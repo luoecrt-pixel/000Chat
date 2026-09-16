@@ -15,8 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Unzip project
+        run: unzip -o *.zip
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -56,3 +59,4 @@ jobs:
           name: OpenAIApiChat-Astra-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          
