@@ -34,7 +34,30 @@ jobs:
 
       - name: Unzip project source
         if: steps.source.outputs.archive != ''
-        run: unzip -o -q "${{ steps.source.outputs.archive }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -o -q "${{ steps.source.outputs.archive }}"
+
+      - name: Locate Gradle project root
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            project_dir="."
+          else
+            mapfile -t roots < <(find . -mindepth 1 -maxdepth 2 -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -printf '%h\n' | sort -u)
+            if [ "${#roots[@]}" -ne 1 ]; then
+              echo "Could not determine a unique Gradle project root. Found:" >&2
+              printf ' - %s\n' "${roots[@]:-<none>}" >&2
+              exit 1
+            fi
+            project_dir="${roots[0]}"
+          fi
+          project_dir="${project_dir#./}"
+          if [ -z "$project_dir" ]; then project_dir="."; fi
+          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
+          echo "Using Gradle project root: $project_dir"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -45,8 +68,6 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools'
 
       - name: Install Android SDK packages
         run: |
@@ -60,7 +81,11 @@ jobs:
           cache-provider: basic
 
       - name: Verify source before build
-        run: python3 tools/verify_v4_16_1.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          python3 tools/verify_v4_16_1.py
 
       - name: Decode persistent debug keystore
         env:
@@ -76,11 +101,16 @@ jobs:
           fi
 
       - name: Build debug APK
-        run: gradle --no-daemon --stacktrace assembleDebug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/app-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
           name: OpenAIApiChat-Astra-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app-debug.apk
           if-no-files-found: error
