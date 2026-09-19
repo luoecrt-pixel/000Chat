@@ -60,7 +60,7 @@ jobs:
           cache-provider: basic
 
       - name: Verify source before build
-        run: python3 tools/verify_v4_14.py
+        run: python3 tools/verify_v4_16.py
 
       - name: Decode persistent debug keystore
         env:
@@ -84,4 +84,3 @@ jobs:
           name: OpenAIApiChat-Astra-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          
