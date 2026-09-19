@@ -60,7 +60,7 @@ jobs:
           cache-provider: basic
 
       - name: Verify source before build
-        run: python3 tools/verify_v4_16.py
+        run: python3 tools/verify_v4_16_1.py
 
       - name: Decode persistent debug keystore
         env:
