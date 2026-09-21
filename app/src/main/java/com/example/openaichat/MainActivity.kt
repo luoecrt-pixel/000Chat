@@ -3439,6 +3439,7 @@ class MainActivity : Activity() {
     private val thumbnailCache = object : android.util.LruCache<String, Bitmap>(12 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
+    private val thumbnailRequests = java.util.WeakHashMap<ImageView,String>()
 
     private fun thumbnailCacheKey(path:String,maxDim:Int):String{
         val file=File(path)
@@ -3448,15 +3449,25 @@ class MainActivity : Activity() {
     private fun loadThumbnailAsync(view:ImageView,path:String,maxDim:Int=640){
         view.setImageResource(android.R.drawable.ic_menu_gallery)
         val key=thumbnailCacheKey(path,maxDim)
+        synchronized(thumbnailRequests){thumbnailRequests[view]=key}
         thumbnailCache.get(key)?.let{
-            view.setImageBitmap(it)
+            runOnUiThread{
+                if(isFinishing || isDestroyed)return@runOnUiThread
+                synchronized(thumbnailRequests){
+                    if(thumbnailRequests[view]==key)view.setImageBitmap(it)
+                }
+            }
             return
         }
         executor.execute{
             val bmp=decodeThumbnailFromFile(path,maxDim)
             if(bmp!=null)thumbnailCache.put(key,bmp)
             runOnUiThread{
-                if(!isFinishing && !isDestroyed && bmp!=null) view.setImageBitmap(bmp)
+                if(isFinishing || isDestroyed || bmp==null)return@runOnUiThread
+                synchronized(thumbnailRequests){
+                    if(thumbnailRequests[view]!=key)return@synchronized
+                    view.setImageBitmap(bmp)
+                }
             }
         }
     }
