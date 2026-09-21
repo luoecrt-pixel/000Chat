@@ -4119,38 +4119,36 @@ class MainActivity : Activity() {
         pendingUploads=(pendingUploads-1).coerceAtLeast(0)
         if(pendingUploads==0 && stop.visibility!=View.VISIBLE) send.isEnabled=true
     } }
-    private fun addBubble(
-        label:String,
-        text:String,
-        user:Boolean,
-        imageBitmap:Bitmap?=null,
-        annotations:JSONArray?=null,
-        message:JSONObject?=null
-    ):TextView{
-        val card=LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(13),dp(10),dp(13),dp(10))
-            background=rounded(if(user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+    private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
+        orientation=LinearLayout.VERTICAL
+        setPadding(dp(13),dp(10),dp(13),dp(10))
+        background=rounded(Color.rgb(28,29,34),14)
+        layoutParams=RecyclerView.LayoutParams(-1,-2).apply{bottomMargin=dp(8)}
+    }
+
+    private fun renderChatBubbleBody(item:ChatBubbleItem):CharSequence{
+        return if(!item.user && item.message!=null) {
+            RichTextRenderer.render(AstraResponseModel.fromChatJson(item.message))
+        } else {
+            markdown(item.text,item.annotations)
         }
+    }
+
+    private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
+        card.removeAllViews()
+        card.orientation=LinearLayout.VERTICAL
+        card.setPadding(dp(13),dp(10),dp(13),dp(10))
+        card.background=rounded(if(item.user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+
         val who=TextView(this).apply{
-            this.text=label;textSize=12f
-            setTextColor(if(user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
+            text=item.label
+            textSize=12f
+            setTextColor(if(item.user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
             setTypeface(null,Typeface.BOLD)
         }
         card.addView(who)
-        if (imageBitmap != null && !(user && message != null)) {
-            imageBitmap.let{ bmp->
-                card.addView(ImageView(this).apply{
-                    setImageBitmap(bmp)
-                    setAdjustViewBounds(true)
-                    scaleType=ImageView.ScaleType.FIT_CENTER
-                    setPadding(0,dp(6),0,0)
-                    setOnClickListener { showImagePreviewFromBitmap(bmp, message?.optString("image_name").orEmpty()) }
-                }, LinearLayout.LayoutParams(-1,dp(220)))
-            }
-        }
+
         val body=TextView(this).apply{
-            this.text=if(!user && message!=null) RichTextRenderer.render(AstraResponseModel.fromChatJson(message)) else markdown(text, annotations)
             textSize=16f
             setTextColor(Color.WHITE)
             setLinkTextColor(Color.rgb(138,180,248))
@@ -4159,32 +4157,39 @@ class MainActivity : Activity() {
             setPadding(0,dp(5),0,dp(0))
         }
         card.addView(body)
-        if(user && message!=null){
+
+        val message=item.message
+        if(item.user && message!=null){
             renderUserAttachments(message,card)
         }
-        if(!user && message!=null){
-            val savedSummary=message.optString("reasoning_summary").trim()
-            if(savedSummary.isNotBlank()){
-                attachReasoningSummaryPanel(card,savedSummary,initiallyExpanded=false)
+        if(!item.user){
+            val savedSummary=item.reasoningSummary?.trim().takeIf{!it.isNullOrBlank()}
+                ?: message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            if(savedSummary!=null) attachReasoningSummaryPanel(card,savedSummary,initiallyExpanded=false)
+            if(message!=null){
+                if(hasAssistantAssets(message)) addAssetSectionHeader(card)
+                renderGeneratedImages(message,card)
+                val annotations=message.optJSONArray("annotations") ?: item.annotations
+                if(annotations!=null) renderAnnotations(
+                    annotations,
+                    card,
+                    message,
+                    currentChatId(),
+                    requestGeneration
+                )
+                addFeedbackRow(card,message,currentChatId())
             }
         }
-        if(!user && message!=null && hasAssistantAssets(message)) addAssetSectionHeader(card)
-        if(!user && message!=null){
-            renderGeneratedImages(message,card)
-        }
-        if(!user && annotations!=null){
-            renderAnnotations(annotations,card,message ?: findMessageForAnnotations(annotations) ?: JSONObject(),currentChatId(),requestGeneration)
-        }
-        if(!user && message!=null){
-            addFeedbackRow(card,message,currentChatId())
-        }
+
         val longPress=View.OnLongClickListener{
-            val items=if(user)arrayOf("Копировать","Экспорт в TXT","Редактировать") else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
-            AlertDialog.Builder(this).setItems(items){_,which->
+            val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
+            else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
+            AlertDialog.Builder(this).setItems(menu){_,which->
                 when(which){
                     0->{
                         val cm=getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()));status.text="Скопировано"
+                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()))
+                        status.text="Скопировано"
                     }
                     1->{
                         pendingExportBytes=body.text?.toString().orEmpty().toByteArray()
@@ -4193,19 +4198,51 @@ class MainActivity : Activity() {
                             type="text/plain"
                             putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
                         }
-                        try{ startActivityForResult(i,pickExportTxt) }
-                        catch(e:Exception){ status.text="Экспорт недоступен: ${e.message}" }
+                        try{startActivityForResult(i,pickExportTxt)}
+                        catch(e:Exception){status.text="Экспорт недоступен: ${e.message}"}
                     }
-                    2->if(user) editMessage(messages.indexOfChild(card)) else sendMessage(true)
+                    2->if(item.user){
+                        item.chatIndex?.let(::editMessage)
+                    }else{
+                        sendMessage(true)
+                    }
                 }
-            }.show();true
+            }.show()
+            true
         }
         card.setOnLongClickListener(longPress)
         body.setOnLongClickListener(longPress)
         who.setOnLongClickListener(longPress)
-        messages.addView(card,LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=dp(8)})
-        scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}
         return body
+    }
+
+    private fun addBubble(
+        label:String,
+        text:String,
+        user:Boolean,
+        annotations:JSONArray?=null,
+        message:JSONObject?=null
+    ):String{
+        val chatIndex=message?.let{target->chat.indexOfFirst{it===target}.takeIf{it>=0}}
+        val id=if(chatIndex!=null){
+            "chat-${chatIndex}-${if(user)"user" else "assistant"}"
+        }else{
+            "bubble-${UUID.randomUUID()}"
+        }
+        messageAdapter.addItem(
+            ChatBubbleItem.create(
+                id=id,
+                label=label,
+                text=text,
+                user=user,
+                annotations=annotations,
+                message=message,
+                chatIndex=chatIndex,
+                reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            )
+        )
+        scrollToLatest()
+        return id
     }
 
     private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
