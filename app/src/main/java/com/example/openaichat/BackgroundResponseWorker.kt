@@ -53,7 +53,7 @@ class BackgroundResponseWorker(
 
         val db = ChatDatabase(applicationContext)
         val diagnostics = AstraDiagnostics(applicationContext)
-        val streamClient = ResumableResponseStreamClient(applicationContext, client)
+        val streamClient = ResumableResponseStreamClient(applicationContext)
         var activeCall: okhttp3.Call? = null
         currentCoroutineContext().job.invokeOnCompletion {
             activeCall?.cancel()
@@ -232,6 +232,7 @@ class BackgroundResponseWorker(
         } finally {
             activeCall?.cancel()
             try { db.close() } catch (_: Exception) {}
+            try { streamClient.close() } catch (_: Exception) {}
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }
