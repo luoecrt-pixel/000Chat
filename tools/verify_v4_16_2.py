@@ -1,7 +1,6 @@
 from pathlib import Path
 import sqlite3
 import xml.etree.ElementTree as ET
-import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt"
@@ -71,6 +70,7 @@ for p in [ROOT/'app/src/main/AndroidManifest.xml', *ROOT.glob('app/src/main/res/
 
 # Representative SQLite schema sanity check.
 con = sqlite3.connect(':memory:')
+con.execute('PRAGMA foreign_keys=ON')
 con.execute('''CREATE TABLE chats (
     id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, response_id TEXT,
     baseline_effort TEXT, updated_at INTEGER NOT NULL,
@@ -88,6 +88,11 @@ con.execute('''CREATE TABLE messages (
     tools TEXT, status TEXT, feedback INTEGER,
     FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 )''')
+con.execute("INSERT INTO chats(id,title,updated_at) VALUES('chat-1','x',0)")
+con.execute("INSERT INTO messages(chat_id,position,role,text) VALUES('chat-1',0,'user','hello')")
+con.execute("DELETE FROM chats WHERE id='chat-1'")
+assert con.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
+
 cols = {r[1] for r in con.execute('PRAGMA table_info(messages)')}
 assert {'file_paths','file_mimes','image_name','image_mime','image_size','generated_images'} <= cols
 
@@ -131,9 +136,12 @@ for p in [MAIN,DB,MODEL,RENDERER]:
 for action in ['actions/checkout@v7','actions/setup-java@v6','android-actions/setup-android@v4','gradle/actions/setup-gradle@v6','actions/upload-artifact@v7']:
     assert action in workflow
 assert 'gradle-version: \'8.9\'' in workflow
-assert 'python3 tools/verify_v4_16_1.py' in workflow
-assert 'find . -mindepth 1 -maxdepth 5 -type f -name \'*-source.zip\'' in workflow
-assert 'No Gradle project found directly; extracting source archive:' in workflow
+assert 'gradle --no-daemon --stacktrace test lintDebug assembleDebug' in workflow
+assert 'permissions:' in workflow and 'contents: read' in workflow
+assert 'expectedRequestId' in main
+assert 'pollingClient' in main
+assert 'setForeignKeyConstraintsEnabled(true)' in db
+assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
 assert 'tools/verify_v4_16_2.py' in workflow
 
 print('Astra v4.16.2 static verification: PASS')
