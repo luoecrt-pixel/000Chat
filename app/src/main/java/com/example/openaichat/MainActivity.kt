@@ -210,6 +210,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         persistComposerStateNow()
         requestGeneration++
+        activeResumeCalls.values.forEach { it.cancel() }
+        activeResumeCalls.clear()
         // Only close the local HTTP stream. Background Responses keep running on the
         // server when background=true; the next Activity instance will reconnect by polling.
         currentCall?.cancel()
@@ -453,6 +455,7 @@ class MainActivity : Activity() {
             requestGeneration++
             currentCall?.cancel()
         }
+        activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
@@ -770,6 +773,7 @@ class MainActivity : Activity() {
         userStopRequestedGeneration=generation
         requestGeneration++
         currentCall?.cancel()
+        activeResumeCalls.remove(chatId)?.cancel()
         val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
