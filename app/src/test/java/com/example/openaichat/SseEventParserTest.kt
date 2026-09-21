@@ -10,9 +10,9 @@ class SseEventParserTest {
     fun parsesDataWithoutSpaceAndBlankRecordBoundary() {
         val parser = SseEventParser()
         assertNull(parser.acceptLine(": comment"))
-        assertNull(parser.acceptLine("data:{"type":"response.created"}"))
+        assertNull(parser.acceptLine("data:hello"))
         val event = parser.acceptLine("")
-        assertEquals("{\"type\":\"response.created\"}", event?.data)
+        assertEquals("hello", event?.data)
     }
 
     @Test
@@ -31,6 +31,7 @@ class SseEventParserTest {
     @Test
     fun handlesCrLfAndResetsEventTypeButKeepsLastEventId() {
         val parser = SseEventParser()
+        parser.acceptLine("id: 42\r")
         parser.acceptLine("event: first\r")
         parser.acceptLine("data: one\r")
         val first = parser.acceptLine("\r")
