@@ -140,6 +140,16 @@ assert 'gradle --no-daemon --stacktrace test lintDebug assembleDebug' in workflo
 assert 'permissions:' in workflow and 'contents: read' in workflow
 assert 'expectedRequestId' in main
 assert 'pollingClient' in main
+assert 'SseEventParser' in main
+assert 'pollingClient.newCall(req)' in main
+assert 'ApiHttpException' in main or (ROOT / 'app/src/main/java/com/example/openaichat/ApiHttpException.kt').exists()
+assert 'sse_event_sequence_gap' in main
+assert 'background_resume_rate_limited' in main
+assert 'listLocalFilePaths' in db
+assert 'deleteOwnedLocalFile' in main
+assert (ROOT / 'app/src/test/java/com/example/openaichat/SseEventParserTest.kt').exists()
+assert 'testImplementation("junit:junit:4.13.2")' in gradle
+assert 'val success=state=="completed"' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
 assert 'tools/verify_v4_16_2.py' in workflow
