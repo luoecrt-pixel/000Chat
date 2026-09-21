@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 12
+        private const val DB_VERSION = 13
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -69,6 +69,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 tools TEXT,
                 status TEXT,
                 feedback INTEGER,
+                content_hash TEXT,
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
         """.trimIndent())
@@ -165,6 +166,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                   )
             """.trimIndent())
             db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
+        }
+        if (oldVersion < 13) {
+            db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN content_hash TEXT")
         }
     }
 
@@ -291,34 +295,94 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 put("updated_at", System.currentTimeMillis())
             }
             if (exists) db.update(CHAT_TABLE, values, "id=?", arrayOf(id)) else db.insertOrThrow(CHAT_TABLE, null, values)
-            db.delete(MESSAGE_TABLE, "chat_id=?", arrayOf(id))
-            messages.forEachIndexed { index, m ->
-                val mv = ContentValues().apply {
-                    put("chat_id", id)
-                    put("position", index)
-                    put("role", m.optString("role"))
-                    put("text", m.optString("text"))
-                    putStringOrNull("response_id", m.optString("response_id").takeIf { it.isNotBlank() && it != "null" })
-                    putStringOrNull("request_id", m.optString("request_id").takeIf { it.isNotBlank() && it != "null" })
-                    putStringOrNull("file_ids", m.optJSONArray("file_ids")?.toString())
-                    putStringOrNull("file_names", m.optJSONArray("file_names")?.toString())
-                    putStringOrNull("file_sizes", m.optJSONArray("file_sizes")?.toString())
-                    putStringOrNull("file_paths", m.optJSONArray("file_paths")?.toString())
-                    putStringOrNull("file_mimes", m.optJSONArray("file_mimes")?.toString())
-                    putStringOrNull("image_path", m.optString("image_path").takeIf { it.isNotBlank() })
-                    putStringOrNull("image_file_id", m.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
-                    putStringOrNull("image_name", m.optString("image_name").takeIf { it.isNotBlank() })
-                    putStringOrNull("image_mime", m.optString("image_mime").takeIf { it.isNotBlank() })
-                    put("image_size", m.optLong("image_size", 0L).coerceAtLeast(0L))
-                    putStringOrNull("annotations", m.optJSONArray("annotations")?.toString())
-                    putStringOrNull("generated_images", m.optJSONArray("generated_images")?.toString())
-                    putStringOrNull("tools", m.optJSONArray("tools")?.toString())
-                    putStringOrNull("status", m.optString("status").takeIf { it.isNotBlank() && it != "null" })
-                    if (m.has("feedback") && !m.isNull("feedback")) put("feedback", m.optInt("feedback")) else putNull("feedback")
+
+            val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
+            val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
+            db.query(
+                MESSAGE_TABLE,
+                arrayOf("id", "position", "request_id", "content_hash"),
+                "chat_id=?",
+                arrayOf(id),
+                null, null, "position ASC"
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val row = ExistingMessageRow(
+                        id = c.getLong(0),
+                        position = c.getInt(1),
+                        requestId = c.getString(2),
+                        contentHash = c.getString(3)
+                    )
+                    existingByPosition.putIfAbsent(row.position, row)
+                    row.requestId?.takeIf { it.isNotBlank() }?.let { existingByRequestId.putIfAbsent(it, row) }
                 }
-                db.insertOrThrow(MESSAGE_TABLE, null, mv)
             }
+
+            val usedIds = HashSet<Long>()
+            messages.forEachIndexed { index, message ->
+                val requestId = message.optString("request_id").takeIf { it.isNotBlank() && it != "null" }
+                val candidate = requestId?.let(existingByRequestId::get)?.takeIf { !usedIds.contains(it.id) }
+                    ?: existingByPosition[index]?.takeIf { !usedIds.contains(it.id) }
+                val contentHash = ChatMessageFingerprint.of(message)
+
+                if (candidate == null) {
+                    val mv = messageContentValues(id, index, message, contentHash)
+                    db.insertOrThrow(MESSAGE_TABLE, null, mv)
+                } else {
+                    usedIds += candidate.id
+                    if (candidate.contentHash != contentHash || candidate.position != index) {
+                        db.update(
+                            MESSAGE_TABLE,
+                            messageContentValues(id, index, message, contentHash),
+                            "id=?",
+                            arrayOf(candidate.id.toString())
+                        )
+                    }
+                }
+            }
+
+            db.delete(
+                MESSAGE_TABLE,
+                "chat_id=? AND position>=?",
+                arrayOf(id, messages.size.toString())
+            )
         }
+    }
+
+    private data class ExistingMessageRow(
+        val id: Long,
+        val position: Int,
+        val requestId: String?,
+        val contentHash: String?
+    )
+
+    private fun messageContentValues(
+        chatId: String,
+        position: Int,
+        message: JSONObject,
+        contentHash: String
+    ): ContentValues = ContentValues().apply {
+        put("chat_id", chatId)
+        put("position", position)
+        put("role", message.optString("role"))
+        put("text", message.optString("text"))
+        putStringOrNull("request_id", message.optString("request_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("response_id", message.optString("response_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("file_ids", message.optJSONArray("file_ids")?.toString())
+        putStringOrNull("file_names", message.optJSONArray("file_names")?.toString())
+        putStringOrNull("file_sizes", message.optJSONArray("file_sizes")?.toString())
+        putStringOrNull("file_paths", message.optJSONArray("file_paths")?.toString())
+        putStringOrNull("file_mimes", message.optJSONArray("file_mimes")?.toString())
+        putStringOrNull("image_path", message.optString("image_path").takeIf { it.isNotBlank() })
+        putStringOrNull("image_file_id", message.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("image_name", message.optString("image_name").takeIf { it.isNotBlank() })
+        putStringOrNull("image_mime", message.optString("image_mime").takeIf { it.isNotBlank() })
+        put("image_size", message.optLong("image_size", 0L).coerceAtLeast(0L))
+        putStringOrNull("annotations", message.optJSONArray("annotations")?.toString())
+        putStringOrNull("generated_images", message.optJSONArray("generated_images")?.toString())
+        putStringOrNull("tools", message.optJSONArray("tools")?.toString())
+        putStringOrNull("status", message.optString("status").takeIf { it.isNotBlank() && it != "null" })
+        if (message.has("feedback") && !message.isNull("feedback")) put("feedback", message.optInt("feedback")) else putNull("feedback")
+        put("content_hash", contentHash)
     }
 
     fun recordEffortMetric(
