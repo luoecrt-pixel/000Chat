@@ -405,6 +405,16 @@ class MainActivity : Activity() {
     }
 
     private fun deleteChat(id: String) {
+        val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
+        val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        if(currentChatId()==id){
+            requestGeneration++
+            currentCall?.cancel()
+        }
+        synchronized(activeResumeChats){activeResumeChats.remove(id)}
+        chatDb.clearActiveResponse(id, expectedRequestId = requestId)
+        if(responseId!=null)cancelRemoteResponse(id,responseId)
         clearComposerState(id)
         chatDb.deleteChat(id)
         if (currentChatId()==id) {
@@ -693,6 +703,25 @@ class MainActivity : Activity() {
         return (uncached*inRate + cachedTokens*cachedRate + cacheWriteTokens*cacheWriteRate + outputTokens*outRate) / 1_000_000.0
     }
 
+
+    private fun cancelRemoteResponse(chatId:String,responseId:String){
+        executor.execute{
+            try{
+                val key=secure.getApiKey()
+                if(key.isBlank())return@execute
+                val req=Request.Builder()
+                    .url("https://api.openai.com/v1/responses/$responseId/cancel")
+                    .addHeader("Authorization","Bearer $key")
+                    .post("{}".toRequestBody("application/json".toMediaType()))
+                    .build()
+                pollingClient.newCall(req).execute().use{resp->
+                    diagnostics.log("background_response_cancel",mapOf("chat_id" to chatId,"response_id" to responseId,"status" to resp.code))
+                }
+            }catch(e:Exception){
+                diagnostics.log("background_response_cancel_failed",mapOf("chat_id" to chatId,"response_id" to responseId,"error" to (e.message?:e.toString()).take(300)))
+            }
+        }
+    }
 
     private fun stopCurrentResponse(){
         val chatId=currentChatId()
