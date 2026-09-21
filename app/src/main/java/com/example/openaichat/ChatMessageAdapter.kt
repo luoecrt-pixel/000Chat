@@ -140,36 +140,27 @@ class ChatMessageAdapter(
         boundHolders[id] = holder
     }
 
+    private fun submitModel() {
+        differ.submitList(items.toList())
+    }
+
     fun submitItems(newItems: List<ChatBubbleItem>) {
-        val oldItems = items.toList()
-        if (oldItems === newItems) return
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize(): Int = oldItems.size
-            override fun getNewListSize(): Int = newItems.size
-
-            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                oldItems[oldItemPosition].id == newItems[newItemPosition].id
-
-            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                oldItems[oldItemPosition].contentSignature == newItems[newItemPosition].contentSignature &&
-                    oldItems[oldItemPosition].reasoningSummary == newItems[newItemPosition].reasoningSummary
-        })
+        if (items == newItems) return
         items.clear()
         items.addAll(newItems)
-        diff.dispatchUpdatesTo(this)
+        submitModel()
     }
 
     fun addItem(item: ChatBubbleItem) {
-        val index = items.size
         items.add(item)
-        notifyItemInserted(index)
+        submitModel()
     }
 
     fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = item.copy(id = id)
-        notifyItemChanged(index)
+        submitModel()
         return true
     }
 
@@ -177,7 +168,8 @@ class ChatMessageAdapter(
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = items[index].copy(text = text)
-        notifyItemChanged(index, PAYLOAD_TEXT)
+        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
+        if (displayIndex >= 0) notifyItemChanged(displayIndex, PAYLOAD_TEXT)
         return true
     }
 
@@ -185,7 +177,8 @@ class ChatMessageAdapter(
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = items[index].copy(reasoningSummary = summary)
-        notifyItemChanged(index)
+        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
+        if (displayIndex >= 0) notifyItemChanged(displayIndex)
         return true
     }
 
