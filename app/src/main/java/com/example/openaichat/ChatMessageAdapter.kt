@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import org.json.JSONArray
@@ -73,6 +74,15 @@ class ChatMessageAdapter(
 
     private val items = mutableListOf<ChatBubbleItem>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
+
+    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
+        override fun areItemsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
+            oldItem.id == newItem.id
+
+        override fun areContentsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
+            oldItem.contentSignature == newItem.contentSignature &&
+                oldItem.reasoningSummary == newItem.reasoningSummary
+    })
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val card = createCard(parent)
