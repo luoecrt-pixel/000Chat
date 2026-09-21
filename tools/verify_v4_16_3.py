@@ -182,5 +182,8 @@ assert 'activeResumeChats.clear()' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
 assert 'tools/verify_v4_16_3.py' in workflow
+file_paths_xml = (ROOT / 'app/src/main/res/xml/file_paths.xml').read_text()
+assert 'name="attachments" path="attachments/"' in file_paths_xml
+assert 'cache-path name="cache" path="."' not in file_paths_xml
 
 print('Astra v4.16.3 static verification: PASS')
