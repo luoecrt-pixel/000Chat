@@ -395,6 +395,43 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
     }
 
+data class ExistingMessageRow(
+        val id: Long,
+        val position: Int,
+        val requestId: String?,
+        val contentHash: String?
+    )
+
+    private fun messageContentValues(
+        chatId: String,
+        position: Int,
+        message: JSONObject,
+        contentHash: String
+    ): ContentValues = ContentValues().apply {
+        put("chat_id", chatId)
+        put("position", position)
+        put("role", message.optString("role"))
+        put("text", message.optString("text"))
+        putStringOrNull("request_id", message.optString("request_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("response_id", message.optString("response_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("file_ids", message.optJSONArray("file_ids")?.toString())
+        putStringOrNull("file_names", message.optJSONArray("file_names")?.toString())
+        putStringOrNull("file_sizes", message.optJSONArray("file_sizes")?.toString())
+        putStringOrNull("file_paths", message.optJSONArray("file_paths")?.toString())
+        putStringOrNull("file_mimes", message.optJSONArray("file_mimes")?.toString())
+        putStringOrNull("image_path", message.optString("image_path").takeIf { it.isNotBlank() })
+        putStringOrNull("image_file_id", message.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("image_name", message.optString("image_name").takeIf { it.isNotBlank() })
+        putStringOrNull("image_mime", message.optString("image_mime").takeIf { it.isNotBlank() })
+        put("image_size", message.optLong("image_size", 0L).coerceAtLeast(0L))
+        putStringOrNull("annotations", message.optJSONArray("annotations")?.toString())
+        putStringOrNull("generated_images", message.optJSONArray("generated_images")?.toString())
+        putStringOrNull("tools", message.optJSONArray("tools")?.toString())
+        putStringOrNull("status", message.optString("status").takeIf { it.isNotBlank() && it != "null" })
+        if (message.has("feedback") && !message.isNull("feedback")) put("feedback", message.optInt("feedback")) else putNull("feedback")
+        put("content_hash", contentHash)
+    }
+
     fun recordEffortMetric(
         requestId: String?,
         chatId: String,
