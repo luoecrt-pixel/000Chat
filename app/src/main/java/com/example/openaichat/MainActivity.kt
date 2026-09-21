@@ -4145,10 +4145,21 @@ class MainActivity : Activity() {
         send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads == 0 && !preparingZipAttachments
     }
 
-    private fun scrollToLatest(){
+    private fun isNearLatest(): Boolean {
+        if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return true
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return true
+        val lastVisible = lm.findLastVisibleItemPosition()
+        return lastVisible == RecyclerView.NO_POSITION ||
+            messageAdapter.itemCount - 1 - lastVisible <= 2
+    }
+
+    private fun scrollToLatest(force: Boolean = false){
         if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
+        if(!force && !isNearLatest()) return
         scroll.post{
-            if(messageAdapter.itemCount>0) scroll.scrollToPosition(messageAdapter.itemCount-1)
+            if(messageAdapter.itemCount>0 && (force || isNearLatest())) {
+                scroll.scrollToPosition(messageAdapter.itemCount-1)
+            }
         }
     }
 
@@ -4284,8 +4295,7 @@ class MainActivity : Activity() {
                 reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
             )
         )
-        scrollToLatest()
-        return id
+        scrollToLatest(force = user)        return id
     }
 
     private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
