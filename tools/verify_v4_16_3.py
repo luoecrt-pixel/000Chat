@@ -152,6 +152,10 @@ assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/Ba
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'concurrency:' in workflow
 assert 'activityVisible && !isFinishing' in main
+assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
+assert 'WindowInsetsCompat.Type.systemBars()' in main
+assert 'systemWindowInsetLeft' not in main
+assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
 assert 'SseEventParser' in main
 assert 'pollingClient.newCall(req)' in main
