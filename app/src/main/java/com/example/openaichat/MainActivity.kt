@@ -1489,7 +1489,6 @@ class MainActivity : Activity() {
                     BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
                 }
                 return
-            }                return
             }
             if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
                 diagnostics.log("background_resume_timeout",mapOf(
@@ -4295,7 +4294,8 @@ class MainActivity : Activity() {
                 reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
             )
         )
-        scrollToLatest(force = user)        return id
+        scrollToLatest(force = user)
+        return id
     }
 
     private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
