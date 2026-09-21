@@ -1585,7 +1585,7 @@ class MainActivity : Activity() {
         if(currentChatId()!=chatId) return
         runOnUiThread{
             if(currentChatId()!=chatId) return@runOnUiThread
-            activeAssistantBody=null
+            activeAssistantItemId=null
             currentCall=null
             setBusy(false)
             status.text=message
@@ -1730,14 +1730,8 @@ class MainActivity : Activity() {
      }
 
      private fun updateActiveReasoningSummary(summary:String){
-         val clean=summary.trim()
-         if(activeReasoningSummaryBody==null){
-             val card=activeAssistantBody?.parent as? LinearLayout ?: return
-             activeReasoningSummaryBody=attachReasoningSummaryPanel(card,clean,initiallyExpanded=false)
-             activeReasoningSummaryToggle=(activeReasoningSummaryBody?.parent as? LinearLayout)?.getChildAt(0) as? TextView
-         }else{
-             activeReasoningSummaryBody?.text=clean
-             activeReasoningSummaryToggle?.text=if(clean.isBlank())"🧠 Astra думает…" else "🧠 Показать ход рассуждений ▼"
+         activeAssistantItemId?.let { id ->
+             messageAdapter.updateReasoningSummary(id, summary.trim())
          }
      }
 
