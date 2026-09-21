@@ -783,17 +783,9 @@ class MainActivity : Activity() {
             chat.removeAt(chat.lastIndex)
             persistCurrentChat()
         }
-        val assistantParent=activeAssistantBody?.parent
-        if(assistantParent is ViewGroup){
-            messages.removeView(assistantParent)
-        }else if(messages.childCount>0){
-            messages.removeViewAt(messages.childCount-1)
-            if(!activeRequestRegenerate && messages.childCount>0) messages.removeViewAt(messages.childCount-1)
-        }
+        messageAdapter.removeLast(if(activeRequestRegenerate) 1 else 2)
         persistComposerStateNow()
-        activeAssistantBody=null
-        activeReasoningSummaryBody=null
-        activeReasoningSummaryToggle=null
+        activeAssistantItemId=null
         setBusy(false)
         userStopRequestedGeneration=null
         activeRequestRegenerate=false
@@ -1005,10 +997,8 @@ class MainActivity : Activity() {
         toolLabel.text=""
         refreshAttachChips()
 
-        val assistantView = addBubble("Astra","",false)
-        activeAssistantBody = assistantView
-        activeReasoningSummaryBody = null
-        activeReasoningSummaryToggle = null
+        val assistantItemId = addBubble("Astra","",false)
+        activeAssistantItemId = assistantItemId
         val req=Request.Builder()
             .url("https://api.openai.com/v1/responses")
             .addHeader("Authorization","Bearer $key")
@@ -1092,9 +1082,9 @@ class MainActivity : Activity() {
                                             val snapshot=full.toString()
                                             runOnUiThread{
                                                 if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                    assistantView.text=markdown(snapshot)
-                                                    activeAssistantBody=assistantView
-                                                    scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}
+                                                    messageAdapter.updateText(assistantItemId, snapshot)
+                                                    activeAssistantItemId = assistantItemId
+                                                    scrollToLatest()
                                                 }
                                             }
                                         }
