@@ -12,15 +12,15 @@ Current default branch: `main`.
 
 Current app:
 - namespace/applicationId: `com.example.openaichat`
-- versionName: `4.16.2`
-- versionCode: `62`
+- versionName: `4.16.3`
+- versionCode: `63`
 - compileSdk / targetSdk: `35`
 - minSdk: `26`
 
-Current main CI head after PR #7 merge:
-- main head: `3ad779c2e88aa4cb424dd0ca3725a3dbb12b12e6`
-- GitHub Actions Build Android APK run #109: **success**
-- run #109 completed after PR #7 merge.
+Current main before PR #9:
+- main head: `4fedade217a3c2888d315c44bdfd9724f27770b8`
+- GitHub Actions Build Android APK run #112: **success**
+- PR #9 (`fix/recovery-state-and-chat-scroll`) contains the current 4.16.3 reliability patch; its latest checks are still running.
 
 Do not assume an earlier PR branch is still the correct base. Start new work from `main`.
 
@@ -128,7 +128,8 @@ Important files:
 - `app/src/main/java/com/example/openaichat/SseEventParser.kt`
 - `app/src/main/java/com/example/openaichat/SecureStore.kt`
 - `.github/workflows/build.yml`
-- `tools/verify_v4_16_2.py`
+- `tools/verify_v4_16_3.py`
+- `app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt`
 
 Current `MainActivity.kt` is still very large:
 - about 4,305 lines;
@@ -137,6 +138,15 @@ Current `MainActivity.kt` is still very large:
 It still owns UI creation, chat state, streaming, polling, uploads, persistence calls, metrics and recovery coordination.
 
 ---
+
+### v4.16.3 reliability patch (PR #9)
+
+Additional code review found three issues that were not fully captured by the previous handoff:
+- active background-response state now persists `background_enabled` per request (DB v14), so WorkManager does not resurrect a request that was created with background recovery disabled;
+- background polling/finalization re-checks the persisted `request_id`, and final persistence uses an atomic `upsertCurrentChatIfActiveRequest()` transaction, preventing a stale worker from writing an old response after stop/delete/new-request races;
+- chat streaming uses a sticky-bottom policy so deliberate upward scrolling is preserved while new outgoing messages still jump to the latest item.
+
+The recovery retry path now applies bounded ±20% jitter unless the server supplies `Retry-After`. `ChatScrollPolicy` and its boundary tests are pure JVM-testable logic.
 
 ## 4. Existing reliability work already completed before this session
 
@@ -175,7 +185,7 @@ Environment:
 - Gradle 8.9
 
 Before Gradle:
-- `tools/verify_v4_16_2.py`
+- `tools/verify_v4_16_3.py`
 
 Gradle command:
 ```
@@ -220,6 +230,8 @@ There are still not enough tests around the most failure-prone state transitions
 
 Add JVM/unit coverage for:
 - stop before `response.created`;
+- stale background finalization after stop/delete/new request;
+- DB v13 -> v14 migration and persisted background flag;
 - late `response.created` after stop/delete;
 - switch chat while stream callbacks are still arriving;
 - orphan active row with no response ID;
@@ -239,7 +251,7 @@ Add JVM/unit coverage for:
   - request ID match wins over position match;
 - deletion cleanup of local files.
 
-The goal should be to make the race-sensitive logic executable in JVM tests instead of relying only on static inspection and manual CI.
+The goal should be to make the remaining race-sensitive logic executable in JVM tests instead of relying only on static inspection and manual CI. v4.16.3 already adds pure tests for the sticky-scroll and retry-jitter rules.
 
 ### RecyclerView follow-up
 
@@ -249,12 +261,9 @@ For huge histories, consider `ListAdapter` / `AsyncListDiffer` so diff computati
 
 Also review `scrollToLatest()`:
 - current behavior always forces the list to the latest position;
-- while streaming, this may pull the user away from an older message if they deliberately scrolled upward.
+- fixed in v4.16.3 via `ChatScrollPolicy` + sticky-bottom behavior.
 
-A better policy is:
-- detect whether the user was already near the bottom;
-- auto-scroll only in that case;
-- otherwise keep the user's position.
+Remaining RecyclerView work is moving `DiffUtil` off the main thread with `AsyncListDiffer`/`ListAdapter` for very large histories.
 
 Also add adapter tests or small model tests around stable item IDs and streaming/final-message transitions.
 
@@ -274,7 +283,7 @@ Do not rewrite everything at once.
 
 Recommended extraction sequence:
 1. `ChatMessageAdapter` and message UI helpers — already started by PR #7.
-2. response streaming/polling into a dedicated controller/service;
+2. keep the new response/recovery request-aware boundaries while extracting streaming/polling into a dedicated controller/service;
 3. attachment/upload controller;
 4. background recovery coordinator;
 5. persistence facade;
