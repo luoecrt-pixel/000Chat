@@ -4148,8 +4148,10 @@ class MainActivity : Activity() {
         if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return true
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return true
         val lastVisible = lm.findLastVisibleItemPosition()
-        return lastVisible == RecyclerView.NO_POSITION ||
-            messageAdapter.itemCount - 1 - lastVisible <= 2
+        return ChatScrollPolicy.shouldScrollToLatest(
+            itemCount = messageAdapter.itemCount,
+            lastVisiblePosition = lastVisible
+        )
     }
 
     private fun scrollToLatest(force: Boolean = false){
