@@ -187,12 +187,10 @@ class ChatMessageAdapter(
         if (actual <= 0) return
         val start = items.size - actual
         for (item in items.subList(start, items.size)) {
-            if (boundHolders[item.id]?.bindingAdapterPosition == RecyclerView.NO_POSITION) {
-                boundHolders.remove(item.id)
-            }
+            boundHolders.remove(item.id)
         }
         repeat(actual) { items.removeAt(items.lastIndex) }
-        notifyItemRangeRemoved(start, actual)
+        submitModel()
     }
 
     fun removeFrom(index: Int) {
@@ -200,16 +198,15 @@ class ChatMessageAdapter(
         for (item in items.subList(index, items.size)) {
             boundHolders.remove(item.id)
         }
-        val count = items.size - index
-        repeat(count) { items.removeAt(items.lastIndex) }
-        notifyItemRangeRemoved(index, count)
+        repeat(items.size - index) { items.removeAt(items.lastIndex) }
+        submitModel()
     }
 
     fun clearItems() {
         if (items.isEmpty()) return
         items.clear()
         boundHolders.clear()
-        notifyDataSetChanged()
+        submitModel()
     }
 
     fun bodyForId(id: String): TextView? = boundHolders[id]?.body
