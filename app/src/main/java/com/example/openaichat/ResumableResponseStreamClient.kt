@@ -45,19 +45,10 @@ class ResumableResponseStreamClient(
         val key = secureStore.getApiKey()
         if (key.isBlank()) throw IOException("API key is not configured")
 
-        val urlBuilder = okhttp3.HttpUrl.Builder()
-            .scheme("https")
-            .host("api.openai.com")
-            .addPathSegment("v1")
-            .addPathSegment("responses")
-            .addPathSegment(responseId)
-            .addQueryParameter("stream", "true")
-        if (startingAfter >= 0L) {
-            urlBuilder.addQueryParameter("starting_after", startingAfter.toString())
-        }
+        val url = ResumableResponseRequest.url(responseId, startingAfter)
 
         val request = Request.Builder()
-            .url(urlBuilder.build())
+            .url(url)
             .addHeader("Authorization", "Bearer $key")
             .addHeader("Accept", "text/event-stream")
             .build()
