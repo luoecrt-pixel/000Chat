@@ -19,7 +19,7 @@ workflow = WF.read_text()
 
 assert 'versionName = "4.17.0"' in gradle
 assert 'implementation("androidx.recyclerview:recyclerview:1.4.0")' in gradle
-assert 'implementation("androidx.core:core-ktx:1.19.0")' in gradle
+assert 'implementation("androidx.core:core-ktx:1.18.0")' in gradle
 assert 'implementation("androidx.work:work-runtime-ktx:2.11.2")' in gradle
 assert 'implementation("androidx.activity:activity-ktx:1.10.1")' in gradle
 assert 'class MainActivity : ComponentActivity()' in main
