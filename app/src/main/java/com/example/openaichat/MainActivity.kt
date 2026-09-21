@@ -1435,9 +1435,12 @@ class MainActivity : Activity() {
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
             if (!a.optBoolean("background_enabled", true)) {
-                if (responseId != null) cancelRemoteResponse(chatId, responseId)
                 chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
-                diagnostics.log("background_recovery_disabled", mapOf("chat_id" to chatId, "request_id" to requestId, "response_id" to responseId))
+                diagnostics.log("background_recovery_disabled", mapOf(
+                    "chat_id" to chatId,
+                    "request_id" to requestId,
+                    "response_id" to responseId
+                ))
                 return@forEach
             }
             if(responseId==null){
