@@ -298,6 +298,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
             val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
             val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
+            val existingRows = mutableListOf<ExistingMessageRow>()
             db.query(
                 MESSAGE_TABLE,
                 arrayOf("id", "position", "request_id", "content_hash"),
@@ -312,6 +313,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         requestId = c.getString(2),
                         contentHash = c.getString(3)
                     )
+                    existingRows += row
                     existingByPosition.putIfAbsent(row.position, row)
                     row.requestId?.takeIf { it.isNotBlank() }?.let { existingByRequestId.putIfAbsent(it, row) }
                 }
@@ -325,8 +327,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 val contentHash = ChatMessageFingerprint.of(message)
 
                 if (candidate == null) {
-                    val mv = messageContentValues(id, index, message, contentHash)
-                    db.insertOrThrow(MESSAGE_TABLE, null, mv)
+                    val newId = db.insertOrThrow(MESSAGE_TABLE, null, messageContentValues(id, index, message, contentHash))
+                    usedIds += newId
                 } else {
                     usedIds += candidate.id
                     if (candidate.contentHash != contentHash || candidate.position != index) {
@@ -340,11 +342,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 }
             }
 
-            db.delete(
-                MESSAGE_TABLE,
-                "chat_id=? AND position>=?",
-                arrayOf(id, messages.size.toString())
-            )
+            existingRows.forEach { row ->
+                if (!usedIds.contains(row.id)) {
+                    db.delete(MESSAGE_TABLE, "id=?", arrayOf(row.id.toString()))
+                }
+            }
         }
     }
 
