@@ -162,6 +162,10 @@ assert (ROOT / 'app/src/test/java/com/example/openaichat/BackgroundRecoveryPolic
 assert 'val success=state=="completed"' in main
 assert 'idx_effort_metrics_chat_request' in db
 assert 'CREATE UNIQUE INDEX' in db
+assert 'DELETE FROM $METRICS_TABLE' in db
+assert 'GROUP BY chat_id, request_id' in db
+assert 'if(!activityVisible)' in main
+assert 'activeResumeChats.clear()' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
 assert 'tools/verify_v4_16_2.py' in workflow
