@@ -135,8 +135,6 @@ CI устанавливает Android SDK 35 и build-tools 35.0.0.
 
 После v4.16.3 наиболее полезные следующие шаги остаются архитектурными и тестовыми: детерминированные тесты background lifecycle/DB migration, миграция RecyclerView на async diff, cleanup deprecated Activity APIs, release/AAB CI и постепенное выделение response/recovery логики из MainActivity.
 
-Что осталось проверить / улучшить
-
 Подробный handoff для следующей модели: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
 
 Наиболее полезный следующий порядок:
