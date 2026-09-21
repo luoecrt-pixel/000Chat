@@ -739,6 +739,40 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         return out
     }
 
+    fun listLocalFilePaths(chatId: String): List<String> {
+        if (chatId.isBlank()) return emptyList()
+        val out = linkedSetOf<String>()
+        readableDatabase.query(
+            MESSAGE_TABLE,
+            arrayOf("file_paths", "image_path", "annotations", "generated_images"),
+            "chat_id=?",
+            arrayOf(chatId),
+            null, null, "position ASC"
+        ).use { c ->
+            while (c.moveToNext()) {
+                val filePaths = try { JSONArray(c.getString(0).orEmpty()) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until filePaths.length()) {
+                    filePaths.optString(i).takeIf { it.isNotBlank() }?.let(out::add)
+                }
+
+                c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
+
+                val annotations = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until annotations.length()) {
+                    annotations.optJSONObject(i)?.optString("local_path")
+                        ?.takeIf { it.isNotBlank() }?.let(out::add)
+                }
+
+                val generatedImages = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until generatedImages.length()) {
+                    generatedImages.optJSONObject(i)?.optString("local_path")
+                        ?.takeIf { it.isNotBlank() }?.let(out::add)
+                }
+            }
+        }
+        return out.toList()
+    }
+
     fun removeLocalFile(path: String): Boolean {
         if (path.isBlank()) return false
         var removed = false
