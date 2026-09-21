@@ -176,6 +176,7 @@ class MainActivity : Activity() {
         super.onStart()
         activityVisible = true
         BackgroundResponseWorkScheduler.cancelAll(applicationContext)
+        synchronized(activeResumeChats) { activeResumeChats.clear() }
         resumePendingUploads()
         resumeBackgroundResponses()
     }
@@ -1469,6 +1470,10 @@ class MainActivity : Activity() {
         var delay=1500L
 
         while(!executor.isShutdown){
+            if(!activityVisible){
+                BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                return
+            }
             if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
                 diagnostics.log("background_resume_timeout",mapOf(
                     "chat_id" to chatId,
