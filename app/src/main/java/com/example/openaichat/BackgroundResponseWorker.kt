@@ -54,6 +54,9 @@ class BackgroundResponseWorker(
         val title = db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }
 
         try {
+            val activeAtStart = db.getActiveResponse(chatId)
+            if (activeAtStart?.optString("request_id") != requestId) return Result.success()
+
             setForeground(createForegroundInfo(title))
             val startedAt = SystemClock.elapsedRealtime()
             var delayMs = 1_500L
@@ -99,7 +102,7 @@ class BackgroundResponseWorker(
                 }
 
                 val state = response.optString("status").ifBlank { "in_progress" }
-                val text = extractResponseText(response)
+                val text = extractResponseText(response).ifBlank { db.getActiveResponse(chatId)?.optString("text").orEmpty() }
                 db.updateActiveResponse(chatId, responseId = responseId, text = text, status = state, expectedRequestId = requestId)
 
                 if (state in setOf("completed", "failed", "cancelled", "incomplete")) {
