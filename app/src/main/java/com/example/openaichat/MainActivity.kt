@@ -1282,9 +1282,9 @@ class MainActivity : Activity() {
                             if(isRequestCurrent(requestChatId,requestGeneration)){
                                 currentCall=null
                                 status.text="Соединение прервалось — Astra продолжает работу…"
-                                activeAssistantBody?.let{
+                                activeAssistantItemId?.let { id ->
                                     val partial=full.toString()
-                                    if(partial.isNotBlank()) it.text=markdown(partial)
+                                    if(partial.isNotBlank()) messageAdapter.updateText(id, partial)
                                 }
                                 setBusy(true)
                             }
@@ -1298,7 +1298,7 @@ class MainActivity : Activity() {
                 runOnUiThread{
                     if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
                     setBusy(false)
-                    activeAssistantBody=null
+                    activeAssistantItemId=null
                     currentCall=null
                     if(!cancelled && completionState=="incomplete" && full.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
                         val partial=JSONObject().put("role","assistant").put("text",full.toString()).put("incomplete",true).put("status","incomplete")
@@ -1313,8 +1313,7 @@ class MainActivity : Activity() {
                             chat.removeAt(chat.lastIndex)
                             persistCurrentChat()
                         }
-                        if(messages.childCount>0) messages.removeViewAt(messages.childCount-1)
-                        if(!regenerate && messages.childCount>0) messages.removeViewAt(messages.childCount-1)
+                        messageAdapter.removeLast(if(regenerate) 1 else 2)
                         if(!regenerate){
                             input.setText(text); input.setSelection(input.text.length)
                         }
@@ -1436,9 +1435,8 @@ class MainActivity : Activity() {
                 if(!activeResumeChats.add(chatId)) return@forEach
             }
             if(chatId==currentChatId()) {
-                val body=activeAssistantBody
-                if(body!=null && a.optString("text").isNotBlank()) {
-                    body.text=markdown(a.optString("text"))
+                activeAssistantItemId?.let { id ->
+                    if(a.optString("text").isNotBlank()) messageAdapter.updateText(id, a.optString("text"))
                 }
                 runOnUiThread{
                     status.text="Astra продолжает ответ…"
@@ -1552,8 +1550,8 @@ class MainActivity : Activity() {
             if(chatId==currentChatId()){
                 runOnUiThread{
                     if(currentChatId()==chatId){
-                        activeAssistantBody?.text=markdown(text)
-                        activeAssistantBody?.let{scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}}
+                        activeAssistantItemId?.let { id -> messageAdapter.updateText(id, text) }
+                        scrollToLatest()
                         status.text=if(state=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
                     }
                 }
@@ -1689,7 +1687,7 @@ class MainActivity : Activity() {
                 requestGeneration++
                 currentResponseId=responseId.takeIf{it.isNotBlank()}
                 baselineEffort=effectiveEffort
-                activeAssistantBody=null
+                activeAssistantItemId=null
                 restoreCurrentChat()
                 setBusy(false)
                 status.text=when{
