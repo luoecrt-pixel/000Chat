@@ -1221,23 +1221,22 @@ class MainActivity : Activity() {
                         chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         persistCurrentChat()
 
-                        assistantView.text=RichTextRenderer.render(responseModel)
-                        val bubbleCard=assistantView.parent as? LinearLayout
-                        if(bubbleCard!=null){
-                            responseModel.reasoningSummary?.takeIf{it.isNotBlank()}?.let{summaryText->
-                                if(activeReasoningSummaryBody==null){
-                                    activeReasoningSummaryBody=attachReasoningSummaryPanel(bubbleCard,summaryText,initiallyExpanded=false)
-                                    activeReasoningSummaryToggle=(activeReasoningSummaryBody?.parent as? LinearLayout)?.getChildAt(0) as? TextView
-                                }else{
-                                    activeReasoningSummaryBody?.text=summaryText
-                                    activeReasoningSummaryToggle?.text="🧠 Показать ход рассуждений ▼"
-                                }
-                            }
-                            if (hasAssistantAssets(assistantMessage)) addAssetSectionHeader(bubbleCard)
-                            renderGeneratedImages(assistantMessage,bubbleCard)
-                            renderAnnotations(responseModel.annotations,bubbleCard,assistantMessage,requestChatId,requestGeneration)
-                            addFeedbackRow(bubbleCard,assistantMessage,requestChatId)
-                        }
+                        val finalItemId = activeAssistantItemId ?: assistantItemId
+                        messageAdapter.replaceItem(
+                            finalItemId,
+                            ChatBubbleItem.create(
+                                id = finalItemId,
+                                label = "Astra",
+                                text = assistantMessage.optString("text"),
+                                user = false,
+                                annotations = assistantMessage.optJSONArray("annotations"),
+                                message = assistantMessage,
+                                chatIndex = chat.lastIndex,
+                                reasoningSummary = responseModel.reasoningSummary
+                            )
+                        )
+                        activeAssistantItemId = finalItemId
+                        scrollToLatest()
                         status.text=if(usageObj!=null){
                             val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
                             val reasoningPart=if(reasoningTok>0)" (${fmtTokens(reasoningTok)} думал)" else ""
@@ -1246,7 +1245,7 @@ class MainActivity : Activity() {
                         } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
                         setBusy(false)
-                        activeAssistantBody=null
+                        activeAssistantItemId=null
                         currentCall=null
                         activeRequestRegenerate=false
                         if(status.text=="Astra думает…") status.text="Готово"
