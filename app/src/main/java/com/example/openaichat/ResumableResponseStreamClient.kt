@@ -21,10 +21,19 @@ data class ResumableStreamResult(
  * accumulation/persistence because the same transport is used by Activity and WorkManager.
  */
 class ResumableResponseStreamClient(
-    context: Context,
-    private val httpClient: OkHttpClient
+    context: Context
 ) {
     private val secureStore = SecureStore(context.applicationContext)
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
+    fun close() {
+        httpClient.dispatcher.executorService.shutdown()
+        httpClient.connectionPool.evictAll()
+    }
 
     fun stream(
         responseId: String,
