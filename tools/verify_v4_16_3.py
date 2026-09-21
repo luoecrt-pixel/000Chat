@@ -17,8 +17,8 @@ renderer = RENDERER.read_text()
 gradle = GRADLE.read_text()
 workflow = WF.read_text()
 
-assert 'versionName = "4.16.3"' in gradle
-assert 'versionCode = 63' in gradle
+assert 'versionName = "4.17.0"' in gradle
+assert 'versionCode = 64' in gradle
 assert 'buildConfig = true' in gradle
 assert 'container_file_citation' in main
 assert 'file_citation' in main
@@ -59,7 +59,7 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 14' in db
+assert 'DB_VERSION = 15' in db
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
@@ -78,7 +78,8 @@ con.execute('''CREATE TABLE chats (
     active_status TEXT, active_started_at INTEGER, active_effort_pref TEXT,
     active_effective_effort TEXT, active_auto_selected INTEGER NOT NULL DEFAULT 0,
     active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0,
-    active_background_enabled INTEGER NOT NULL DEFAULT 1
+    active_background_enabled INTEGER NOT NULL DEFAULT 1,
+    active_last_sequence_number INTEGER NOT NULL DEFAULT -1
 )''')
 con.execute('''CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, position INTEGER NOT NULL,
@@ -154,6 +155,12 @@ assert 'concurrency:' in workflow
 assert 'activityVisible && !isFinishing' in main
 assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
 assert 'WindowInsetsCompat.Type.systemBars()' in main
+assert 'ResumableResponseStreamClient' in main
+assert 'startingAfter = cursor' in main
+assert 'last_sequence_number' in main
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()
+assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
+assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
 assert 'systemWindowInsetLeft' not in main
 assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
@@ -190,4 +197,4 @@ file_paths_xml = (ROOT / 'app/src/main/res/xml/file_paths.xml').read_text()
 assert 'name="attachments" path="attachments/"' in file_paths_xml
 assert 'cache-path name="cache" path="."' not in file_paths_xml
 
-print('Astra v4.16.3 static verification: PASS')
+print('Astra v4.17.0 static verification: PASS')
