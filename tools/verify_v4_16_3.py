@@ -77,7 +77,8 @@ con.execute('''CREATE TABLE chats (
     active_response_id TEXT, active_request_id TEXT, active_text TEXT,
     active_status TEXT, active_started_at INTEGER, active_effort_pref TEXT,
     active_effective_effort TEXT, active_auto_selected INTEGER NOT NULL DEFAULT 0,
-    active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0
+    active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0,
+    active_background_enabled INTEGER NOT NULL DEFAULT 1
 )''')
 con.execute('''CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, position INTEGER NOT NULL,
