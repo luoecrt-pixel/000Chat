@@ -182,7 +182,8 @@ class BackgroundResponseWorker(
                         "expected_sequence_number" to e.expectedSequenceNumber,
                         "received_sequence_number" to e.receivedSequenceNumber
                     ))
-                    retryDelayMs = 1_500L
+                    delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
+                    retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
                 } catch (e: ApiHttpException) {
                     activeCall = null
                     when (BackgroundRecoveryPolicy.actionForHttpStatus(e.statusCode)) {
