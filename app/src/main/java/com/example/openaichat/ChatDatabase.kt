@@ -154,6 +154,16 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_size INTEGER NOT NULL DEFAULT 0")
         }
         if (oldVersion < 12) {
+            db.execSQL("""
+                DELETE FROM $METRICS_TABLE
+                WHERE request_id IS NOT NULL
+                  AND id NOT IN (
+                      SELECT MIN(id)
+                      FROM $METRICS_TABLE
+                      WHERE request_id IS NOT NULL
+                      GROUP BY chat_id, request_id
+                  )
+            """.trimIndent())
             db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
         }
     }
