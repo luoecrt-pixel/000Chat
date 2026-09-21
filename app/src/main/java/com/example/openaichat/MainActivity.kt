@@ -97,6 +97,8 @@ class MainActivity : Activity() {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
+    private val resumableResponseClient by lazy { ResumableResponseStreamClient(this, pollingClient) }
+    private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
     private lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
@@ -178,6 +180,8 @@ class MainActivity : Activity() {
         super.onStart()
         activityVisible = true
         BackgroundResponseWorkScheduler.cancelAll(applicationContext)
+        activeResumeCalls.values.forEach { it.cancel() }
+        activeResumeCalls.clear()
         synchronized(activeResumeChats) { activeResumeChats.clear() }
         resumePendingUploads()
         resumeBackgroundResponses()
@@ -188,6 +192,7 @@ class MainActivity : Activity() {
         activityVisible = false
         val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
+        activeResumeCalls.remove(currentChatId())?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
         val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
@@ -1042,7 +1047,7 @@ class MainActivity : Activity() {
             try {
                 call.execute().use { response ->
                     requestId=response.header("x-request-id")
-                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
+                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
@@ -1084,7 +1089,7 @@ class MainActivity : Activity() {
                                     val r=ev.optJSONObject("response")
                                     newId=r?.optString("id")?.takeIf{it.isNotBlank()}
                                     if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", expectedRequestId = localRequestId)
+                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
                                         diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
                                     }
                                 }
@@ -1480,6 +1485,7 @@ class MainActivity : Activity() {
     }
 
     private fun pollBackgroundResponse(active:JSONObject){
+         return streamBackgroundResponse(active)
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
         val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
