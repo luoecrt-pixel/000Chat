@@ -95,12 +95,17 @@ class ChatMessageAdapter(
         return ViewHolder(card)
     }
 
+    private fun itemForBoundPosition(position: Int): ChatBubbleItem {
+        val structural = differ.currentList[position]
+        return items.firstOrNull { it.id == structural.id } ?: structural
+    }
+
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        bindFull(holder, items[position])
+        bindFull(holder, itemForBoundPosition(position))
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
-        val item = items[position]
+        val item = itemForBoundPosition(position)
         if (payloads.contains(PAYLOAD_TEXT)) {
             holder.body?.text = renderBody(item)
             bindHolder(item.id, holder)
@@ -118,7 +123,7 @@ class ChatMessageAdapter(
         super.onViewRecycled(holder)
     }
 
-    override fun getItemCount(): Int = items.size
+    override fun getItemCount(): Int = differ.currentList.size
 
     private fun bindFull(holder: ViewHolder, item: ChatBubbleItem) {
         val body = bindCard(holder.card, item)
