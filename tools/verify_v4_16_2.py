@@ -59,7 +59,7 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 12' in db
+assert 'DB_VERSION = 13' in db
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
