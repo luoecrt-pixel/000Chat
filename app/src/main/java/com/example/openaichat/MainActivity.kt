@@ -408,6 +408,10 @@ class MainActivity : Activity() {
         val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        val localPaths=linkedSetOf<String>().apply{
+            try{addAll(chatDb.listLocalFilePaths(id))}catch(_:Exception){}
+            addAll(listComposerLocalFilePaths(id))
+        }
         if(currentChatId()==id){
             requestGeneration++
             currentCall?.cancel()
@@ -415,6 +419,7 @@ class MainActivity : Activity() {
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null)cancelRemoteResponse(id,responseId)
+        localPaths.forEach(::deleteOwnedLocalFile)
         clearComposerState(id)
         chatDb.deleteChat(id)
         if (currentChatId()==id) {
@@ -3087,6 +3092,37 @@ class MainActivity : Activity() {
             obj.put("pending_uploads",pending)
             prefs.edit().putString(composerPrefsKey(id),obj.toString()).apply()
         }catch(_:Exception){}
+    }
+
+    private fun listComposerLocalFilePaths(chatId:String):List<String>{
+        if(chatId.isBlank())return emptyList()
+        val raw=prefs.getString(composerPrefsKey(chatId),null) ?: return emptyList()
+        val out=linkedSetOf<String>()
+        try{
+            val obj=JSONObject(raw)
+            obj.optJSONArray("file_paths")?.let{arr->
+                for(i in 0 until arr.length()) arr.optString(i).takeIf{it.isNotBlank()}?.let(out::add)
+            }
+            obj.optString("image_path").takeIf{it.isNotBlank()}?.let(out::add)
+        }catch(_:Exception){}
+        return out.toList()
+    }
+
+    private fun deleteOwnedLocalFile(path:String){
+        if(path.isBlank())return
+        try{
+            val file=File(path).canonicalFile
+            val roots=listOf(filesDir,cacheDir).map{it.canonicalFile}
+            if(roots.none{file.path==it.path || file.path.startsWith(it.path+File.separator)}){
+                diagnostics.log("local_file_delete_skipped",mapOf("path" to path.take(300),"reason" to "outside_app_storage"))
+                return
+            }
+            if(file.isFile && file.delete()){
+                diagnostics.log("local_file_deleted",mapOf("path" to file.path.take(300)))
+            }
+        }catch(e:Exception){
+            diagnostics.log("local_file_delete_failed",mapOf("path" to path.take(300),"error" to (e.message?:e.toString()).take(300)))
+        }
     }
 
     private fun clearComposerState(chatId:String){
