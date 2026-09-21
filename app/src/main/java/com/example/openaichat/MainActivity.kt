@@ -1464,8 +1464,7 @@ class MainActivity : Activity() {
     private fun pollBackgroundResponse(active:JSONObject){
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
-        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
-        if (requestId.isNullOrBlank()) return
+        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
         val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_:Exception) { null }
         if (persistedActive?.optString("request_id") != requestId) {
             diagnostics.log("background_stale_finalization_ignored", mapOf(
