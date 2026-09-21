@@ -2,6 +2,9 @@ package com.example.openaichat
 
 import android.app.*
 import android.content.*
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
 import android.database.Cursor
 import android.provider.OpenableColumns
@@ -51,7 +54,7 @@ import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private data class UploadCardViews(
         val root: LinearLayout,
         val preview: ImageView,
@@ -151,6 +154,8 @@ class MainActivity : Activity() {
     private var pendingImageMime: String? = null
     private var pendingImageSize: Long = 0L
     private var lastUserText: String = ""
+    private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
+    private var pendingActivityResultCode: Int? = null
 
     private val secure by lazy { SecureStore(this) }
     private val pickAny = 5100
@@ -166,6 +171,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+         activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+             val requestCode = pendingActivityResultCode
+             pendingActivityResultCode = null
+             if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
+         }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
         diagnostics = AstraDiagnostics(this)
@@ -2336,7 +2346,7 @@ class MainActivity : Activity() {
             type=mime
             putExtra(Intent.EXTRA_TITLE,filename)
         }
-        try{startActivityForResult(i,pickSaveGenerated)}catch(e:Exception){status.text="Сохранение недоступно: ${e.message}"}
+        try{launchActivityForResult(i, pickSaveGenerated)}catch(e:Exception){status.text="Сохранение недоступно: ${e.message}"}
     }
 
     private fun shareLocalFile(path:String,filename:String,mime:String){
@@ -2498,13 +2508,13 @@ class MainActivity : Activity() {
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
             type="*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
         }
-        startActivityForResult(i,pickAny)
+        launchActivityForResult(i, pickAny)
     }
     private fun chooseImage() {
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
             type="image/*"; addCategory(Intent.CATEGORY_OPENABLE)
         }
-        startActivityForResult(i,pickImage)
+        launchActivityForResult(i, pickImage)
     }
     private fun chooseVoice() {
         val i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{
@@ -2512,7 +2522,7 @@ class MainActivity : Activity() {
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Говорите…")
         }
         if(i.resolveActivity(packageManager)!=null){
-            try{ startActivityForResult(i,pickVoice) }
+            try{ launchActivityForResult(i, pickVoice) }
             catch(e:Exception){ status.text="Голосовой ввод недоступен: ${e.message}" }
         } else {
             status.text="На устройстве не найден сервис распознавания речи"
@@ -2592,7 +2602,7 @@ class MainActivity : Activity() {
 
     private fun pickFileForVectorStore(){
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{addCategory(Intent.CATEGORY_OPENABLE);type="*/*"}
-        startActivityForResult(i,pickVectorStoreFile)
+        launchActivityForResult(i, pickVectorStoreFile)
     }
 
     private fun listVectorStoreFiles(vsId:String):List<Pair<String,String>>{
@@ -2671,8 +2681,7 @@ class MainActivity : Activity() {
         }finally{temp.delete()}
     }
 
-    override fun onActivityResult(r:Int,c:Int,d:Intent?){
-        super.onActivityResult(r,c,d)
+    private fun handleActivityResult(r:Int,c:Int,d:Intent?){
         if(c!=RESULT_OK || d==null)return
         if(r==pickExportTxt){
             val uri=d.data ?: return
@@ -2821,6 +2830,16 @@ class MainActivity : Activity() {
                 }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
                 finally{ endUpload(); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
             }
+        }
+    }
+
+    private fun launchActivityForResult(intent: Intent, requestCode: Int) {
+        pendingActivityResultCode = requestCode
+        try {
+            activityResultLauncher.launch(intent)
+        } catch (e: Exception) {
+            pendingActivityResultCode = null
+            status.text = "Операция недоступна: ${e.message}"
         }
     }
 
@@ -4382,7 +4401,7 @@ class MainActivity : Activity() {
                             type="text/plain"
                             putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
                         }
-                        try{startActivityForResult(i,pickExportTxt)}
+                        try{launchActivityForResult(i, pickExportTxt)}
                         catch(e:Exception){status.text="Экспорт недоступен: ${e.message}"}
                     }
                     2->if(item.user){

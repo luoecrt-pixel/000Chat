@@ -18,6 +18,11 @@ gradle = GRADLE.read_text()
 workflow = WF.read_text()
 
 assert 'versionName = "4.17.0"' in gradle
+assert 'implementation("androidx.activity:activity-ktx:1.10.1")' in gradle
+assert 'class MainActivity : ComponentActivity()' in main
+assert 'registerForActivityResult(ActivityResultContracts.StartActivityForResult())' in main
+assert 'startActivityForResult(' not in main
+assert 'override fun onActivityResult' not in main
 assert 'versionCode = 64' in gradle
 assert 'buildConfig = true' in gradle
 assert 'container_file_citation' in main
