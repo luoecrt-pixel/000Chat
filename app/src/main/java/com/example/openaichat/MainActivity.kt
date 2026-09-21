@@ -119,6 +119,7 @@ class MainActivity : Activity() {
     private var activeReasoningSummaryToggle: TextView? = null
     private var userStopRequestedGeneration: Long? = null
     private var activeRequestRegenerate = false
+    private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var draftSaveRunnable: Runnable? = null
     private var restoringComposer = false
@@ -173,12 +174,18 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        activityVisible = true
+        BackgroundResponseWorkScheduler.cancelAll(applicationContext)
         resumePendingUploads()
         resumeBackgroundResponses()
     }
 
     override fun onStop() {
         persistComposerStateNow()
+        activityVisible = false
+        val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
+        BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
+        currentCall?.cancel()
         super.onStop()
     }
 
@@ -417,6 +424,7 @@ class MainActivity : Activity() {
             currentCall?.cancel()
         }
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
+        BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
@@ -736,6 +744,7 @@ class MainActivity : Activity() {
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
         chatDb.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
+        BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
         if(responseId!=null){
             executor.execute{
                 try{
@@ -1263,19 +1272,28 @@ class MainActivity : Activity() {
                 )
                 if(canContinueInBackground){
                     val active=try{chatDb.getActiveResponse(requestChatId)}catch(_:Exception){null}
-                    runOnUiThread{
-                        if(isRequestCurrent(requestChatId,requestGeneration)){
-                            currentCall=null
-                            status.text="Соединение прервалось — Astra продолжает работу…"
-                            activeAssistantBody?.let{
-                                val partial=full.toString()
-                                if(partial.isNotBlank()) it.text=markdown(partial)
+                    if(!activityVisible && newId!=null){
+                        BackgroundResponseWorkScheduler.enqueueImmediate(
+                            applicationContext,
+                            requestChatId,
+                            newId!!,
+                            localRequestId
+                        )
+                    } else if(activityVisible && active!=null){
+                        runOnUiThread{
+                            if(isRequestCurrent(requestChatId,requestGeneration)){
+                                currentCall=null
+                                status.text="Соединение прервалось — Astra продолжает работу…"
+                                activeAssistantBody?.let{
+                                    val partial=full.toString()
+                                    if(partial.isNotBlank()) it.text=markdown(partial)
+                                }
+                                setBusy(true)
                             }
-                            setBusy(true)
                         }
-                    }
-                    if(active!=null){
-                        pollBackgroundResponse(active)
+                        if(active!=null){
+                            pollBackgroundResponse(active)
+                        }
                     }
                     return@execute
                 }
