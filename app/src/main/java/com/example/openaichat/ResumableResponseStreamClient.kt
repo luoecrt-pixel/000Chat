@@ -7,6 +7,11 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
 
+class ResponseStreamSequenceGapException(
+    val expectedSequenceNumber: Long,
+    val receivedSequenceNumber: Long
+) : IOException("Responses SSE sequence gap: expected $expectedSequenceNumber, received $receivedSequenceNumber")
+
 data class ResumableStreamResult(
     val lastSequenceNumber: Long,
     val terminalResponse: JSONObject?,
@@ -76,6 +81,9 @@ class ResumableResponseStreamClient(
             val sequence = event.optLong("sequence_number", -1L)
             if (sequence >= 0L) {
                 if (sequence <= lastSequenceNumber) return
+                if (lastSequenceNumber >= 0L && sequence > lastSequenceNumber + 1L) {
+                    throw ResponseStreamSequenceGapException(lastSequenceNumber + 1L, sequence)
+                }
                 lastSequenceNumber = sequence
             }
 
