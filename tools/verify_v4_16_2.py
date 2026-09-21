@@ -59,7 +59,7 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 11' in db
+assert 'DB_VERSION = 12' in db
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
@@ -160,6 +160,8 @@ assert 'androidx.work.impl.foreground.SystemForegroundService' in (ROOT / 'app/s
 assert 'foregroundServiceType="dataSync"' in (ROOT / 'app/src/main/AndroidManifest.xml').read_text()
 assert (ROOT / 'app/src/test/java/com/example/openaichat/BackgroundRecoveryPolicyTest.kt').exists()
 assert 'val success=state=="completed"' in main
+assert 'idx_effort_metrics_chat_request' in db
+assert 'CREATE UNIQUE INDEX' in db
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
 assert 'tools/verify_v4_16_2.py' in workflow
