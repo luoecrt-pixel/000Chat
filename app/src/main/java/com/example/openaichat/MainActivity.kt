@@ -1017,13 +1017,39 @@ class MainActivity : Activity() {
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
-                    reader.forEachLine { line ->
-                        if(!line.startsWith("data: ")) return@forEachLine
-                        val data=line.removePrefix("data: ").trim()
-                        if(data=="[DONE]") return@forEachLine
+                    val sseParser = SseEventParser()
+                    var streamDone = false
+                    var lastSequenceNumber = -1L
+
+                    fun handleSseEvent(data:String) {
+                        if(streamDone) return
+                        if(data=="[DONE]"){
+                            streamDone=true
+                            return
+                        }
                         try {
                             val ev=JSONObject(data)
-                            val sequenceNumber = ev.optLong("sequence_number",-1L)
+                            val sequenceNumber=ev.optLong("sequence_number",-1L)
+                            if(sequenceNumber>=0L){
+                                when{
+                                    sequenceNumber<=lastSequenceNumber -> {
+                                        diagnostics.log("sse_event_duplicate_or_out_of_order",mapOf(
+                                            "request_id" to requestId,
+                                            "sequence_number" to sequenceNumber,
+                                            "last_sequence_number" to lastSequenceNumber
+                                        ))
+                                        return
+                                    }
+                                    lastSequenceNumber>=0L && sequenceNumber>lastSequenceNumber+1L -> {
+                                        diagnostics.log("sse_event_sequence_gap",mapOf(
+                                            "request_id" to requestId,
+                                            "expected_sequence_number" to (lastSequenceNumber+1L),
+                                            "received_sequence_number" to sequenceNumber
+                                        ))
+                                    }
+                                }
+                                lastSequenceNumber=sequenceNumber
+                            }
                             when(ev.optString("type")){
                                 "response.created" -> {
                                     val r=ev.optJSONObject("response")
@@ -1061,17 +1087,17 @@ class MainActivity : Activity() {
                                     }
                                 }
                                 "response.reasoning_summary_text.delta" -> {
-                                     val delta=ev.optString("delta")
-                                     if(delta.isNotEmpty()){
-                                         reasoningSummary.append(delta)
-                                         runOnUiThread{
-                                             if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                 updateActiveReasoningSummary(reasoningSummary.toString())
-                                             }
-                                         }
-                                     }
-                                 }
-                                 "response.reasoning_summary_text.done" -> {}
+                                    val delta=ev.optString("delta")
+                                    if(delta.isNotEmpty()){
+                                        reasoningSummary.append(delta)
+                                        runOnUiThread{
+                                            if(isRequestCurrent(requestChatId,requestGeneration)){
+                                                updateActiveReasoningSummary(reasoningSummary.toString())
+                                            }
+                                        }
+                                    }
+                                }
+                                "response.reasoning_summary_text.done" -> {}
                                 "response.web_search_call.completed" -> { toolItems.add("🌐 Web Search"); updateToolState("web_search","completed",requestChatId,requestGeneration) }
                                 "response.file_search_call.completed" -> { toolItems.add("📚 File Search"); updateToolState("file_search","completed",requestChatId,requestGeneration) }
                                 "response.code_interpreter_call.completed" -> { toolItems.add("🐍 Code Interpreter"); updateToolState("code_interpreter","completed",requestChatId,requestGeneration) }
@@ -1128,6 +1154,12 @@ class MainActivity : Activity() {
                             diagnostics.log("sse_event_parse_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
                         }
                     }
+
+                    reader.forEachLine { line ->
+                        if(streamDone) return@forEachLine
+                        sseParser.acceptLine(line)?.let { handleSseEvent(it.data) }
+                    }
+                    sseParser.finish()?.let { handleSseEvent(it.data) }
 
                     if(completionState=="failed") {
                         throw IOException("Ответ Astra не завершился: ${completionError?.take(500) ?: "неизвестная ошибка"}")
@@ -1255,7 +1287,7 @@ class MainActivity : Activity() {
                         persistCurrentChat()
                     }
                     if(cancelled && userStopped){
-                        chatDb.clearActiveResponse(requestChatId)
+                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         if(chat.isNotEmpty() && chat.lastOrNull()?.optString("role")=="user" && !regenerate){
                             chat.removeAt(chat.lastIndex)
                             persistCurrentChat()
@@ -1280,7 +1312,7 @@ class MainActivity : Activity() {
                         persistComposerStateNow()
                         status.text="Остановлено — сообщение и вложения возвращены в поле ввода"
                     } else {
-                        chatDb.clearActiveResponse(requestChatId)
+                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         val friendly = friendlyApiError(e.message)
                         status.text="Ошибка"
                         addBubble("Ошибка",friendly,false)
@@ -1408,14 +1440,87 @@ class MainActivity : Activity() {
         val responseId=active.optString("response_id")
         val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
         if(chatId.isBlank() || responseId.isBlank()) return
+
+        val recoveryStartedAt=SystemClock.elapsedRealtime()
+        val maxRecoveryMs=30L*60L*1000L
         var delay=1500L
+
         while(!executor.isShutdown){
-            val r=try{retrieveResponse(responseId)}catch(e:Exception){
-                diagnostics.log("background_resume_poll_failed",mapOf("chat_id" to chatId,"response_id" to responseId,"error" to (e.message?:e.toString()).take(400)))
-                Thread.sleep(delay.coerceAtMost(5000L))
-                delay=(delay*2).coerceAtMost(5000L)
+            if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
+                diagnostics.log("background_resume_timeout",mapOf(
+                    "chat_id" to chatId,
+                    "response_id" to responseId,
+                    "request_id" to requestId
+                ))
+                finishBackgroundRecovery(chatId,"Фоновое восстановление приостановлено — попробуйте открыть приложение позже",requestId)
+                return
+            }
+
+            val r=try{
+                retrieveResponse(responseId)
+            }catch(e:ApiHttpException){
+                when(e.statusCode){
+                    401,403 -> {
+                        diagnostics.log("background_resume_auth_failed",mapOf(
+                            "chat_id" to chatId,
+                            "response_id" to responseId,
+                            "status" to e.statusCode
+                        ))
+                        finishBackgroundRecovery(chatId,"Не удалось восстановить ответ: проверьте API-ключ",requestId)
+                        return
+                    }
+                    404,410 -> {
+                        diagnostics.log("background_resume_response_gone",mapOf(
+                            "chat_id" to chatId,
+                            "response_id" to responseId,
+                            "status" to e.statusCode
+                        ))
+                        finishBackgroundRecovery(chatId,"Фоновый ответ больше недоступен",requestId)
+                        return
+                    }
+                    429 -> {
+                        val waitMs=e.retryAfterMs?.coerceIn(1000L,300_000L)
+                            ?: delay.coerceAtMost(60_000L)
+                        diagnostics.log("background_resume_rate_limited",mapOf(
+                            "chat_id" to chatId,
+                            "response_id" to responseId,
+                            "retry_after_ms" to waitMs
+                        ))
+                        if(!sleepBackgroundRetry(waitMs)) return
+                        delay=(delay*2).coerceAtMost(30_000L)
+                        continue
+                    }
+                    in 500..599 -> {
+                        diagnostics.log("background_resume_server_error",mapOf(
+                            "chat_id" to chatId,
+                            "response_id" to responseId,
+                            "status" to e.statusCode
+                        ))
+                    }
+                    else -> {
+                        diagnostics.log("background_resume_http_error",mapOf(
+                            "chat_id" to chatId,
+                            "response_id" to responseId,
+                            "status" to e.statusCode
+                        ))
+                        finishBackgroundRecovery(chatId,"Не удалось восстановить ответ (HTTP ${e.statusCode})",requestId)
+                        return
+                    }
+                }
+                if(!sleepBackgroundRetry(delay)) return
+                delay=(delay*2).coerceAtMost(30_000L)
+                continue
+            }catch(e:Exception){
+                diagnostics.log("background_resume_poll_failed",mapOf(
+                    "chat_id" to chatId,
+                    "response_id" to responseId,
+                    "error" to (e.message?:e.toString()).take(400)
+                ))
+                if(!sleepBackgroundRetry(delay)) return
+                delay=(delay*2).coerceAtMost(30_000L)
                 continue
             }
+
             val state=r.optString("status").ifBlank{"in_progress"}
             val text=extractResponseText(r).ifBlank{active.optString("text")}
             chatDb.updateActiveResponse(chatId,responseId=responseId,text=text,status=state,expectedRequestId=requestId)
@@ -1432,8 +1537,35 @@ class MainActivity : Activity() {
                 finalizeBackgroundResponse(active,r)
                 return
             }
-            Thread.sleep(delay)
+            if(!sleepBackgroundRetry(delay)) return
             delay=1500L
+        }
+    }
+
+    private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean{
+        val jitter=if(baseDelayMs<=1L) 0L else {
+            val spread=(baseDelayMs/5L).coerceAtLeast(1L)
+            kotlin.random.Random.nextLong(-spread,spread+1L)
+        }
+        val actual=(baseDelayMs+jitter).coerceAtLeast(250L)
+        return try{
+            Thread.sleep(actual)
+            true
+        }catch(_:InterruptedException){
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
+        chatDb.clearActiveResponse(chatId,expectedRequestId=requestId)
+        if(currentChatId()!=chatId) return
+        runOnUiThread{
+            if(currentChatId()!=chatId) return@runOnUiThread
+            activeAssistantBody=null
+            currentCall=null
+            setBusy(false)
+            status.text=message
         }
     }
 
@@ -1444,9 +1576,13 @@ class MainActivity : Activity() {
             .url("https://api.openai.com/v1/responses/$responseId")
             .addHeader("Authorization","Bearer $key")
             .get().build()
-        client.newCall(req).execute().use{resp->
+        pollingClient.newCall(req).execute().use{resp->
             val raw=resp.body?.string().orEmpty()
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
+            if(!resp.isSuccessful){
+                val retryAfterMs=resp.header("Retry-After")?.trim()?.toLongOrNull()
+                    ?.coerceIn(1L,300L)?.times(1000L)
+                throw ApiHttpException(resp.code,retryAfterMs,raw.take(4096))
+            }
             return JSONObject(raw)
         }
     }
@@ -1499,7 +1635,7 @@ class MainActivity : Activity() {
         val cachedTok=usage?.optJSONObject("input_tokens_details")?.optLong("cached_tokens",0L) ?: 0L
         val cacheWriteTok=usage?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens",0L) ?: 0L
         val reasoningTok=usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
-        val success=state=="completed" || state=="incomplete"
+        val success=state=="completed"
         val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
         chatDb.recordEffortMetric(
             requestId,chatId,"resumed",
