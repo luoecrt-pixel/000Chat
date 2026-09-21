@@ -85,7 +85,8 @@ class BackgroundResponseWorker(
                         }
                         BackgroundRecoveryAction.RETRY -> {
                             diagnostics.log("worker_http_retry", mapOf("chat_id" to chatId, "response_id" to responseId, "status" to e.statusCode))
-                            delay(BackgroundRecoveryPolicy.retryDelayMs(delayMs, e.retryAfterMs))
+                            val retryDelay = BackgroundRecoveryPolicy.retryDelayMs(delayMs, e.retryAfterMs)
+                            delay(if (e.retryAfterMs != null) retryDelay else BackgroundRecoveryPolicy.jitteredDelayMs(retryDelay))
                             delayMs = BackgroundRecoveryPolicy.nextDelayMs(delayMs)
                             continue
                         }
@@ -97,7 +98,8 @@ class BackgroundResponseWorker(
                     }
                 } catch (e: Exception) {
                     diagnostics.log("worker_poll_failed", mapOf("chat_id" to chatId, "response_id" to responseId, "error" to (e.message ?: e.toString()).take(400)))
-                    delay(BackgroundRecoveryPolicy.retryDelayMs(delayMs, null))
+                    val retryDelay = BackgroundRecoveryPolicy.retryDelayMs(delayMs, null)
+                    delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelay))
                     delayMs = BackgroundRecoveryPolicy.nextDelayMs(delayMs)
                     continue
                 }
@@ -111,7 +113,7 @@ class BackgroundResponseWorker(
                     return if (state == "failed") Result.failure() else Result.success()
                 }
 
-                delay(delayMs.coerceIn(1_000L, 30_000L))
+                delay(BackgroundRecoveryPolicy.jitteredDelayMs(delayMs))
                 delayMs = 1_500L
             }
             return Result.success()
