@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -15,59 +17,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Locate project or source archive
-        id: project
+      - name: Normalize source layout
+        id: normalize
         shell: bash
         run: |
           set -euo pipefail
+          migrated=false
 
-          find_project_root() {
-            local base="$1"
-            if [ -f "$base/settings.gradle.kts" ] || [ -f "$base/settings.gradle" ]; then
-              printf '%s\n' "$base"
-              return 0
-            fi
-            mapfile -t roots < <(find "$base" -mindepth 1 -maxdepth 6 -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -printf '%h\n' | sort -u)
-            if [ "${#roots[@]}" -eq 1 ]; then
-              printf '%s\n' "${roots[0]}"
-              return 0
-            fi
-            return 1
-          }
-
-          project_dir=""
-          project_dir="$(find_project_root . || true)"
-
-          if [ -z "$project_dir" ]; then
-            mapfile -t zips < <(find . -mindepth 1 -maxdepth 5 -type f -name '*-source.zip' -printf '%p\n' | sort)
-            if [ "${#zips[@]}" -eq 1 ]; then
-              archive="${zips[0]}"
-              extract_dir="$RUNNER_TEMP/astra-source"
-              rm -rf "$extract_dir"
-              mkdir -p "$extract_dir"
-              echo "No Gradle project found directly; extracting source archive: $archive"
-              unzip -o -q "$archive" -d "$extract_dir"
-              project_dir="$(find_project_root "$extract_dir" || true)"
-            elif [ "${#zips[@]}" -gt 1 ]; then
-              echo "Multiple source archives found:" >&2
-              printf ' - %s\n' "${zips[@]}" >&2
+          if [ ! -f settings.gradle.kts ] && [ ! -f settings.gradle ]; then
+            mapfile -t zips < <(find . -mindepth 1 -maxdepth 5 -type f -name '*-source.zip' -print | sort)
+            if [ "${#zips[@]}" -ne 1 ]; then
+              echo "Expected exactly one source archive while the repository has no Gradle project root." >&2
+              printf '%s\n' "${zips[@]}" >&2
               exit 1
             fi
+
+            archive="${zips[0]}"
+            extract_dir="$RUNNER_TEMP/astra-source"
+            rm -rf "$extract_dir"
+            mkdir -p "$extract_dir"
+            unzip -q "$archive" -d "$extract_dir"
+
+            mapfile -t roots < <(find "$extract_dir" -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -printf '%h\n' | sort -u)
+            if [ "${#roots[@]}" -ne 1 ]; then
+              echo "Expected exactly one Gradle project root inside the archive; found ${#roots[@]}." >&2
+              printf '%s\n' "${roots[@]}" >&2
+              exit 1
+            fi
+
+            source_root="${roots[0]}"
+            find "$source_root" -type d -name .git -prune -exec rm -rf {} +
+            while IFS= read -r -d '' item; do
+              cp -a "$item" .
+            done < <(find "$source_root" -mindepth 1 -maxdepth 1 ! -name '.github' -print0)
+
+            rm -f "$archive"
+            migrated=true
           fi
 
-          if [ -z "$project_dir" ]; then
-            echo "Could not locate a Gradle project." >&2
-            echo "Expected either settings.gradle(.kts) in the repository or exactly one *-source.zip anywhere up to depth 5." >&2
-            echo "Repository top-level contents:" >&2
-            find . -maxdepth 2 -mindepth 1 -print | sort | sed -n '1,200p' >&2
+          if [ ! -f settings.gradle.kts ] && [ ! -f settings.gradle ]; then
+            echo "Gradle project root is still missing after normalization." >&2
             exit 1
           fi
 
-          project_dir="$(cd "$project_dir" && pwd)"
-          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
-          echo "Using Gradle project root: $project_dir"
-          echo "Project contents:"
-          find "$project_dir" -maxdepth 2 -mindepth 1 -print | sort | sed -n '1,160p'
+          echo "migrated=$migrated" >> "$GITHUB_OUTPUT"
+          echo "Project root: $(pwd)"
+          echo "Top-level files:"
+          find . -maxdepth 1 -mindepth 1 -print | sort
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -93,14 +89,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
           if [ -f "tools/verify_v4_16_2.py" ]; then
             python3 tools/verify_v4_16_2.py
           elif [ -f "tools/verify_v4_16_1.py" ]; then
             echo "::warning::Using legacy verifier tools/verify_v4_16_1.py"
             python3 tools/verify_v4_16_1.py
           else
-            echo "::warning::No Astra static verifier found; continuing to Gradle build."
+            echo "No Astra static verifier found; continuing to Gradle checks."
           fi
 
       - name: Decode persistent debug keystore
@@ -111,17 +106,13 @@ jobs:
           if [ -n "${DEBUG_KEYSTORE_BASE64:-}" ]; then
             echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/debug.keystore"
             echo "DEBUG_KEYSTORE_PATH=$RUNNER_TEMP/debug.keystore" >> "$GITHUB_ENV"
-            echo "Using persistent debug keystore from secrets."
-          else
-            echo "::warning::DEBUG_KEYSTORE_BASE64 secret not set; a new signing key will be generated."
           fi
 
-      - name: Build debug APK
+      - name: Test, lint and build
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
-          gradle --no-daemon --stacktrace assembleDebug
+          gradle --no-daemon --stacktrace test lintDebug assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/app-debug.apk"
 
       - name: Upload APK
@@ -130,3 +121,14 @@ jobs:
           name: OpenAIApiChat-Astra-debug
           path: app-debug.apk
           if-no-files-found: error
+
+      - name: Persist normalized source layout
+        if: steps.normalize.outputs.migrated == 'true' && github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: extract Android source from archive"
+          git push origin HEAD:main
