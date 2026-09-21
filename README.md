@@ -127,8 +127,8 @@ CI устанавливает Android SDK 35 и build-tools 35.0.0.
 
 1. Добавить тесты для lifecycle/DB/background recovery: stale request, stop/delete race, WorkManager recovery, HTTP retry policy, миграции DB v12→v13.
 2. Улучшить `RecyclerView`: перейти с синхронного `DiffUtil.calculateDiff()` на `AsyncListDiffer/ListAdapter` и не принудительно прокручивать вниз, если пользователь уже читает старые сообщения.
-3. Обновить стабильные AndroidX зависимости. На 2026-09-21 официальные AndroidX docs указывают RecyclerView 1.4.0 и Core/KTX 1.19.0; WorkManager 2.11.2 остаётся текущей стабильной веткой. citeturn354393search0turn772240search6turn354393search1
-4. Отдельно планировать миграцию AGP/Kotlin/Gradle: текущий AGP 8.7.3 существенно старше актуального AGP 9.x; современный AGP 9.x меняет встроенную Kotlin-интеграцию и требует отдельного compatibility pass. citeturn560887search0turn560887search6turn560887search4
+3. Обновить стабильные AndroidX зависимости. На 2026-09-21 официальные AndroidX release pages указывают RecyclerView 1.4.0, Core/KTX 1.19.0 и WorkManager 2.11.2.
+4. Отдельно планировать миграцию AGP/Kotlin/Gradle: текущий AGP 8.7.3 существенно старше актуального AGP 9.x; современный AGP 9.x меняет встроенную Kotlin-интеграцию и требует отдельного compatibility pass.
 5. Убрать deprecated Activity APIs: `systemWindowInset*`, `consumeSystemWindowInsets()`, `startActivityForResult()`, `onActivityResult()`.
 6. Разделять гигантский `MainActivity.kt` на UI/state/network/persistence/recovery слои небольшими PR, без большого rewrite.
 7. Расширить CI отдельным release/AAB build и проверкой release variant, потому что текущий workflow гарантирует только debug APK.
