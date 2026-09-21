@@ -149,6 +149,16 @@ assert 'listLocalFilePaths' in db
 assert 'deleteOwnedLocalFile' in main
 assert (ROOT / 'app/src/test/java/com/example/openaichat/SseEventParserTest.kt').exists()
 assert 'testImplementation("junit:junit:4.13.2")' in gradle
+assert 'androidx.work:work-runtime-ktx:2.11.2' in gradle
+assert 'BackgroundResponseWorkScheduler' in main
+assert 'BackgroundResponseWorkScheduler.cancelAll(applicationContext)' in main
+assert 'BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)' in main
+assert 'BackgroundResponseWorker' in workflow or (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').exists()
+assert 'BackgroundRecoveryPolicy' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
+assert 'FOREGROUND_SERVICE_DATA_SYNC' in (ROOT / 'app/src/main/AndroidManifest.xml').read_text()
+assert 'androidx.work.impl.foreground.SystemForegroundService' in (ROOT / 'app/src/main/AndroidManifest.xml').read_text()
+assert 'foregroundServiceType="dataSync"' in (ROOT / 'app/src/main/AndroidManifest.xml').read_text()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/BackgroundRecoveryPolicyTest.kt').exists()
 assert 'val success=state=="completed"' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
