@@ -42,7 +42,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 active_effective_effort TEXT,
                 active_auto_selected INTEGER NOT NULL DEFAULT 0,
                 active_prompt_chars INTEGER NOT NULL DEFAULT 0,
-                active_attachments INTEGER NOT NULL DEFAULT 0
+                active_attachments INTEGER NOT NULL DEFAULT 0,
+                active_background_enabled INTEGER NOT NULL DEFAULT 1,
+                active_last_sequence_number INTEGER NOT NULL DEFAULT -1
             )
         """.trimIndent())
         db.execSQL("""
