@@ -3250,29 +3250,40 @@ class MainActivity : Activity() {
         chat.clear()
         clearAttachedSelection()
         refreshAttachChips()
+        activeAssistantItemId=null
         val c=currentChatObj()
         title.text=c.optString("title","Новый чат")
         currentResponseId=c.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
         baselineEffort=c.optString("baseline_effort").takeIf{it.isNotBlank() && it!="null"}
         val arr=c.optJSONArray("messages") ?: JSONArray()
+        val restoredItems=mutableListOf<ChatBubbleItem>()
         for(i in 0 until arr.length()){
             val m=arr.optJSONObject(i)?:continue
             val role=m.optString("role")
             val t=m.optString("text")
             chat.add(m)
-            addBubble(if(role=="user")"Ты" else "Astra",t,role=="user",null,m.optJSONArray("annotations"),m)
+            restoredItems += ChatBubbleItem.create(
+                id="chat-message-$i",
+                label=if(role=="user")"Ты" else "Astra",
+                text=t,
+                user=role=="user",
+                annotations=m.optJSONArray("annotations"),
+                message=m,
+                chatIndex=chat.lastIndex,
+                reasoningSummary=m.optString("reasoning_summary").trim().takeIf{it.isNotBlank()}
+            )
             if(role=="user")lastUserText=t
         }
+        messageAdapter.submitItems(restoredItems)
         val restoredTools = chat.lastOrNull { it.optString("role") == "assistant" }
             ?.optJSONArray("tools")
-        toolLabel.text = restoredTools?.let { arr ->
-            (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
+        toolLabel.text = restoredTools?.let { tools ->
+            (0 until tools.length()).map { tools.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
         }.orEmpty()
-        activeAssistantBody=null
         val active=chatDb.getActiveResponse(currentChatId())
         if(active!=null && active.optString("response_id").isNotBlank()){
             val partial=active.optString("text")
-            activeAssistantBody=addBubble("Astra",partial,false)
+            activeAssistantItemId=addBubble("Astra",partial,false)
             status.text=if(active.optString("status")=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
             setBusy(true)
         }else{
@@ -3312,7 +3323,7 @@ class MainActivity : Activity() {
         restoreAttachmentSelectionFromMessage(message)
 
         while(chat.size>idx) chat.removeAt(chat.size-1)
-        while(messages.childCount>idx) messages.removeViewAt(messages.childCount-1)
+        messageAdapter.removeFrom(idx)
         currentResponseId=chat.lastOrNull{it.optString("role")=="assistant"}
             ?.optString("response_id")?.takeIf{it.isNotBlank() && it!="null"}
         if(chat.isEmpty()) baselineEffort=null
