@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.app.*
 import android.content.*
+import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
@@ -53,7 +54,7 @@ import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private data class UploadCardViews(
         val root: LinearLayout,
         val preview: ImageView,
