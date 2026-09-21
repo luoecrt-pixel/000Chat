@@ -145,6 +145,12 @@ assert 'backgroundEnabled = backgroundEnabled' in main
 assert 'active_background_enabled' in db
 assert 'background_enabled' in main
 assert 'isNearLatest' in main
+assert 'ChatScrollPolicy.shouldScrollToLatest' in main
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt').exists()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/ChatScrollPolicyTest.kt').exists()
+assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
+assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
+assert 'concurrency:' in workflow
 assert 'activityVisible && !isFinishing' in main
 assert 'pollingClient' in main
 assert 'SseEventParser' in main
