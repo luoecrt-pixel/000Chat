@@ -1048,7 +1048,7 @@ class MainActivity : Activity() {
             try {
                 call.execute().use { response ->
                     requestId=response.header("x-request-id")
-                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
+                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
@@ -1720,6 +1720,17 @@ class MainActivity : Activity() {
 
     private fun pollBackgroundResponse(active: JSONObject) {
         streamBackgroundResponse(active)
+    }
+
+    private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
+        val actual = BackgroundRecoveryPolicy.jitteredDelayMs(baseDelayMs)
+        return try {
+            Thread.sleep(actual)
+            true
+        } catch (_:InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
