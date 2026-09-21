@@ -1465,6 +1465,16 @@ class MainActivity : Activity() {
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
         val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
+        if (requestId.isNullOrBlank()) return
+        val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_:Exception) { null }
+        if (persistedActive?.optString("request_id") != requestId) {
+            diagnostics.log("background_stale_finalization_ignored", mapOf(
+                "chat_id" to chatId,
+                "response_id" to responseId,
+                "request_id" to requestId
+            ))
+            return
+        }
         if(chatId.isBlank() || responseId.isBlank()) return
 
         val recoveryStartedAt=SystemClock.elapsedRealtime()
@@ -1672,19 +1682,28 @@ class MainActivity : Activity() {
         val reasoningTok=usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
         val success=state=="completed"
         val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+        val committed = chatDb.upsertCurrentChatIfActiveRequest(
+            chatId,
+            chatObj.optString("title","Новый чат"),
+            responseId.takeIf{it.isNotBlank()},
+            effectiveEffort,
+            msgs,
+            requestId
+        )
+        if (!committed) {
+            diagnostics.log("background_stale_finalization_ignored", mapOf(
+                "chat_id" to chatId,
+                "response_id" to responseId,
+                "request_id" to requestId
+            ))
+            return
+        }
         chatDb.recordEffortMetric(
             requestId,chatId,"resumed",
             effortPref,effectiveEffort,active.optBoolean("auto_selected",false),
             active.optInt("prompt_chars",0),active.optInt("attachments",0),
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
-        )
-        chatDb.upsertCurrentChat(
-            chatId,
-            chatObj.optString("title","Новый чат"),
-            responseId.takeIf{it.isNotBlank()},
-            effectiveEffort,
-            msgs
         )
         chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
