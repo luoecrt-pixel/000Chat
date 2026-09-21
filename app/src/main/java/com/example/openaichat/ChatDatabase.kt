@@ -20,6 +20,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val METRICS_TABLE = "effort_metrics"
     }
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.setForeignKeyConstraintsEnabled(true)
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE $CHAT_TABLE (
@@ -562,7 +567,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         chatId: String,
         responseId: String? = null,
         text: String? = null,
-        status: String? = null
+        status: String? = null,
+        expectedRequestId: String? = null
     ) {
         if (chatId.isBlank()) return
         val values = ContentValues().apply {
@@ -571,7 +577,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if (status != null) put("active_status", status)
             put("updated_at", System.currentTimeMillis())
         }
-        writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
+        val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
+        val args = if (expectedRequestId != null) arrayOf(chatId, expectedRequestId) else arrayOf(chatId)
+        writableDatabase.update(CHAT_TABLE, values, where, args)
     }
 
     fun getActiveResponse(chatId: String): JSONObject? {
@@ -634,7 +642,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         return out
     }
 
-    fun clearActiveResponse(chatId: String) {
+    fun clearActiveResponse(chatId: String, expectedRequestId: String? = null) {
         if (chatId.isBlank()) return
         val values = ContentValues().apply {
             putNull("active_response_id")
@@ -649,7 +657,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("active_attachments", 0)
             put("updated_at", System.currentTimeMillis())
         }
-        writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
+        val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
+        val args = if (expectedRequestId != null) arrayOf(chatId, expectedRequestId) else arrayOf(chatId)
+        writableDatabase.update(CHAT_TABLE, values, where, args)
     }
 
     fun usageTotals(since: Long = 0L): JSONObject {
