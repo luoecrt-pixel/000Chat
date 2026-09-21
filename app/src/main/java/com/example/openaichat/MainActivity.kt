@@ -418,8 +418,6 @@ class MainActivity : Activity() {
         clearComposerState(id)
         chatDb.deleteChat(id)
         if (currentChatId()==id) {
-            requestGeneration++
-            currentCall?.cancel()
             val newId = newChatId()
             prefs.edit().putString("current_chat",newId).apply()
             chat.clear()
