@@ -702,7 +702,8 @@ class MainActivity : Activity() {
         currentCall?.cancel()
         val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
-        chatDb.clearActiveResponse(chatId)
+        val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        chatDb.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
         if(responseId!=null){
             executor.execute{
                 try{
@@ -712,7 +713,7 @@ class MainActivity : Activity() {
                         .addHeader("Authorization","Bearer $key")
                         .post("{}".toRequestBody("application/json".toMediaType()))
                         .build()
-                    client.newCall(req).execute().use{resp->
+                    pollingClient.newCall(req).execute().use{resp->
                         diagnostics.log("background_response_cancel",mapOf("chat_id" to chatId,"response_id" to responseId,"status" to resp.code))
                     }
                 }catch(e:Exception){
@@ -1138,14 +1139,14 @@ class MainActivity : Activity() {
                     val cacheWriteTok=usageObj?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens",0L) ?: 0L
                     val reasoningTok=usageObj?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
-                    chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, true, null, estimatedCost)
+                    chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
 
                     runOnUiThread{
                         if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
                         currentResponseId=newId ?: currentResponseId
                         baselineEffort=actualEffort
                         chat.add(assistantMessage)
-                        chatDb.clearActiveResponse(requestChatId)
+                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         persistCurrentChat()
 
                         assistantView.text=RichTextRenderer.render(responseModel)
@@ -1340,7 +1341,17 @@ class MainActivity : Activity() {
         val active=try{chatDb.listActiveResponses()}catch(_:Exception){emptyList()}
         active.forEach { a ->
             val chatId=a.optString("chat_id")
-            val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"} ?: return@forEach
+            val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
+            val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
+            if(responseId==null){
+                val startedAt=a.optLong("started_at",0L)
+                val age=System.currentTimeMillis()-startedAt
+                if(requestId!=null && startedAt>0L && age>120_000L){
+                    chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
+                    diagnostics.log("background_response_orphaned",mapOf("chat_id" to chatId,"request_id" to requestId,"age_ms" to age))
+                }
+                return@forEach
+            }
             synchronized(activeResumeChats){
                 if(!activeResumeChats.add(chatId)) return@forEach
             }
@@ -1368,6 +1379,7 @@ class MainActivity : Activity() {
     private fun pollBackgroundResponse(active:JSONObject){
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
+        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
         if(chatId.isBlank() || responseId.isBlank()) return
         var delay=1500L
         while(!executor.isShutdown){
@@ -1379,7 +1391,7 @@ class MainActivity : Activity() {
             }
             val state=r.optString("status").ifBlank{"in_progress"}
             val text=extractResponseText(r).ifBlank{active.optString("text")}
-            chatDb.updateActiveResponse(chatId,responseId=responseId,text=text,status=state)
+            chatDb.updateActiveResponse(chatId,responseId=responseId,text=text,status=state,expectedRequestId=requestId)
             if(chatId==currentChatId()){
                 runOnUiThread{
                     if(currentChatId()==chatId){
@@ -1476,7 +1488,7 @@ class MainActivity : Activity() {
             effectiveEffort,
             msgs
         )
-        chatDb.clearActiveResponse(chatId)
+        chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
             "chat_id" to chatId,
             "response_id" to responseId,
