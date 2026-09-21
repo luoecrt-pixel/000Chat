@@ -203,7 +203,7 @@ class MainActivity : Activity() {
     }
 
     private fun isRequestCurrent(chatId: String, generation: Long): Boolean =
-        currentChatId() == chatId && requestGeneration == generation && !isFinishing
+        currentChatId() == chatId && requestGeneration == generation && activityVisible && !isFinishing
 
     // ---------- UI ----------
     private fun buildUi() {
@@ -894,7 +894,8 @@ class MainActivity : Activity() {
             effectiveEffort = actualEffort,
             autoSelected = autoSelected,
             promptChars = text.length,
-            attachments = requestFileIds.size + if(requestImageFileId!=null) 1 else 0
+            attachments = requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
+            backgroundEnabled = backgroundEnabled
         )
         setBusy(true)
         status.text=if(preflightWarning.isNullOrBlank()) "Astra думает…" else "⚠ $preflightWarning\nAstra думает…"
@@ -1422,6 +1423,12 @@ class MainActivity : Activity() {
             val chatId=a.optString("chat_id")
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
+            if (!a.optBoolean("background_enabled", true)) {
+                if (responseId != null) cancelRemoteResponse(chatId, responseId)
+                chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
+                diagnostics.log("background_recovery_disabled", mapOf("chat_id" to chatId, "request_id" to requestId, "response_id" to responseId))
+                return@forEach
+            }
             if(responseId==null){
                 val startedAt=a.optLong("started_at",0L)
                 val age=System.currentTimeMillis()-startedAt
@@ -1465,9 +1472,14 @@ class MainActivity : Activity() {
         var delay=1500L
 
         while(!executor.isShutdown){
+            val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+            if (persistedActive?.optString("request_id") != requestId) return
             if(!activityVisible){
-                BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                if (persistedActive.optBoolean("background_enabled", true)) {
+                    BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                }
                 return
+            }                return
             }
             if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
                 diagnostics.log("background_resume_timeout",mapOf(
