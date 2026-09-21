@@ -149,6 +149,8 @@ assert 'isNearLatest' in main
 assert 'ChatScrollPolicy.shouldScrollToLatest' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt').exists()
 assert (ROOT / 'app/src/test/java/com/example/openaichat/ChatScrollPolicyTest.kt').exists()
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseRequest.kt').exists()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/ResumableResponseRequestTest.kt').exists()
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'concurrency:' in workflow
