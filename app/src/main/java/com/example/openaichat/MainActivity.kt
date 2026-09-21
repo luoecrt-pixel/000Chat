@@ -2681,16 +2681,6 @@ class MainActivity : Activity() {
     }
 
     private fun handleActivityResult(r:Int,c:Int,d:Intent?){
-    private fun launchActivityForResult(intent: Intent, requestCode: Int) {
-        pendingActivityResultCode = requestCode
-        try {
-            activityResultLauncher.launch(intent)
-        } catch (e: Exception) {
-            pendingActivityResultCode = null
-            status.text = "Операция недоступна: ${e.message}"
-        }
-    }
-
         if(c!=RESULT_OK || d==null)return
         if(r==pickExportTxt){
             val uri=d.data ?: return
@@ -2839,6 +2829,16 @@ class MainActivity : Activity() {
                 }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
                 finally{ endUpload(); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
             }
+        }
+    }
+
+    private fun launchActivityForResult(intent: Intent, requestCode: Int) {
+        pendingActivityResultCode = requestCode
+        try {
+            activityResultLauncher.launch(intent)
+        } catch (e: Exception) {
+            pendingActivityResultCode = null
+            status.text = "Операция недоступна: ${e.message}"
         }
     }
 
