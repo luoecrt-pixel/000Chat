@@ -20,6 +20,9 @@ object ChatMessageFingerprint {
         val normalized = JSONArray()
         persistedKeys.forEach { key ->
             when (key) {
+                "role", "text" -> normalized.put(
+                    message.optString(key)
+                )
                 "feedback" -> normalized.put(
                     if (message.has(key) && !message.isNull(key)) message.optInt(key) else JSONObject.NULL
                 )
