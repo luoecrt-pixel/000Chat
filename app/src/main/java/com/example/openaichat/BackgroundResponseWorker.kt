@@ -173,6 +173,16 @@ class BackgroundResponseWorker(
                     if (isStopped) return Result.success()
                     delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
                     retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                } catch (e: ResponseStreamSequenceGapException) {
+                    activeCall = null
+                    diagnostics.log("worker_sequence_gap", mapOf(
+                        "chat_id" to chatId,
+                        "response_id" to responseId,
+                        "request_id" to requestId,
+                        "expected_sequence_number" to e.expectedSequenceNumber,
+                        "received_sequence_number" to e.receivedSequenceNumber
+                    ))
+                    retryDelayMs = 1_500L
                 } catch (e: ApiHttpException) {
                     activeCall = null
                     when (BackgroundRecoveryPolicy.actionForHttpStatus(e.statusCode)) {
