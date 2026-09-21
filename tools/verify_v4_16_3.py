@@ -17,8 +17,8 @@ renderer = RENDERER.read_text()
 gradle = GRADLE.read_text()
 workflow = WF.read_text()
 
-assert 'versionName = "4.16.2"' in gradle
-assert 'versionCode = 62' in gradle
+assert 'versionName = "4.16.3"' in gradle
+assert 'versionCode = 63' in gradle
 assert 'buildConfig = true' in gradle
 assert 'container_file_citation' in main
 assert 'file_citation' in main
@@ -59,7 +59,7 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 13' in db
+assert 'DB_VERSION = 14' in db
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
@@ -77,7 +77,8 @@ con.execute('''CREATE TABLE chats (
     active_response_id TEXT, active_request_id TEXT, active_text TEXT,
     active_status TEXT, active_started_at INTEGER, active_effort_pref TEXT,
     active_effective_effort TEXT, active_auto_selected INTEGER NOT NULL DEFAULT 0,
-    active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0
+    active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0,
+    active_background_enabled INTEGER NOT NULL DEFAULT 1
 )''')
 con.execute('''CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, position INTEGER NOT NULL,
@@ -139,6 +140,22 @@ assert 'gradle-version: \'8.9\'' in workflow
 assert 'gradle --no-daemon --stacktrace test lintDebug assembleDebug' in workflow
 assert 'permissions:' in workflow and 'contents: read' in workflow
 assert 'expectedRequestId' in main
+assert 'upsertCurrentChatIfActiveRequest' in db
+assert 'backgroundEnabled = backgroundEnabled' in main
+assert 'active_background_enabled' in db
+assert 'background_enabled' in main
+assert 'isNearLatest' in main
+assert 'ChatScrollPolicy.shouldScrollToLatest' in main
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt').exists()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/ChatScrollPolicyTest.kt').exists()
+assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
+assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
+assert 'concurrency:' in workflow
+assert 'activityVisible && !isFinishing' in main
+assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
+assert 'WindowInsetsCompat.Type.systemBars()' in main
+assert 'systemWindowInsetLeft' not in main
+assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
 assert 'SseEventParser' in main
 assert 'pollingClient.newCall(req)' in main
@@ -168,6 +185,9 @@ assert 'if(!activityVisible)' in main
 assert 'activeResumeChats.clear()' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
-assert 'tools/verify_v4_16_2.py' in workflow
+assert 'tools/verify_v4_16_3.py' in workflow
+file_paths_xml = (ROOT / 'app/src/main/res/xml/file_paths.xml').read_text()
+assert 'name="attachments" path="attachments/"' in file_paths_xml
+assert 'cache-path name="cache" path="."' not in file_paths_xml
 
-print('Astra v4.16.2 static verification: PASS')
+print('Astra v4.16.3 static verification: PASS')

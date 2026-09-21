@@ -70,7 +70,8 @@ object BackgroundResponseWorkScheduler {
             val chatId = active.optString("chat_id")
             val responseId = active.optString("response_id")
             val requestId = active.optString("request_id")
-            if (chatId.isNotBlank() && responseId.isNotBlank() && requestId.isNotBlank()) {
+            val backgroundEnabled = active.optBoolean("background_enabled", true)
+            if (backgroundEnabled && chatId.isNotBlank() && responseId.isNotBlank() && requestId.isNotBlank()) {
                 enqueueImmediate(context, chatId, responseId, requestId)
             }
         }

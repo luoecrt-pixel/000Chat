@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -41,11 +45,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "tools/verify_v4_16_2.py" ]; then
+          if [ -f "tools/verify_v4_16_3.py" ]; then
+            python3 tools/verify_v4_16_3.py
+          elif [ -f "tools/verify_v4_16_2.py" ]; then
+            echo "::warning::Using legacy verifier tools/verify_v4_16_2.py"
             python3 tools/verify_v4_16_2.py
-          elif [ -f "tools/verify_v4_16_1.py" ]; then
-            echo "::warning::Using legacy verifier tools/verify_v4_16_1.py"
-            python3 tools/verify_v4_16_1.py
           else
             echo "No Astra static verifier found; continuing to Gradle checks."
           fi

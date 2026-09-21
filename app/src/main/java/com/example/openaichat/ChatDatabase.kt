@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 13
+        private const val DB_VERSION = 14
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -170,6 +170,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (oldVersion < 13) {
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN content_hash TEXT")
         }
+        if (oldVersion < 14) {
+            db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_background_enabled INTEGER NOT NULL DEFAULT 1")
+        }
     }
 
     /** One-time migration from v4.13's SharedPreferences chat_store JSON. */
@@ -286,71 +289,113 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     fun upsertCurrentChat(id: String, title: String, responseId: String?, baselineEffort: String?, messages: List<JSONObject>) {
         if (id.isBlank()) return
         writableDatabase.transaction { db ->
-            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
-            val values = ContentValues().apply {
-                put("id", id)
-                put("title", title.ifBlank { "Новый чат" })
-                if (responseId.isNullOrBlank()) putNull("response_id") else put("response_id", responseId)
-                if (baselineEffort.isNullOrBlank()) putNull("baseline_effort") else put("baseline_effort", baselineEffort)
-                put("updated_at", System.currentTimeMillis())
-            }
-            if (exists) db.update(CHAT_TABLE, values, "id=?", arrayOf(id)) else db.insertOrThrow(CHAT_TABLE, null, values)
+            upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
+        }
+    }
 
-            val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
-            val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
-            val existingRows = mutableListOf<ExistingMessageRow>()
-            db.query(
-                MESSAGE_TABLE,
-                arrayOf("id", "position", "request_id", "content_hash"),
-                "chat_id=?",
+    /**
+     * Atomically persists a completed response only while the same request is still active.
+     * This closes the stop/delete/new-request race in background recovery.
+     */
+    fun upsertCurrentChatIfActiveRequest(
+        id: String,
+        title: String,
+        responseId: String?,
+        baselineEffort: String?,
+        messages: List<JSONObject>,
+        expectedRequestId: String
+    ): Boolean {
+        if (id.isBlank() || expectedRequestId.isBlank()) return false
+        var committed = false
+        writableDatabase.transaction { db ->
+            val activeRequest = db.query(
+                CHAT_TABLE,
+                arrayOf("active_request_id"),
+                "id=?",
                 arrayOf(id),
-                null, null, "position ASC"
+                null, null, null, "1"
             ).use { c ->
-                while (c.moveToNext()) {
-                    val row = ExistingMessageRow(
-                        id = c.getLong(0),
-                        position = c.getInt(1),
-                        requestId = c.getString(2),
-                        contentHash = c.getString(3)
+                if (!c.moveToFirst()) null else c.getString(0)
+            }
+            if (activeRequest != expectedRequestId) return@transaction
+            upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
+            committed = true
+        }
+        return committed
+    }
+
+    private fun upsertCurrentChatInDb(
+        db: SQLiteDatabase,
+        id: String,
+        title: String,
+        responseId: String?,
+        baselineEffort: String?,
+        messages: List<JSONObject>
+    ) {
+        val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
+        val values = ContentValues().apply {
+            put("id", id)
+            put("title", title.ifBlank { "Новый чат" })
+            if (responseId.isNullOrBlank()) putNull("response_id") else put("response_id", responseId)
+            if (baselineEffort.isNullOrBlank()) putNull("baseline_effort") else put("baseline_effort", baselineEffort)
+            put("updated_at", System.currentTimeMillis())
+        }
+        if (exists) db.update(CHAT_TABLE, values, "id=?", arrayOf(id)) else db.insertOrThrow(CHAT_TABLE, null, values)
+
+        val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
+        val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
+        val existingRows = mutableListOf<ExistingMessageRow>()
+        db.query(
+            MESSAGE_TABLE,
+            arrayOf("id", "position", "request_id", "content_hash"),
+            "chat_id=?",
+            arrayOf(id),
+            null, null, "position ASC"
+        ).use { c ->
+            while (c.moveToNext()) {
+                val row = ExistingMessageRow(
+                    id = c.getLong(0),
+                    position = c.getInt(1),
+                    requestId = c.getString(2),
+                    contentHash = c.getString(3)
+                )
+                existingRows += row
+                existingByPosition.putIfAbsent(row.position, row)
+                row.requestId?.takeIf { it.isNotBlank() }?.let { existingByRequestId.putIfAbsent(it, row) }
+            }
+        }
+
+        val usedIds = HashSet<Long>()
+        messages.forEachIndexed { index, message ->
+            val requestId = message.optString("request_id").takeIf { it.isNotBlank() && it != "null" }
+            val candidate = requestId?.let(existingByRequestId::get)?.takeIf { !usedIds.contains(it.id) }
+                ?: existingByPosition[index]?.takeIf { !usedIds.contains(it.id) }
+            val contentHash = ChatMessageFingerprint.of(message)
+
+            if (candidate == null) {
+                val newId = db.insertOrThrow(MESSAGE_TABLE, null, messageContentValues(id, index, message, contentHash))
+                usedIds += newId
+            } else {
+                usedIds += candidate.id
+                if (candidate.contentHash != contentHash || candidate.position != index) {
+                    db.update(
+                        MESSAGE_TABLE,
+                        messageContentValues(id, index, message, contentHash),
+                        "id=?",
+                        arrayOf(candidate.id.toString())
                     )
-                    existingRows += row
-                    existingByPosition.putIfAbsent(row.position, row)
-                    row.requestId?.takeIf { it.isNotBlank() }?.let { existingByRequestId.putIfAbsent(it, row) }
                 }
             }
+        }
 
-            val usedIds = HashSet<Long>()
-            messages.forEachIndexed { index, message ->
-                val requestId = message.optString("request_id").takeIf { it.isNotBlank() && it != "null" }
-                val candidate = requestId?.let(existingByRequestId::get)?.takeIf { !usedIds.contains(it.id) }
-                    ?: existingByPosition[index]?.takeIf { !usedIds.contains(it.id) }
-                val contentHash = ChatMessageFingerprint.of(message)
-
-                if (candidate == null) {
-                    val newId = db.insertOrThrow(MESSAGE_TABLE, null, messageContentValues(id, index, message, contentHash))
-                    usedIds += newId
-                } else {
-                    usedIds += candidate.id
-                    if (candidate.contentHash != contentHash || candidate.position != index) {
-                        db.update(
-                            MESSAGE_TABLE,
-                            messageContentValues(id, index, message, contentHash),
-                            "id=?",
-                            arrayOf(candidate.id.toString())
-                        )
-                    }
-                }
-            }
-
-            existingRows.forEach { row ->
-                if (!usedIds.contains(row.id)) {
-                    db.delete(MESSAGE_TABLE, "id=?", arrayOf(row.id.toString()))
-                }
+        existingRows.forEach { row ->
+            if (!usedIds.contains(row.id)) {
+                db.delete(MESSAGE_TABLE, "id=?", arrayOf(row.id.toString()))
             }
         }
     }
 
-    private data class ExistingMessageRow(
+data class ExistingMessageRow(
         val id: Long,
         val position: Int,
         val requestId: String?,
@@ -624,7 +669,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         effectiveEffort: String,
         autoSelected: Boolean,
         promptChars: Int,
-        attachments: Int
+        attachments: Int,
+        backgroundEnabled: Boolean
     ) {
         if (chatId.isBlank()) return
         val values = ContentValues().apply {
@@ -638,6 +684,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("active_auto_selected", if (autoSelected) 1 else 0)
             put("active_prompt_chars", promptChars.coerceAtLeast(0))
             put("active_attachments", attachments.coerceAtLeast(0))
+            put("active_background_enabled", if (backgroundEnabled) 1 else 0)
             put("updated_at", System.currentTimeMillis())
         }
         writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
@@ -669,7 +716,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             arrayOf(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
-                "active_auto_selected", "active_prompt_chars", "active_attachments"
+                "active_auto_selected", "active_prompt_chars", "active_attachments",
+                "active_background_enabled"
             ),
             "id=? AND active_status IS NOT NULL",
             arrayOf(chatId), null, null, null, "1"
@@ -687,6 +735,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 .put("auto_selected", c.getInt(7) != 0)
                 .put("prompt_chars", c.getInt(8))
                 .put("attachments", c.getInt(9))
+                .put("background_enabled", c.getInt(10) != 0)
         }
     }
 
@@ -698,7 +747,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
                 "active_effective_effort", "active_auto_selected", "active_prompt_chars",
-                "active_attachments"
+                "active_attachments", "active_background_enabled"
             ),
             "active_status IS NOT NULL",
             null, null, null, "updated_at DESC"
@@ -717,6 +766,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     .put("auto_selected", c.getInt(9) != 0)
                     .put("prompt_chars", c.getInt(10))
                     .put("attachments", c.getInt(11))
+                    .put("background_enabled", c.getInt(12) != 0)
             }
         }
         return out
@@ -735,6 +785,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             put("active_auto_selected", 0)
             put("active_prompt_chars", 0)
             put("active_attachments", 0)
+            put("active_background_enabled", 1)
             put("updated_at", System.currentTimeMillis())
         }
         val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"

@@ -10,6 +10,8 @@ import android.os.Handler
 import android.os.Looper
 import android.text.method.LinkMovementMethod
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
@@ -186,7 +188,17 @@ class MainActivity : Activity() {
         activityVisible = false
         val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
-        currentCall?.cancel()
+        val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
+        val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
+        val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
+        val keepStreamUntilId = backgroundEnabled && !responseIdKnown
+        if (!keepStreamUntilId) {
+            currentCall?.cancel()
+        } else {
+            diagnostics.log("background_stream_kept_for_response_id", mapOf(
+                "chat_id" to currentChatId()
+            ))
+        }
         super.onStop()
     }
 
@@ -203,7 +215,7 @@ class MainActivity : Activity() {
     }
 
     private fun isRequestCurrent(chatId: String, generation: Long): Boolean =
-        currentChatId() == chatId && requestGeneration == generation && !isFinishing
+        currentChatId() == chatId && requestGeneration == generation && activityVisible && !isFinishing
 
     // ---------- UI ----------
     private fun buildUi() {
@@ -351,10 +363,12 @@ class MainActivity : Activity() {
         composer.addView(stop, LinearLayout.LayoutParams(dp(52),-2).apply{leftMargin=dp(6)})
         root.addView(composer)
 
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
-            insets.consumeSystemWindowInsets()
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
         }
+        ViewCompat.requestApplyInsets(root)
 
         setContentView(root)
 
@@ -424,6 +438,7 @@ class MainActivity : Activity() {
         val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        val backgroundEnabled=active?.optBoolean("background_enabled", true) == true
         val localPaths=linkedSetOf<String>().apply{
             try{addAll(chatDb.listLocalFilePaths(id))}catch(_:Exception){}
             addAll(listComposerLocalFilePaths(id))
@@ -435,7 +450,7 @@ class MainActivity : Activity() {
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
-        if(responseId!=null)cancelRemoteResponse(id,responseId)
+        if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
         clearComposerState(id)
         chatDb.deleteChat(id)
@@ -894,7 +909,8 @@ class MainActivity : Activity() {
             effectiveEffort = actualEffort,
             autoSelected = autoSelected,
             promptChars = text.length,
-            attachments = requestFileIds.size + if(requestImageFileId!=null) 1 else 0
+            attachments = requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
+            backgroundEnabled = backgroundEnabled
         )
         setBusy(true)
         status.text=if(preflightWarning.isNullOrBlank()) "Astra думает…" else "⚠ $preflightWarning\nAstra думает…"
@@ -1422,6 +1438,15 @@ class MainActivity : Activity() {
             val chatId=a.optString("chat_id")
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
+            if (!a.optBoolean("background_enabled", true)) {
+                chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
+                diagnostics.log("background_recovery_disabled", mapOf(
+                    "chat_id" to chatId,
+                    "request_id" to requestId,
+                    "response_id" to responseId
+                ))
+                return@forEach
+            }
             if(responseId==null){
                 val startedAt=a.optLong("started_at",0L)
                 val age=System.currentTimeMillis()-startedAt
@@ -1457,7 +1482,16 @@ class MainActivity : Activity() {
     private fun pollBackgroundResponse(active:JSONObject){
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
-        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
+        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
+        val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_:Exception) { null }
+        if (persistedActive?.optString("request_id") != requestId) {
+            diagnostics.log("background_stale_finalization_ignored", mapOf(
+                "chat_id" to chatId,
+                "response_id" to responseId,
+                "request_id" to requestId
+            ))
+            return
+        }
         if(chatId.isBlank() || responseId.isBlank()) return
 
         val recoveryStartedAt=SystemClock.elapsedRealtime()
@@ -1465,8 +1499,12 @@ class MainActivity : Activity() {
         var delay=1500L
 
         while(!executor.isShutdown){
+            val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+            if (persistedActive?.optString("request_id") != requestId) return
             if(!activityVisible){
-                BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                if (persistedActive.optBoolean("background_enabled", true)) {
+                    BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                }
                 return
             }
             if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
@@ -1631,7 +1669,7 @@ class MainActivity : Activity() {
         val state=response.optString("status").ifBlank{active.optString("status")}
         val fallbackText=active.optString("text")
         val text=extractResponseText(response).ifBlank{fallbackText}
-        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
+        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
         val model=AstraResponseModel.fromResponse(response,text,requestId,state,
             response.optJSONObject("error")?.optString("message")
                 ?: response.optJSONObject("incomplete_details")?.optString("reason"))
@@ -1660,19 +1698,28 @@ class MainActivity : Activity() {
         val reasoningTok=usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
         val success=state=="completed"
         val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+        val committed = chatDb.upsertCurrentChatIfActiveRequest(
+            chatId,
+            chatObj.optString("title","Новый чат"),
+            responseId.takeIf{it.isNotBlank()},
+            effectiveEffort,
+            msgs,
+            requestId
+        )
+        if (!committed) {
+            diagnostics.log("background_stale_finalization_ignored", mapOf(
+                "chat_id" to chatId,
+                "response_id" to responseId,
+                "request_id" to requestId
+            ))
+            return
+        }
         chatDb.recordEffortMetric(
             requestId,chatId,"resumed",
             effortPref,effectiveEffort,active.optBoolean("auto_selected",false),
             active.optInt("prompt_chars",0),active.optInt("attachments",0),
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
-        )
-        chatDb.upsertCurrentChat(
-            chatId,
-            chatObj.optString("title","Новый чат"),
-            responseId.takeIf{it.isNotBlank()},
-            effectiveEffort,
-            msgs
         )
         chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
@@ -4114,10 +4161,23 @@ class MainActivity : Activity() {
         send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads == 0 && !preparingZipAttachments
     }
 
-    private fun scrollToLatest(){
+    private fun isNearLatest(): Boolean {
+        if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return true
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return true
+        val lastVisible = lm.findLastVisibleItemPosition()
+        return ChatScrollPolicy.shouldScrollToLatest(
+            itemCount = messageAdapter.itemCount,
+            lastVisiblePosition = lastVisible
+        )
+    }
+
+    private fun scrollToLatest(force: Boolean = false){
         if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
+        if(!force && !isNearLatest()) return
         scroll.post{
-            if(messageAdapter.itemCount>0) scroll.scrollToPosition(messageAdapter.itemCount-1)
+            if(messageAdapter.itemCount>0 && (force || isNearLatest())) {
+                scroll.scrollToPosition(messageAdapter.itemCount-1)
+            }
         }
     }
 
@@ -4253,7 +4313,7 @@ class MainActivity : Activity() {
                 reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
             )
         )
-        scrollToLatest()
+        scrollToLatest(force = user)
         return id
     }
 

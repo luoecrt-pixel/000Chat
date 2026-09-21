@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.openaichat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 62
-        versionName = "4.16.2"
+        versionCode = 63
+        versionName = "4.16.3"
     }
 
     buildFeatures {

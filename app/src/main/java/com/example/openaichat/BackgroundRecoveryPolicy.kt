@@ -21,4 +21,11 @@ object BackgroundRecoveryPolicy {
 
     fun retryDelayMs(baseDelayMs: Long, retryAfterMs: Long?): Long =
         (retryAfterMs ?: baseDelayMs.coerceAtMost(60_000L)).coerceIn(1_000L, 300_000L)
+
+    fun jitteredDelayMs(baseDelayMs: Long): Long {
+        val base = baseDelayMs.coerceIn(1_000L, 30_000L)
+        val spread = (base / 5L).coerceAtLeast(1L)
+        val delta = kotlin.random.Random.nextLong(-spread, spread + 1L)
+        return (base + delta).coerceAtLeast(1_000L)
+    }
 }

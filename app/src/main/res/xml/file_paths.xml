@@ -2,5 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path name="generated" path="generated/" />
     <files-path name="generated_images" path="generated_images/" />
-    <cache-path name="cache" path="." />
+    <files-path name="attachments" path="attachments/" />
 </paths>

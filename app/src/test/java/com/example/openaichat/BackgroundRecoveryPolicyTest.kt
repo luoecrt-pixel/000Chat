@@ -1,6 +1,7 @@
 package com.example.openaichat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BackgroundRecoveryPolicyTest {
@@ -28,5 +29,14 @@ class BackgroundRecoveryPolicyTest {
         assertEquals(3_000L, BackgroundRecoveryPolicy.nextDelayMs(1_500L))
         assertEquals(30_000L, BackgroundRecoveryPolicy.nextDelayMs(20_000L))
         assertEquals(30_000L, BackgroundRecoveryPolicy.nextDelayMs(30_000L))
+    }
+
+    @Test
+    fun jitterStaysWithinTwentyPercentAndNeverBelowOneSecond() {
+        repeat(100) {
+            val actual = BackgroundRecoveryPolicy.jitteredDelayMs(10_000L)
+            assertTrue(actual in 8_000L..12_000L)
+        }
+        assertTrue(BackgroundRecoveryPolicy.jitteredDelayMs(1_000L) >= 1_000L)
     }
 }
