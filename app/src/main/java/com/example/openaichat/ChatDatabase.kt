@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 14
+        private const val DB_VERSION = 15
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -172,6 +172,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         if (oldVersion < 14) {
             db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_background_enabled INTEGER NOT NULL DEFAULT 1")
+        }
+        if (oldVersion < 15) {
+            db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_last_sequence_number INTEGER NOT NULL DEFAULT -1")
         }
     }
 
@@ -685,6 +688,7 @@ data class ExistingMessageRow(
             put("active_prompt_chars", promptChars.coerceAtLeast(0))
             put("active_attachments", attachments.coerceAtLeast(0))
             put("active_background_enabled", if (backgroundEnabled) 1 else 0)
+            put("active_last_sequence_number", -1)
             put("updated_at", System.currentTimeMillis())
         }
         writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
@@ -695,6 +699,7 @@ data class ExistingMessageRow(
         responseId: String? = null,
         text: String? = null,
         status: String? = null,
+        lastSequenceNumber: Long? = null,
         expectedRequestId: String? = null
     ) {
         if (chatId.isBlank()) return
@@ -702,6 +707,7 @@ data class ExistingMessageRow(
             if (responseId != null) putStringOrNull("active_response_id", responseId)
             if (text != null) put("active_text", text)
             if (status != null) put("active_status", status)
+            if (lastSequenceNumber != null) put("active_last_sequence_number", lastSequenceNumber.coerceAtLeast(-1L))
             put("updated_at", System.currentTimeMillis())
         }
         val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
@@ -717,7 +723,7 @@ data class ExistingMessageRow(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
                 "active_auto_selected", "active_prompt_chars", "active_attachments",
-                "active_background_enabled"
+                "active_background_enabled", "active_last_sequence_number"
             ),
             "id=? AND active_status IS NOT NULL",
             arrayOf(chatId), null, null, null, "1"
@@ -736,6 +742,7 @@ data class ExistingMessageRow(
                 .put("prompt_chars", c.getInt(8))
                 .put("attachments", c.getInt(9))
                 .put("background_enabled", c.getInt(10) != 0)
+                .put("last_sequence_number", c.getLong(11))
         }
     }
 
@@ -747,7 +754,7 @@ data class ExistingMessageRow(
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
                 "active_effective_effort", "active_auto_selected", "active_prompt_chars",
-                "active_attachments", "active_background_enabled"
+                "active_attachments", "active_background_enabled", "active_last_sequence_number"
             ),
             "active_status IS NOT NULL",
             null, null, null, "updated_at DESC"
@@ -767,6 +774,7 @@ data class ExistingMessageRow(
                     .put("prompt_chars", c.getInt(10))
                     .put("attachments", c.getInt(11))
                     .put("background_enabled", c.getInt(12) != 0)
+                    .put("last_sequence_number", c.getLong(13))
             }
         }
         return out
@@ -786,6 +794,7 @@ data class ExistingMessageRow(
             put("active_prompt_chars", 0)
             put("active_attachments", 0)
             put("active_background_enabled", 1)
+            put("active_last_sequence_number", -1)
             put("updated_at", System.currentTimeMillis())
         }
         val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
