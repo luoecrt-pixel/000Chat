@@ -11,9 +11,7 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -60,7 +58,7 @@ class BackgroundResponseWorker(
             val startedAt = SystemClock.elapsedRealtime()
             var delayMs = 1_500L
 
-            while (currentCoroutineContext().isActive) {
+            while (!isStopped) {
                 if (SystemClock.elapsedRealtime() - startedAt >= MAX_RECOVERY_MS) {
                     diagnostics.log("worker_recovery_timeout", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
