@@ -46,6 +46,7 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.core:core-ktx:1.15.0")
 }

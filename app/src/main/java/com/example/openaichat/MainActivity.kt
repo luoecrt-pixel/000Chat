@@ -119,6 +119,7 @@ class MainActivity : Activity() {
     private var activeReasoningSummaryToggle: TextView? = null
     private var userStopRequestedGeneration: Long? = null
     private var activeRequestRegenerate = false
+    private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var draftSaveRunnable: Runnable? = null
     private var restoringComposer = false
@@ -173,12 +174,19 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        activityVisible = true
+        BackgroundResponseWorkScheduler.cancelAll(applicationContext)
+        synchronized(activeResumeChats) { activeResumeChats.clear() }
         resumePendingUploads()
         resumeBackgroundResponses()
     }
 
     override fun onStop() {
         persistComposerStateNow()
+        activityVisible = false
+        val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
+        BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
+        currentCall?.cancel()
         super.onStop()
     }
 
@@ -417,6 +425,7 @@ class MainActivity : Activity() {
             currentCall?.cancel()
         }
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
+        BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
@@ -736,6 +745,7 @@ class MainActivity : Activity() {
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
         chatDb.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
+        BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
         if(responseId!=null){
             executor.execute{
                 try{
@@ -1263,19 +1273,28 @@ class MainActivity : Activity() {
                 )
                 if(canContinueInBackground){
                     val active=try{chatDb.getActiveResponse(requestChatId)}catch(_:Exception){null}
-                    runOnUiThread{
-                        if(isRequestCurrent(requestChatId,requestGeneration)){
-                            currentCall=null
-                            status.text="Соединение прервалось — Astra продолжает работу…"
-                            activeAssistantBody?.let{
-                                val partial=full.toString()
-                                if(partial.isNotBlank()) it.text=markdown(partial)
+                    if(!activityVisible && newId!=null){
+                        BackgroundResponseWorkScheduler.enqueueImmediate(
+                            applicationContext,
+                            requestChatId,
+                            newId!!,
+                            localRequestId
+                        )
+                    } else if(activityVisible && active!=null){
+                        runOnUiThread{
+                            if(isRequestCurrent(requestChatId,requestGeneration)){
+                                currentCall=null
+                                status.text="Соединение прервалось — Astra продолжает работу…"
+                                activeAssistantBody?.let{
+                                    val partial=full.toString()
+                                    if(partial.isNotBlank()) it.text=markdown(partial)
+                                }
+                                setBusy(true)
                             }
-                            setBusy(true)
                         }
-                    }
-                    if(active!=null){
-                        pollBackgroundResponse(active)
+                        if(active!=null){
+                            pollBackgroundResponse(active)
+                        }
                     }
                     return@execute
                 }
@@ -1451,6 +1470,10 @@ class MainActivity : Activity() {
         var delay=1500L
 
         while(!executor.isShutdown){
+            if(!activityVisible){
+                BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
+                return
+            }
             if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
                 diagnostics.log("background_resume_timeout",mapOf(
                     "chat_id" to chatId,
@@ -4193,30 +4216,4 @@ class MainActivity : Activity() {
         setColor(fill)
     }
 
-    private class SecureStore(private val context:Context){
-        private val prefs=context.getSharedPreferences("secure",Context.MODE_PRIVATE)
-        private val alias="OpenAIApiChatKey"
-        private fun key():SecretKey{
-            val ks=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
-            (ks.getKey(alias,null) as? SecretKey)?.let{return it}
-            val gen=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore")
-            gen.init(KeyGenParameterSpec.Builder(alias,KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setRandomizedEncryptionRequired(true).build())
-            return gen.generateKey()
-        }
-        fun setApiKey(v:String){
-            if(v.isBlank()){prefs.edit().remove("key").apply();return}
-            val c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key())
-            val p=c.iv+c.doFinal(v.toByteArray(Charsets.UTF_8))
-            prefs.edit().putString("key",Base64.encodeToString(p,Base64.NO_WRAP)).apply()
-        }
-        fun getApiKey():String{
-            return try{
-                val p=Base64.decode(prefs.getString("key",null)?:return "",Base64.NO_WRAP)
-                val iv=p.copyOfRange(0,12);val d=p.copyOfRange(12,p.size)
-                val c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),GCMParameterSpec(128,iv))
-                String(c.doFinal(d),Charsets.UTF_8)
-            }catch(_:Exception){""}
-        }
-    }
 }

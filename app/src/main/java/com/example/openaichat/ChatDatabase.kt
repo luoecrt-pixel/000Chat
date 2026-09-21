@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 11
+        private const val DB_VERSION = 12
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -100,6 +100,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         """.trimIndent())
         db.execSQL("CREATE INDEX idx_effort_metrics_created ON $METRICS_TABLE(created_at)")
         db.execSQL("CREATE INDEX idx_effort_metrics_task ON $METRICS_TABLE(task_class, effective_effort, feedback)")
+        db.execSQL("CREATE UNIQUE INDEX idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -151,6 +152,19 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT")
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT")
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_size INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 12) {
+            db.execSQL("""
+                DELETE FROM $METRICS_TABLE
+                WHERE request_id IS NOT NULL
+                  AND id NOT IN (
+                      SELECT MIN(id)
+                      FROM $METRICS_TABLE
+                      WHERE request_id IS NOT NULL
+                      GROUP BY chat_id, request_id
+                  )
+            """.trimIndent())
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
         }
     }
 
