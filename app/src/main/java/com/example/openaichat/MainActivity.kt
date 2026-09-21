@@ -91,6 +91,7 @@ class MainActivity : Activity() {
         .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
         .callTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+    private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
 
     private lateinit var prefs: SharedPreferences
@@ -984,7 +985,7 @@ class MainActivity : Activity() {
             try {
                 call.execute().use { response ->
                     requestId=response.header("x-request-id")
-                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress")
+                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
@@ -1000,7 +1001,7 @@ class MainActivity : Activity() {
                                     val r=ev.optJSONObject("response")
                                     newId=r?.optString("id")?.takeIf{it.isNotBlank()}
                                     if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress")
+                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", expectedRequestId = localRequestId)
                                         diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
                                     }
                                 }
@@ -1026,7 +1027,7 @@ class MainActivity : Activity() {
                                                 requestChatId,
                                                 responseId = newId,
                                                 text = full.toString(),
-                                                status = "in_progress"
+                                                status = "in_progress", expectedRequestId = localRequestId
                                             )
                                         }
                                     }
@@ -1082,7 +1083,7 @@ class MainActivity : Activity() {
                                     usage=r?.optJSONObject("usage")
                                     completedResponse=r
                                     parseTools(r?.optJSONArray("output"),toolItems,requestChatId,requestGeneration)
-                                    newId?.let { chatDb.updateActiveResponse(requestChatId, responseId = it, text = full.toString(), status = "completed") }
+                                    newId?.let { chatDb.updateActiveResponse(requestChatId, responseId = it, text = full.toString(), status = "completed", expectedRequestId = localRequestId) }
                                     val annotations=extractAnnotations(r?.optJSONArray("output"))
                                     fileCites=annotations.first
                                     urlCites=annotations.second
