@@ -1980,10 +1980,10 @@ class MainActivity : Activity() {
                 scaleType=ImageView.ScaleType.FIT_CENTER
                 background=rounded(Color.rgb(24,26,30),8)
                 setOnClickListener{showImagePreviewFromFile(path,filename)}
-            },LinearLayout.LayoutParams(-1,dp(220)))
-        }else if(isTextLikeMime(mime,filename)){
+            }
             loadThumbnailAsync(preview,path,900)
             box.addView(preview,LinearLayout.LayoutParams(-1,dp(220)))
+        }else if(isTextLikeMime(mime,filename)){
             box.addView(TextView(this).apply{
                 text="📄 Текстовый файл — нажмите «Просмотр», чтобы прочитать"
                 textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
@@ -3265,7 +3265,6 @@ class MainActivity : Activity() {
             val role=m.optString("role")
             val t=m.optString("text")
             chat.add(m)
-            val imgPath=m.optString("image_path").takeIf{it.isNotBlank()}
             addBubble(if(role=="user")"Ты" else "Astra",t,role=="user",null,m.optJSONArray("annotations"),m)
             if(role=="user")lastUserText=t
         }
@@ -3717,11 +3716,6 @@ class MainActivity : Activity() {
                 runOnUiThread{status.text="Не удалось скачать $name: ${e.message}"}
             }
         }
-    }
-
-    private fun showImagePreviewFromFile(path:String,name:String){
-        val bmp=decodeThumbnailFromFile(path,1800) ?: run{status.text="Не удалось прочитать изображение";return}
-        showImagePreviewFromBitmap(bmp,name)
     }
 
     private fun showImagePreviewFromBitmap(bitmap:Bitmap,name:String=""){
