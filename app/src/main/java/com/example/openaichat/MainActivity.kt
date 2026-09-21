@@ -1648,6 +1648,16 @@ class MainActivity : Activity() {
 
                 if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: ResponseStreamSequenceGapException) {
+                activeResumeCalls.remove(chatId)
+                diagnostics.log("background_resume_sequence_gap", mapOf(
+                    "chat_id" to chatId,
+                    "response_id" to responseId,
+                    "request_id" to requestId,
+                    "expected_sequence_number" to e.expectedSequenceNumber,
+                    "received_sequence_number" to e.receivedSequenceNumber
+                ))
+                retryDelayMs = 1_500L
             } catch (e: ApiHttpException) {
                 activeResumeCalls.remove(chatId)
                 when (e.statusCode) {
