@@ -3456,7 +3456,7 @@ class MainActivity : Activity() {
             val bmp=decodeThumbnailFromFile(path,maxDim)
             if(bmp!=null)thumbnailCache.put(key,bmp)
             runOnUiThread{
-                if(!isFinishing && view.parent!=null && bmp!=null) view.setImageBitmap(bmp)
+                if(!isFinishing && !isDestroyed && bmp!=null) view.setImageBitmap(bmp)
             }
         }
     }
