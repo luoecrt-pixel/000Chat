@@ -1669,7 +1669,7 @@ class MainActivity : Activity() {
         val state=response.optString("status").ifBlank{active.optString("status")}
         val fallbackText=active.optString("text")
         val text=extractResponseText(response).ifBlank{fallbackText}
-        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
+        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
         val model=AstraResponseModel.fromResponse(response,text,requestId,state,
             response.optJSONObject("error")?.optString("message")
                 ?: response.optJSONObject("incomplete_details")?.optString("reason"))
