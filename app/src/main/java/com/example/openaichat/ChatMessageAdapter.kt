@@ -112,15 +112,14 @@ class ChatMessageAdapter(
 
     private fun bindFull(holder: ViewHolder, item: ChatBubbleItem) {
         val body = bindCard(holder.card, item)
+        holder.body = body
         body.text = renderBody(item)
         bindHolder(item.id, holder)
     }
 
     private fun bindHolder(id: String, holder: ViewHolder) {
         holder.itemId = id
-        holder.body?.let { body ->
-            // Keep the existing bound body when bindCard recreated it.
-        }
+        boundHolders.entries.removeIf { it.key != id && it.value === holder }
         boundHolders[id] = holder
     }
 
