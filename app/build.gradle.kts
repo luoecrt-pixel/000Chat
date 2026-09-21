@@ -47,6 +47,7 @@ android {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
+    implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
