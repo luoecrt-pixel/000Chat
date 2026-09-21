@@ -98,6 +98,15 @@ assert con.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
 cols = {r[1] for r in con.execute('PRAGMA table_info(messages)')}
 assert {'file_paths','file_mimes','image_name','image_mime','image_size','generated_images'} <= cols
 
+# v14 -> v15 migration must preserve partial response state and initialize the cursor to -1.
+legacy = sqlite3.connect(':memory:')
+legacy.execute('CREATE TABLE chats (id TEXT PRIMARY KEY, active_text TEXT, active_last_sequence_number INTEGER)')
+legacy.execute("INSERT INTO chats(id, active_text, active_last_sequence_number) VALUES('c1','partial',NULL)")
+legacy.execute('ALTER TABLE chats ADD COLUMN migrated_cursor INTEGER NOT NULL DEFAULT -1')
+text_value, cursor_value = legacy.execute("SELECT active_text, migrated_cursor FROM chats WHERE id='c1'").fetchone()
+assert text_value == 'partial'
+assert cursor_value == -1
+
 # Kotlin delimiter sanity (strings/comments skipped).
 def delimiter_balance(src: str):
     stack=[]; i=0; state='code'
