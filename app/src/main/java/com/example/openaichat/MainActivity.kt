@@ -4114,6 +4114,13 @@ class MainActivity : Activity() {
         send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads == 0 && !preparingZipAttachments
     }
 
+    private fun scrollToLatest(){
+        if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
+        scroll.post{
+            if(messageAdapter.itemCount>0) scroll.scrollToPosition(messageAdapter.itemCount-1)
+        }
+    }
+
     // ---------- utils ----------
     private fun setBusy(v:Boolean){
         send.isEnabled=!v && pendingUploads==0 && !preparingZipAttachments
