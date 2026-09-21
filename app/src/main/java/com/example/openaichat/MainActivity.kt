@@ -186,7 +186,17 @@ class MainActivity : Activity() {
         activityVisible = false
         val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
-        currentCall?.cancel()
+        val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
+        val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
+        val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
+        val keepStreamUntilId = backgroundEnabled && !responseIdKnown
+        if (!keepStreamUntilId) {
+            currentCall?.cancel()
+        } else {
+            diagnostics.log("background_stream_kept_for_response_id", mapOf(
+                "chat_id" to currentChatId()
+            ))
+        }
         super.onStop()
     }
 
@@ -424,6 +434,7 @@ class MainActivity : Activity() {
         val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        val backgroundEnabled=active?.optBoolean("background_enabled", true) == true
         val localPaths=linkedSetOf<String>().apply{
             try{addAll(chatDb.listLocalFilePaths(id))}catch(_:Exception){}
             addAll(listComposerLocalFilePaths(id))
@@ -435,7 +446,7 @@ class MainActivity : Activity() {
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
-        if(responseId!=null)cancelRemoteResponse(id,responseId)
+        if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
         clearComposerState(id)
         chatDb.deleteChat(id)
