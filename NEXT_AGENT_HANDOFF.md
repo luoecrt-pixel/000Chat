@@ -17,10 +17,13 @@ Current app:
 - compileSdk / targetSdk: `35`
 - minSdk: `26`
 
-Current main before PR #9:
-- main head: `4fedade217a3c2888d315c44bdfd9724f27770b8`
-- GitHub Actions Build Android APK run #112: **success**
-- PR #9 (`fix/recovery-state-and-chat-scroll`) contains the current 4.16.3 reliability patch; its latest checks are still running.
+Current main after PR #9:
+- main head: `0b7e786b951576a208c6de2be4c585335ade6e4e`
+- GitHub Actions Build Android APK run #134: **success**
+- versionName: `4.16.3`
+- versionCode: `63`
+- DB schema: `v14`
+- PR #9 is merged into `main`.
 
 Do not assume an earlier PR branch is still the correct base. Start new work from `main`.
 
