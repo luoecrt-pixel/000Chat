@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import org.json.JSONArray
@@ -74,6 +75,15 @@ class ChatMessageAdapter(
     private val items = mutableListOf<ChatBubbleItem>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
 
+    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
+        override fun areItemsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
+            oldItem.id == newItem.id
+
+        override fun areContentsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
+            oldItem.contentSignature == newItem.contentSignature &&
+                oldItem.reasoningSummary == newItem.reasoningSummary
+    })
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val card = createCard(parent)
         if (card.layoutParams == null) {
@@ -85,12 +95,17 @@ class ChatMessageAdapter(
         return ViewHolder(card)
     }
 
+    private fun itemForBoundPosition(position: Int): ChatBubbleItem {
+        val structural = differ.currentList[position]
+        return items.firstOrNull { it.id == structural.id } ?: structural
+    }
+
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        bindFull(holder, items[position])
+        bindFull(holder, itemForBoundPosition(position))
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
-        val item = items[position]
+        val item = itemForBoundPosition(position)
         if (payloads.contains(PAYLOAD_TEXT)) {
             holder.body?.text = renderBody(item)
             bindHolder(item.id, holder)
@@ -108,7 +123,7 @@ class ChatMessageAdapter(
         super.onViewRecycled(holder)
     }
 
-    override fun getItemCount(): Int = items.size
+    override fun getItemCount(): Int = differ.currentList.size
 
     private fun bindFull(holder: ViewHolder, item: ChatBubbleItem) {
         val body = bindCard(holder.card, item)
@@ -125,36 +140,27 @@ class ChatMessageAdapter(
         boundHolders[id] = holder
     }
 
+    private fun submitModel() {
+        differ.submitList(items.toList())
+    }
+
     fun submitItems(newItems: List<ChatBubbleItem>) {
-        val oldItems = items.toList()
-        if (oldItems === newItems) return
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize(): Int = oldItems.size
-            override fun getNewListSize(): Int = newItems.size
-
-            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                oldItems[oldItemPosition].id == newItems[newItemPosition].id
-
-            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
-                oldItems[oldItemPosition].contentSignature == newItems[newItemPosition].contentSignature &&
-                    oldItems[oldItemPosition].reasoningSummary == newItems[newItemPosition].reasoningSummary
-        })
+        if (items == newItems) return
         items.clear()
         items.addAll(newItems)
-        diff.dispatchUpdatesTo(this)
+        submitModel()
     }
 
     fun addItem(item: ChatBubbleItem) {
-        val index = items.size
         items.add(item)
-        notifyItemInserted(index)
+        submitModel()
     }
 
     fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = item.copy(id = id)
-        notifyItemChanged(index)
+        submitModel()
         return true
     }
 
@@ -162,7 +168,8 @@ class ChatMessageAdapter(
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = items[index].copy(text = text)
-        notifyItemChanged(index, PAYLOAD_TEXT)
+        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
+        if (displayIndex >= 0) notifyItemChanged(displayIndex, PAYLOAD_TEXT)
         return true
     }
 
@@ -170,7 +177,8 @@ class ChatMessageAdapter(
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return false
         items[index] = items[index].copy(reasoningSummary = summary)
-        notifyItemChanged(index)
+        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
+        if (displayIndex >= 0) notifyItemChanged(displayIndex)
         return true
     }
 
@@ -179,12 +187,10 @@ class ChatMessageAdapter(
         if (actual <= 0) return
         val start = items.size - actual
         for (item in items.subList(start, items.size)) {
-            if (boundHolders[item.id]?.bindingAdapterPosition == RecyclerView.NO_POSITION) {
-                boundHolders.remove(item.id)
-            }
+            boundHolders.remove(item.id)
         }
         repeat(actual) { items.removeAt(items.lastIndex) }
-        notifyItemRangeRemoved(start, actual)
+        submitModel()
     }
 
     fun removeFrom(index: Int) {
@@ -192,16 +198,15 @@ class ChatMessageAdapter(
         for (item in items.subList(index, items.size)) {
             boundHolders.remove(item.id)
         }
-        val count = items.size - index
-        repeat(count) { items.removeAt(items.lastIndex) }
-        notifyItemRangeRemoved(index, count)
+        repeat(items.size - index) { items.removeAt(items.lastIndex) }
+        submitModel()
     }
 
     fun clearItems() {
         if (items.isEmpty()) return
         items.clear()
         boundHolders.clear()
-        notifyDataSetChanged()
+        submitModel()
     }
 
     fun bodyForId(id: String): TextView? = boundHolders[id]?.body
