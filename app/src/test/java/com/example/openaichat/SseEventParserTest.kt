@@ -12,7 +12,7 @@ class SseEventParserTest {
         assertNull(parser.acceptLine(": comment"))
         assertNull(parser.acceptLine("data:{"type":"response.created"}"))
         val event = parser.acceptLine("")
-        assertEquals("response.created", event?.data?.let { org.json.JSONObject(it).optString("type") })
+        assertEquals("{\"type\":\"response.created\"}", event?.data)
     }
 
     @Test
@@ -40,7 +40,7 @@ class SseEventParserTest {
         assertEquals("one", first?.data)
         assertEquals(null, second?.event)
         assertEquals("two", second?.data)
-        assertNull(second?.id)
+        assertEquals(null, second?.id)
     }
 
     @Test
