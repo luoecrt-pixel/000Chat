@@ -10,6 +10,8 @@ import android.os.Handler
 import android.os.Looper
 import android.text.method.LinkMovementMethod
 import androidx.core.content.FileProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.pdf.PdfRenderer
@@ -97,8 +99,8 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
     private lateinit var diagnostics: AstraDiagnostics
-    private lateinit var scroll: ScrollView
-    private lateinit var messages: LinearLayout
+    private lateinit var scroll: RecyclerView
+    private lateinit var messageAdapter: ChatMessageAdapter
     private lateinit var input: EditText
     private lateinit var send: Button
     private lateinit var stop: Button
@@ -114,9 +116,7 @@ class MainActivity : Activity() {
     private var currentCall: Call? = null
     private var requestGeneration = 0L
     private var currentResponseId: String? = null
-    private var activeAssistantBody: TextView? = null
-    private var activeReasoningSummaryBody: TextView? = null
-    private var activeReasoningSummaryToggle: TextView? = null
+    private var activeAssistantItemId: String? = null
     private var userStopRequestedGeneration: Long? = null
     private var activeRequestRegenerate = false
     private var activityVisible = false
@@ -244,12 +244,20 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        scroll = ScrollView(this)
-        messages = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        messageAdapter = ChatMessageAdapter(
+            createCard = { createChatBubbleCard() },
+            bindCard = { card, item -> bindChatBubbleCard(card, item) },
+            renderBody = { item -> renderChatBubbleBody(item) }
+        )
+        scroll = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity).apply {
+                stackFromEnd = true
+            }
+            adapter = messageAdapter
+            itemAnimator = null
+            clipToPadding = false
             setPadding(dp(10), dp(6), dp(10), dp(12))
         }
-        scroll.addView(messages)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
@@ -439,7 +447,7 @@ class MainActivity : Activity() {
             baselineEffort=null
             clearAttachedSelection()
             refreshAttachChips()
-            messages.removeAllViews()
+            messageAdapter.clearItems()
             toolLabel.text=""
             title.text="Новый чат"
             ensureChatEntry(newId,"Новый чат")
@@ -652,7 +660,7 @@ class MainActivity : Activity() {
         lastUserText=""
         clearAttachedSelection()
         refreshAttachChips()
-        messages.removeAllViews()
+        messageAdapter.clearItems()
         toolLabel.text=""
         title.text="Новый чат"
         clearComposerState(id)
@@ -775,17 +783,9 @@ class MainActivity : Activity() {
             chat.removeAt(chat.lastIndex)
             persistCurrentChat()
         }
-        val assistantParent=activeAssistantBody?.parent
-        if(assistantParent is ViewGroup){
-            messages.removeView(assistantParent)
-        }else if(messages.childCount>0){
-            messages.removeViewAt(messages.childCount-1)
-            if(!activeRequestRegenerate && messages.childCount>0) messages.removeViewAt(messages.childCount-1)
-        }
+        messageAdapter.removeLast(if(activeRequestRegenerate) 1 else 2)
         persistComposerStateNow()
-        activeAssistantBody=null
-        activeReasoningSummaryBody=null
-        activeReasoningSummaryToggle=null
+        activeAssistantItemId=null
         setBusy(false)
         userStopRequestedGeneration=null
         activeRequestRegenerate=false
@@ -997,10 +997,8 @@ class MainActivity : Activity() {
         toolLabel.text=""
         refreshAttachChips()
 
-        val assistantView = addBubble("Astra","",false)
-        activeAssistantBody = assistantView
-        activeReasoningSummaryBody = null
-        activeReasoningSummaryToggle = null
+        val assistantItemId = addBubble("Astra","",false)
+        activeAssistantItemId = assistantItemId
         val req=Request.Builder()
             .url("https://api.openai.com/v1/responses")
             .addHeader("Authorization","Bearer $key")
@@ -1084,9 +1082,9 @@ class MainActivity : Activity() {
                                             val snapshot=full.toString()
                                             runOnUiThread{
                                                 if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                    assistantView.text=markdown(snapshot)
-                                                    activeAssistantBody=assistantView
-                                                    scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}
+                                                    messageAdapter.updateText(assistantItemId, snapshot)
+                                                    activeAssistantItemId = assistantItemId
+                                                    scrollToLatest()
                                                 }
                                             }
                                         }
@@ -1223,23 +1221,22 @@ class MainActivity : Activity() {
                         chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         persistCurrentChat()
 
-                        assistantView.text=RichTextRenderer.render(responseModel)
-                        val bubbleCard=assistantView.parent as? LinearLayout
-                        if(bubbleCard!=null){
-                            responseModel.reasoningSummary?.takeIf{it.isNotBlank()}?.let{summaryText->
-                                if(activeReasoningSummaryBody==null){
-                                    activeReasoningSummaryBody=attachReasoningSummaryPanel(bubbleCard,summaryText,initiallyExpanded=false)
-                                    activeReasoningSummaryToggle=(activeReasoningSummaryBody?.parent as? LinearLayout)?.getChildAt(0) as? TextView
-                                }else{
-                                    activeReasoningSummaryBody?.text=summaryText
-                                    activeReasoningSummaryToggle?.text="🧠 Показать ход рассуждений ▼"
-                                }
-                            }
-                            if (hasAssistantAssets(assistantMessage)) addAssetSectionHeader(bubbleCard)
-                            renderGeneratedImages(assistantMessage,bubbleCard)
-                            renderAnnotations(responseModel.annotations,bubbleCard,assistantMessage,requestChatId,requestGeneration)
-                            addFeedbackRow(bubbleCard,assistantMessage,requestChatId)
-                        }
+                        val finalItemId = activeAssistantItemId ?: assistantItemId
+                        messageAdapter.replaceItem(
+                            finalItemId,
+                            ChatBubbleItem.create(
+                                id = finalItemId,
+                                label = "Astra",
+                                text = assistantMessage.optString("text"),
+                                user = false,
+                                annotations = assistantMessage.optJSONArray("annotations"),
+                                message = assistantMessage,
+                                chatIndex = chat.lastIndex,
+                                reasoningSummary = responseModel.reasoningSummary
+                            )
+                        )
+                        activeAssistantItemId = finalItemId
+                        scrollToLatest()
                         status.text=if(usageObj!=null){
                             val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
                             val reasoningPart=if(reasoningTok>0)" (${fmtTokens(reasoningTok)} думал)" else ""
@@ -1248,7 +1245,7 @@ class MainActivity : Activity() {
                         } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
                         setBusy(false)
-                        activeAssistantBody=null
+                        activeAssistantItemId=null
                         currentCall=null
                         activeRequestRegenerate=false
                         if(status.text=="Astra думает…") status.text="Готово"
@@ -1285,9 +1282,9 @@ class MainActivity : Activity() {
                             if(isRequestCurrent(requestChatId,requestGeneration)){
                                 currentCall=null
                                 status.text="Соединение прервалось — Astra продолжает работу…"
-                                activeAssistantBody?.let{
+                                activeAssistantItemId?.let { id ->
                                     val partial=full.toString()
-                                    if(partial.isNotBlank()) it.text=markdown(partial)
+                                    if(partial.isNotBlank()) messageAdapter.updateText(id, partial)
                                 }
                                 setBusy(true)
                             }
@@ -1301,7 +1298,7 @@ class MainActivity : Activity() {
                 runOnUiThread{
                     if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
                     setBusy(false)
-                    activeAssistantBody=null
+                    activeAssistantItemId=null
                     currentCall=null
                     if(!cancelled && completionState=="incomplete" && full.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
                         val partial=JSONObject().put("role","assistant").put("text",full.toString()).put("incomplete",true).put("status","incomplete")
@@ -1316,8 +1313,7 @@ class MainActivity : Activity() {
                             chat.removeAt(chat.lastIndex)
                             persistCurrentChat()
                         }
-                        if(messages.childCount>0) messages.removeViewAt(messages.childCount-1)
-                        if(!regenerate && messages.childCount>0) messages.removeViewAt(messages.childCount-1)
+                        messageAdapter.removeLast(if(regenerate) 1 else 2)
                         if(!regenerate){
                             input.setText(text); input.setSelection(input.text.length)
                         }
@@ -1439,9 +1435,8 @@ class MainActivity : Activity() {
                 if(!activeResumeChats.add(chatId)) return@forEach
             }
             if(chatId==currentChatId()) {
-                val body=activeAssistantBody
-                if(body!=null && a.optString("text").isNotBlank()) {
-                    body.text=markdown(a.optString("text"))
+                activeAssistantItemId?.let { id ->
+                    if(a.optString("text").isNotBlank()) messageAdapter.updateText(id, a.optString("text"))
                 }
                 runOnUiThread{
                     status.text="Astra продолжает ответ…"
@@ -1555,8 +1550,8 @@ class MainActivity : Activity() {
             if(chatId==currentChatId()){
                 runOnUiThread{
                     if(currentChatId()==chatId){
-                        activeAssistantBody?.text=markdown(text)
-                        activeAssistantBody?.let{scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}}
+                        activeAssistantItemId?.let { id -> messageAdapter.updateText(id, text) }
+                        scrollToLatest()
                         status.text=if(state=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
                     }
                 }
@@ -1590,7 +1585,7 @@ class MainActivity : Activity() {
         if(currentChatId()!=chatId) return
         runOnUiThread{
             if(currentChatId()!=chatId) return@runOnUiThread
-            activeAssistantBody=null
+            activeAssistantItemId=null
             currentCall=null
             setBusy(false)
             status.text=message
@@ -1692,7 +1687,7 @@ class MainActivity : Activity() {
                 requestGeneration++
                 currentResponseId=responseId.takeIf{it.isNotBlank()}
                 baselineEffort=effectiveEffort
-                activeAssistantBody=null
+                activeAssistantItemId=null
                 restoreCurrentChat()
                 setBusy(false)
                 status.text=when{
@@ -1735,14 +1730,8 @@ class MainActivity : Activity() {
      }
 
      private fun updateActiveReasoningSummary(summary:String){
-         val clean=summary.trim()
-         if(activeReasoningSummaryBody==null){
-             val card=activeAssistantBody?.parent as? LinearLayout ?: return
-             activeReasoningSummaryBody=attachReasoningSummaryPanel(card,clean,initiallyExpanded=false)
-             activeReasoningSummaryToggle=(activeReasoningSummaryBody?.parent as? LinearLayout)?.getChildAt(0) as? TextView
-         }else{
-             activeReasoningSummaryBody?.text=clean
-             activeReasoningSummaryToggle?.text=if(clean.isBlank())"🧠 Astra думает…" else "🧠 Показать ход рассуждений ▼"
+         activeAssistantItemId?.let { id ->
+             messageAdapter.updateReasoningSummary(id, summary.trim())
          }
      }
 
@@ -3251,33 +3240,44 @@ class MainActivity : Activity() {
         if(::title.isInitialized) title.text=chatTitle
     }
     private fun restoreCurrentChat(){
-        messages.removeAllViews()
+        messageAdapter.clearItems()
         chat.clear()
         clearAttachedSelection()
         refreshAttachChips()
+        activeAssistantItemId=null
         val c=currentChatObj()
         title.text=c.optString("title","Новый чат")
         currentResponseId=c.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
         baselineEffort=c.optString("baseline_effort").takeIf{it.isNotBlank() && it!="null"}
         val arr=c.optJSONArray("messages") ?: JSONArray()
+        val restoredItems=mutableListOf<ChatBubbleItem>()
         for(i in 0 until arr.length()){
             val m=arr.optJSONObject(i)?:continue
             val role=m.optString("role")
             val t=m.optString("text")
             chat.add(m)
-            addBubble(if(role=="user")"Ты" else "Astra",t,role=="user",null,m.optJSONArray("annotations"),m)
+            restoredItems += ChatBubbleItem.create(
+                id="chat-message-$i",
+                label=if(role=="user")"Ты" else "Astra",
+                text=t,
+                user=role=="user",
+                annotations=m.optJSONArray("annotations"),
+                message=m,
+                chatIndex=chat.lastIndex,
+                reasoningSummary=m.optString("reasoning_summary").trim().takeIf{it.isNotBlank()}
+            )
             if(role=="user")lastUserText=t
         }
+        messageAdapter.submitItems(restoredItems)
         val restoredTools = chat.lastOrNull { it.optString("role") == "assistant" }
             ?.optJSONArray("tools")
-        toolLabel.text = restoredTools?.let { arr ->
-            (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
+        toolLabel.text = restoredTools?.let { tools ->
+            (0 until tools.length()).map { tools.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
         }.orEmpty()
-        activeAssistantBody=null
         val active=chatDb.getActiveResponse(currentChatId())
         if(active!=null && active.optString("response_id").isNotBlank()){
             val partial=active.optString("text")
-            activeAssistantBody=addBubble("Astra",partial,false)
+            activeAssistantItemId=addBubble("Astra",partial,false)
             status.text=if(active.optString("status")=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
             setBusy(true)
         }else{
@@ -3317,7 +3317,7 @@ class MainActivity : Activity() {
         restoreAttachmentSelectionFromMessage(message)
 
         while(chat.size>idx) chat.removeAt(chat.size-1)
-        while(messages.childCount>idx) messages.removeViewAt(messages.childCount-1)
+        messageAdapter.removeFrom(idx)
         currentResponseId=chat.lastOrNull{it.optString("role")=="assistant"}
             ?.optString("response_id")?.takeIf{it.isNotBlank() && it!="null"}
         if(chat.isEmpty()) baselineEffort=null
@@ -3439,6 +3439,7 @@ class MainActivity : Activity() {
     private val thumbnailCache = object : android.util.LruCache<String, Bitmap>(12 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
+    private val thumbnailRequests = java.util.WeakHashMap<ImageView,String>()
 
     private fun thumbnailCacheKey(path:String,maxDim:Int):String{
         val file=File(path)
@@ -3448,15 +3449,25 @@ class MainActivity : Activity() {
     private fun loadThumbnailAsync(view:ImageView,path:String,maxDim:Int=640){
         view.setImageResource(android.R.drawable.ic_menu_gallery)
         val key=thumbnailCacheKey(path,maxDim)
+        synchronized(thumbnailRequests){thumbnailRequests[view]=key}
         thumbnailCache.get(key)?.let{
-            view.setImageBitmap(it)
+            runOnUiThread{
+                if(isFinishing || isDestroyed)return@runOnUiThread
+                synchronized(thumbnailRequests){
+                    if(thumbnailRequests[view]==key)view.setImageBitmap(it)
+                }
+            }
             return
         }
         executor.execute{
             val bmp=decodeThumbnailFromFile(path,maxDim)
             if(bmp!=null)thumbnailCache.put(key,bmp)
             runOnUiThread{
-                if(!isFinishing && !isDestroyed && bmp!=null) view.setImageBitmap(bmp)
+                if(isFinishing || isDestroyed || bmp==null)return@runOnUiThread
+                synchronized(thumbnailRequests){
+                    if(thumbnailRequests[view]!=key)return@synchronized
+                    view.setImageBitmap(bmp)
+                }
             }
         }
     }
@@ -4103,6 +4114,13 @@ class MainActivity : Activity() {
         send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads == 0 && !preparingZipAttachments
     }
 
+    private fun scrollToLatest(){
+        if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
+        scroll.post{
+            if(messageAdapter.itemCount>0) scroll.scrollToPosition(messageAdapter.itemCount-1)
+        }
+    }
+
     // ---------- utils ----------
     private fun setBusy(v:Boolean){
         send.isEnabled=!v && pendingUploads==0 && !preparingZipAttachments
@@ -4113,38 +4131,36 @@ class MainActivity : Activity() {
         pendingUploads=(pendingUploads-1).coerceAtLeast(0)
         if(pendingUploads==0 && stop.visibility!=View.VISIBLE) send.isEnabled=true
     } }
-    private fun addBubble(
-        label:String,
-        text:String,
-        user:Boolean,
-        imageBitmap:Bitmap?=null,
-        annotations:JSONArray?=null,
-        message:JSONObject?=null
-    ):TextView{
-        val card=LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(13),dp(10),dp(13),dp(10))
-            background=rounded(if(user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+    private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
+        orientation=LinearLayout.VERTICAL
+        setPadding(dp(13),dp(10),dp(13),dp(10))
+        background=rounded(Color.rgb(28,29,34),14)
+        layoutParams=RecyclerView.LayoutParams(-1,-2).apply{bottomMargin=dp(8)}
+    }
+
+    private fun renderChatBubbleBody(item:ChatBubbleItem):CharSequence{
+        return if(!item.user && item.message!=null) {
+            RichTextRenderer.render(AstraResponseModel.fromChatJson(item.message))
+        } else {
+            markdown(item.text,item.annotations)
         }
+    }
+
+    private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
+        card.removeAllViews()
+        card.orientation=LinearLayout.VERTICAL
+        card.setPadding(dp(13),dp(10),dp(13),dp(10))
+        card.background=rounded(if(item.user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+
         val who=TextView(this).apply{
-            this.text=label;textSize=12f
-            setTextColor(if(user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
+            text=item.label
+            textSize=12f
+            setTextColor(if(item.user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
             setTypeface(null,Typeface.BOLD)
         }
         card.addView(who)
-        if (imageBitmap != null && !(user && message != null)) {
-            imageBitmap.let{ bmp->
-                card.addView(ImageView(this).apply{
-                    setImageBitmap(bmp)
-                    setAdjustViewBounds(true)
-                    scaleType=ImageView.ScaleType.FIT_CENTER
-                    setPadding(0,dp(6),0,0)
-                    setOnClickListener { showImagePreviewFromBitmap(bmp, message?.optString("image_name").orEmpty()) }
-                }, LinearLayout.LayoutParams(-1,dp(220)))
-            }
-        }
+
         val body=TextView(this).apply{
-            this.text=if(!user && message!=null) RichTextRenderer.render(AstraResponseModel.fromChatJson(message)) else markdown(text, annotations)
             textSize=16f
             setTextColor(Color.WHITE)
             setLinkTextColor(Color.rgb(138,180,248))
@@ -4153,32 +4169,39 @@ class MainActivity : Activity() {
             setPadding(0,dp(5),0,dp(0))
         }
         card.addView(body)
-        if(user && message!=null){
+
+        val message=item.message
+        if(item.user && message!=null){
             renderUserAttachments(message,card)
         }
-        if(!user && message!=null){
-            val savedSummary=message.optString("reasoning_summary").trim()
-            if(savedSummary.isNotBlank()){
-                attachReasoningSummaryPanel(card,savedSummary,initiallyExpanded=false)
+        if(!item.user){
+            val savedSummary=item.reasoningSummary?.trim().takeIf{!it.isNullOrBlank()}
+                ?: message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            if(savedSummary!=null) attachReasoningSummaryPanel(card,savedSummary,initiallyExpanded=false)
+            if(message!=null){
+                if(hasAssistantAssets(message)) addAssetSectionHeader(card)
+                renderGeneratedImages(message,card)
+                val annotations=message.optJSONArray("annotations") ?: item.annotations
+                if(annotations!=null) renderAnnotations(
+                    annotations,
+                    card,
+                    message,
+                    currentChatId(),
+                    requestGeneration
+                )
+                addFeedbackRow(card,message,currentChatId())
             }
         }
-        if(!user && message!=null && hasAssistantAssets(message)) addAssetSectionHeader(card)
-        if(!user && message!=null){
-            renderGeneratedImages(message,card)
-        }
-        if(!user && annotations!=null){
-            renderAnnotations(annotations,card,message ?: findMessageForAnnotations(annotations) ?: JSONObject(),currentChatId(),requestGeneration)
-        }
-        if(!user && message!=null){
-            addFeedbackRow(card,message,currentChatId())
-        }
+
         val longPress=View.OnLongClickListener{
-            val items=if(user)arrayOf("Копировать","Экспорт в TXT","Редактировать") else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
-            AlertDialog.Builder(this).setItems(items){_,which->
+            val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
+            else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
+            AlertDialog.Builder(this).setItems(menu){_,which->
                 when(which){
                     0->{
                         val cm=getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()));status.text="Скопировано"
+                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()))
+                        status.text="Скопировано"
                     }
                     1->{
                         pendingExportBytes=body.text?.toString().orEmpty().toByteArray()
@@ -4187,19 +4210,51 @@ class MainActivity : Activity() {
                             type="text/plain"
                             putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
                         }
-                        try{ startActivityForResult(i,pickExportTxt) }
-                        catch(e:Exception){ status.text="Экспорт недоступен: ${e.message}" }
+                        try{startActivityForResult(i,pickExportTxt)}
+                        catch(e:Exception){status.text="Экспорт недоступен: ${e.message}"}
                     }
-                    2->if(user) editMessage(messages.indexOfChild(card)) else sendMessage(true)
+                    2->if(item.user){
+                        item.chatIndex?.let(::editMessage)
+                    }else{
+                        sendMessage(true)
+                    }
                 }
-            }.show();true
+            }.show()
+            true
         }
         card.setOnLongClickListener(longPress)
         body.setOnLongClickListener(longPress)
         who.setOnLongClickListener(longPress)
-        messages.addView(card,LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=dp(8)})
-        scroll.post{scroll.fullScroll(View.FOCUS_DOWN)}
         return body
+    }
+
+    private fun addBubble(
+        label:String,
+        text:String,
+        user:Boolean,
+        annotations:JSONArray?=null,
+        message:JSONObject?=null
+    ):String{
+        val chatIndex=message?.let{target->chat.indexOfFirst{it===target}.takeIf{it>=0}}
+        val id=if(chatIndex!=null){
+            "chat-${chatIndex}-${if(user)"user" else "assistant"}"
+        }else{
+            "bubble-${UUID.randomUUID()}"
+        }
+        messageAdapter.addItem(
+            ChatBubbleItem.create(
+                id=id,
+                label=label,
+                text=text,
+                user=user,
+                annotations=annotations,
+                message=message,
+                chatIndex=chatIndex,
+                reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            )
+        )
+        scrollToLatest()
+        return id
     }
 
     private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
