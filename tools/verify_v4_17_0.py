@@ -172,6 +172,9 @@ assert 'last_sequence_number' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()
 assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
+assert 'ResponseStreamSequenceGapException' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
+assert 'background_resume_sequence_gap' in main
+assert 'worker_sequence_gap' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'systemWindowInsetLeft' not in main
 assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
