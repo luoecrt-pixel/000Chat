@@ -148,6 +148,12 @@ Additional code review found three issues that were not fully captured by the pr
 
 The recovery retry path now applies bounded ±20% jitter unless the server supplies `Retry-After`. `ChatScrollPolicy` and its boundary tests are pure JVM-testable logic.
 
+Additional hardening in the same patch:
+- when `background=true`, `onStop()` keeps the initial SSE alive until `response.created` has delivered a response ID; the official resume flow depends on that ID;
+- remote cancellation is attempted only for background responses;
+- `FileProvider` now explicitly exposes the `attachments/` app-private directory and no longer exposes the entire cache directory via `cache-path="."`;
+- CI now cancels superseded builds for the same ref, reducing stale-build noise.
+
 ## 4. Existing reliability work already completed before this session
 
 Earlier merged PRs:
