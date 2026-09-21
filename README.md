@@ -1,4 +1,4 @@
-# OpenAI API Chat — Astra v4.16.2
+# OpenAI API Chat — Astra v4.16.3
 
 Нативный Android-клиент для собственного OpenAI API key, ориентированный на GPT-6 Astra.
 
@@ -25,6 +25,18 @@
 - отмена генерации и защита от устаревших callback
 - экспорт/сохранение/поделиться через Android Storage Access Framework
 - GitHub Actions build workflow
+
+## v4.16.3 — reliability patch 2026-09-21
+
+После дополнительной проверки `main` были исправлены ещё три узких места:
+
+- active background response теперь хранит свой режим `background_enabled`, поэтому recovery не запускается для запросов, которым он был отключён;
+- background polling/finalization использует атомарную проверку `chatId + requestId`, поэтому поздний ответ старого запроса не может записаться поверх нового состояния того же чата;
+- streaming и background polling больше не выбрасывают пользователя вниз, если он сознательно читает старую часть истории; ручная отправка нового сообщения всё равно прокручивает к последнему элементу.
+
+DB schema: **v14**, versionCode: **63**.
+
+CI verifier обновлён до `tools/verify_v4_16_3.py`.
 
 ## v4.16.2 — инженерные изменения 2026-09-21
 
@@ -120,6 +132,10 @@ PR #2 был закрыт без merge.
 CI устанавливает Android SDK 35 и build-tools 35.0.0.
 
 ## Что осталось проверить / улучшить
+
+После v4.16.3 наиболее полезные следующие шаги остаются архитектурными и тестовыми: детерминированные тесты background lifecycle/DB migration, миграция RecyclerView на async diff, cleanup deprecated Activity APIs, release/AAB CI и постепенное выделение response/recovery логики из MainActivity.
+
+Что осталось проверить / улучшить
 
 Подробный handoff для следующей модели: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
 
