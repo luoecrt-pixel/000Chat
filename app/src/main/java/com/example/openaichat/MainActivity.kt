@@ -10,6 +10,8 @@ import android.os.Handler
 import android.os.Looper
 import android.text.method.LinkMovementMethod
 import androidx.core.content.FileProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.pdf.PdfRenderer
@@ -97,8 +99,8 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
     private lateinit var diagnostics: AstraDiagnostics
-    private lateinit var scroll: ScrollView
-    private lateinit var messages: LinearLayout
+    private lateinit var scroll: RecyclerView
+    private lateinit var messageAdapter: ChatMessageAdapter
     private lateinit var input: EditText
     private lateinit var send: Button
     private lateinit var stop: Button
@@ -114,9 +116,7 @@ class MainActivity : Activity() {
     private var currentCall: Call? = null
     private var requestGeneration = 0L
     private var currentResponseId: String? = null
-    private var activeAssistantBody: TextView? = null
-    private var activeReasoningSummaryBody: TextView? = null
-    private var activeReasoningSummaryToggle: TextView? = null
+    private var activeAssistantItemId: String? = null
     private var userStopRequestedGeneration: Long? = null
     private var activeRequestRegenerate = false
     private var activityVisible = false
@@ -244,12 +244,20 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        scroll = ScrollView(this)
-        messages = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        messageAdapter = ChatMessageAdapter(
+            createCard = { createChatBubbleCard() },
+            bindCard = { card, item -> bindChatBubbleCard(card, item) },
+            renderBody = { item -> renderChatBubbleBody(item) }
+        )
+        scroll = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity).apply {
+                stackFromEnd = true
+            }
+            adapter = messageAdapter
+            itemAnimator = null
+            clipToPadding = false
             setPadding(dp(10), dp(6), dp(10), dp(12))
         }
-        scroll.addView(messages)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
@@ -439,7 +447,7 @@ class MainActivity : Activity() {
             baselineEffort=null
             clearAttachedSelection()
             refreshAttachChips()
-            messages.removeAllViews()
+            messageAdapter.clearItems()
             toolLabel.text=""
             title.text="Новый чат"
             ensureChatEntry(newId,"Новый чат")
@@ -652,7 +660,7 @@ class MainActivity : Activity() {
         lastUserText=""
         clearAttachedSelection()
         refreshAttachChips()
-        messages.removeAllViews()
+        messageAdapter.clearItems()
         toolLabel.text=""
         title.text="Новый чат"
         clearComposerState(id)
@@ -3251,7 +3259,7 @@ class MainActivity : Activity() {
         if(::title.isInitialized) title.text=chatTitle
     }
     private fun restoreCurrentChat(){
-        messages.removeAllViews()
+        messageAdapter.clearItems()
         chat.clear()
         clearAttachedSelection()
         refreshAttachChips()
