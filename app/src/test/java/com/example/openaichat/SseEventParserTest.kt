@@ -40,7 +40,7 @@ class SseEventParserTest {
         assertEquals("one", first?.data)
         assertEquals(null, second?.event)
         assertEquals("two", second?.data)
-        assertEquals(null, second?.id)
+        assertEquals("42", second?.id)
     }
 
     @Test
