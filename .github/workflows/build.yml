@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "tools/verify_v4_16_3.py" ]; then
+          if [ -f "tools/verify_v4_17_0.py" ]; then
             python3 tools/verify_v4_16_3.py
           elif [ -f "tools/verify_v4_16_2.py" ]; then
             echo "::warning::Using legacy verifier tools/verify_v4_16_2.py"
