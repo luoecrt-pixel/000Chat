@@ -97,6 +97,8 @@ class MainActivity : Activity() {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
+    private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
+    private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
     private lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
@@ -178,6 +180,8 @@ class MainActivity : Activity() {
         super.onStart()
         activityVisible = true
         BackgroundResponseWorkScheduler.cancelAll(applicationContext)
+        activeResumeCalls.values.forEach { it.cancel() }
+        activeResumeCalls.clear()
         synchronized(activeResumeChats) { activeResumeChats.clear() }
         resumePendingUploads()
         resumeBackgroundResponses()
@@ -188,6 +192,7 @@ class MainActivity : Activity() {
         activityVisible = false
         val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
+        activeResumeCalls.remove(currentChatId())?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
         val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
@@ -205,11 +210,14 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         persistComposerStateNow()
         requestGeneration++
+        activeResumeCalls.values.forEach { it.cancel() }
+        activeResumeCalls.clear()
         // Only close the local HTTP stream. Background Responses keep running on the
         // server when background=true; the next Activity instance will reconnect by polling.
         currentCall?.cancel()
         draftSaveRunnable?.let(mainHandler::removeCallbacks)
         executor.shutdownNow()
+        try { resumableResponseClient.close() } catch (_: Exception) {}
         try { chatDb.close() } catch (_: Exception) {}
         super.onDestroy()
     }
@@ -447,6 +455,7 @@ class MainActivity : Activity() {
             requestGeneration++
             currentCall?.cancel()
         }
+        activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         chatDb.clearActiveResponse(id, expectedRequestId = requestId)
@@ -764,6 +773,7 @@ class MainActivity : Activity() {
         userStopRequestedGeneration=generation
         requestGeneration++
         currentCall?.cancel()
+        activeResumeCalls.remove(chatId)?.cancel()
         val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
@@ -1084,7 +1094,7 @@ class MainActivity : Activity() {
                                     val r=ev.optJSONObject("response")
                                     newId=r?.optString("id")?.takeIf{it.isNotBlank()}
                                     if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", expectedRequestId = localRequestId)
+                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
                                         diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
                                     }
                                 }
@@ -1479,140 +1489,260 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun pollBackgroundResponse(active:JSONObject){
-        val chatId=active.optString("chat_id")
-        val responseId=active.optString("response_id")
-        val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
-        val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_:Exception) { null }
-        if (persistedActive?.optString("request_id") != requestId) {
-            diagnostics.log("background_stale_finalization_ignored", mapOf(
-                "chat_id" to chatId,
-                "response_id" to responseId,
-                "request_id" to requestId
-            ))
-            return
-        }
-        if(chatId.isBlank() || responseId.isBlank()) return
+    private fun streamBackgroundResponse(active: JSONObject) {
+        val chatId = active.optString("chat_id")
+        val responseId = active.optString("response_id")
+        val requestId = active.optString("request_id").takeIf { it.isNotBlank() && it != "null" } ?: return
+        if (chatId.isBlank() || responseId.isBlank()) return
 
-        val recoveryStartedAt=SystemClock.elapsedRealtime()
-        val maxRecoveryMs=30L*60L*1000L
-        var delay=1500L
+        val started = SystemClock.elapsedRealtime()
+        val deadline = started + 30L * 60L * 1000L
+        var retryDelayMs = 1_500L
 
-        while(!executor.isShutdown){
-            val persistedActive = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
-            if (persistedActive?.optString("request_id") != requestId) return
-            if(!activityVisible){
-                if (persistedActive.optBoolean("background_enabled", true)) {
-                    BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext,chatId,responseId,requestId ?: return)
-                }
+        while (!executor.isShutdown) {
+            if (!activityVisible) {
+                BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext, chatId, responseId, requestId)
                 return
             }
-            if(SystemClock.elapsedRealtime()-recoveryStartedAt>=maxRecoveryMs){
-                diagnostics.log("background_resume_timeout",mapOf(
+
+            val current = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+            if (current?.optString("request_id") != requestId) return
+            if (!current.optBoolean("background_enabled", true)) {
+                chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
+                return
+            }
+
+            val cursor = current.optLong("last_sequence_number", -1L)
+            val full = StringBuilder(if (cursor >= 0L) current.optString("text").orEmpty() else "")
+            val reasoning = StringBuilder()
+            var lastSequence = cursor
+            var lastCheckpointAt = SystemClock.elapsedRealtime()
+
+            try {
+                val result = resumableResponseClient.stream(
+                    responseId = responseId,
+                    startingAfter = cursor,
+                    onCallCreated = { call -> activeResumeCalls[chatId] = call }
+                ) { event ->
+                    val sequence = event.optLong("sequence_number", -1L)
+                    if (sequence >= 0L && sequence > lastSequence) {
+                        if (lastSequence >= 0L && sequence > lastSequence + 1L) {
+                            diagnostics.log("sse_event_sequence_gap", mapOf(
+                                "chat_id" to chatId,
+                                "request_id" to requestId,
+                                "expected_sequence_number" to (lastSequence + 1L),
+                                "received_sequence_number" to sequence
+                            ))
+                        }
+                        lastSequence = sequence
+                    }
+
+                    when (event.optString("type")) {
+                        "response.output_text.delta" -> {
+                            val delta = event.optString("delta")
+                            if (delta.isNotEmpty()) {
+                                full.append(delta)
+                                if (chatId == currentChatId()) {
+                                    runOnUiThread {
+                                        if (isRequestCurrent(chatId, requestGeneration)) {
+                                            activeAssistantItemId?.let { id -> messageAdapter.updateText(id, full.toString()) }
+                                            scrollToLatest()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "response.reasoning_summary_text.delta" -> {
+                            val delta = event.optString("delta")
+                            if (delta.isNotEmpty()) {
+                                reasoning.append(delta)
+                                if (chatId == currentChatId()) {
+                                    runOnUiThread {
+                                        if (currentChatId() == chatId) updateActiveReasoningSummary(reasoning.toString())
+                                    }
+                                }
+                            }
+                        }
+                        "response.web_search_call.in_progress",
+                        "response.web_search_call.searching" -> updateToolState("web_search", "running", chatId, requestGeneration)
+                        "response.web_search_call.completed" -> updateToolState("web_search", "completed", chatId, requestGeneration)
+                        "response.web_search_call.failed" -> updateToolState("web_search", "failed", chatId, requestGeneration)
+                        "response.file_search_call.in_progress" -> updateToolState("file_search", "running", chatId, requestGeneration)
+                        "response.file_search_call.completed" -> updateToolState("file_search", "completed", chatId, requestGeneration)
+                        "response.file_search_call.failed" -> updateToolState("file_search", "failed", chatId, requestGeneration)
+                        "response.code_interpreter_call.in_progress" -> updateToolState("code_interpreter", "running", chatId, requestGeneration)
+                        "response.code_interpreter_call.completed" -> updateToolState("code_interpreter", "completed", chatId, requestGeneration)
+                        "response.code_interpreter_call.failed" -> updateToolState("code_interpreter", "failed", chatId, requestGeneration)
+                        "response.image_generation_call.in_progress" -> updateToolState("image_generation", "running", chatId, requestGeneration)
+                        "response.image_generation_call.completed" -> updateToolState("image_generation", "completed", chatId, requestGeneration)
+                        "response.image_generation_call.failed" -> updateToolState("image_generation", "failed", chatId, requestGeneration)
+                        "response.computer_call.in_progress" -> updateToolState("computer", "running", chatId, requestGeneration)
+                        "response.computer_call.completed" -> updateToolState("computer", "completed", chatId, requestGeneration)
+                        "response.computer_call.failed" -> updateToolState("computer", "failed", chatId, requestGeneration)
+                    }
+
+                    val type = event.optString("type")
+                    val terminal = type == "response.completed" ||
+                        type == "response.failed" ||
+                        type == "response.incomplete" ||
+                        type == "response.cancelled"
+                    val now = SystemClock.elapsedRealtime()
+                    if (terminal || now - lastCheckpointAt >= 500L) {
+                        lastCheckpointAt = now
+                        chatDb.updateActiveResponse(
+                            chatId,
+                            responseId = responseId,
+                            text = full.toString(),
+                            status = when (type) {
+                                "response.completed" -> "completed"
+                                "response.failed" -> "failed"
+                                "response.incomplete" -> "incomplete"
+                                "response.cancelled" -> "cancelled"
+                                else -> "in_progress"
+                            },
+                            lastSequenceNumber = lastSequence,
+                            expectedRequestId = requestId
+                        )
+                    }
+                }
+
+                activeResumeCalls.remove(chatId)
+                val latest = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+                if (latest?.optString("request_id") != requestId) return
+
+                if (result.terminalResponse != null) {
+                    chatDb.updateActiveResponse(
+                        chatId,
+                        responseId = responseId,
+                        text = full.toString(),
+                        status = when (result.terminalEventType) {
+                            "response.completed" -> "completed"
+                            "response.failed" -> "failed"
+                            "response.incomplete" -> "incomplete"
+                            "response.cancelled" -> "cancelled"
+                            else -> "in_progress"
+                        },
+                        lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                        expectedRequestId = requestId
+                    )
+                    finalizeBackgroundResponse(
+                        chatDb.getActiveResponse(chatId) ?: active,
+                        result.terminalResponse!!
+                    )
+                    return
+                }
+
+                chatDb.updateActiveResponse(
+                    chatId,
+                    responseId = responseId,
+                    text = full.toString(),
+                    status = "in_progress",
+                    lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                    expectedRequestId = requestId
+                )
+
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    finishBackgroundRecovery(
+                        chatId,
+                        "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
+                        requestId
+                    )
+                    return
+                }
+
+                if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
+                retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: ResponseStreamSequenceGapException) {
+                activeResumeCalls.remove(chatId)
+                diagnostics.log("background_resume_sequence_gap", mapOf(
                     "chat_id" to chatId,
                     "response_id" to responseId,
-                    "request_id" to requestId
+                    "request_id" to requestId,
+                    "expected_sequence_number" to e.expectedSequenceNumber,
+                    "received_sequence_number" to e.receivedSequenceNumber
                 ))
-                finishBackgroundRecovery(chatId,"Фоновое восстановление приостановлено — попробуйте открыть приложение позже",requestId)
-                return
-            }
-
-            val r=try{
-                retrieveResponse(responseId)
-            }catch(e:ApiHttpException){
-                when(e.statusCode){
-                    401,403 -> {
-                        diagnostics.log("background_resume_auth_failed",mapOf(
+                if (!sleepBackgroundRetry(retryDelayMs)) return
+                retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: ApiHttpException) {
+                activeResumeCalls.remove(chatId)
+                when (e.statusCode) {
+                    401, 403 -> {
+                        diagnostics.log("background_resume_auth_failed", mapOf(
                             "chat_id" to chatId,
                             "response_id" to responseId,
                             "status" to e.statusCode
                         ))
-                        finishBackgroundRecovery(chatId,"Не удалось восстановить ответ: проверьте API-ключ",requestId)
+                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ: проверьте API-ключ", requestId)
                         return
                     }
-                    404,410 -> {
-                        diagnostics.log("background_resume_response_gone",mapOf(
+                    404, 410 -> {
+                        diagnostics.log("background_resume_response_gone", mapOf(
                             "chat_id" to chatId,
                             "response_id" to responseId,
                             "status" to e.statusCode
                         ))
-                        finishBackgroundRecovery(chatId,"Фоновый ответ больше недоступен",requestId)
+                        finishBackgroundRecovery(chatId, "Фоновый ответ больше недоступен", requestId)
                         return
                     }
                     429 -> {
-                        val waitMs=e.retryAfterMs?.coerceIn(1000L,300_000L)
-                            ?: delay.coerceAtMost(60_000L)
-                        diagnostics.log("background_resume_rate_limited",mapOf(
+                        val waitMs = e.retryAfterMs?.coerceIn(1_000L, 300_000L)
+                            ?: retryDelayMs.coerceAtMost(60_000L)
+                        diagnostics.log("background_resume_rate_limited", mapOf(
                             "chat_id" to chatId,
                             "response_id" to responseId,
                             "retry_after_ms" to waitMs
                         ))
-                        if(!sleepBackgroundRetry(waitMs)) return
-                        delay=(delay*2).coerceAtMost(30_000L)
-                        continue
+                        if (!sleepBackgroundRetry(waitMs)) return
                     }
                     in 500..599 -> {
-                        diagnostics.log("background_resume_server_error",mapOf(
+                        diagnostics.log("background_resume_server_error", mapOf(
                             "chat_id" to chatId,
                             "response_id" to responseId,
                             "status" to e.statusCode
                         ))
+                        if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                     }
                     else -> {
-                        diagnostics.log("background_resume_http_error",mapOf(
-                            "chat_id" to chatId,
-                            "response_id" to responseId,
-                            "status" to e.statusCode
-                        ))
-                        finishBackgroundRecovery(chatId,"Не удалось восстановить ответ (HTTP ${e.statusCode})",requestId)
+                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ (HTTP " + e.statusCode + ")", requestId)
                         return
                     }
                 }
-                if(!sleepBackgroundRetry(delay)) return
-                delay=(delay*2).coerceAtMost(30_000L)
-                continue
-            }catch(e:Exception){
-                diagnostics.log("background_resume_poll_failed",mapOf(
+                retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: Exception) {
+                activeResumeCalls.remove(chatId)
+                if (!activityVisible) {
+                    BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext, chatId, responseId, requestId)
+                    return
+                }
+                diagnostics.log("background_resume_stream_failed", mapOf(
                     "chat_id" to chatId,
                     "response_id" to responseId,
-                    "error" to (e.message?:e.toString()).take(400)
+                    "error" to (e.message ?: e.toString()).take(400)
                 ))
-                if(!sleepBackgroundRetry(delay)) return
-                delay=(delay*2).coerceAtMost(30_000L)
-                continue
-            }
-
-            val state=r.optString("status").ifBlank{"in_progress"}
-            val text=extractResponseText(r).ifBlank{active.optString("text")}
-            chatDb.updateActiveResponse(chatId,responseId=responseId,text=text,status=state,expectedRequestId=requestId)
-            if(chatId==currentChatId()){
-                runOnUiThread{
-                    if(currentChatId()==chatId){
-                        activeAssistantItemId?.let { id -> messageAdapter.updateText(id, text) }
-                        scrollToLatest()
-                        status.text=if(state=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
-                    }
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    finishBackgroundRecovery(
+                        chatId,
+                        "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
+                        requestId
+                    )
+                    return
                 }
+                if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
+                retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
             }
-            if(state in setOf("completed","failed","cancelled","incomplete")){
-                finalizeBackgroundResponse(active,r)
-                return
-            }
-            if(!sleepBackgroundRetry(delay)) return
-            delay=1500L
         }
     }
 
-    private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean{
-        val jitter=if(baseDelayMs<=1L) 0L else {
-            val spread=(baseDelayMs/5L).coerceAtLeast(1L)
-            kotlin.random.Random.nextLong(-spread,spread+1L)
-        }
-        val actual=(baseDelayMs+jitter).coerceAtLeast(250L)
-        return try{
+    private fun pollBackgroundResponse(active: JSONObject) {
+        streamBackgroundResponse(active)
+    }
+
+    private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
+        val actual = BackgroundRecoveryPolicy.jitteredDelayMs(baseDelayMs)
+        return try {
             Thread.sleep(actual)
             true
-        }catch(_:InterruptedException){
+        } catch (_:InterruptedException) {
             Thread.currentThread().interrupt()
             false
         }
@@ -1627,24 +1757,6 @@ class MainActivity : Activity() {
             currentCall=null
             setBusy(false)
             status.text=message
-        }
-    }
-
-    private fun retrieveResponse(responseId:String):JSONObject{
-        val key=secure.getApiKey()
-        if(key.isBlank()) throw IOException("API key is not configured")
-        val req=Request.Builder()
-            .url("https://api.openai.com/v1/responses/$responseId")
-            .addHeader("Authorization","Bearer $key")
-            .get().build()
-        pollingClient.newCall(req).execute().use{resp->
-            val raw=resp.body?.string().orEmpty()
-            if(!resp.isSuccessful){
-                val retryAfterMs=resp.header("Retry-After")?.trim()?.toLongOrNull()
-                    ?.coerceIn(1L,300L)?.times(1000L)
-                throw ApiHttpException(resp.code,retryAfterMs,raw.take(4096))
-            }
-            return JSONObject(raw)
         }
     }
 

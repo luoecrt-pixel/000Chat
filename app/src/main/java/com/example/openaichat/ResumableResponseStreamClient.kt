@@ -1,0 +1,127 @@
+package com.example.openaichat
+
+import android.content.Context
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import java.io.IOException
+
+class ResponseStreamSequenceGapException(
+    val expectedSequenceNumber: Long,
+    val receivedSequenceNumber: Long
+) : IOException("Responses SSE sequence gap: expected $expectedSequenceNumber, received $receivedSequenceNumber")
+
+data class ResumableStreamResult(
+    val lastSequenceNumber: Long,
+    val terminalResponse: JSONObject?,
+    val terminalEventType: String?,
+    val requestId: String?
+)
+
+/**
+ * Raw Responses SSE transport used for reconnecting an already-created background response.
+ *
+ * The API resumes from the server-side cursor via starting_after. The caller owns event
+ * accumulation/persistence because the same transport is used by Activity and WorkManager.
+ */
+class ResumableResponseStreamClient(
+    context: Context
+) {
+    private val secureStore = SecureStore(context.applicationContext)
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
+    fun close() {
+        httpClient.dispatcher.executorService.shutdown()
+        httpClient.connectionPool.evictAll()
+    }
+
+    fun stream(
+        responseId: String,
+        startingAfter: Long,
+        onCallCreated: (Call) -> Unit = {},
+        onEvent: (JSONObject) -> Unit = {}
+    ): ResumableStreamResult {
+        if (responseId.isBlank()) throw IllegalArgumentException("responseId is blank")
+        val key = secureStore.getApiKey()
+        if (key.isBlank()) throw IOException("API key is not configured")
+
+        val url = ResumableResponseRequest.url(responseId, startingAfter)
+
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Accept", "text/event-stream")
+            .build()
+
+        val call = httpClient.newCall(request)
+        onCallCreated(call)
+
+        var lastSequenceNumber = startingAfter
+        var terminalResponse: JSONObject? = null
+        var terminalEventType: String? = null
+        var requestId: String? = null
+        val parser = SseEventParser()
+
+        fun consume(data: String) {
+            if (data == "[DONE]") return
+            val event = try {
+                JSONObject(data)
+            } catch (e: Exception) {
+                throw IOException("Invalid Responses SSE event", e)
+            }
+
+            requestId = event.optString("request_id").takeIf { it.isNotBlank() }
+                ?: requestId
+
+            val sequence = event.optLong("sequence_number", -1L)
+            if (sequence >= 0L) {
+                if (sequence <= lastSequenceNumber) return
+                if (lastSequenceNumber >= 0L && sequence > lastSequenceNumber + 1L) {
+                    throw ResponseStreamSequenceGapException(lastSequenceNumber + 1L, sequence)
+                }
+                lastSequenceNumber = sequence
+            }
+
+            val type = event.optString("type")
+            when (type) {
+                "response.completed",
+                "response.failed",
+                "response.incomplete",
+                "response.cancelled" -> {
+                    terminalEventType = type
+                    terminalResponse = event.optJSONObject("response")
+                }
+            }
+
+            onEvent(event)
+        }
+
+        call.execute().use { response ->
+            if (!response.isSuccessful) {
+                val raw = response.body?.string().orEmpty()
+                val retryAfterMs = response.header("Retry-After")?.trim()?.toLongOrNull()
+                    ?.coerceIn(1L, 300L)?.times(1000L)
+                throw ApiHttpException(response.code, retryAfterMs, raw.take(4096))
+            }
+            val body = response.body ?: throw IOException("Empty Responses SSE body")
+            body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                reader.forEachLine { line ->
+                    parser.acceptLine(line)?.let { consume(it.data) }
+                }
+            }
+            parser.finish()?.let { consume(it.data) }
+        }
+
+        return ResumableStreamResult(
+            lastSequenceNumber = lastSequenceNumber,
+            terminalResponse = terminalResponse,
+            terminalEventType = terminalEventType,
+            requestId = requestId ?: responseId
+        )
+    }
+}

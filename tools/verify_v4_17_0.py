@@ -17,8 +17,8 @@ renderer = RENDERER.read_text()
 gradle = GRADLE.read_text()
 workflow = WF.read_text()
 
-assert 'versionName = "4.16.3"' in gradle
-assert 'versionCode = 63' in gradle
+assert 'versionName = "4.17.0"' in gradle
+assert 'versionCode = 64' in gradle
 assert 'buildConfig = true' in gradle
 assert 'container_file_citation' in main
 assert 'file_citation' in main
@@ -59,7 +59,7 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 14' in db
+assert 'DB_VERSION = 15' in db
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
@@ -78,7 +78,8 @@ con.execute('''CREATE TABLE chats (
     active_status TEXT, active_started_at INTEGER, active_effort_pref TEXT,
     active_effective_effort TEXT, active_auto_selected INTEGER NOT NULL DEFAULT 0,
     active_prompt_chars INTEGER NOT NULL DEFAULT 0, active_attachments INTEGER NOT NULL DEFAULT 0,
-    active_background_enabled INTEGER NOT NULL DEFAULT 1
+    active_background_enabled INTEGER NOT NULL DEFAULT 1,
+    active_last_sequence_number INTEGER NOT NULL DEFAULT -1
 )''')
 con.execute('''CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, position INTEGER NOT NULL,
@@ -96,6 +97,15 @@ assert con.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
 
 cols = {r[1] for r in con.execute('PRAGMA table_info(messages)')}
 assert {'file_paths','file_mimes','image_name','image_mime','image_size','generated_images'} <= cols
+
+# v14 -> v15 migration must preserve partial response state and initialize the cursor to -1.
+legacy = sqlite3.connect(':memory:')
+legacy.execute('CREATE TABLE chats (id TEXT PRIMARY KEY, active_text TEXT, active_last_sequence_number INTEGER)')
+legacy.execute("INSERT INTO chats(id, active_text, active_last_sequence_number) VALUES('c1','partial',NULL)")
+legacy.execute('ALTER TABLE chats ADD COLUMN migrated_cursor INTEGER NOT NULL DEFAULT -1')
+text_value, cursor_value = legacy.execute("SELECT active_text, migrated_cursor FROM chats WHERE id='c1'").fetchone()
+assert text_value == 'partial'
+assert cursor_value == -1
 
 # Kotlin delimiter sanity (strings/comments skipped).
 def delimiter_balance(src: str):
@@ -148,12 +158,23 @@ assert 'isNearLatest' in main
 assert 'ChatScrollPolicy.shouldScrollToLatest' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt').exists()
 assert (ROOT / 'app/src/test/java/com/example/openaichat/ChatScrollPolicyTest.kt').exists()
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseRequest.kt').exists()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/ResumableResponseRequestTest.kt').exists()
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'concurrency:' in workflow
 assert 'activityVisible && !isFinishing' in main
 assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
 assert 'WindowInsetsCompat.Type.systemBars()' in main
+assert 'ResumableResponseStreamClient' in main
+assert 'startingAfter = cursor' in main
+assert 'last_sequence_number' in main
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()
+assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
+assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
+assert 'ResponseStreamSequenceGapException' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
+assert 'background_resume_sequence_gap' in main
+assert 'worker_sequence_gap' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'systemWindowInsetLeft' not in main
 assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
@@ -181,13 +202,13 @@ assert 'idx_effort_metrics_chat_request' in db
 assert 'CREATE UNIQUE INDEX' in db
 assert 'DELETE FROM $METRICS_TABLE' in db
 assert 'GROUP BY chat_id, request_id' in db
-assert 'if(!activityVisible)' in main
+assert 'activityVisible' in main
 assert 'activeResumeChats.clear()' in main
 assert 'setForeignKeyConstraintsEnabled(true)' in db
 assert not list(ROOT.glob('*-source.zip')), 'source archive must not remain in the repository'
-assert 'tools/verify_v4_16_3.py' in workflow
+assert 'tools/verify_v4_17_0.py' in workflow
 file_paths_xml = (ROOT / 'app/src/main/res/xml/file_paths.xml').read_text()
 assert 'name="attachments" path="attachments/"' in file_paths_xml
 assert 'cache-path name="cache" path="."' not in file_paths_xml
 
-print('Astra v4.16.3 static verification: PASS')
+print('Astra v4.17.0 static verification: PASS')
