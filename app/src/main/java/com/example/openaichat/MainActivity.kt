@@ -97,7 +97,7 @@ class MainActivity : Activity() {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
-    private val resumableResponseClient by lazy { ResumableResponseStreamClient(this, pollingClient) }
+    private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
     private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
     private lateinit var prefs: SharedPreferences
@@ -215,6 +215,7 @@ class MainActivity : Activity() {
         currentCall?.cancel()
         draftSaveRunnable?.let(mainHandler::removeCallbacks)
         executor.shutdownNow()
+        try { resumableResponseClient.close() } catch (_: Exception) {}
         try { chatDb.close() } catch (_: Exception) {}
         super.onDestroy()
     }
