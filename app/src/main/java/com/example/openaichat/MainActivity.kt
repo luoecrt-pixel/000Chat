@@ -874,7 +874,7 @@ class MainActivity : Activity() {
         }
 
         if(!regenerate) {
-            addBubble("Ты",text,true, imagePath?.let{decodeThumbnailFromFile(it)}, message=sentUserMessage)
+            addBubble("Ты",text,true, message=sentUserMessage)
             chat.add(sentUserMessage)
             persistCurrentChat()
             input.setText("")
@@ -1975,15 +1975,15 @@ class MainActivity : Activity() {
         val mime=annotation.optString("mime_type").ifBlank{mimeForFilename(filename)}
         val size=annotation.optLong("size_bytes",File(path).length())
         if(mime.startsWith("image/")){
-            val bmp=decodeThumbnailFromFile(path,900)
-            box.addView(ImageView(this).apply{
-                setImageBitmap(bmp)
+            val preview=ImageView(this).apply{
                 adjustViewBounds=true
                 scaleType=ImageView.ScaleType.FIT_CENTER
                 background=rounded(Color.rgb(24,26,30),8)
                 setOnClickListener{showImagePreviewFromFile(path,filename)}
             },LinearLayout.LayoutParams(-1,dp(220)))
         }else if(isTextLikeMime(mime,filename)){
+            loadThumbnailAsync(preview,path,900)
+            box.addView(preview,LinearLayout.LayoutParams(-1,dp(220)))
             box.addView(TextView(this).apply{
                 text="📄 Текстовый файл — нажмите «Просмотр», чтобы прочитать"
                 textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
@@ -2149,8 +2149,7 @@ class MainActivity : Activity() {
             }
             parent.addView(box,LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
             box.addView(ImageView(this).apply{
-                val bmp=decodeThumbnailFromFile(path,1200)
-                setImageBitmap(bmp)
+                loadThumbnailAsync(this,path,1200)
                 adjustViewBounds=true
                 scaleType=ImageView.ScaleType.FIT_CENTER
                 setPadding(0,0,0,dp(6))
@@ -3267,7 +3266,7 @@ class MainActivity : Activity() {
             val t=m.optString("text")
             chat.add(m)
             val imgPath=m.optString("image_path").takeIf{it.isNotBlank()}
-            addBubble(if(role=="user")"Ты" else "Astra",t,role=="user",imgPath?.let{decodeThumbnailFromFile(it)},m.optJSONArray("annotations"),m)
+            addBubble(if(role=="user")"Ты" else "Astra",t,role=="user",null,m.optJSONArray("annotations"),m)
             if(role=="user")lastUserText=t
         }
         val restoredTools = chat.lastOrNull { it.optString("role") == "assistant" }
@@ -3438,6 +3437,43 @@ class MainActivity : Activity() {
         background=cardBackground()
     }
 
+    private val thumbnailCache = object : android.util.LruCache<String, Bitmap>(12 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
+    private fun thumbnailCacheKey(path:String,maxDim:Int):String{
+        val file=File(path)
+        return file.absolutePath+"|"+file.lastModified()+"|"+file.length()+"|"+maxDim
+    }
+
+    private fun loadThumbnailAsync(view:ImageView,path:String,maxDim:Int=640){
+        view.setImageResource(android.R.drawable.ic_menu_gallery)
+        val key=thumbnailCacheKey(path,maxDim)
+        thumbnailCache.get(key)?.let{
+            view.setImageBitmap(it)
+            return
+        }
+        executor.execute{
+            val bmp=decodeThumbnailFromFile(path,maxDim)
+            if(bmp!=null)thumbnailCache.put(key,bmp)
+            runOnUiThread{
+                if(!isFinishing && view.parent!=null && bmp!=null) view.setImageBitmap(bmp)
+            }
+        }
+    }
+
+    private fun showImagePreviewFromFile(path:String,name:String){
+        executor.execute{
+            val key=thumbnailCacheKey(path,1800)
+            val bmp=thumbnailCache.get(key) ?: decodeThumbnailFromFile(path,1800)?.also{thumbnailCache.put(key,it)}
+            runOnUiThread{
+                if(isFinishing)return@runOnUiThread
+                if(bmp==null){status.text="Не удалось прочитать изображение";return@runOnUiThread}
+                showImagePreviewFromBitmap(bmp,name)
+            }
+        }
+    }
+
     private fun createThumbnailView(bitmap:Bitmap?):ImageView = ImageView(this).apply{
         if(bitmap!=null)setImageBitmap(bitmap) else setImageResource(android.R.drawable.ic_menu_gallery)
         scaleType=ImageView.ScaleType.CENTER_CROP
@@ -3478,7 +3514,8 @@ class MainActivity : Activity() {
             val mime=message.optString("image_mime").ifBlank{if(imagePath!=null) mimeForFilename(name) else "image/*"}
             val box=createAttachmentCard()
             if(imagePath!=null){
-                val preview=createThumbnailView(decodeThumbnailFromFile(imagePath,900))
+                val preview=createThumbnailView(null)
+                loadThumbnailAsync(preview,imagePath,900)
                 preview.setOnClickListener{showImagePreviewFromFile(imagePath,name)}
                 box.addView(preview,LinearLayout.LayoutParams(-1,dp(220)))
             }else{
@@ -3837,12 +3874,12 @@ class MainActivity : Activity() {
     private fun addCompactImagePreview(parent:LinearLayout,path:String,name:String){
         val preview=ImageView(this).apply{
             tag="attachment_local_preview"
-            setImageBitmap(decodeThumbnailFromFile(path,720))
             scaleType=ImageView.ScaleType.CENTER_CROP
             adjustViewBounds=true
             background=rounded(Color.rgb(24,26,30),8)
             setOnClickListener{showImagePreviewFromFile(path,name)}
         }
+        loadThumbnailAsync(preview,path,720)
         parent.addView(preview,LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
     }
 
@@ -3892,7 +3929,6 @@ class MainActivity : Activity() {
                     mime.startsWith("image/") -> {
                         val view=ImageView(this).apply{
                             tag="attachment_local_preview"
-                            setImageBitmap(decodeThumbnailFromFile(path,720))
                             scaleType=ImageView.ScaleType.CENTER_CROP
                             adjustViewBounds=true
                             background=rounded(Color.rgb(24,26,30),8)
@@ -4036,8 +4072,8 @@ class MainActivity : Activity() {
             val name=pendingImageName?.ifBlank{null} ?: "Изображение"
             val mime=pendingImageMime?.ifBlank{null} ?: "image/*"
             val card=createAttachmentCard()
-            val bmp=decodeThumbnailFromFile(path,640)
-            val preview=createThumbnailView(bmp)
+            val preview=createThumbnailView(null)
+            loadThumbnailAsync(preview,path,640)
             preview.setOnClickListener{showImagePreviewFromFile(path,name)}
             card.addView(preview,LinearLayout.LayoutParams(dp(180),dp(120)))
             card.addView(TextView(this).apply{text="🖼 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))})
