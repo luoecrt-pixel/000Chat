@@ -56,6 +56,7 @@ class BackgroundResponseWorker(
         try {
             val activeAtStart = db.getActiveResponse(chatId)
             if (activeAtStart?.optString("request_id") != requestId) return Result.success()
+            if (!activeAtStart.optBoolean("background_enabled", true)) return Result.success()
 
             setForeground(createForegroundInfo(title))
             val startedAt = SystemClock.elapsedRealtime()
@@ -193,14 +194,18 @@ class BackgroundResponseWorker(
         val cacheWriteTok = usage?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens", 0L) ?: 0L
         val reasoningTok = usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens", 0L) ?: 0L
         val cost = estimateCost(inTok, cachedTok, cacheWriteTok, outTok)
+        val committed = db.upsertCurrentChatIfActiveRequest(
+            chatId, chatObj.optString("title", "Новый чат"), responseId.takeIf { it.isNotBlank() }, effectiveEffort, messages, requestId
+        )
+        if (!committed) {
+            diagnostics.log("worker_stale_finalization_ignored", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
+            return
+        }
         db.recordEffortMetric(
             requestId, chatId, "resumed", effortPref, effectiveEffort, active.optBoolean("auto_selected", false),
             active.optInt("prompt_chars", 0), active.optInt("attachments", 0), latency,
             inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, state == "completed",
             if (state == "completed") null else state.ifBlank { "background_failed" }, cost
-        )
-        db.upsertCurrentChat(
-            chatId, chatObj.optString("title", "Новый чат"), responseId.takeIf { it.isNotBlank() }, effectiveEffort, messages
         )
         db.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("worker_response_finalized", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId, "status" to state, "latency_ms" to latency, "estimated_cost_usd" to "%.6f".format(cost)))
