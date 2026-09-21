@@ -1657,7 +1657,8 @@ class MainActivity : Activity() {
                     "expected_sequence_number" to e.expectedSequenceNumber,
                     "received_sequence_number" to e.receivedSequenceNumber
                 ))
-                retryDelayMs = 1_500L
+                if (!sleepBackgroundRetry(retryDelayMs)) return
+                retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
             } catch (e: ApiHttpException) {
                 activeResumeCalls.remove(chatId)
                 when (e.statusCode) {
