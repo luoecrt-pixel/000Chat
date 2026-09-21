@@ -11,7 +11,9 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -51,73 +53,184 @@ class BackgroundResponseWorker(
 
         val db = ChatDatabase(applicationContext)
         val diagnostics = AstraDiagnostics(applicationContext)
-        val title = db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }
+        val streamClient = ResumableResponseStreamClient(applicationContext, client)
+        var activeCall: okhttp3.Call? = null
+        currentCoroutineContext().job.invokeOnCompletion {
+            activeCall?.cancel()
+        }
 
         try {
             val activeAtStart = db.getActiveResponse(chatId)
             if (activeAtStart?.optString("request_id") != requestId) return Result.success()
             if (!activeAtStart.optBoolean("background_enabled", true)) return Result.success()
 
-            setForeground(createForegroundInfo(title))
+            setForeground(createForegroundInfo(db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }))
             val startedAt = SystemClock.elapsedRealtime()
-            var delayMs = 1_500L
+            val deadline = startedAt + MAX_RECOVERY_MS
+            var retryDelayMs = 1_500L
 
             while (!isStopped) {
-                if (SystemClock.elapsedRealtime() - startedAt >= MAX_RECOVERY_MS) {
-                    diagnostics.log("worker_recovery_timeout", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    diagnostics.log("worker_recovery_timeout", mapOf(
+                        "chat_id" to chatId,
+                        "response_id" to responseId,
+                        "request_id" to requestId
+                    ))
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
 
-                val response = try {
-                    retrieveResponse(responseId)
+                val current = db.getActiveResponse(chatId)
+                    ?: return Result.success()
+                if (current.optString("request_id") != requestId) return Result.success()
+                if (!current.optBoolean("background_enabled", true)) return Result.success()
+
+                val cursor = current.optLong("last_sequence_number", -1L)
+                val full = StringBuilder(if (cursor >= 0L) current.optString("text").orEmpty() else "")
+                var lastSequence = cursor
+                var lastCheckpointAt = SystemClock.elapsedRealtime()
+
+                try {
+                    val result = streamClient.stream(
+                        responseId = responseId,
+                        startingAfter = cursor,
+                        onCallCreated = { call -> activeCall = call }
+                    ) { event ->
+                        val sequence = event.optLong("sequence_number", -1L)
+                        if (sequence >= 0L && sequence > lastSequence) {
+                            lastSequence = sequence
+                        }
+
+                        if (event.optString("type") == "response.output_text.delta") {
+                            val delta = event.optString("delta")
+                            if (delta.isNotEmpty()) full.append(delta)
+                        }
+
+                        val type = event.optString("type")
+                        val terminal = type == "response.completed" ||
+                            type == "response.failed" ||
+                            type == "response.incomplete" ||
+                            type == "response.cancelled"
+                        val now = SystemClock.elapsedRealtime()
+                        if (terminal || now - lastCheckpointAt >= 500L) {
+                            lastCheckpointAt = now
+                            db.updateActiveResponse(
+                                chatId,
+                                responseId = responseId,
+                                text = full.toString(),
+                                status = when (type) {
+                                    "response.completed" -> "completed"
+                                    "response.failed" -> "failed"
+                                    "response.incomplete" -> "incomplete"
+                                    "response.cancelled" -> "cancelled"
+                                    else -> "in_progress"
+                                },
+                                lastSequenceNumber = lastSequence,
+                                expectedRequestId = requestId
+                            )
+                        }
+                    }
+
+                    activeCall = null
+                    val latest = db.getActiveResponse(chatId)
+                    if (latest?.optString("request_id") != requestId) return Result.success()
+
+                    if (result.terminalResponse != null) {
+                        db.updateActiveResponse(
+                            chatId,
+                            responseId = responseId,
+                            text = full.toString(),
+                            status = when (result.terminalEventType) {
+                                "response.completed" -> "completed"
+                                "response.failed" -> "failed"
+                                "response.incomplete" -> "incomplete"
+                                "response.cancelled" -> "cancelled"
+                                else -> "in_progress"
+                            },
+                            lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                            expectedRequestId = requestId
+                        )
+                        finalize(
+                            chatId,
+                            responseId,
+                            requestId,
+                            result.terminalResponse!!,
+                            db,
+                            diagnostics
+                        )
+                        return if (result.terminalEventType == "response.failed") Result.failure() else Result.success()
+                    }
+
+                    db.updateActiveResponse(
+                        chatId,
+                        responseId = responseId,
+                        text = full.toString(),
+                        status = "in_progress",
+                        lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                        expectedRequestId = requestId
+                    )
+
+                    if (isStopped) return Result.success()
+                    delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
+                    retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
                 } catch (e: ApiHttpException) {
+                    activeCall = null
                     when (BackgroundRecoveryPolicy.actionForHttpStatus(e.statusCode)) {
                         BackgroundRecoveryAction.AUTH_FAILURE -> {
-                            diagnostics.log("worker_auth_failure", mapOf("chat_id" to chatId, "response_id" to responseId, "status" to e.statusCode))
+                            diagnostics.log("worker_auth_failure", mapOf(
+                                "chat_id" to chatId,
+                                "response_id" to responseId,
+                                "status" to e.statusCode
+                            ))
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
                         BackgroundRecoveryAction.RESPONSE_GONE -> {
-                            diagnostics.log("worker_response_gone", mapOf("chat_id" to chatId, "response_id" to responseId, "status" to e.statusCode))
+                            diagnostics.log("worker_response_gone", mapOf(
+                                "chat_id" to chatId,
+                                "response_id" to responseId,
+                                "status" to e.statusCode
+                            ))
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
                         BackgroundRecoveryAction.RETRY -> {
-                            diagnostics.log("worker_http_retry", mapOf("chat_id" to chatId, "response_id" to responseId, "status" to e.statusCode))
-                            val retryDelay = BackgroundRecoveryPolicy.retryDelayMs(delayMs, e.retryAfterMs)
-                            delay(if (e.retryAfterMs != null) retryDelay else BackgroundRecoveryPolicy.jitteredDelayMs(retryDelay))
-                            delayMs = BackgroundRecoveryPolicy.nextDelayMs(delayMs)
-                            continue
+                            val waitMs = e.retryAfterMs?.coerceIn(1_000L, 300_000L)
+                                ?: retryDelayMs.coerceAtMost(60_000L)
+                            diagnostics.log("worker_http_retry", mapOf(
+                                "chat_id" to chatId,
+                                "response_id" to responseId,
+                                "status" to e.statusCode,
+                                "retry_after_ms" to waitMs
+                            ))
+                            delay(if (e.retryAfterMs != null) waitMs else BackgroundRecoveryPolicy.jitteredDelayMs(waitMs))
+                            retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
                         }
                         BackgroundRecoveryAction.FATAL -> {
-                            diagnostics.log("worker_http_fatal", mapOf("chat_id" to chatId, "response_id" to responseId, "status" to e.statusCode))
+                            diagnostics.log("worker_http_fatal", mapOf(
+                                "chat_id" to chatId,
+                                "response_id" to responseId,
+                                "status" to e.statusCode
+                            ))
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
                     }
                 } catch (e: Exception) {
-                    diagnostics.log("worker_poll_failed", mapOf("chat_id" to chatId, "response_id" to responseId, "error" to (e.message ?: e.toString()).take(400)))
-                    val retryDelay = BackgroundRecoveryPolicy.retryDelayMs(delayMs, null)
-                    delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelay))
-                    delayMs = BackgroundRecoveryPolicy.nextDelayMs(delayMs)
-                    continue
+                    activeCall = null
+                    if (isStopped) return Result.success()
+                    diagnostics.log("worker_stream_failed", mapOf(
+                        "chat_id" to chatId,
+                        "response_id" to responseId,
+                        "error" to (e.message ?: e.toString()).take(400)
+                    ))
+                    delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
+                    retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
                 }
-
-                val state = response.optString("status").ifBlank { "in_progress" }
-                val text = extractResponseText(response).ifBlank { db.getActiveResponse(chatId)?.optString("text").orEmpty() }
-                db.updateActiveResponse(chatId, responseId = responseId, text = text, status = state, expectedRequestId = requestId)
-
-                if (state in setOf("completed", "failed", "cancelled", "incomplete")) {
-                    finalize(chatId, responseId, requestId, response, db, diagnostics)
-                    return if (state == "failed") Result.failure() else Result.success()
-                }
-
-                delay(BackgroundRecoveryPolicy.jitteredDelayMs(delayMs))
-                delayMs = 1_500L
             }
             return Result.success()
         } finally {
+            activeCall?.cancel()
             try { db.close() } catch (_: Exception) {}
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
