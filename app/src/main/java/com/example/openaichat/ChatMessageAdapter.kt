@@ -119,7 +119,9 @@ class ChatMessageAdapter(
 
     private fun bindHolder(id: String, holder: ViewHolder) {
         holder.itemId = id
-        boundHolders.entries.removeIf { it.key != id && it.value === holder }
+        boundHolders.filterValues { it === holder }.keys.toList().forEach { staleId ->
+            if (staleId != id) boundHolders.remove(staleId)
+        }
         boundHolders[id] = holder
     }
 
