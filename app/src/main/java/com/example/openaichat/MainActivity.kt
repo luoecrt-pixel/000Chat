@@ -2,6 +2,8 @@ package com.example.openaichat
 
 import android.app.*
 import android.content.*
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
 import android.database.Cursor
 import android.provider.OpenableColumns
@@ -151,6 +153,8 @@ class MainActivity : Activity() {
     private var pendingImageMime: String? = null
     private var pendingImageSize: Long = 0L
     private var lastUserText: String = ""
+    private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
+    private var pendingActivityResultCode: Int? = null
 
     private val secure by lazy { SecureStore(this) }
     private val pickAny = 5100
@@ -166,6 +170,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+         activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+             val requestCode = pendingActivityResultCode
+             pendingActivityResultCode = null
+             if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
+         }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
         diagnostics = AstraDiagnostics(this)
