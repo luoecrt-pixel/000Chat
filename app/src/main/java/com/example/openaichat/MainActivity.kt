@@ -2687,7 +2687,7 @@ class MainActivity : Activity() {
             activityResultLauncher.launch(intent)
         } catch (e: Exception) {
             pendingActivityResultCode = null
-            status.text = "Операция недоступна: \${e.message}"
+            status.text = "Операция недоступна: ${e.message}"
         }
     }
 
