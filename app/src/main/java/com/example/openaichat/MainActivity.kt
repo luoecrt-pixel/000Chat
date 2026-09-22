@@ -1105,7 +1105,7 @@ class MainActivity : ComponentActivity() {
                                     val r=ev.optJSONObject("response")
                                     newId=r?.optString("id")?.takeIf{it.isNotBlank()}
                                     if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
+                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber, expectedRequestId = localRequestId)
                                         diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
                                     }
                                 }
@@ -1201,7 +1201,14 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         } catch (parseError:Exception){
-                            if(parseError is ResponseStreamSequenceGapException) throw parseError
+                            if(parseError is ResponseStreamSequenceGapException){
+                                diagnostics.log("sse_event_sequence_gap", mapOf(
+                                    "request_id" to requestId,
+                                    "expected_sequence_number" to parseError.expectedSequenceNumber,
+                                    "received_sequence_number" to parseError.receivedSequenceNumber
+                                ))
+                                throw parseError
+                            }
                             diagnostics.log("sse_event_parse_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
                         }
                     }
