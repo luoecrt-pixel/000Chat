@@ -14,6 +14,7 @@ data class ActiveResponseState(
 }
 
 class ActiveResponseStateStore {
+    @Volatile
     var state: ActiveResponseState = ActiveResponseState()
         private set
 
