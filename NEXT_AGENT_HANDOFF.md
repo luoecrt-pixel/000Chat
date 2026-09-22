@@ -6,7 +6,10 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 
 Default branch: `main`
 
-Known-good HEAD after this engineering pass:
+Current `main` HEAD:
+`ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
+
+Code-good parent before this documentation-only reconciliation commit:
 `433d27ac74e0e20405facc1014e2d152440dbaef`
 
 App:
@@ -33,6 +36,23 @@ Important compatibility finding:
 - Core KTX 1.17.x/1.18.x/1.19.x was tested and rejected by CI because its AAR metadata requires compileSdk 36+ / 37.
 - RecyclerView 1.4.0 passed full CI on compileSdk 35.
 - Do not upgrade AGP/Kotlin/compileSdk as part of small fixes; make that a separate migration project.
+
+## Session reconciliation / duplicate PR history
+
+The repository had several historical duplicate/superseded PRs. This is intentional history, not multiple required implementations:
+
+- PR #14: first release/AAB CI attempt, closed without merge.
+- PR #16: second/current-name release/AAB CI attempt, now closed as superseded.
+- PR #17: final release/AAB CI implementation, merged into `main`; it is the authoritative release workflow.
+- PR #15: ActiveResponseState holder, merged and still part of the architecture.
+- PR #18: O(1) adapter indexing on top of PR #11, merged and part of current `main`.
+
+There is no need to create another release PR for the same workflow. Do not resurrect branches `ci/release-aab-verification`, `ci/release-aab-verification-current`, or `ci/release-aab-verification-v2`; the merged workflow is already `.github/workflows/release.yml` on `main`.
+
+Current main CI after PR #18 / documentation reconciliation:
+- Debug run #184: **success** on `ce6de958...`.
+- Release run #6: **success** on `ce6de958...`.
+- PR #16 is closed as superseded by #17.
 
 ## Merged engineering work
 
@@ -210,6 +230,24 @@ JVM tests include:
 Static verifier:
 - `tools/verify_v4_17_0.py`
 
+## Compose decision and target UI architecture
+
+Compose is the intended long-term UI direction, but **not** as a big-bang rewrite of the current app.
+
+The current evidence supports the same conclusion as the earlier review: Android officially recommends incremental migration for existing View-based apps; Views and Compose can coexist, new screens/features can be written in Compose, and existing features can then be replaced one screen at a time. `ComposeView` is the intended interoperability mechanism for embedding Compose into the current View hierarchy. citeturn678769search0turn678769search1turn678769search2
+
+Important correction to the old framing: RecyclerView was **not** a dead-end architectural mistake. It was a valid intermediate optimization for the existing chat history. The current adapter work (AsyncListDiffer + O(1) identity/display indexes) is directly reusable conceptually when the chat list eventually becomes a Compose `LazyColumn`.
+
+The correct order is architectural, not toolkit-first:
+
+1. Finish extracting response lifecycle/controller logic from `MainActivity`.
+2. Extract attachment/upload/composer state and side effects.
+3. Make screen state explicit and immutable at the screen boundary, ideally via a single UI state + event model. Android's current Compose guidance explicitly fits this UDF/state-holder approach. citeturn678769search4turn678769search6
+4. Introduce Compose for one bounded feature/screen using interoperability, not by rewriting the entire Activity.
+5. Migrate the chat screen incrementally; only after the screen is Compose-native should Navigation Compose / Compose-only architecture be considered.
+
+Do **not** start a `Compose rewrite` while `MainActivity` still owns networking, persistence, uploads, recovery and UI state. Compose can reduce UI complexity, but it cannot solve a 4.5k-line Activity by itself; that requires the controller/state extraction first.
+
 ## Highest-value remaining work
 
 ### 1. Race-condition tests
@@ -226,7 +264,7 @@ Add deterministic tests for:
 - incremental upsert request-ID-vs-position behavior.
 
 ### 2. Response controller extraction
-Next architecture step:
+This is now the highest-value architecture step. Do not re-plan AsyncListDiffer or RecyclerView migration; those are already merged. Next step:
 - extract stream/recovery lifecycle around generation, response ID, completion state, retry and DB checkpoints;
 - keep Activity as lifecycle/composition glue;
 - preserve existing request-aware transaction boundaries.
@@ -256,7 +294,10 @@ Future separate PR:
 - verify renderer/reflection/file handling under shrinker;
 - keep signing/publishing separate.
 
-### 6. AGP / Kotlin / compileSdk migration
+### 6. Compose migration execution
+After controller extraction, start Compose incrementally with one bounded screen/feature. Do not combine this with an AGP/compileSdk upgrade.
+
+### 7. AGP / Kotlin / compileSdk migration
 Separate project. Current baseline is:
 - AGP 8.7.3;
 - Kotlin 2.0.21;
@@ -276,12 +317,14 @@ The CI evidence above shows that newer AndroidX Core/Activity versions require a
 
 ## Known-good state
 
-- main HEAD: `433d27ac74e0e20405facc1014e2d152440dbaef`
+- main HEAD: `ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
 - version: `4.17.0`
 - DB: `v15`
 - debug CI: success
 - release CI: success
 - release APK/AAB: successfully produced
-- PRs #10, #11, #12, #13, #17, #18 merged.
+- PRs #10, #11, #12, #13, #15, #17, #18 merged.
+- PR #16 closed as superseded by #17.
+- No pending implementation PR is required for the completed work above.
 
 Next work should start from this exact `main`.
