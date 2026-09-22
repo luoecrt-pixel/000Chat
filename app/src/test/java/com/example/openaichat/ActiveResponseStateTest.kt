@@ -67,6 +67,6 @@ class ActiveResponseStateTest {
         store.clear()
         assertNull(store.state.responseId)
         assertNull(store.state.assistantItemId)
-        assertNull(store.state.userStopRequestedGeneration)
+        assertNull(store.state.userStopInvalidatedThroughGeneration)
     }
 }
