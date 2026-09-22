@@ -35,7 +35,7 @@ assert 'put("type","web_search")' in main
 assert 'configuration_update' in main
 assert 'if (configUpdateEffort == null)' in main
 assert 'background' in main
-assert 'pollBackgroundResponse' in main
+assert 'streamBackgroundResponse' in main
 assert 'response.reasoning_summary_text.delta' in main
 assert 'reasoningSummary' in model
 assert 'AstraResponseModel.fromResponse' in main
