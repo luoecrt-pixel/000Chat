@@ -1340,7 +1340,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         if(active!=null){
-                            pollBackgroundResponse(active)
+                            streamBackgroundResponse(active)
                         }
                     }
                     return@execute
@@ -1505,7 +1505,7 @@ class MainActivity : ComponentActivity() {
             }
             executor.execute{
                 try{
-                    pollBackgroundResponse(a)
+                    streamBackgroundResponse(a)
                 }finally{
                     synchronized(activeResumeChats){activeResumeChats.remove(chatId)}
                 }
@@ -1757,9 +1757,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun pollBackgroundResponse(active: JSONObject) {
-        streamBackgroundResponse(active)
-    }
 
     private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
         val actual = BackgroundRecoveryPolicy.jitteredDelayMs(baseDelayMs)
