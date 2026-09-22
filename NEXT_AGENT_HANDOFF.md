@@ -181,6 +181,10 @@ Release workflow:
 
 Treat static verifier and real Gradle CI as separate checks.
 
+## Current thread-safety note
+
+`ActiveResponseStateStore.state` is read from executor callbacks while its immutable snapshots are updated on the Activity/main thread. PR #23 adds `@Volatile` to the snapshot and a structural JVM test for that visibility contract. This addresses one confirmed cross-thread visibility boundary; the broader Activity/Executor/WorkManager thread-safety audit remains open.
+
 ## What is still worth doing
 
 Priority order:
@@ -208,9 +212,11 @@ Priority order:
    - composer persistence.
 
 4. Thread-safety audit:
-   - verify cross-thread access to `ActiveResponseStateStore`;
-   - inspect Activity/Executor/WorkManager boundaries;
+   - verify remaining Activity/Executor/WorkManager boundaries;
+   - look for shared mutable state beyond `ActiveResponseStateStore`;
    - only change synchronization after reproducing or proving a race.
+
+   PR #23 covers the confirmed `ActiveResponseStateStore.state` visibility boundary.
 
 5. Diagnostics/security review:
    - diagnostics retention/clear;
