@@ -152,6 +152,20 @@ class ChatMessageAdapter(
         boundHolders[id] = holder
     }
 
+    private fun rebuildModelIndexes() {
+        itemById.clear()
+        itemIndexById.clear()
+        items.forEachIndexed { index, item ->
+            itemById[item.id] = item
+            itemIndexById[item.id] = index
+        }
+    }
+
+    private fun refreshModelItem(index: Int, item: ChatBubbleItem) {
+        items[index] = item
+        itemById[item.id] = item
+    }
+
     private fun submitModel() {
         differ.submitList(items.toList())
     }
@@ -160,18 +174,21 @@ class ChatMessageAdapter(
         if (items == newItems) return
         items.clear()
         items.addAll(newItems)
+        rebuildModelIndexes()
         submitModel()
     }
 
     fun addItem(item: ChatBubbleItem) {
         items.add(item)
+        itemById[item.id] = item
+        itemIndexById[item.id] = items.lastIndex
         submitModel()
     }
 
     fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = item.copy(id = id)
+        val index = itemIndexById[id] ?: return false
+        val replacement = item.copy(id = id)
+        refreshModelItem(index, replacement)
         submitModel()
         return true
     }
@@ -198,6 +215,7 @@ class ChatMessageAdapter(
             boundHolders.remove(item.id)
         }
         repeat(actual) { items.removeAt(items.lastIndex) }
+        rebuildModelIndexes()
         submitModel()
     }
 
@@ -207,12 +225,15 @@ class ChatMessageAdapter(
             boundHolders.remove(item.id)
         }
         repeat(items.size - index) { items.removeAt(items.lastIndex) }
+        rebuildModelIndexes()
         submitModel()
     }
 
     fun clearItems() {
         if (items.isEmpty()) return
         items.clear()
+        itemById.clear()
+        itemIndexById.clear()
         boundHolders.clear()
         submitModel()
     }
@@ -221,7 +242,7 @@ class ChatMessageAdapter(
 
     fun cardForId(id: String): LinearLayout? = boundHolders[id]?.card
 
-    fun indexOfId(id: String): Int = items.indexOfFirst { it.id == id }
+    fun indexOfId(id: String): Int = itemIndexById[id] ?: -1
 
     fun itemAt(index: Int): ChatBubbleItem? = items.getOrNull(index)
 
