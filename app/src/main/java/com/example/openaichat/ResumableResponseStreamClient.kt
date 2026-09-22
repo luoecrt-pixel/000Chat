@@ -61,7 +61,7 @@ class ResumableResponseStreamClient(
         val call = httpClient.newCall(request)
         onCallCreated(call)
 
-        var lastSequenceNumber = startingAfter
+        val sequenceCursor = ResponseStreamSequenceCursor(startingAfter)
         var terminalResponse: JSONObject? = null
         var terminalEventType: String? = null
         var requestId: String? = null
@@ -80,11 +80,7 @@ class ResumableResponseStreamClient(
 
             val sequence = event.optLong("sequence_number", -1L)
             if (sequence >= 0L) {
-                if (sequence <= lastSequenceNumber) return
-                if (lastSequenceNumber >= 0L && sequence > lastSequenceNumber + 1L) {
-                    throw ResponseStreamSequenceGapException(lastSequenceNumber + 1L, sequence)
-                }
-                lastSequenceNumber = sequence
+                if (sequenceCursor.observe(sequence) == ResponseStreamSequenceObservation.DUPLICATE) return
             }
 
             val type = event.optString("type")
@@ -118,7 +114,7 @@ class ResumableResponseStreamClient(
         }
 
         return ResumableStreamResult(
-            lastSequenceNumber = lastSequenceNumber,
+            lastSequenceNumber = sequenceCursor.lastSequenceNumber,
             terminalResponse = terminalResponse,
             terminalEventType = terminalEventType,
             requestId = requestId ?: responseId
