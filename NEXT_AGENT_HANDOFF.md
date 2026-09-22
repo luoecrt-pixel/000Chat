@@ -183,6 +183,11 @@ Treat static verifier and real Gradle CI as separate checks.
 
 ## Current thread-safety note
 
+PR #23 added `@Volatile` to the immutable `ActiveResponseStateStore.state` snapshot so Activity/main-thread updates are visible to executor readers.
+
+**New confirmed follow-up:** PR #20/23 still exposed a lifecycle hole in the user-stop marker. `stopCurrentResponse()` cleared the marker immediately, and a later Stop could overwrite the previous marker. The safe contract is monotonic: all generations up to the latest user-stop generation remain classified as user-stopped. PR #25 is the focused fix and test coverage for this contract.
+
+
 `ActiveResponseStateStore.state` is read from executor callbacks while its immutable snapshots are updated on the Activity/main thread. PR #23 adds `@Volatile` to the snapshot and a structural JVM test for that visibility contract. This addresses one confirmed cross-thread visibility boundary; the broader Activity/Executor/WorkManager thread-safety audit remains open.
 
 ## What is still worth doing
