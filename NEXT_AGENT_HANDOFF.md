@@ -6,14 +6,9 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 
 Default branch: `main`
 
-Current `main` HEAD:
-`bb7ddcfa36264f5a80dbc3bb601e09edd961de3e`
+Current `main` HEAD: the commit containing this handoff document.
 
-This HEAD is documentation-only. The code state is unchanged from:
-`ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
-
-Earlier code-good parent before the first reconciliation note:
-`433d27ac74e0e20405facc1014e2d152440dbaef`
+The current commit is documentation-only; the code baseline remains the already-validated `4.17.0` state. The last code-changing baseline before the reconciliation notes is `ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`.
 
 App:
 - versionName: `4.17.0`
@@ -321,7 +316,8 @@ The CI evidence above shows that newer AndroidX Core/Activity versions require a
 
 ## Known-good state
 
-- main HEAD: `ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
+- main HEAD: the current handoff/documentation commit; start directly from `main`.
+- code baseline: `ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
 - version: `4.17.0`
 - DB: `v15`
 - debug CI: success
@@ -331,4 +327,4 @@ The CI evidence above shows that newer AndroidX Core/Activity versions require a
 - PR #16 closed as superseded by #17.
 - No pending implementation PR is required for the completed work above.
 
-Next work should start from this exact `main`.
+Next work should start from the current `main` exactly as it is; do not resurrect superseded PR branches.
