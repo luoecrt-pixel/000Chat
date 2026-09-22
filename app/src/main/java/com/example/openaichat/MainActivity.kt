@@ -131,9 +131,6 @@ class MainActivity : ComponentActivity() {
     private var activeAssistantItemId: String?
         get() = activeResponseState.state.assistantItemId
         set(value) = activeResponseState.setAssistantItemId(value)
-    private var userStopRequestedGeneration: Long?
-        get() = activeResponseState.state.userStopRequestedGeneration
-        set(value) = activeResponseState.setUserStopRequestedGeneration(value)
     private var activeRequestRegenerate = false
     private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -830,7 +827,6 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeAssistantItemId=null
         setBusy(false)
-        activeResponseState.clearUserStop()
         activeRequestRegenerate=false
         status.text="Остановлено — запрос отменён"
         toolStates.clear(); renderToolActivity()
