@@ -1076,7 +1076,7 @@ class MainActivity : ComponentActivity() {
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
                     val sseParser = SseEventParser()
                     var streamDone = false
-                    var lastSequenceNumber = -1L
+                    val sequenceCursor = ResponseStreamSequenceCursor()
 
                     fun handleSseEvent(data:String) {
                         if(streamDone) return
@@ -1088,31 +1088,24 @@ class MainActivity : ComponentActivity() {
                             val ev=JSONObject(data)
                             val sequenceNumber=ev.optLong("sequence_number",-1L)
                             if(sequenceNumber>=0L){
-                                when{
-                                    sequenceNumber<=lastSequenceNumber -> {
+                                when(sequenceCursor.observe(sequenceNumber)){
+                                    ResponseStreamSequenceObservation.ACCEPTED -> Unit
+                                    ResponseStreamSequenceObservation.DUPLICATE -> {
                                         diagnostics.log("sse_event_duplicate_or_out_of_order",mapOf(
                                             "request_id" to requestId,
                                             "sequence_number" to sequenceNumber,
-                                            "last_sequence_number" to lastSequenceNumber
+                                            "last_sequence_number" to sequenceCursor.lastSequenceNumber
                                         ))
                                         return
                                     }
-                                    lastSequenceNumber>=0L && sequenceNumber>lastSequenceNumber+1L -> {
-                                        diagnostics.log("sse_event_sequence_gap",mapOf(
-                                            "request_id" to requestId,
-                                            "expected_sequence_number" to (lastSequenceNumber+1L),
-                                            "received_sequence_number" to sequenceNumber
-                                        ))
-                                    }
                                 }
-                                lastSequenceNumber=sequenceNumber
                             }
                             when(ev.optString("type")){
                                 "response.created" -> {
                                     val r=ev.optJSONObject("response")
                                     newId=r?.optString("id")?.takeIf{it.isNotBlank()}
                                     if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = lastSequenceNumber, expectedRequestId = localRequestId)
+                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber, expectedRequestId = localRequestId)
                                         diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
                                     }
                                 }
@@ -1208,6 +1201,14 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         } catch (parseError:Exception){
+                            if(parseError is ResponseStreamSequenceGapException){
+                                diagnostics.log("sse_event_sequence_gap", mapOf(
+                                    "request_id" to requestId,
+                                    "expected_sequence_number" to parseError.expectedSequenceNumber,
+                                    "received_sequence_number" to parseError.receivedSequenceNumber
+                                ))
+                                throw parseError
+                            }
                             diagnostics.log("sse_event_parse_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
                         }
                     }
