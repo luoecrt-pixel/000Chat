@@ -177,6 +177,13 @@ assert '!finishing' in (ROOT / 'app/src/main/java/com/example/openaichat/ActiveR
 assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
 assert 'WindowInsetsCompat.Type.systemBars()' in main
 assert 'ResumableResponseStreamClient' in main
+adapter = (ROOT / 'app/src/main/java/com/example/openaichat/ChatMessageAdapter.kt').read_text()
+assert 'AsyncListDiffer' in adapter
+assert 'itemById' in adapter
+assert 'itemIndexById' in adapter
+assert 'displayPositionById' in adapter
+assert 'items.firstOrNull' not in adapter
+assert 'differ.currentList.indexOfFirst' not in adapter
 assert 'startingAfter = cursor' in main
 assert 'last_sequence_number' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()

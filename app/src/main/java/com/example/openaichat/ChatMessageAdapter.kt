@@ -73,6 +73,9 @@ class ChatMessageAdapter(
     }
 
     private val items = mutableListOf<ChatBubbleItem>()
+    private val itemById = mutableMapOf<String, ChatBubbleItem>()
+    private val itemIndexById = mutableMapOf<String, Int>()
+    private val displayPositionById = mutableMapOf<String, Int>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
 
     private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
@@ -83,6 +86,15 @@ class ChatMessageAdapter(
             oldItem.contentSignature == newItem.contentSignature &&
                 oldItem.reasoningSummary == newItem.reasoningSummary
     })
+
+    init {
+        differ.addListListener { _, current ->
+            displayPositionById.clear()
+            current.forEachIndexed { index, item ->
+                displayPositionById[item.id] = index
+            }
+        }
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val card = createCard(parent)
@@ -97,7 +109,7 @@ class ChatMessageAdapter(
 
     private fun itemForBoundPosition(position: Int): ChatBubbleItem {
         val structural = differ.currentList[position]
-        return items.firstOrNull { it.id == structural.id } ?: structural
+        return itemById[structural.id] ?: structural
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
@@ -140,6 +152,20 @@ class ChatMessageAdapter(
         boundHolders[id] = holder
     }
 
+    private fun rebuildModelIndexes() {
+        itemById.clear()
+        itemIndexById.clear()
+        items.forEachIndexed { index, item ->
+            itemById[item.id] = item
+            itemIndexById[item.id] = index
+        }
+    }
+
+    private fun refreshModelItem(index: Int, item: ChatBubbleItem) {
+        items[index] = item
+        itemById[item.id] = item
+    }
+
     private fun submitModel() {
         differ.submitList(items.toList())
     }
@@ -148,37 +174,36 @@ class ChatMessageAdapter(
         if (items == newItems) return
         items.clear()
         items.addAll(newItems)
+        rebuildModelIndexes()
         submitModel()
     }
 
     fun addItem(item: ChatBubbleItem) {
         items.add(item)
+        itemById[item.id] = item
+        itemIndexById[item.id] = items.lastIndex
         submitModel()
     }
 
     fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = item.copy(id = id)
+        val index = itemIndexById[id] ?: return false
+        val replacement = item.copy(id = id)
+        refreshModelItem(index, replacement)
         submitModel()
         return true
     }
 
     fun updateText(id: String, text: String): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = items[index].copy(text = text)
-        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
-        if (displayIndex >= 0) notifyItemChanged(displayIndex, PAYLOAD_TEXT)
+        val index = itemIndexById[id] ?: return false
+        refreshModelItem(index, items[index].copy(text = text))
+        displayPositionById[id]?.let { notifyItemChanged(it, PAYLOAD_TEXT) }
         return true
     }
 
     fun updateReasoningSummary(id: String, summary: String): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = items[index].copy(reasoningSummary = summary)
-        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
-        if (displayIndex >= 0) notifyItemChanged(displayIndex)
+        val index = itemIndexById[id] ?: return false
+        refreshModelItem(index, items[index].copy(reasoningSummary = summary))
+        displayPositionById[id]?.let { notifyItemChanged(it) }
         return true
     }
 
@@ -190,6 +215,7 @@ class ChatMessageAdapter(
             boundHolders.remove(item.id)
         }
         repeat(actual) { items.removeAt(items.lastIndex) }
+        rebuildModelIndexes()
         submitModel()
     }
 
@@ -199,12 +225,15 @@ class ChatMessageAdapter(
             boundHolders.remove(item.id)
         }
         repeat(items.size - index) { items.removeAt(items.lastIndex) }
+        rebuildModelIndexes()
         submitModel()
     }
 
     fun clearItems() {
         if (items.isEmpty()) return
         items.clear()
+        itemById.clear()
+        itemIndexById.clear()
         boundHolders.clear()
         submitModel()
     }
@@ -213,7 +242,7 @@ class ChatMessageAdapter(
 
     fun cardForId(id: String): LinearLayout? = boundHolders[id]?.card
 
-    fun indexOfId(id: String): Int = items.indexOfFirst { it.id == id }
+    fun indexOfId(id: String): Int = itemIndexById[id] ?: -1
 
     fun itemAt(index: Int): ChatBubbleItem? = items.getOrNull(index)
 
