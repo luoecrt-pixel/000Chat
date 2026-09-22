@@ -109,7 +109,7 @@ class ChatMessageAdapter(
 
     private fun itemForBoundPosition(position: Int): ChatBubbleItem {
         val structural = differ.currentList[position]
-        return items.firstOrNull { it.id == structural.id } ?: structural
+        return itemById[structural.id] ?: structural
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
@@ -177,20 +177,16 @@ class ChatMessageAdapter(
     }
 
     fun updateText(id: String, text: String): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = items[index].copy(text = text)
-        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
-        if (displayIndex >= 0) notifyItemChanged(displayIndex, PAYLOAD_TEXT)
+        val index = itemIndexById[id] ?: return false
+        refreshModelItem(index, items[index].copy(text = text))
+        displayPositionById[id]?.let { notifyItemChanged(it, PAYLOAD_TEXT) }
         return true
     }
 
     fun updateReasoningSummary(id: String, summary: String): Boolean {
-        val index = items.indexOfFirst { it.id == id }
-        if (index < 0) return false
-        items[index] = items[index].copy(reasoningSummary = summary)
-        val displayIndex = differ.currentList.indexOfFirst { it.id == id }
-        if (displayIndex >= 0) notifyItemChanged(displayIndex)
+        val index = itemIndexById[id] ?: return false
+        refreshModelItem(index, items[index].copy(reasoningSummary = summary))
+        displayPositionById[id]?.let { notifyItemChanged(it) }
         return true
     }
 
