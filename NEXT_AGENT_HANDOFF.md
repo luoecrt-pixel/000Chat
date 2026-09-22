@@ -7,9 +7,12 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 Default branch: `main`
 
 Current `main` HEAD:
+`bb7ddcfa36264f5a80dbc3bb601e09edd961de3e`
+
+This HEAD is documentation-only. The code state is unchanged from:
 `ce6de958cd329a2a9df66b82b0fb9a202f1f4cc8`
 
-Code-good parent before this documentation-only reconciliation commit:
+Earlier code-good parent before the first reconciliation note:
 `433d27ac74e0e20405facc1014e2d152440dbaef`
 
 App:
@@ -50,8 +53,9 @@ The repository had several historical duplicate/superseded PRs. This is intentio
 There is no need to create another release PR for the same workflow. Do not resurrect branches `ci/release-aab-verification`, `ci/release-aab-verification-current`, or `ci/release-aab-verification-v2`; the merged workflow is already `.github/workflows/release.yml` on `main`.
 
 Current main CI after PR #18 / documentation reconciliation:
-- Debug run #184: **success** on `ce6de958...`.
-- Release run #6: **success** on `ce6de958...`.
+- Debug run #184: **success** on code HEAD `ce6de958...`.
+- Release run #6: **success** on code HEAD `ce6de958...`.
+- The current `bb7ddcfa...` change is documentation-only and should not be treated as a new code baseline.
 - PR #16 is closed as superseded by #17.
 
 ## Merged engineering work
