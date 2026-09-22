@@ -242,7 +242,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isRequestCurrent(chatId: String, generation: Long): Boolean =
-        currentChatId() == chatId && requestGeneration == generation && activityVisible && !isFinishing
+        currentChatId() == chatId &&
+            activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
 
     // ---------- UI ----------
     private fun buildUi() {
@@ -788,9 +789,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopCurrentResponse(){
         val chatId=currentChatId()
-        val generation=requestGeneration
-        userStopRequestedGeneration=generation
-        requestGeneration++
+        val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
         activeResumeCalls.remove(chatId)?.cancel()
         val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
@@ -831,7 +830,7 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeAssistantItemId=null
         setBusy(false)
-        userStopRequestedGeneration=null
+        activeResponseState.clearUserStop()
         activeRequestRegenerate=false
         status.text="Остановлено — запрос отменён"
         toolStates.clear(); renderToolActivity()
