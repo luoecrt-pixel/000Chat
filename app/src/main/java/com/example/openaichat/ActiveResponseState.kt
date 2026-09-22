@@ -4,13 +4,13 @@ data class ActiveResponseState(
     val generation: Long = 0L,
     val responseId: String? = null,
     val assistantItemId: String? = null,
-    val userStopRequestedGeneration: Long? = null
+    val userStopInvalidatedThroughGeneration: Long? = null
 ) {
     fun isCurrent(candidateGeneration: Long, activityVisible: Boolean, finishing: Boolean): Boolean =
         activityVisible && !finishing && generation == candidateGeneration
 
     fun wasUserStopped(candidateGeneration: Long): Boolean =
-        userStopRequestedGeneration == candidateGeneration
+        userStopInvalidatedThroughGeneration?.let { candidateGeneration <= it } == true
 }
 
 class ActiveResponseStateStore {
@@ -28,22 +28,14 @@ class ActiveResponseStateStore {
         val stoppedGeneration = state.generation
         state = state.copy(
             generation = stoppedGeneration + 1L,
-            userStopRequestedGeneration = stoppedGeneration
+            userStopInvalidatedThroughGeneration = maxOf(
+                state.userStopInvalidatedThroughGeneration ?: Long.MIN_VALUE,
+                stoppedGeneration
+            )
         )
         return stoppedGeneration
     }
 
-    fun setGeneration(generation: Long) {
-        state = state.copy(generation = generation)
-    }
-
-    fun setUserStopRequestedGeneration(generation: Long?) {
-        state = state.copy(userStopRequestedGeneration = generation)
-    }
-
-    fun clearUserStop() {
-        state = state.copy(userStopRequestedGeneration = null)
-    }
 
     fun setResponseId(responseId: String?) {
         state = state.copy(responseId = responseId)
