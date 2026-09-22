@@ -1,154 +1,255 @@
-# OpenAI API Chat — Astra v4.16.3
+# OpenAI API Chat — Astra v4.17.0
 
 Нативный Android-клиент для собственного OpenAI API key, ориентированный на GPT-6 Astra.
 
-## Реализовано
+## Текущий статус
 
-- Чат-интерфейс и несколько локальных чатов
-- SQLite история с миграцией старого `chat_store`
-- лёгкий список чатов без загрузки всей истории
-- Responses API streaming + `previous_response_id`
-- `gpt-6-astra`, reasoning low/medium/high/xhigh/max + Auto
-- `configuration_update` для смены reasoning effort в standard mode
-- `web_search` + кликабельные `url_citation`
-- File Search + `file_citation` с явным скачиванием
-- Code Interpreter + реальные `container_file_citation` и локальный cache
-- Image Generation + локальное сохранение результата PNG и preview
-- Images input через Files API `file_id`
-- Markdown/bare HTTP(S) links
-- ZIP import с потоковой распаковкой и лимитами
-- диагностика, usage/effort metrics, 👍/👎 feedback
-- live tool activity statuses
-- local Astra file library (Open/Save/Share/Delete)
-- background Responses with automatic resume after app restart
-- persistent composer drafts and uploaded attachments per chat
-- отмена генерации и защита от устаревших callback
-- экспорт/сохранение/поделиться через Android Storage Access Framework
-- GitHub Actions build workflow
+**Канонический репозиторий:** `luoecrt-pixel/OpenAIApiChat`  
+**Основная ветка:** `main`  
+**Текущая кодовая база:** `4.17.0` / versionCode `64`  
+**DB schema:** `v15`  
+**MainActivity:** ~4.5k строк
 
-## v4.16.3 — reliability patch 2026-09-21
+После базовой ветки v4.17.0 уже вошли ещё два reliability-fix PR:
 
-После дополнительной проверки `main` были исправлены ещё три узких места:
+- **PR #19** — строгая проверка непрерывности `sequence_number` в foreground SSE; тот же cursor-контракт используется resumable recovery.
+- **PR #20** — cancellation/Stop привязан к generation запроса, чтобы устаревший executor не повторял UI-восстановление после ручной остановки.
 
-- active background response теперь хранит свой режим `background_enabled`, поэтому recovery не запускается для запросов, которым он был отключён;
-- background polling/finalization использует атомарную проверку `chatId + requestId`, поэтому поздний ответ старого запроса не может записаться поверх нового состояния того же чата;
-- streaming и background polling больше не выбрасывают пользователя вниз, если он сознательно читает старую часть истории; ручная отправка нового сообщения всё равно прокручивает к последнему элементу.
+VersionName пока остаётся **4.17.0**: #19/#20 — точечные исправления поверх текущей кодовой базы, без отдельного bump версии.
 
-DB schema: **v14**, versionCode: **63**.
+## Что уже реализовано
 
-CI verifier обновлён до `tools/verify_v4_16_3.py`.
+### Chat / Responses
 
-## v4.16.2 — инженерные изменения 2026-09-21
+- несколько локальных чатов;
+- SQLite-история с миграцией старого `chat_store`;
+- Responses API streaming + `previous_response_id`;
+- `gpt-6-astra`, reasoning low/medium/high/xhigh/max + Auto;
+- `configuration_update` для standard mode;
+- generation-based защита от устаревших callback;
+- request-aware DB writes для active response;
+- отмена генерации без повторного применения старого Stop-handler;
+- resumable SSE с durable `active_last_sequence_number` и `starting_after`;
+- fail-fast на sequence gap + bounded retry/backoff/jitter;
+- восстановление фоновых Responses через WorkManager после process death;
+- partial response text сохраняется и восстанавливается.
 
-За одну сессию были последовательно закрыты несколько классов рисков:
+### Tools / files / images
 
-### Надёжность Responses / фонового режима
+- `web_search` + кликабельные `url_citation`;
+- File Search + `file_citation` с явным скачиванием;
+- Code Interpreter + `container_file_citation` и локальный cache;
+- Image Generation + локальное сохранение PNG и preview;
+- Images input через Files API `file_id`;
+- Markdown и bare HTTP(S) links;
+- ZIP import с потоковой распаковкой и лимитами;
+- local Astra file library (Open/Save/Share/Delete);
+- экспорт/сохранение/поделиться через Android Storage Access Framework.
 
-- request-aware очистка `active_response`, чтобы старый callback не мог стереть новое состояние;
-- bounded polling client с connect/read/call timeout;
-- обработка HTTP 401/403/404/410/429/5xx и сетевых ошибок с backoff/jitter;
-- SSE parser с CRLF, multiline `data:`, комментариями, EOF flush и проверкой `sequence_number`;
-- process-death recovery через WorkManager;
-- unique work на пару `chatId + requestId`;
-- cancel/resume логика синхронизирована между Activity и WorkManager;
-- частичный текст фонового ответа сохраняется и безопасно восстанавливается;
-- метрики считают успешным только `completionState == "completed"`.
+### UI / persistence / performance
 
-### SQLite и сохранение истории
+- persistent composer drafts и uploaded attachments per chat;
+- `RecyclerView` вместо `ScrollView + LinearLayout`;
+- `AsyncListDiffer` для структурного diff истории;
+- O(1) identity/model/display lookups в `ChatMessageAdapter`;
+- streaming text/reasoning обновляются точечно, без diff на каждый token;
+- async image decode + 12 MB LRU thumbnail cache;
+- race-защита thumbnail callbacks при recycling ViewHolder;
+- sticky scroll policy: streaming не сбрасывает пользователя вниз, если он читает старую историю; новая ручная отправка прокручивает к последнему сообщению.
 
-- включено явное SQLite foreign-key enforcement;
-- DB schema сейчас **v13**;
-- добавлен `messages.content_hash`;
-- `ChatMessageFingerprint` использует SHA-256 persisted message fields;
-- `upsertCurrentChat()` стал incremental: неизменённые сообщения не переписываются;
-- удаление устаревших строк учитывает и удаления из середины истории;
-- создан JVM-тест fingerprint;
-- удаление чата чистит также принадлежащие ему локальные файлы.
+### Diagnostics / feedback / metrics
 
-### UI / производительность
+- диагностика и usage/effort metrics;
+- 👍/👎 feedback;
+- live tool activity statuses;
+- успешным считается только `completionState == "completed"`.
 
-- локальные изображения декодируются асинхронно;
-- добавлен 12 MB LRU thumbnail cache;
-- preview generated/user images не блокирует UI;
-- история чата переведена с `ScrollView + LinearLayout` на `RecyclerView`;
-- добавлен `ChatMessageAdapter` с `DiffUtil`;
-- восстановление длинной истории идёт через diff вместо ручного создания всех View;
-- streaming-дельты обновляют только текст активного item через payload;
-- async thumbnail callbacks защищены от race при recycling ViewHolder.
+## CI и источник истины
 
-### CI / верификация
+README хранит **смысл и статус проекта**. Фактический результат сборки надо смотреть в GitHub Actions.
 
-Canonical workflow: `.github/workflows/build.yml`.
+### Debug CI
 
-CI запускает:
+[Build Android APK](../../actions/workflows/build.yml)
+
+Сейчас workflow проверяет:
 
 ```
 gradle --no-daemon --stacktrace test lintDebug assembleDebug
 ```
 
-Проверка исходников выполняется через `tools/verify_v4_16_2.py`.
+Также запускается статический verifier `tools/verify_v4_17_0.py`.
 
-В этой сессии два реальных CI-дефекта были найдены по логам и исправлены:
+Артефакт:
 
-1. PR #6: JVM unit-тесты fingerprint падали из-за Android stub `org.json`. Исправление — `testImplementation("org.json:json:20250517")`.
-2. PR #7: после миграции на RecyclerView четыре места вызывали `scrollToLatest()`, но helper не попал в первый коммит. Добавлен отдельным fix-коммитом.
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
 
-После исправлений:
-- PR #6 merged, CI main run #106 — **success**;
-- PR #7 merged, CI main run #109 — **success**.
+### Release CI
 
-## История инженерных PR
+[Build Android Release](../../actions/workflows/release.yml)
 
-| PR | Назначение | Статус |
-|---|---|---|
-| #1 | source moved out of ZIP archive | merged |
-| #3 | response lifecycle + CI hardening | merged |
-| #4 | SSE parsing + background recovery hardening | merged |
-| #5 | process-death resilient background responses / WorkManager | merged |
-| #6 | incremental chat persistence + async thumbnails | merged |
-| #7 | RecyclerView + DiffUtil chat history | merged |
+Сейчас workflow проверяет:
 
-PR #2 был закрыт без merge.
+```
+gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease
+```
 
-## Сборка
+И публикует как workflow artifacts:
 
-Репозиторий сейчас канонически доступен как **`luoecrt-pixel/OpenAIApiChat`**. Старый URL `luoecrt-pixel/Mychatgpt` редиректит на каноническое имя.
+```
+app/build/outputs/apk/release/*.apk
+app/build/outputs/bundle/release/*.aab
+```
 
-Текущий app config:
+Это **проверка сборки**, а не production signing/publishing.
 
-- versionName: **4.16.2**
-- versionCode: **62**
+## Текущая сборочная конфигурация
+
 - compileSdk / targetSdk: **35**
 - minSdk: **26**
 - JDK: **17**
 - AGP: **8.7.3**
 - Kotlin Gradle Plugin: **2.0.21**
-- Gradle CI: **8.9**
+- Gradle в CI: **8.9**
+- Activity KTX: **1.10.1**
 - WorkManager: **2.11.2**
-- RecyclerView: **1.3.2**
+- RecyclerView: **1.4.0**
 - Core KTX: **1.15.0**
 - OkHttp: **4.12.0**
+- JUnit: **4.13.2**
+- JVM `org.json`: **20250517**
 
-CI устанавливает Android SDK 35 и build-tools 35.0.0.
+Текущий baseline намеренно остаётся на compileSdk 35. Попытки поднять отдельные AndroidX Activity/Core ветки до более новых версий упирались в требования к более новому compileSdk; такой upgrade нужно делать отдельным совместимым pass, а не вместе с мелкими fix PR.
 
-## Что осталось проверить / улучшить
+## История инженерных изменений
 
-После v4.16.3 наиболее полезные следующие шаги остаются архитектурными и тестовыми: детерминированные тесты background lifecycle/DB migration, миграция RecyclerView на async diff, cleanup deprecated Activity APIs, release/AAB CI и постепенное выделение response/recovery логики из MainActivity.
+### v4.17.0 engineering baseline
 
-Подробный handoff для следующей модели: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
+- **PR #10** — resumable background Responses, durable sequence cursor, retry/gap recovery.
+- **PR #11** — `AsyncListDiffer` для истории чатов.
+- **PR #12** — modern Activity Result API.
+- **PR #13** — RecyclerView 1.4.0.
+- **PR #15** — централизованный `ActiveResponseState`.
+- **PR #17** — release APK/AAB CI.
+- **PR #18** — O(1) lookups в `ChatMessageAdapter`.
 
-Наиболее полезный следующий порядок:
+### Reliability fixes после v4.17.0 baseline
 
-1. Добавить тесты для lifecycle/DB/background recovery: stale request, stop/delete race, WorkManager recovery, HTTP retry policy, миграции DB v12→v13.
-2. Улучшить `RecyclerView`: перейти с синхронного `DiffUtil.calculateDiff()` на `AsyncListDiffer/ListAdapter` и не принудительно прокручивать вниз, если пользователь уже читает старые сообщения.
-3. Обновить стабильные AndroidX зависимости. На 2026-09-21 официальные AndroidX release pages указывают RecyclerView 1.4.0, Core/KTX 1.19.0 и WorkManager 2.11.2.
-4. Отдельно планировать миграцию AGP/Kotlin/Gradle: текущий AGP 8.7.3 существенно старше актуального AGP 9.x; современный AGP 9.x меняет встроенную Kotlin-интеграцию и требует отдельного compatibility pass.
-5. Убрать deprecated Activity APIs: `systemWindowInset*`, `consumeSystemWindowInsets()`, `startActivityForResult()`, `onActivityResult()`.
-6. Разделять гигантский `MainActivity.kt` на UI/state/network/persistence/recovery слои небольшими PR, без большого rewrite.
-7. Расширить CI отдельным release/AAB build и проверкой release variant, потому что текущий workflow гарантирует только debug APK.
-8. Проверить FileProvider paths, локальное orphan-file cleanup и retention диагностического журнала.
-9. Для полного event-driven Responses renderer сохранить отдельный проектный этап; текущий live renderer намеренно остаётся быстрым текстовым buffer.
+- **PR #19** — единый строгий sequence-gap contract для foreground и resumable SSE.
+- **PR #20** — Stop/cancellation generation race fix.
 
-## Ограничения
+Исторические PR, закрытые без merge или superseded, остаются только частью истории GitHub и не являются альтернативными реализациями:
 
-Полноценный event-by-event renderer всех Responses API событий, Computer Use executor, MCP UX и Realtime voice — отдельные функции. Финальный ответ уже проходит через `AstraResponseModel`, а live streaming display использует быстрый текстовый буфер. Background Responses автоматически восстанавливаются через polling; cursor-based stream resume (`starting_after`) пока не используется.
+- **PR #2** — закрыт без merge;
+- **PR #14** — первая попытка release/AAB CI, закрыта;
+- **PR #16** — superseded by #17, закрыт.
+
+## Что сейчас в плане
+
+План ниже содержит только **не завершённые** направления. Сделанные пункты из старых планов сюда не возвращаются — они должны появляться в истории выше.
+
+### 1. Детерминированные lifecycle/recovery tests
+
+Добавить тесты на:
+
+- Stop до `response.created`;
+- late callback после Stop/Delete;
+- stale Worker finalization после нового request;
+- переключение чата во время callback;
+- orphan active-response rows;
+- DB migrations v13→v14→v15;
+- сохранение partial response при recovery.
+
+### 2. Выделение response/recovery controller
+
+Сначала вынести из `MainActivity` lifecycle вокруг:
+
+- generation;
+- response ID;
+- completion state;
+- retry/backoff;
+- DB checkpoints;
+- Activity ↔ WorkManager coordination.
+
+Activity должна остаться тонким lifecycle/composition слоем.
+
+### 3. Attachment/upload/composer controller
+
+После response lifecycle отдельно вынести:
+
+- URI/file/image upload;
+- ZIP extraction;
+- upload progress;
+- persistent composer state.
+
+### 4. Thread-safety audit
+
+Отдельно проверить границы потоков для `ActiveResponseStateStore` и участков Activity/Executor/WorkManager, не меняя модель без подтверждённого race.
+
+### 5. Diagnostics/security review
+
+Проверить отдельно:
+
+- retention/clear поведения диагностического журнала;
+- отсутствие API keys и message bodies в diagnostics;
+- отсутствие orphan local files;
+- минимальные FileProvider paths.
+
+Базовая защита FileProvider и cleanup уже присутствуют в текущем коде; здесь нужен именно дополнительный аудит.
+
+### 6. Release hardening
+
+Отдельный PR для release variant:
+
+- явно определить policy shrinker/minification;
+- проверить renderer/reflection/file handling под shrinker;
+- не смешивать это с signing/publishing.
+
+### 7. Compose — только после выделения state/controller
+
+Не делать big-bang rewrite.
+
+Порядок:
+
+1. response controller;
+2. attachment/composer state;
+3. явный immutable screen state + events;
+4. один bounded Compose feature через interop;
+5. затем постепенная миграция chat UI.
+
+`RecyclerView + AsyncListDiffer` уже является закрытым этапом, поэтому возвращаться к нему в плане не нужно.
+
+### 8. AGP / Kotlin / compileSdk migration
+
+Отдельный compatibility project. Не совмещать с текущими небольшими reliability PR.
+
+### 9. Gradle Wrapper / local-build parity
+
+Репозиторий пока полагается на Gradle, установленный CI. Добавление wrapper улучшит воспроизводимость локальной сборки и совпадение local/CI toolchain.
+
+## Архитектурные ограничения
+
+Сейчас намеренно **не** реализованы:
+
+- полноценный event-by-event renderer всех Responses API events;
+- Computer Use executor;
+- MCP UX;
+- Realtime voice.
+
+Live renderer остаётся быстрым текстовым buffer, а background recovery использует resumable stream с `starting_after`.
+
+Полный Compose rewrite также не является текущей задачей: сначала нужно уменьшить ответственность `MainActivity.kt`.
+
+## Правило поддержания документации
+
+Чтобы README не превращался в устаревший backlog:
+
+- **что уже работает** → в «Что уже реализовано»;
+- **новое завершённое изменение** → в «История инженерных изменений»;
+- **что ещё предстоит** → только в «Что сейчас в плане»;
+- **факт CI** → проверять в GitHub Actions;
+- подробности для следующего агента → в `NEXT_AGENT_HANDOFF.md`.
+
+Подробный continuity note: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
