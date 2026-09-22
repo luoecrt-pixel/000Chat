@@ -32,6 +32,14 @@ class ActiveResponseStateStore {
         return stoppedGeneration
     }
 
+    fun setGeneration(generation: Long) {
+        state = state.copy(generation = generation)
+    }
+
+    fun setUserStopRequestedGeneration(generation: Long?) {
+        state = state.copy(userStopRequestedGeneration = generation)
+    }
+
     fun clearUserStop() {
         state = state.copy(userStopRequestedGeneration = null)
     }
