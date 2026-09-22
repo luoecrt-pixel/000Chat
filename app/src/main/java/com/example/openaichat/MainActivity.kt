@@ -121,10 +121,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var effortBadge: TextView
 
     private var currentCall: Call? = null
-    private var requestGeneration = 0L
-    private var currentResponseId: String? = null
-    private var activeAssistantItemId: String? = null
-    private var userStopRequestedGeneration: Long? = null
+    private val activeResponseState = ActiveResponseStateStore()
+    private var requestGeneration: Long
+        get() = activeResponseState.state.generation
+        set(value) = activeResponseState.setGeneration(value)
+    private var currentResponseId: String?
+        get() = activeResponseState.state.responseId
+        set(value) = activeResponseState.setResponseId(value)
+    private var activeAssistantItemId: String?
+        get() = activeResponseState.state.assistantItemId
+        set(value) = activeResponseState.setAssistantItemId(value)
+    private var userStopRequestedGeneration: Long?
+        get() = activeResponseState.state.userStopRequestedGeneration
+        set(value) = activeResponseState.setUserStopRequestedGeneration(value)
     private var activeRequestRegenerate = false
     private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -219,7 +228,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         persistComposerStateNow()
-        requestGeneration++
+        activeResponseState.nextGeneration()
         activeResumeCalls.values.forEach { it.cancel() }
         activeResumeCalls.clear()
         // Only close the local HTTP stream. Background Responses keep running on the
@@ -233,7 +242,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isRequestCurrent(chatId: String, generation: Long): Boolean =
-        currentChatId() == chatId && requestGeneration == generation && activityVisible && !isFinishing
+        currentChatId() == chatId &&
+            activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
 
     // ---------- UI ----------
     private fun buildUi() {
@@ -462,7 +472,7 @@ class MainActivity : ComponentActivity() {
             addAll(listComposerLocalFilePaths(id))
         }
         if(currentChatId()==id){
-            requestGeneration++
+            activeResponseState.nextGeneration()
             currentCall?.cancel()
         }
         activeResumeCalls.remove(id)?.cancel()
@@ -683,7 +693,7 @@ class MainActivity : ComponentActivity() {
 
     private fun newChat() {
         persistComposerStateNow()
-        requestGeneration++
+        activeResponseState.nextGeneration()
         currentCall?.cancel()
         persistCurrentChat()
         val id = newChatId()
@@ -706,7 +716,7 @@ class MainActivity : ComponentActivity() {
 
     private fun switchChat(id:String) {
         persistComposerStateNow()
-        requestGeneration++
+        activeResponseState.nextGeneration()
         currentCall?.cancel()
         persistCurrentChat()
         prefs.edit().putString("current_chat",id).apply()
@@ -779,9 +789,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopCurrentResponse(){
         val chatId=currentChatId()
-        val generation=requestGeneration
-        userStopRequestedGeneration=generation
-        requestGeneration++
+        val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
         activeResumeCalls.remove(chatId)?.cancel()
         val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
@@ -822,7 +830,7 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeAssistantItemId=null
         setBusy(false)
-        userStopRequestedGeneration=null
+        activeResponseState.clearUserStop()
         activeRequestRegenerate=false
         status.text="Остановлено — запрос отменён"
         toolStates.clear(); renderToolActivity()
@@ -838,7 +846,7 @@ class MainActivity : ComponentActivity() {
         if(pendingUploads>0){ status.text="Дождитесь загрузки вложений…"; return }
         if(preparingZipAttachments){ status.text="Готовлю ZIP-вложения…"; return }
         val requestChatId = currentChatId()
-        val requestGeneration = ++this.requestGeneration
+        val requestGeneration = activeResponseState.nextGeneration()
         val startedAt = SystemClock.elapsedRealtime()
 
         var text = if(regenerate) lastUserText else input.text.toString().trim()
@@ -1853,7 +1861,7 @@ class MainActivity : ComponentActivity() {
         ))
         runOnUiThread{
             if(currentChatId()==chatId){
-                requestGeneration++
+                activeResponseState.nextGeneration()
                 currentResponseId=responseId.takeIf{it.isNotBlank()}
                 baselineEffort=effectiveEffort
                 activeAssistantItemId=null
@@ -3486,7 +3494,7 @@ class MainActivity : ComponentActivity() {
     private fun editMessage(idx:Int){
         if(idx<0 || idx>=chat.size) return
         if(chat[idx].optString("role")!="user") return
-        requestGeneration++
+        activeResponseState.nextGeneration()
         currentCall?.cancel()
         val message=chat[idx]
         val text=message.optString("text")

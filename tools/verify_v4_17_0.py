@@ -171,13 +171,20 @@ assert (ROOT / 'app/src/test/java/com/example/openaichat/ResumableResponseReques
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundRecoveryPolicy.kt').read_text()
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'concurrency:' in workflow
-assert 'activityVisible && !isFinishing' in main
+assert 'activityVisible' in main
+assert 'isFinishing)' in main
+assert '!finishing' in (ROOT / 'app/src/main/java/com/example/openaichat/ActiveResponseState.kt').read_text()
 assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
 assert 'WindowInsetsCompat.Type.systemBars()' in main
 assert 'ResumableResponseStreamClient' in main
 assert 'startingAfter = cursor' in main
 assert 'last_sequence_number' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()
+assert (ROOT / 'app/src/main/java/com/example/openaichat/ActiveResponseState.kt').exists()
+assert (ROOT / 'app/src/test/java/com/example/openaichat/ActiveResponseStateTest.kt').exists()
+assert 'ActiveResponseStateStore' in main
+assert 'activeResponseState.state.isCurrent' in main
+assert 'activeResponseState.markUserStop()' in main
 assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
 assert 'ResponseStreamSequenceGapException' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
