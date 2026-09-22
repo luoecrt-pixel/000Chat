@@ -166,6 +166,8 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 Покрыть:
 
+**Подтверждённый новый race:** marker ручного Stop нельзя очищать сразу и нельзя хранить только последний остановленный generation. Иначе поздний executor callback может потерять факт user-stop и снова уйти в background continuation. PR #25 меняет контракт state на инвалидизацию всех generation до последнего user-stop.
+
 - Stop до `response.created`;
 - late callback после Stop/Delete;
 - stale Worker finalization после нового request;
