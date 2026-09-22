@@ -121,10 +121,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var effortBadge: TextView
 
     private var currentCall: Call? = null
-    private var requestGeneration = 0L
-    private var currentResponseId: String? = null
-    private var activeAssistantItemId: String? = null
-    private var userStopRequestedGeneration: Long? = null
+    private val activeResponseState = ActiveResponseStateStore()
+    private var requestGeneration: Long
+        get() = activeResponseState.state.generation
+        set(value) = activeResponseState.setGeneration(value)
+    private var currentResponseId: String?
+        get() = activeResponseState.state.responseId
+        set(value) = activeResponseState.setResponseId(value)
+    private var activeAssistantItemId: String?
+        get() = activeResponseState.state.assistantItemId
+        set(value) = activeResponseState.setAssistantItemId(value)
+    private var userStopRequestedGeneration: Long?
+        get() = activeResponseState.state.userStopRequestedGeneration
+        set(value) = activeResponseState.setUserStopRequestedGeneration(value)
     private var activeRequestRegenerate = false
     private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
