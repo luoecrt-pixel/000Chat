@@ -172,7 +172,8 @@ assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/Ba
 assert 'jitteredDelayMs' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'concurrency:' in workflow
 assert 'activityVisible' in main
-assert '!isFinishing' in main
+assert 'isFinishing)' in main
+assert '!finishing' in (ROOT / 'app/src/main/java/com/example/openaichat/ActiveResponseState.kt').read_text()
 assert 'ViewCompat.setOnApplyWindowInsetsListener' in main
 assert 'WindowInsetsCompat.Type.systemBars()' in main
 assert 'ResumableResponseStreamClient' in main
