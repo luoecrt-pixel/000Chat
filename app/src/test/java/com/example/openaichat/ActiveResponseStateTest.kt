@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.lang.reflect.Modifier
 
 class ActiveResponseStateTest {
     @Test
@@ -41,6 +42,13 @@ class ActiveResponseStateTest {
         assertTrue(store.state.wasUserStopped(generation))
         assertFalse(store.state.isCurrent(generation, activityVisible = true, finishing = false))
         assertTrue(store.state.isCurrent(generation + 1L, activityVisible = true, finishing = false))
+    }
+
+    @Test
+    fun stateSnapshotIsVolatileForCrossThreadReaders() {
+        val field = ActiveResponseStateStore::class.java.getDeclaredField("state")
+
+        assertTrue(Modifier.isVolatile(field.modifiers))
     }
 
     @Test
