@@ -1,154 +1,257 @@
-# OpenAI API Chat — Astra v4.16.3
+# OpenAI API Chat — Astra v4.17.0
 
 Нативный Android-клиент для собственного OpenAI API key, ориентированный на GPT-6 Astra.
 
-## Реализовано
+## Текущий статус
 
-- Чат-интерфейс и несколько локальных чатов
-- SQLite история с миграцией старого `chat_store`
-- лёгкий список чатов без загрузки всей истории
-- Responses API streaming + `previous_response_id`
-- `gpt-6-astra`, reasoning low/medium/high/xhigh/max + Auto
-- `configuration_update` для смены reasoning effort в standard mode
-- `web_search` + кликабельные `url_citation`
-- File Search + `file_citation` с явным скачиванием
-- Code Interpreter + реальные `container_file_citation` и локальный cache
-- Image Generation + локальное сохранение результата PNG и preview
-- Images input через Files API `file_id`
-- Markdown/bare HTTP(S) links
-- ZIP import с потоковой распаковкой и лимитами
-- диагностика, usage/effort metrics, 👍/👎 feedback
-- live tool activity statuses
-- local Astra file library (Open/Save/Share/Delete)
-- background Responses with automatic resume after app restart
-- persistent composer drafts and uploaded attachments per chat
-- отмена генерации и защита от устаревших callback
-- экспорт/сохранение/поделиться через Android Storage Access Framework
-- GitHub Actions build workflow
+**Канонический репозиторий:** `luoecrt-pixel/OpenAIApiChat`  
+**Основная ветка:** `main`  
+**Кодовая база:** `4.17.0` / versionCode `64`  
+**DB schema:** `v15`  
+**MainActivity:** ~4.5k строк
 
-## v4.16.3 — reliability patch 2026-09-21
+Последний кодовый baseline перед этим документальным PR:
 
-После дополнительной проверки `main` были исправлены ещё три узких места:
+`ce251af52ef899907e17f11dff237fb9cf3798c6`
 
-- active background response теперь хранит свой режим `background_enabled`, поэтому recovery не запускается для запросов, которым он был отключён;
-- background polling/finalization использует атомарную проверку `chatId + requestId`, поэтому поздний ответ старого запроса не может записаться поверх нового состояния того же чата;
-- streaming и background polling больше не выбрасывают пользователя вниз, если он сознательно читает старую часть истории; ручная отправка нового сообщения всё равно прокручивает к последнему элементу.
+После baseline были добавлены два точечных reliability-fix PR без bump версии:
 
-DB schema: **v14**, versionCode: **63**.
+- **PR #19** — строгая непрерывность `sequence_number` для foreground SSE и resumable recovery.
+- **PR #20** — Stop/cancellation привязан к generation запроса, чтобы устаревший executor не повторял UI-восстановление.
 
-CI verifier обновлён до `tools/verify_v4_16_3.py`.
+## CI — где смотреть фактический результат
 
-## v4.16.2 — инженерные изменения 2026-09-21
+README описывает состояние и архитектуру. GitHub Actions является источником факта о прохождении сборки.
 
-За одну сессию были последовательно закрыты несколько классов рисков:
+[Build Android APK](../../actions/workflows/build.yml)  
+[Build Android Release](../../actions/workflows/release.yml)
 
-### Надёжность Responses / фонового режима
-
-- request-aware очистка `active_response`, чтобы старый callback не мог стереть новое состояние;
-- bounded polling client с connect/read/call timeout;
-- обработка HTTP 401/403/404/410/429/5xx и сетевых ошибок с backoff/jitter;
-- SSE parser с CRLF, multiline `data:`, комментариями, EOF flush и проверкой `sequence_number`;
-- process-death recovery через WorkManager;
-- unique work на пару `chatId + requestId`;
-- cancel/resume логика синхронизирована между Activity и WorkManager;
-- частичный текст фонового ответа сохраняется и безопасно восстанавливается;
-- метрики считают успешным только `completionState == "completed"`.
-
-### SQLite и сохранение истории
-
-- включено явное SQLite foreign-key enforcement;
-- DB schema сейчас **v13**;
-- добавлен `messages.content_hash`;
-- `ChatMessageFingerprint` использует SHA-256 persisted message fields;
-- `upsertCurrentChat()` стал incremental: неизменённые сообщения не переписываются;
-- удаление устаревших строк учитывает и удаления из середины истории;
-- создан JVM-тест fingerprint;
-- удаление чата чистит также принадлежащие ему локальные файлы.
-
-### UI / производительность
-
-- локальные изображения декодируются асинхронно;
-- добавлен 12 MB LRU thumbnail cache;
-- preview generated/user images не блокирует UI;
-- история чата переведена с `ScrollView + LinearLayout` на `RecyclerView`;
-- добавлен `ChatMessageAdapter` с `DiffUtil`;
-- восстановление длинной истории идёт через diff вместо ручного создания всех View;
-- streaming-дельты обновляют только текст активного item через payload;
-- async thumbnail callbacks защищены от race при recycling ViewHolder.
-
-### CI / верификация
-
-Canonical workflow: `.github/workflows/build.yml`.
-
-CI запускает:
+Debug workflow:
 
 ```
 gradle --no-daemon --stacktrace test lintDebug assembleDebug
 ```
 
-Проверка исходников выполняется через `tools/verify_v4_16_2.py`.
+Release workflow:
 
-В этой сессии два реальных CI-дефекта были найдены по логам и исправлены:
+```
+gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease
+```
 
-1. PR #6: JVM unit-тесты fingerprint падали из-за Android stub `org.json`. Исправление — `testImplementation("org.json:json:20250517")`.
-2. PR #7: после миграции на RecyclerView четыре места вызывали `scrollToLatest()`, но helper не попал в первый коммит. Добавлен отдельным fix-коммитом.
+Debug artifact:
 
-После исправлений:
-- PR #6 merged, CI main run #106 — **success**;
-- PR #7 merged, CI main run #109 — **success**.
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
 
-## История инженерных PR
+Release artifacts:
 
-| PR | Назначение | Статус |
-|---|---|---|
-| #1 | source moved out of ZIP archive | merged |
-| #3 | response lifecycle + CI hardening | merged |
-| #4 | SSE parsing + background recovery hardening | merged |
-| #5 | process-death resilient background responses / WorkManager | merged |
-| #6 | incremental chat persistence + async thumbnails | merged |
-| #7 | RecyclerView + DiffUtil chat history | merged |
+```
+app/build/outputs/apk/release/*.apk
+app/build/outputs/bundle/release/*.aab
+```
 
-PR #2 был закрыт без merge.
+Source verifier:
 
-## Сборка
+`tools/verify_v4_17_0.py`
 
-Репозиторий сейчас канонически доступен как **`luoecrt-pixel/OpenAIApiChat`**. Старый URL `luoecrt-pixel/Mychatgpt` редиректит на каноническое имя.
+Release workflow проверяет упаковку APK/AAB. Это не production signing/publishing.
 
-Текущий app config:
+## История инженерных изменений
 
-- versionName: **4.16.2**
-- versionCode: **62**
+### v4.17.0 engineering baseline
+
+- **PR #10** — resumable background Responses, durable sequence cursor, `starting_after`, retry/gap recovery.
+- **PR #11** — `AsyncListDiffer` для истории чатов.
+- **PR #12** — modern Activity Result API.
+- **PR #13** — RecyclerView 1.4.0.
+- **PR #15** — централизованный `ActiveResponseState`.
+- **PR #17** — release APK/AAB CI.
+- **PR #18** — O(1) lookups в `ChatMessageAdapter`.
+
+### Reliability fixes поверх baseline
+
+- **PR #19** — единый строгий sequence-gap contract для foreground и resumable SSE.
+- **PR #20** — Stop/cancellation generation race fix.
+
+### Ранние reliability/UI изменения
+
+До v4.17.0 были последовательно закрыты:
+
+- request-aware background recovery и атомарная финализация по `chatId + requestId`;
+- bounded polling/retry и HTTP error policy;
+- SSE parser hardening;
+- WorkManager process-death recovery;
+- incremental SQLite persistence + `content_hash`;
+- async thumbnails + LRU cache;
+- RecyclerView migration;
+- Activity Result migration;
+- sticky-scroll policy;
+- FileProvider hardening;
+- локальный cleanup принадлежащих чату файлов.
+
+Детали старых версий остаются в `V4.*_NOTES.md`.
+
+Исторические PR, не являющиеся альтернативными реализациями:
+
+- **PR #2** — закрыт без merge;
+- **PR #14** — первая попытка release/AAB CI, закрыта;
+- **PR #16** — superseded by #17, закрыт.
+
+## Что приложение умеет сейчас
+
+### Chat / Responses
+
+- несколько локальных чатов;
+- SQLite-история с миграциями;
+- Responses API streaming + `previous_response_id`;
+- `gpt-6-astra`, reasoning low/medium/high/xhigh/max + Auto;
+- `configuration_update`;
+- generation-based защита от устаревших callback;
+- request-aware DB writes;
+- отмена генерации;
+- resumable SSE с durable cursor;
+- fail-fast на sequence gap + retry/backoff/jitter;
+- background Responses через WorkManager после process death;
+- сохранение и восстановление partial response.
+
+### Tools / files / images
+
+- `web_search` + `url_citation`;
+- File Search + `file_citation`;
+- Code Interpreter + `container_file_citation`;
+- Image Generation + локальные PNG/preview;
+- Images input через Files API `file_id`;
+- Markdown/bare HTTP(S) links;
+- ZIP import с потоковой распаковкой и лимитами;
+- local Astra file library;
+- Android Storage Access Framework для export/share/save.
+
+### UI / performance / diagnostics
+
+- persistent composer drafts и uploaded attachments per chat;
+- RecyclerView + AsyncListDiffer;
+- O(1) adapter identity/model/display indexes;
+- payload-style streaming updates;
+- async image decode + 12 MB LRU thumbnail cache;
+- sticky scroll policy;
+- diagnostics и usage/effort metrics;
+- 👍/👎 feedback;
+- live tool activity statuses;
+- успешным считается только `completionState == "completed"`.
+
+## Текущая сборочная конфигурация
+
 - compileSdk / targetSdk: **35**
 - minSdk: **26**
 - JDK: **17**
 - AGP: **8.7.3**
 - Kotlin Gradle Plugin: **2.0.21**
-- Gradle CI: **8.9**
+- Gradle в CI: **8.9**
+- Activity KTX: **1.10.1**
 - WorkManager: **2.11.2**
-- RecyclerView: **1.3.2**
+- RecyclerView: **1.4.0**
 - Core KTX: **1.15.0**
 - OkHttp: **4.12.0**
+- JUnit: **4.13.2**
+- JVM `org.json`: **20250517**
 
-CI устанавливает Android SDK 35 и build-tools 35.0.0.
+Текущий baseline намеренно остаётся на compileSdk 35. Отдельные попытки обновить более новые Activity/Core KTX показали требования к более новому compileSdk; такой upgrade нужно делать отдельным compatibility pass.
 
-## Что осталось проверить / улучшить
+## Что сейчас в плане
 
-После v4.16.3 наиболее полезные следующие шаги остаются архитектурными и тестовыми: детерминированные тесты background lifecycle/DB migration, миграция RecyclerView на async diff, cleanup deprecated Activity APIs, release/AAB CI и постепенное выделение response/recovery логики из MainActivity.
+Это только **незавершённые** направления. Сделанные пункты из старых планов сюда не возвращаются.
 
-Подробный handoff для следующей модели: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
+### 1. Детерминированные lifecycle/recovery tests
 
-Наиболее полезный следующий порядок:
+Покрыть:
 
-1. Добавить тесты для lifecycle/DB/background recovery: stale request, stop/delete race, WorkManager recovery, HTTP retry policy, миграции DB v12→v13.
-2. Улучшить `RecyclerView`: перейти с синхронного `DiffUtil.calculateDiff()` на `AsyncListDiffer/ListAdapter` и не принудительно прокручивать вниз, если пользователь уже читает старые сообщения.
-3. Обновить стабильные AndroidX зависимости. На 2026-09-21 официальные AndroidX release pages указывают RecyclerView 1.4.0, Core/KTX 1.19.0 и WorkManager 2.11.2.
-4. Отдельно планировать миграцию AGP/Kotlin/Gradle: текущий AGP 8.7.3 существенно старше актуального AGP 9.x; современный AGP 9.x меняет встроенную Kotlin-интеграцию и требует отдельного compatibility pass.
-5. Убрать deprecated Activity APIs: `systemWindowInset*`, `consumeSystemWindowInsets()`, `startActivityForResult()`, `onActivityResult()`.
-6. Разделять гигантский `MainActivity.kt` на UI/state/network/persistence/recovery слои небольшими PR, без большого rewrite.
-7. Расширить CI отдельным release/AAB build и проверкой release variant, потому что текущий workflow гарантирует только debug APK.
-8. Проверить FileProvider paths, локальное orphan-file cleanup и retention диагностического журнала.
-9. Для полного event-driven Responses renderer сохранить отдельный проектный этап; текущий live renderer намеренно остаётся быстрым текстовым buffer.
+- Stop до `response.created`;
+- late callback после Stop/Delete;
+- stale Worker finalization после нового request;
+- переключение чата во время callback;
+- orphan active-response state;
+- DB v13→v14→v15;
+- partial-response preservation.
 
-## Ограничения
+### 2. Response/recovery controller
 
-Полноценный event-by-event renderer всех Responses API событий, Computer Use executor, MCP UX и Realtime voice — отдельные функции. Финальный ответ уже проходит через `AstraResponseModel`, а live streaming display использует быстрый текстовый буфер. Background Responses автоматически восстанавливаются через polling; cursor-based stream resume (`starting_after`) пока не используется.
+Вынести из `MainActivity.kt` lifecycle вокруг:
+
+- generation;
+- response ID;
+- completion state;
+- retry/backoff;
+- DB checkpoints;
+- Activity ↔ WorkManager coordination.
+
+### 3. Attachment/upload/composer controller
+
+Отдельно вынести:
+
+- URI/file/image upload;
+- ZIP extraction;
+- upload progress;
+- composer persistence.
+
+### 4. Thread-safety audit
+
+Проверить границы потоков для `ActiveResponseStateStore`, Executor, Activity и WorkManager. Менять синхронизацию только после подтверждённого race.
+
+### 5. Diagnostics/security review
+
+Проверить:
+
+- retention/clear диагностического журнала;
+- отсутствие API keys и message bodies в diagnostics;
+- orphan local files;
+- FileProvider least-privilege paths.
+
+Базовая защита FileProvider и cleanup уже присутствуют; здесь нужен дополнительный аудит.
+
+### 6. Release hardening
+
+Отдельный PR для:
+
+- явной политики shrinker/minification;
+- проверки renderer/reflection/file handling под shrinker;
+- сохранения signing/publishing отдельно.
+
+### 7. Compose — после state/controller extraction
+
+Не делать big-bang rewrite.
+
+Порядок:
+
+`response controller → attachment/composer state → immutable screen state/events → один bounded Compose feature → incremental chat migration`
+
+### 8. AGP / Kotlin / compileSdk migration
+
+Отдельный compatibility project. Не совмещать с небольшими reliability PR.
+
+### 9. Gradle Wrapper
+
+Добавить wrapper для совпадения local/CI toolchain и воспроизводимой сборки.
+
+## Архитектурные ограничения
+
+Сейчас намеренно не реализованы:
+
+- полноценный event-by-event renderer всех Responses API events;
+- Computer Use executor;
+- MCP UX;
+- Realtime voice.
+
+Live renderer остаётся быстрым текстовым buffer, background recovery — resumable stream с `starting_after`.
+
+Полный Compose rewrite не является текущей задачей: сначала нужно уменьшить ответственность `MainActivity.kt`.
+
+## Правила поддержания документации
+
+- что уже работает → в «Что приложение умеет сейчас» и/или истории;
+- завершённый пункт плана → убрать из плана и добавить в историю;
+- незавершённое → держать только в «Что сейчас в плане»;
+- факт CI → смотреть в GitHub Actions;
+- детали для следующего агента → `NEXT_AGENT_HANDOFF.md`.
+
+Подробный continuity note: [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
