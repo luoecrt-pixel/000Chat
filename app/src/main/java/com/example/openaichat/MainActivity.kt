@@ -1298,7 +1298,9 @@ class MainActivity : ComponentActivity() {
                 }
             } catch(e:Exception) {
                 val cancelled=call.isCanceled()
-                val userStopped = userStopRequestedGeneration == requestGeneration
+                // stopCurrentResponse() invalidates this request generation and already restores
+                // the composer/chat UI. The worker must not replay those mutations after the stop.
+                val userStopped = activeResponseState.state.wasUserStopped(requestGeneration)
                 val canContinueInBackground = backgroundEnabled && newId != null && completionState == "in_progress" && !userStopped
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
@@ -1313,6 +1315,9 @@ class MainActivity : ComponentActivity() {
                     },
                     mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId, "generation" to requestGeneration, "latency_ms" to latency, "error" to (e.message ?: e.toString()).take(512))
                 )
+                if (userStopped) {
+                    return@execute
+                }
                 if(canContinueInBackground){
                     val active=try{chatDb.getActiveResponse(requestChatId)}catch(_:Exception){null}
                     if(!activityVisible && newId!=null){
