@@ -73,6 +73,9 @@ class ChatMessageAdapter(
     }
 
     private val items = mutableListOf<ChatBubbleItem>()
+    private val itemById = mutableMapOf<String, ChatBubbleItem>()
+    private val itemIndexById = mutableMapOf<String, Int>()
+    private val displayPositionById = mutableMapOf<String, Int>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
 
     private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
@@ -83,6 +86,15 @@ class ChatMessageAdapter(
             oldItem.contentSignature == newItem.contentSignature &&
                 oldItem.reasoningSummary == newItem.reasoningSummary
     })
+
+    init {
+        differ.addListListener { _, current ->
+            displayPositionById.clear()
+            current.forEachIndexed { index, item ->
+                displayPositionById[item.id] = index
+            }
+        }
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val card = createCard(parent)
