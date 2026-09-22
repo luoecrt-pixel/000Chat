@@ -183,6 +183,11 @@ Treat static verifier and real Gradle CI as separate checks.
 
 ## Current thread-safety note
 
+PR #23 added `@Volatile` to the immutable `ActiveResponseStateStore.state` snapshot so Activity/main-thread updates are visible to executor readers.
+
+**New confirmed follow-up:** PR #20/23 still exposed a lifecycle hole in the user-stop marker. `stopCurrentResponse()` cleared the marker immediately, and a later Stop could overwrite the previous marker. The safe contract is monotonic: all generations up to the latest user-stop generation remain classified as user-stopped. PR #25 is the focused fix and test coverage for this contract.
+
+
 `ActiveResponseStateStore.state` is read from executor callbacks while its immutable snapshots are updated on the Activity/main thread. PR #23 adds `@Volatile` to the snapshot and a structural JVM test for that visibility contract. This addresses one confirmed cross-thread visibility boundary; the broader Activity/Executor/WorkManager thread-safety audit remains open.
 
 ## What is still worth doing
@@ -295,9 +300,13 @@ When a planned item is completed, remove it from the plan and record it in the r
 4. Посмотри не только локальный участок, но и границу между Activity, Executor, Worker и DB, когда изменение касается lifecycle/recovery.
 5. Перед рефакторингом найди существующие тесты и текущие invariants.
 
+### Рабочее окно
+
+Один рабочий заход должен длиться ориентировочно **10–25 минут**. Цель — успеть разобраться, изменить, проверить и оставить понятный след в документации. Не подгоняй архитектуру под фиксированное число PR: за один заход может выйти один PR, несколько очень маленьких связанных изменений или только подтверждённый вывод.
+
 ### Размер изменений
 
-- Обычно делай 1 небольшой PR за шаг.
+Количество PR не является целью. Обычно делай небольшое изменение за один логический шаг.
 - Допустимы 2 очень маленьких тесно связанных PR, если разделение реально улучшает проверяемость.
 - Не объединяй в один PR архитектурный рефакторинг, upgrade зависимостей и косметический cleanup.
 - После механических переименований обязательно ищи старые символы, импорты, helpers и устаревшие проверки.
@@ -325,7 +334,16 @@ When a planned item is completed, remove it from the plan and record it in the r
 - Документационные коммиты не считать новым code baseline.
 - Реальные CI failures фиксируй в отчёте честно, включая промежуточную причину.
 
-### Архитектурный взгляд
+### Архитектурный и продуктовый взгляд
+
+Периодически делай остановку и задавай два вопроса:
+
+1. «Мы сейчас устраняем реальную проблему или просто уменьшаем счётчик TODO?»
+2. «Есть ли здесь возможность сделать приложение заметно полезнее или необычнее без усложнения ради усложнения?»
+
+Для второго вопроса разрешено **придумывать новые идеи**, даже если их не было в исходном плане. Но сначала сформулируй конкретную пользовательскую ценность и минимальный проверяемый шаг. Хорошая идея должна вписываться в существующие данные/API и иметь путь к постепенной реализации.
+
+Пример текущего продуктового радара: **ветвление/форк чата от выбранного сообщения**, чтобы безопасно исследовать альтернативный запрос или настройки, сохраняя исходную ветку. Это пока кандидат для проверки, а не обещание реализации.
 
 Периодически делай остановку и задавай вопрос:
 
