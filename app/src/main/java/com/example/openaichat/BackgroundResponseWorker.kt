@@ -249,25 +249,6 @@ class BackgroundResponseWorker(
         }
     }
 
-    private fun retrieveResponse(responseId: String): JSONObject {
-        val key = SecureStore(applicationContext).getApiKey()
-        if (key.isBlank()) throw IOException("API key is not configured")
-        val request = Request.Builder()
-            .url("https://api.openai.com/v1/responses/$responseId")
-            .addHeader("Authorization", "Bearer $key")
-            .get()
-            .build()
-        client.newCall(request).execute().use { response ->
-            val raw = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val retryAfterMs = response.header("Retry-After")?.trim()?.toLongOrNull()
-                    ?.coerceIn(1L, 300L)?.times(1000L)
-                throw ApiHttpException(response.code, retryAfterMs, raw.take(4096))
-            }
-            return JSONObject(raw)
-        }
-    }
-
     private fun extractResponseText(response: JSONObject): String {
         val output = response.optJSONArray("output") ?: return ""
         val out = StringBuilder()
