@@ -194,7 +194,7 @@ class ChatDatabaseLifecycleTest {
 
     private fun assertColumnExists(table: String, column: String) {
         val db = SQLiteDatabase.openDatabase(
-            context.getDatabasePath(DB_NAME).path,
+            context.getDatabasePath(dbName).path,
             null,
             SQLiteDatabase.OPEN_READONLY
         )
