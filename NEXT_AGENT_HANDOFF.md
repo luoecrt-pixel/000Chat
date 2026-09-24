@@ -28,13 +28,13 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, а `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot. Background checkpoint, assistant-text и reasoning UI paths уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async upload completion. Background checkpoint, assistant-text/reasoning UI paths и file-upload completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
 
 ## Фактический baseline
 
-- main code baseline: `e786d557ec6240b050aef12e0898ac6bb7076fc7` (PR #40 squash)
+- main code baseline: `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d` (PR #41 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -100,7 +100,7 @@ Background checkpoint, assistant-text и reasoning callbacks проверены 
 ### 2. Attachment/upload/composer controller
 
 ### 2. Attachment/upload/composer controller
-URI/file/image upload, ZIP extraction, progress, composer persistence.
+Первый pure slice закрыт в #41: file-upload completion routing (`cancelled` / current composer / original source chat). Следующий slice — только после доказанной общей семантики для image upload и ZIP preparation; отдельно проверить composer persistence boundary.
 
 ### 3. Thread-safety audit
 Проверить оставшиеся Activity/Executor/Worker границы и shared mutable state. Менять синхронизацию только при доказанном race.
@@ -168,6 +168,9 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - **#40 merged:** `e786d557ec6240b050aef12e0898ac6bb7076fc7`.
 - **#40 PR-head CI:** Release `36070742037` — success; Debug `36070742104` — success, включая lifecycle instrumentation.
 - **#40 post-merge CI:** connector не вернул workflow runs для merge commit `e786d557...`; post-merge green не заявляется.
+- **#41 merged:** `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`.
+- **#41 PR-head CI:** Release `36072696907` — success; Debug `36072696947` — success, включая lifecycle instrumentation.
+- **#41 post-merge CI:** connector не вернул workflow runs для merge commit `35ae9fbf...`; post-merge green не заявляется.
 - Во время #36 были исправлены промежуточные integration проблемы, после чего exact-head CI стал зелёным.
 - **Post-merge runs:** connector не вернул runs для `409996fe...` и `98ca902b...`; post-merge green не заявляется.
 
