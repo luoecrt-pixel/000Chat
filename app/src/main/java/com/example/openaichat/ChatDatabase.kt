@@ -287,6 +287,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     fun deleteChat(id: String) {
         writableDatabase.transaction { db ->
             db.delete(MESSAGE_TABLE, "chat_id=?", arrayOf(id))
+            db.delete(METRICS_TABLE, "chat_id=?", arrayOf(id))
             db.delete(CHAT_TABLE, "id=?", arrayOf(id))
         }
     }
@@ -456,27 +457,39 @@ data class ExistingMessageRow(
         errorType: String?,
         estimatedCostUsd: Double = 0.0
     ) {
-        val v = ContentValues().apply {
-            put("chat_id", chatId)
-            put("created_at", System.currentTimeMillis())
-            putStringOrNull("request_id", requestId)
-            put("task_class", taskClass.ifBlank { "general" })
-            put("effort_pref", effortPref)
-            put("effective_effort", effectiveEffort)
-            put("auto_selected", if (autoSelected) 1 else 0)
-            put("prompt_chars", promptChars)
-            put("attachments", attachments)
-            put("latency_ms", latencyMs.coerceAtLeast(0))
-            put("input_tokens", inputTokens.coerceAtLeast(0))
-            put("cached_tokens", cachedTokens.coerceAtLeast(0))
-            put("cache_write_tokens", cacheWriteTokens.coerceAtLeast(0))
-            put("output_tokens", outputTokens.coerceAtLeast(0))
-            put("reasoning_tokens", reasoningTokens.coerceAtLeast(0))
-            put("success", if (success) 1 else 0)
-            putStringOrNull("error_type", errorType)
-            put("estimated_cost_usd", estimatedCostUsd.coerceAtLeast(0.0))
+        if (chatId.isBlank()) return
+        writableDatabase.transaction { db ->
+            val chatExists = db.query(
+                CHAT_TABLE,
+                arrayOf("id"),
+                "id=?",
+                arrayOf(chatId),
+                null, null, null, "1"
+            ).use { it.moveToFirst() }
+            if (!chatExists) return@transaction
+
+            val v = ContentValues().apply {
+                put("chat_id", chatId)
+                put("created_at", System.currentTimeMillis())
+                putStringOrNull("request_id", requestId)
+                put("task_class", taskClass.ifBlank { "general" })
+                put("effort_pref", effortPref)
+                put("effective_effort", effectiveEffort)
+                put("auto_selected", if (autoSelected) 1 else 0)
+                put("prompt_chars", promptChars)
+                put("attachments", attachments)
+                put("latency_ms", latencyMs.coerceAtLeast(0))
+                put("input_tokens", inputTokens.coerceAtLeast(0))
+                put("cached_tokens", cachedTokens.coerceAtLeast(0))
+                put("cache_write_tokens", cacheWriteTokens.coerceAtLeast(0))
+                put("output_tokens", outputTokens.coerceAtLeast(0))
+                put("reasoning_tokens", reasoningTokens.coerceAtLeast(0))
+                put("success", if (success) 1 else 0)
+                putStringOrNull("error_type", errorType)
+                put("estimated_cost_usd", estimatedCostUsd.coerceAtLeast(0.0))
+            }
+            db.insert(METRICS_TABLE, null, v)
         }
-        writableDatabase.insert(METRICS_TABLE, null, v)
     }
 
     fun recordFeedback(chatId: String, requestId: String, value: Int) {
