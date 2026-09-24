@@ -1342,7 +1342,7 @@ class MainActivity : ComponentActivity() {
                                 currentCall=null
                                 status.text="Соединение прервалось — Astra продолжает работу…"
                                 activeAssistantItemId?.let { id ->
-                                    val partial=full.toString()
+                                    val partial=responseState.text
                                     if(partial.isNotBlank()) messageAdapter.updateText(id, partial)
                                 }
                                 setBusy(true)
@@ -1366,8 +1366,8 @@ class MainActivity : ComponentActivity() {
                     setBusy(false)
                     activeAssistantItemId=null
                     currentCall=null
-                    if(!cancelled && completionState=="incomplete" && full.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
-                        val partial=JSONObject().put("role","assistant").put("text",full.toString()).put("incomplete",true).put("status","incomplete")
+                    if(!cancelled && completionState=="incomplete" && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
+                        val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status","incomplete")
                         newId?.let{partial.put("response_id",it)}
                         requestId?.let{partial.put("request_id",it)}
                         chat.add(partial)
