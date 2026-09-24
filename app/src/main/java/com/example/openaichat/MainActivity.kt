@@ -1193,23 +1193,6 @@ class MainActivity : ComponentActivity() {
                                 "response.code_interpreter_call.failed" -> updateToolState("code_interpreter","failed",requestChatId,requestGeneration)
                                 "response.image_generation_call.failed" -> updateToolState("image_generation","failed",requestChatId,requestGeneration)
                                 "response.computer_call.failed" -> updateToolState("computer","failed",requestChatId,requestGeneration)
-                                "response.incomplete" -> {
-                                    val r=ev.optJSONObject("response")
-                                    completionState="incomplete"
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    usage=r?.optJSONObject("usage")
-                                    completionError=r?.optJSONObject("incomplete_details")?.optString("reason")
-                                    completedResponse=r
-                                }
-                                "response.failed" -> {
-                                    val r=ev.optJSONObject("response")
-                                    completionState="failed"
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    usage=r?.optJSONObject("usage")
-                                    completionError=r?.optJSONObject("error")?.optString("message")
-                                        ?: r?.optString("error")
-                                    completedResponse=r
-                                }
                                 "response.completed" -> {
                                     val r=responseState.terminalResponse
                                     parseTools(r?.optJSONArray("output"),toolItems,requestChatId,requestGeneration)
