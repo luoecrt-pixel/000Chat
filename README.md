@@ -4,15 +4,15 @@
 
 ## Текущее состояние
 
-- **main code baseline:** `409996fe2484d5ac71f096a0331fb9c64ada4ff6` (PR #36 squash)
-- **latest handoff docs:** `fa234ac2d1646937ac84f2f6493bf4fc32920be3`
+- **main code baseline:** `98ca902bd2474129fbb6e95ebfaa23cef8b1cb01` (PR #37 squash)
+- **latest handoff docs:** `12eb9788951ff46ccbe3c84c2bfd35deae8c00c3`
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
 - **min SDK:** `26`
 - **MainActivity:** ~4.5k строк
 
-#36 добавил общий `ResponseEventReducer` для foreground и background response paths, сохранив sequence cursor на transport boundary. PR-head Debug/Release CI зелёные; Debug также прошёл реальный Activity lifecycle instrumentation harness.
+#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. PR-head Debug/Release CI зелёные; Debug прошёл реальный Activity lifecycle instrumentation harness.
 
 GitHub Actions — источник факта о CI. Документальные коммиты после merge не считаются новым code baseline.
 
@@ -44,7 +44,7 @@ GitHub Actions — источник факта о CI. Документальны
 
 Главная lifecycle-цепочка сейчас:
 
-`generation → request/response IDs → immutable UI ownership snapshot → persisted active-response state → WorkManager recovery`
+`generation → request/response IDs → immutable UI ownership snapshot → response event semantics → persisted active-response state → WorkManager recovery`
 
 Критические DB-поля:
 
@@ -52,21 +52,24 @@ GitHub Actions — источник факта о CI. Документальны
 
 `upsertCurrentChatIfActiveRequest()` не должен финализировать устаревший request.
 
-`MainActivity.kt` остаётся большим orchestration layer. #36 сделал первый общий response-event/controller seam: `ResponseEventReducer` отвечает за response semantics, а transport/Activity/WorkManager остаются adapters.
+Текущие seams:
+- `ResponseEventReducer` — pure response event semantics;
+- `ResumableResponseStreamClient` — transport + recovery sequence cursor;
+- `ActiveResponsePersistence` — persisted active-response adapter.
 
-**Важно:** sequence cursor не переносится в reducer. `ResumableResponseStreamClient` уже владеет duplicate/gap handling для recovery path; foreground transport сохраняет свой cursor на соответствующей границе.
+`MainActivity.kt` остаётся большим orchestration layer. Следующий шаг — вынести timing/checkpoint/ownership decisions из event loops, не превращая reducer в Android/DB/WorkManager объект.
 
 RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой после state/controller extraction, а не текущий rewrite.
 
-## Архитектурный обзор — после #36
+## Архитектурный обзор — после #37
 
-Следующий полезный срез — не ещё один универсальный reducer, а persistence/ownership boundary вокруг уже общего event semantics.
+Следующий полезный срез — **pure checkpoint/ownership policy** поверх уже общих event semantics и persistence boundary.
 
-Цель следующего PR:
-- убрать прямые checkpoint writes из event-processing loops в маленький adapter/repository contract;
-- сохранить immutable ownership snapshot `chatId + generation + assistantItemId`;
-- не переносить Android/OkHttp/WorkManager зависимости в pure controller;
-- отдельно проверить foreground и background checkpoint behavior.
+Цель:
+- reducer state + timing + sequence → deterministic persistence decision;
+- immutable ownership snapshot остаётся на UI boundary;
+- adapter выполняет запись, но не решает бизнес-семантику;
+- один foreground/recovery runtime path переносится первым.
 
 Tool/UI effects пока не нужно затаскивать в reducer: сначала стабилизировать state + persistence semantics.
 
@@ -74,7 +77,7 @@ Tool/UI effects пока не нужно затаскивать в reducer: сн
 
 Только незавершённое:
 
-1. Response/recovery controller: persistence/checkpoint + ownership adapter вокруг `ResponseEventReducer`.
+1. Response/recovery controller: pure checkpoint/ownership policy вокруг `ResponseEventReducer` + `ActiveResponsePersistence`.
 2. Attachment/upload/composer controller.
 3. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
 4. Diagnostics/security review.
@@ -88,6 +91,7 @@ Tool/UI effects пока не нужно затаскивать в reducer: сн
 - #34: late metric/telemetry callback после Delete больше не может заново создать telemetry для удалённого chat.
 - #35: реальная Android Activity lifecycle boundary после Stop/Delete закрыта instrumentation coverage.
 - #36: общий response-event reducer для foreground/background paths; JVM tests; exact-head Debug/Release зелёные.
+- #37: active-response persistence adapter вокруг существующих request-aware DB primitives; exact-head Debug/Release зелёные.
 
 ### Product radar
 
