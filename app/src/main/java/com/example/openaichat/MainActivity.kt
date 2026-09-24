@@ -1,10 +1,4 @@
-package                                "undefined" -> Unit
-                               "undefined" -> Unit
-                               "undefined" -> Unit
-                               "undefined" -> Unit
-                               "undefined" -> Unit
-                               "undefined" -> Unit
-com.example.openaichat
+package com.example.openaichat
 
 import android.app.*
 import android.content.*
@@ -1640,7 +1634,7 @@ class MainActivity : ComponentActivity() {
                         chatDb.updateActiveResponse(
                             chatId,
                             responseId = responseId,
-                            text = responseState.text,
+                            text = full.toString(),
                             status = terminalState?.wireStatus ?: "in_progress",
                             lastSequenceNumber = lastSequence,
                             expectedRequestId = requestId
@@ -1656,7 +1650,7 @@ class MainActivity : ComponentActivity() {
                     chatDb.updateActiveResponse(
                         chatId,
                         responseId = responseId,
-                        text = responseState.text,
+                        text = full.toString(),
                         status = when (result.terminalEventType) {
                             "response.completed" -> "completed"
                             "response.failed" -> "failed"
@@ -1677,7 +1671,7 @@ class MainActivity : ComponentActivity() {
                 chatDb.updateActiveResponse(
                     chatId,
                     responseId = responseId,
-                    text = responseState.text,
+                    text = full.toString(),
                     status = "in_progress",
                     lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
                     expectedRequestId = requestId
