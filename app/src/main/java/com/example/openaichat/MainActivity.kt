@@ -1335,7 +1335,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         if(active!=null){
-                            streamBackgroundResponse(active)
+                            streamBackgroundResponse(
+                                active,
+                                BackgroundResponseUiSnapshot(
+                                    chatId = requestChatId,
+                                    generation = requestGeneration,
+                                    assistantItemId = assistantItemId
+                                )
+                            )
                         }
                     }
                     return@execute
