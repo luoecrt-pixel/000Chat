@@ -322,7 +322,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ).use { c ->
                 if (!c.moveToFirst()) null else c.getString(0)
             }
-            if (activeRequest != expectedRequestId) return@transaction
+            if (!ActiveResponseWritePolicy.shouldCommit(activeRequest, expectedRequestId)) return@transaction
             upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
             committed = true
         }

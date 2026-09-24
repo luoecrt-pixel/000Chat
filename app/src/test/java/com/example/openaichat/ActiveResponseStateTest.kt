@@ -31,6 +31,31 @@ class ActiveResponseStateTest {
     }
 
     @Test
+    fun stopBeforeResponseCreatedInvalidatesTheUncreatedRequestGeneration() {
+        val store = ActiveResponseStateStore()
+        val requestGeneration = store.nextGeneration()
+
+        assertTrue(store.state.responseId == null)
+        val stopped = store.markUserStop()
+
+        assertEquals(requestGeneration, stopped)
+        assertTrue(store.state.wasUserStopped(requestGeneration))
+        assertFalse(store.state.isCurrent(requestGeneration, activityVisible = true, finishing = false))
+    }
+
+    @Test
+    fun chatSwitchInvalidatesAResumeSnapshotEvenBeforeTheOldCallbackRuns() {
+        val store = ActiveResponseStateStore()
+        val generation = store.nextGeneration()
+        val snapshot = BackgroundResponseUiSnapshot("chat-a", generation, "assistant-a")
+
+        store.nextGeneration()
+
+        assertFalse(store.state.isCurrent(snapshot, "chat-a", "assistant-a", true, false))
+        assertFalse(store.state.isCurrent(snapshot, "chat-b", "assistant-a", true, false))
+    }
+
+    @Test
     fun stopRecordsOldGenerationAndInvalidatesIt() {
         val store = ActiveResponseStateStore()
         val generation = store.nextGeneration()
