@@ -70,6 +70,19 @@ jobs:
           set -euo pipefail
           gradle --no-daemon --stacktrace test lintDebug assembleDebug
 
+      - name: Free runner disk for Android emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Disk usage before Android emulator cleanup"
+          df -h
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sudo rm -rf "$sdk_root/system-images"/*
+          sudo rm -rf "$sdk_root/ndk"/*
+          sudo apt-get clean
+          echo "Disk usage after Android emulator cleanup"
+          df -h
+
       - name: Android lifecycle instrumentation tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
