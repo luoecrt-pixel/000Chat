@@ -199,11 +199,7 @@ class ChatDatabaseLifecycleTest {
     }
 
     private fun assertColumnExists(table: String, column: String) {
-        val db = SQLiteDatabase.openDatabase(
-            context.getDatabasePath(DB_NAME).path,
-            null,
-            SQLiteDatabase.OPEN_READONLY
-        )
+        val db = database?.readableDatabase ?: throw AssertionError("database is not open")
         db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
             var found = false
             while (cursor.moveToNext()) {
@@ -214,7 +210,6 @@ class ChatDatabaseLifecycleTest {
             }
             assertTrue("Missing $table.$column", found)
         }
-        db.close()
     }
 
     companion object {
