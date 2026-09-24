@@ -4,16 +4,17 @@
 
 ## Текущее состояние
 
-- **main:** `6ef5545c8526afe8355bba737f795bd17451dab3` (PR #32)
+- **main code baseline:** `6c975658698d24cf40da3874f3c96eaf17da634f` (PR #35 squash)
+- **docs follow-up:** `4f6d5bd72724963b262899df0c2d69184ebdea9f` (handoff only)
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
 - **min SDK:** `26`
 - **MainActivity:** ~4.5k строк
 
-Последние изменения усилили lifecycle/recovery и тестируемость: #23 visibility, #25 monotonic Stop invalidation, #27 immutable background UI snapshot, #29 lifecycle ownership contracts, #31 recovery eligibility policy, #32 Robolectric SQLite/migration coverage.
+Последние изменения закрыли реальную Android lifecycle boundary: #35 добавил ActivityScenario coverage для позднего callback после Stop/Delete и подтвердил тот же callback mutation path в RESUMED и rejection после lifecycle boundary. PR-head Debug/Release CI были зелёными.
 
-GitHub Actions — источник факта о CI. Документальные коммиты после merge не являются новым code baseline.
+GitHub Actions — источник факта о CI. Документальные коммиты после merge не считаются новым code baseline.
 
 ## Что приложение умеет
 
@@ -51,21 +52,50 @@ GitHub Actions — источник факта о CI. Документальны
 
 `upsertCurrentChatIfActiveRequest()` не должен финализировать устаревший request.
 
-**Важно:** RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой, а не текущий rewrite.
+`MainActivity.kt` остаётся большим orchestration layer. Следующая архитектурная стадия — не big-bang rewrite, а общий response-event/controller seam. Важно не создавать второй owner для sequence cursor: `ResumableResponseStreamClient` уже централизует duplicate/gap handling на recovery path.
+
+**Важно:** RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой после state/controller extraction, а не текущий rewrite.
+
+## Архитектурный обзор — 2026-09-24
+
+Главное улучшение перед controller extraction — унифицировать семантику response events.
+
+Сейчас foreground SSE и background recovery частично дублируют:
+- event dispatch;
+- text/reasoning accumulation;
+- terminal-state handling;
+- DB checkpoints;
+- UI effects.
+
+Первый controller PR должен поэтому начинаться с **pure response-event contract/reducer + JVM tests**, а не с переноса всего networking/Android-кода.
+
+Минимальный контракт стоит проверить на:
+- accepted / duplicate / gap sequence;
+- text delta и reasoning summary;
+- completed / failed / incomplete / cancelled;
+- checkpoint decision;
+- stale request / invalidated ownership no-op;
+- requestId mismatch.
+
+После этого переносить только один execution path и сравнить его поведение с существующими tests/contracts.
 
 ## Что сейчас в плане
 
 Только незавершённое:
 
-1. Android lifecycle test: поздний callback после Stop/Delete.
-2. Response/recovery controller extraction из `MainActivity.kt`.
-3. Attachment/upload/composer controller.
-4. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
-5. Diagnostics/security review.
-6. Release hardening.
-7. Compose migration после controller/state extraction, поэтапно.
-8. Отдельно: AGP/Kotlin/compileSdk compatibility pass.
-9. Добавить Gradle Wrapper.
+1. Response/recovery controller extraction: общий response-event contract + tests, затем маленькие переносы из `MainActivity.kt`.
+2. Attachment/upload/composer controller.
+3. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
+4. Diagnostics/security review.
+5. Release hardening.
+6. Compose migration после controller/state extraction, поэтапно.
+7. Отдельно: AGP/Kotlin/compileSdk compatibility pass.
+8. Добавить Gradle Wrapper.
+
+## Что уже закрыто
+
+- #34: late metric/telemetry callback после Delete больше не может заново создать telemetry для удалённого chat.
+- #35: реальный Android Activity lifecycle boundary после Stop/Delete закрыта instrumentation coverage.
 
 ### Product radar
 
