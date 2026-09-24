@@ -62,7 +62,7 @@ class MainActivityLifecycleTest {
             assertTrue(isRequestCurrent(activity, chatId, generation))
             val itemId = addAssistantItem(activity)
 
-            invoke(activity, "deleteChat", String::class.java, chatId)
+            activity.deleteChat(chatId)
 
             val database = privateField(activity, "chatDb") as ChatDatabase
             assertTrue(database.getChat(chatId) == null)
@@ -95,18 +95,7 @@ class MainActivityLifecycleTest {
         itemId: String,
         snapshot: String
     ) {
-        invoke(
-            activity,
-            "postAssistantTextUpdate",
-            String::class.java,
-            Long::class.javaPrimitiveType!!,
-            String::class.java,
-            String::class.java,
-            chatId,
-            generation,
-            itemId,
-            snapshot
-        )
+        activity.postAssistantTextUpdate(chatId, generation, itemId, snapshot)
     }
 
     private fun activeGeneration(activity: MainActivity): Long =
