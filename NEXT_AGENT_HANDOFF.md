@@ -1,445 +1,158 @@
 # NEXT_AGENT_HANDOFF — 2026-09-24
 
-## Current state
+# START HERE — ОБЯЗАТЕЛЬНО
 
-Canonical repository: `luoecrt-pixel/OpenAIApiChat`
+**Это основной документ для агента. README на старте не нужен.**
 
-Default branch: `main`
+1. Начинай с фактического `main` и открытых PR.
+2. Один рабочий заход = ориентир **10–25 минут**: понять → изменить/проверить → оставить понятный результат.
+3. Сначала докажи, что проблема существует. Не делай PR ради уменьшения TODO.
+4. Для lifecycle/recovery смотри границу **Activity ↔ Executor ↔ Worker ↔ DB**, а не только один метод.
+5. Используй узкие чтения файлов. Не загружай весь README, весь `MainActivity` или полные CI-логи без причины.
+6. CI: queued/in_progress ≠ green. Static verifier и Gradle CI — отдельные проверки.
+7. После merge проверь post-merge Debug/Release, если GitHub Actions предоставляет эти runs.
+8. После завершения задачи: план → история; устаревшее удалить, а не оставлять вечным backlog.
+9. Периодически делай архитектурный/продуктовый обзор. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
+10. **Не теряй общую картину:** Compose, controller extraction, thread-safety и fork chat — это разные уровни одной дорожной карты, а не взаимозаменяемые TODO.
 
-Latest code-changing `main` commit:
-`6ef5545c8526afe8355bba737f795bd17451dab3` — PR #32.
+## 30-секундная карта проекта
 
-The current code baseline is:
+**Продукт:** локальный multi-chat Android-клиент с Responses API, tools/files/images и streaming.
 
-- versionName: `4.17.0`
-- versionCode: `64`
-- DB schema: `v15`
-- compileSdk / targetSdk: `35`
-- minSdk: `26`
-- MainActivity: ~4.5k lines
+**Надёжность:** основная lifecycle-модель:
+`generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
 
-PR #32 is now merged. Later documentation commits must not be mistaken for new implementation work.
+**Persistence:** DB schema v15; важные поля:
+`active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
+Устаревший request не должен финализировать persisted state.
+
+**Тесты:** JVM/pure contracts + Robolectric SQLite уже покрывают большую часть lifecycle/persistence. Android lifecycle boundary с поздним callback после Stop/Delete остаётся отдельным пробелом.
 
-## Current dependencies
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. Следующее фундаментальное направление — response/recovery controller extraction. Compose не выброшен: он **следующий UI-слой после extraction**, поэтапно через interop. RecyclerView/AsyncListDiffer сейчас валидны.
 
-- AGP 8.7.3
-- Kotlin Gradle Plugin 2.0.21
-- Activity KTX 1.10.1
-- WorkManager 2.11.2
-- RecyclerView 1.4.0
-- Core KTX 1.15.0
-- OkHttp 4.12.0
-- JUnit 4.13.2
-- JVM test dependency: org.json:json:20250517
+**Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
 
-Compatibility finding:
+## Фактический baseline
 
-- newer Activity KTX branches tested against this project require a newer compileSdk;
-- newer Core KTX branches tested against this project also require a newer compileSdk;
-- RecyclerView 1.4.0 passes the current compileSdk 35 baseline.
+- main code baseline: `6ef5545c8526afe8355bba737f795bd17451dab3` (PR #32)
+- versionName/code: `4.17.0 / 64`
+- DB: `v15`
+- compile/target SDK: `35`
+- min SDK: `26`
+- JDK: `17`
+- AGP: `8.7.3`
+- Kotlin Gradle Plugin: `2.0.21`
+- Gradle CI: `8.9`
+- WorkManager: `2.11.2`
+- RecyclerView: `1.4.0`
+- Core KTX: `1.15.0`
+- OkHttp: `4.12.0`
 
-Do not mix AGP/Kotlin/compileSdk migration into small reliability fixes.
+Документальные коммиты после merge не являются новым code baseline.
 
-## Merged engineering history
+## Подтверждённые lifecycle/recovery контракты
 
-### PR #10 — resumable background Responses
+- **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
+- **#20:** Stop привязан к generation конкретного request.
+- **#23:** `ActiveResponseStateStore.state` — `@Volatile` immutable snapshot.
+- **#25:** user-stop инвалидирует все поколения до последнего user-stop; повторный Stop не забывает старые поколения.
+- **#27:** background resume захватывает immutable `chatId + generation + assistantItemId` snapshot; callback не читает «текущую» generation постфактум.
+- **#29:** Stop-before-create, stale Worker finalization и ownership проверяются через детерминированные contracts.
+- **#31:** background recovery запускается только при явной eligibility policy.
+- **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
 
-Implemented:
+Не переоткрывай эти задачи без нового доказательства регрессии.
 
-- persisted `active_last_sequence_number`;
-- `ResumableResponseStreamClient`;
-- `starting_after` resume;
-- shared Activity/Worker transport;
-- strict sequence-gap handling with retry/backoff/jitter;
-- process-death recovery through WorkManager;
-- partial text + cursor checkpointing;
-- removal of the old Activity polling recovery path.
+## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### PR #11 — AsyncListDiffer
+### 1. Android lifecycle boundary
+Поздний callback после Stop/Delete на реальной Android lifecycle boundary.
 
-`ChatMessageAdapter` now uses `AsyncListDiffer` for structural reconciliation.
+### 2. Response/recovery controller
+Постепенно вынести из `MainActivity.kt`:
+- generation/ownership;
+- response lifecycle;
+- retry/backoff;
+- DB checkpoints;
+- Activity ↔ WorkManager coordination.
 
-Streaming text/reasoning updates remain payload-style and do not launch an async diff per token.
+Сначала общий контракт и тесты, затем маленькие переносы. Не делать big-bang rewrite.
 
-### PR #12 — modern Activity Result API
+### 3. Attachment/upload/composer controller
+URI/file/image upload, ZIP extraction, progress, composer persistence.
 
-- `MainActivity : ComponentActivity()`;
-- `ActivityResultLauncher`;
-- old `startActivityForResult()` / `onActivityResult()` paths removed.
+### 4. Thread-safety audit
+Проверить оставшиеся Activity/Executor/Worker границы и shared mutable state. Менять синхронизацию только при доказанном race.
 
-### PR #13 — RecyclerView 1.4.0
+### 5. Diagnostics/security
+Diagnostics retention/clear, отсутствие API keys/message bodies, orphan local files, FileProvider least privilege.
 
-Dependency upgrade completed and validated on compileSdk 35.
+### 6. Release hardening
+Shrink/minification policy, renderer/reflection/file handling under shrinker; signing/publishing отдельно.
 
-### PR #15 — ActiveResponseState
+### 7. Compose migration
+**Не начинать до state/controller extraction.**
+Порядок:
+`response controller → attachment/composer state → immutable screen state/events → one bounded Compose feature → incremental migration`.
+Compose — не «забытый TODO», а отложенная архитектурная стадия.
 
-`ActiveResponseStateStore` centralizes:
+### 8–9. Отдельные compatibility tasks
+AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 
-- generation;
-- response ID;
-- assistant item ID;
-- user-stop generation.
+## Контекстный режим для агента
 
-### PR #17 — release/AAB CI
+Чтобы не перегружать рабочую память:
 
-Authoritative workflow: `.github/workflows/release.yml`
+- В начале читай **этот файл**, а не полный README.
+- README открывай только когда меняется человекочитаемое описание проекта.
+- Для кода сначала fetch конкретных файлов/символов; полный `MainActivity.kt` нужен только при действительно сквозном анализе.
+- CI logs запрашивай только для конкретного failing run/step.
+- Историю старых PR читай точечно, когда нужен конкретный invariant.
+- Не тащи в текущий контекст завершённые задачи как активные.
+- Краткий пользовательский ответ не означает сокращённого инженерного анализа.
 
-Checks:
+## Как проверять новую работу
 
-```
-gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease
-```
+Перед изменением:
+- найти существующий invariant/test;
+- локализовать реальную границу риска;
+- понять, какой state владеет request;
+- определить, нужен ли runtime fix или только тест/документация.
 
-Artifacts:
+После изменения:
+- поискать старые symbols/helpers;
+- проверить static verifier;
+- дождаться реального CI результата;
+- если merge — проверить post-merge runs;
+- обновить план и историю.
 
-- release APK;
-- release AAB.
+## Product radar: fork chat
 
-This is packaging verification only; production signing/publishing stays separate.
+MVP-идея: «Ветвить отсюда» на выбранном сообщении создаёт **независимый local snapshot** до этой точки.
 
-### PR #18 — O(1) adapter indexing
+Обязательные ограничения для первого шага:
+- новый `chatId`;
+- не переносить active response / Worker job / temporary UI state;
+- copied messages — новые local records;
+- не переиспользовать исходный `previous_response_id` вслепую: сначала подтвердить актуальную семантику Responses API для продолжения **ровно от fork point**;
+- первый PR лучше сделать pure DB/domain contract + tests, а не сразу UI + network + branch graph.
 
-Added:
+## Документация
 
-- `itemById`;
-- `itemIndexById`;
-- `displayPositionById`.
+**README** = человекочитаемый snapshot проекта.
 
-Removed hot-path linear searches from the adapter.
+**NEXT_AGENT_HANDOFF** = операционный контекст следующей модели.
 
-### PR #19 — strict initial SSE sequence gaps
+Жизненный цикл незавершённой работы:
+`plan → implementation → CI/check → merge → history`.
 
-Foreground SSE previously logged a gap and continued. Resumable recovery already failed fast.
+Если идея признана ненужной/ошибочной/заменённой — удалить из плана. Не сохранять ради количества задач.
 
-PR #19 introduced a shared `ResponseStreamSequenceCursor` contract and made foreground parsing fail on a real sequence gap instead of persisting a silently incomplete stream.
+## Короткий отчёт пользователю
 
-Merged commit:
-`f9b4d2e4b1504d43378ca43f9ecc745c00bc6fe6`
-
-### PR #20 — Stop generation race
-
-The synchronous Stop path already restores composer/chat state. The async executor cancellation handler could otherwise replay those mutations after Stop.
-
-PR #20 ties the cancellation decision to the captured request generation and exits early when the request was already user-stopped.
-
-Merged commit:
-`ce251af52ef899907e17f11dff237fb9cf3798c6`
-
-Post-merge Debug and Release CI were green.
-
-### PR #23 — ActiveResponseState visibility
-
-Added `@Volatile` to the immutable `ActiveResponseStateStore.state` snapshot and a JVM test for the cross-thread visibility contract.
-
-### PR #25 — monotonic user-stop invalidation
-
-User-stop invalidation now remains effective for every generation up to the latest user-stop generation, including after state clearing and subsequent requests. Added deterministic JVM coverage for repeated Stop operations.
-
-### PR #27 — background resume UI snapshot guard
-
-Confirmed lifecycle race: `streamBackgroundResponse()` previously read the current Activity generation at callback time instead of the generation belonging to the resumed response. A late callback could therefore pass the UI guard after a newer request had started.
-
-Fix:
-
-- immutable `BackgroundResponseUiSnapshot(chatId, generation, assistantItemId)`;
-- snapshot captured once when a background resume starts;
-- foreground→background continuation preserves the original snapshot;
-- text, reasoning and tool UI updates require matching chat, generation, assistant item, visible/non-finishing Activity;
-- JVM regression coverage verifies generation/chat/assistant mismatch rejection.
-
-CI for PR #27: Debug and Release both passed, including static verifier and full Gradle test/lint/build/bundle steps.
-
-Merged commit:
-`5f744c180fb359ab49657632cbce8cead31e0e7d`.
-
-The post-merge Debug and Release workflows for that merge are the source of truth for the current main result.
-### PR #31 — background recovery eligibility
-
-Added pure `BackgroundRecoveryPolicy.isEligibleForResume(JSONObject)` and made `BackgroundResponseWorkScheduler.rescheduleAll()` use it. JVM tests cover missing chat/response/request IDs and `background_enabled=false`.
-
-Merged commit:
-`41e0b7744fb120fad0192adb8afe936ca01bf044`.
-
-Post-merge Debug and Release CI for that exact `main` commit both completed successfully.
-
-### PR #32 — Robolectric SQLite lifecycle coverage
-
-Added real SQLite/Robolectric coverage for:
-
-- migration v13→v15, including `active_background_enabled` and `active_last_sequence_number` defaults;
-- migration v14→v15 and the v15 sequence-cursor default;
-- partial response + durable sequence cursor surviving close/reopen;
-- stale-request protection for `updateActiveResponse()`.
-
-The tests use Robolectric 4.14 with Android resources enabled and isolated database-file cleanup around the test fixture. The Android lifecycle boundary itself remains outside this harness.
-
-Merged commit:
-`6ef5545c8526afe8355bba737f795bd17451dab3`.
-
-PR CI for the final PR head was green: Debug run #237 and Release run #59. The GitHub connector currently exposes no post-merge workflow runs/statuses for the merge commit, so do not claim separate post-merge Debug/Release results from this connector response.
-
-### PR #29 — lifecycle ownership contracts
-
-Added deterministic JVM coverage for:
-
-- Stop before `response.created` invalidating the uncreated request generation;
-- chat switch/new generation rejecting an older background UI snapshot;
-- stale Worker finalization being allowed only when `active_request_id == expectedRequestId`;
-- missing/blank ownership IDs being rejected.
-
-The persisted finalization path now uses the pure `ActiveResponseWritePolicy` predicate directly, so the tested predicate is the same contract used by `ChatDatabase`.
-
-Merged commit:
-`a26402f9ff65210bf2989402cae57e589f3da4d2`.
-
-Post-merge Debug and Release CI for this exact `main` commit both completed successfully.
-
-Current lifecycle gap intentionally remains: Android lifecycle integration for late callbacks after Stop/Delete. Orphan recovery eligibility and SQLite migration/partial-response persistence contracts are now covered by PR #31/#32.
-
-## Current architecture
-
-Already hardened:
-
-- generation-based stale callback protection;
-- request-aware DB writes;
-- WorkManager recovery;
-- resumable SSE with durable cursor;
-- sequence-gap detection and retry;
-- bounded retry/backoff/jitter;
-- HTTP handling for auth/gone/rate-limit/server/network failures;
-- sticky chat scroll policy;
-- AsyncListDiffer + O(1) adapter indexes;
-- modern Activity Result API.
-
-Important persistence fields:
-
-- `active_request_id`
-- `active_response_id`
-- `active_text`
-- `active_status`
-- `active_background_enabled`
-- `active_last_sequence_number`
-
-Critical transaction:
-
-`upsertCurrentChatIfActiveRequest()` verifies the persisted `active_request_id` before finalizing persisted chat state.
-
-## Existing tests / verifier
-
-JVM tests include:
-
-- `ActiveResponseStateTest`
-- `BackgroundRecoveryPolicyTest`
-- `ChatScrollPolicyTest`
-- `ChatMessageFingerprintTest`
-- `ResumableResponseRequestTest`
-- `SseEventParserTest`
-- `ResponseStreamSequenceCursorTest`
-
-Static verifier:
-
-`tools/verify_v4_17_0.py`
-
-Debug workflow:
-
-`.github/workflows/build.yml`
-
-Release workflow:
-
-`.github/workflows/release.yml`
-
-Treat static verifier and real Gradle CI as separate checks.
-
-## Current thread-safety note
-
-Two concrete visibility/ownership boundaries are now explicit:
-
-- PR #23: `ActiveResponseStateStore.state` is `@Volatile`, so executor readers observe the immutable state snapshot published by the Activity/main thread.
-- PR #27: background-resume UI callbacks carry an immutable `chatId + generation + assistantItemId` snapshot instead of reading the current generation at callback time.
-
-PR #25 separately made user-stop invalidation monotonic across generations.
-
-These are confirmed fixes for specific races, not completion of the broader Activity/Executor/WorkManager thread-safety audit.
-
-## What is still worth doing
-
-Priority order:
-
-1. Deterministic lifecycle/recovery tests:
-   - late callback after Stop/Delete on Android lifecycle boundary.
-
-   Already covered in PR #29/#31/#32: Stop before `response.created`, stale Worker finalization after a new request, chat/generation invalidation of an older background snapshot, recovery eligibility, SQLite migrations v13→v15, and partial-response/cursor persistence.
-
-2. Response/recovery controller extraction from `MainActivity.kt`:
-   - generation;
-   - response lifecycle;
-   - retry/backoff;
-   - DB checkpoints;
-   - Activity ↔ WorkManager coordination.
-
-3. Attachment/upload/composer controller:
-   - URI/file/image upload;
-   - ZIP extraction;
-   - upload progress;
-   - composer persistence.
-
-4. Thread-safety audit:
-   - verify remaining Activity/Executor/WorkManager boundaries;
-   - look for shared mutable state beyond `ActiveResponseStateStore`;
-   - only change synchronization after reproducing or proving a race.
-
-   PR #23 covers state visibility; PR #27 covers background-resume UI ownership. The broader audit remains open.
-
-5. Diagnostics/security review:
-   - diagnostics retention/clear;
-   - no API keys or message bodies in diagnostics;
-   - orphan local file behavior;
-   - FileProvider least-privilege paths.
-
-6. Release hardening:
-   - deliberate shrinker/minification policy;
-   - verify renderer/reflection/file handling under shrinker;
-   - keep signing/publishing separate.
-
-7. Compose migration:
-   - controller/state extraction first;
-   - explicit immutable screen state/events;
-   - one bounded Compose feature via interop;
-   - incremental chat migration.
-
-8. AGP/Kotlin/compileSdk migration as a separate compatibility project.
-
-9. Add Gradle Wrapper for local/CI toolchain parity.
-
-Do not re-plan these as unfinished work:
-
-- AsyncListDiffer — done (#11);
-- modern Activity Result API — done (#12);
-- RecyclerView 1.4.0 — done (#13);
-- release APK/AAB CI — done (#17);
-- O(1) ChatMessageAdapter indexing — done (#18);
-- foreground sequence-gap consistency — done (#19);
-- Stop-generation race fix — done (#20);
-- cursor-based `starting_after` resume — done (#10);
-- monotonic user-stop invalidation — done (#25);
-- background resume UI snapshot guard — done (#27).
-
-## Compose decision
-
-Do not start a big-bang Compose rewrite.
-
-The current architectural order is:
-
-`response controller → attachment/composer state → immutable screen state/events → one bounded Compose feature → incremental chat migration`
-
-RecyclerView is not considered an architectural mistake. The current AsyncListDiffer/O(1) work is a valid intermediate solution.
-
-## Documentation rules
-
-README is the human/project snapshot:
-
-- current capabilities;
-- current build configuration;
-- recent engineering history;
-- only unfinished plan.
-
-`NEXT_AGENT_HANDOFF.md` is continuity for another agent:
-
-- exact code baseline;
-- important architectural contracts;
-- completed PRs;
-- known constraints;
-- next investigation order.
-
-GitHub Actions is the executable source of truth for build status.
-
-When a planned item is completed, remove it from the plan and record it in the relevant history section. Do not keep completed tasks in both places.
-
-
-
-## Operating instructions for the next model
-
-Работай как продолжение инженерного аудита, а не как генератор задач.
-
-### Перед каждой новой работой
-
-1. Сначала проверь фактический main HEAD и открытые PR.
-2. Сверь текущий код с README.md и NEXT_AGENT_HANDOFF.md; документация может отставать.
-3. Определи, действительно ли проблема наблюдается в коде/CI/архитектуре. Не создавай PR только ради «улучшения» без измеримого эффекта или понятного устранения риска.
-4. Посмотри не только локальный участок, но и границу между Activity, Executor, Worker и DB, когда изменение касается lifecycle/recovery.
-5. Перед рефакторингом найди существующие тесты и текущие invariants.
-
-### Рабочее окно
-
-Один рабочий заход должен длиться ориентировочно **10–25 минут**. Цель — успеть разобраться, изменить, проверить и оставить понятный след в документации. Не подгоняй архитектуру под фиксированное число PR: за один заход может выйти один PR, несколько очень маленьких связанных изменений или только подтверждённый вывод.
-
-### Размер изменений
-
-Количество PR не является целью. Обычно делай небольшое изменение за один логический шаг.
-- Допустимы 2 очень маленьких тесно связанных PR, если разделение реально улучшает проверяемость.
-- Не объединяй в один PR архитектурный рефакторинг, upgrade зависимостей и косметический cleanup.
-- После механических переименований обязательно ищи старые символы, импорты, helpers и устаревшие проверки.
-
-### Как вести README и handoff
-
-Документация должна следовать реальному состоянию:
-
-план → реализация → CI/проверка → merge → история
-
-- Новую незавершённую работу записывай в план до или вместе с началом PR.
-- После merge убирай её из плана и добавляй в историю инженерных изменений.
-- Если по ходу аудита выяснилось, что идея не нужна, ошибочна или заменена другим решением — удали её из плана, не сохраняй ради истории.
-- Не оставляй в README старые формулировки вроде «нужно сделать X», если X уже реализован.
-- README должен быть полезен человеку, который открывает репозиторий впервые.
-- NEXT_AGENT_HANDOFF.md должен быть полезен следующей модели: текущий baseline, уже закрытое, ограничения, доказанные риски и следующий порядок проверки.
-- Не дублируй один и тот же незавершённый пункт в нескольких разделах без причины.
-
-### CI и доверие к результату
-
-- Static verifier и Gradle CI — разные уровни проверки; учитывай оба.
-- Никогда не называй workflow зелёным, пока он in_progress или queued.
-- Если CI падает из-за устаревшей проверки/инфраструктуры, чини сам контракт проверки, а не ослабляй её ради зелёного статуса.
-- После merge проверяй post-merge Debug и Release.
-- Документационные коммиты не считать новым code baseline.
-- Реальные CI failures фиксируй в отчёте честно, включая промежуточную причину.
-
-### Архитектурный и продуктовый взгляд
-
-Периодически делай остановку и задавай два вопроса:
-
-1. «Мы сейчас устраняем реальную проблему или просто уменьшаем счётчик TODO?»
-2. «Есть ли здесь возможность сделать приложение заметно полезнее или необычнее без усложнения ради усложнения?»
-
-Для второго вопроса разрешено **придумывать новые идеи**, даже если их не было в исходном плане. Но сначала сформулируй конкретную пользовательскую ценность и минимальный проверяемый шаг. Хорошая идея должна вписываться в существующие данные/API и иметь путь к постепенной реализации.
-
-Пример текущего продуктового радара: **ветвление/форк чата от выбранного сообщения**, чтобы безопасно исследовать альтернативный запрос или настройки, сохраняя исходную ветку. Это пока кандидат для проверки, а не обещание реализации.
-
-Периодически делай остановку и задавай вопрос:
-
-«Мы сейчас устраняем реальную проблему или просто уменьшаем счётчик TODO?»
-
-Особенно следи за ответственностями MainActivity.kt, Background Worker, network streaming и persistence. Если несколько PR подряд исправляют один и тот же класс проблем в разных местах, это сигнал пересмотреть границу архитектуры.
-
-При таком сигнале сначала сформулируй общий контракт и добавь тесты, затем выноси слой небольшим PR. Не делай big-bang rewrite только потому, что текущий файл большой.
-
-### Отчёт пользователю
-
-После каждого законченного шага сообщай:
-
-- что именно изменено;
-- почему изменение было нужно;
-- что подтвердил CI/тесты;
-- что осталось в плане;
-- есть ли новый фундаментальный архитектурный вывод.
-
-Не выдавай предположение за найденный баг и не выдавай косметический cleanup за архитектурный прогресс.
-
-## Rules for the next agent
-
-1. Start from actual `main`.
-2. Inspect current source before editing.
-3. Search for stale symbols/helpers after mechanical edits.
-4. Keep changes in small PRs.
-5. Never call an in-progress workflow green.
-6. After a merge, verify post-merge Debug and Release.
-7. Do not resurrect superseded release branches or duplicate PRs.
+После рабочего захода достаточно 3–6 строк:
+- что изменено;
+- почему;
+- что подтвердили тесты/CI;
+- что осталось;
+- новый архитектурный вывод, если он появился.
