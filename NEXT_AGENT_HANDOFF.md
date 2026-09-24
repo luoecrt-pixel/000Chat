@@ -28,13 +28,13 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, а `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint. Background recovery уже использует policy; foreground cadence намеренно не менялась. Следующая стадия — ownership orchestration для принятого runtime snapshot, не добавляя ещё один универсальный слой. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, а `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot. Background checkpoint и один assistant-text UI path уже переведены на эти seams; foreground cadence намеренно не менялась. Следующая стадия — расширять ownership transfer только там, где это даёт доказанный выигрыш. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
 
 ## Фактический baseline
 
-- main code baseline: `e3b346d78247ccaa08aefbdc31060b65935d827f` (PR #38 squash)
+- main code baseline: `a36ff37732931a6aa5ef256e9a03a352395c80a1` (PR #39 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -65,6 +65,7 @@
 - **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
 - **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; `ChatDatabaseActiveResponsePersistence` сохраняет прежнюю request-aware DB реализацию.
 - **#38:** `ResponseCheckpointPolicy` изолирует pure checkpoint decision: interval vs terminal, persisted status/text/responseId/sequence; background recovery перенесён на policy, foreground 750ms cadence не менялась.
+- **#39:** `BackgroundResponseUiOwnershipPolicy` изолирует pure decision для применения background UI snapshot по `chatId + generation + assistantItemId + lifecycle`; `ActiveResponseState` делегирует snapshot ownership этой policy; только assistant-text background path переведён на неё.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -94,7 +95,7 @@
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. Response/recovery controller — следующий срез
-Checkpoint policy закрыт в #38. Следующий шаг — pure ownership decision contract вокруг immutable `chatId + generation + assistantItemId`, затем перенос одного runtime effect path.
+Ownership policy закрыт для одного background assistant-text path в #39. Следующий шаг — проверить оставшиеся reasoning/tool UI callbacks и переносить их только при наличии отдельного race/ownership smell; не делать массовую замену автоматически.
 
 ### 2. Attachment/upload/composer controller
 URI/file/image upload, ZIP extraction, progress, composer persistence.
@@ -159,6 +160,9 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - **#38 merged:** `e3b346d78247ccaa08aefbdc31060b65935d827f`.
 - **#38 PR-head CI:** Release `36064830714` — success; Debug `36064830967` initially failed only at lifecycle instrumentation, rerun job `107855282931` — success. Static verifier + Gradle test/lint/build were successful on both attempts.
 - **#38 post-merge CI:** connector не вернул workflow runs для merge commit `e3b346d...`; post-merge green не заявляется.
+- **#39 merged:** `a36ff37732931a6aa5ef256e9a03a352395c80a1`.
+- **#39 PR-head CI:** Release `36067979922` — success; Debug `36067980079` — success, включая lifecycle instrumentation.
+- **#39 post-merge CI:** connector не вернул workflow runs для merge commit `a36ff377...`; post-merge green не заявляется.
 - Во время #36 были исправлены промежуточные integration проблемы, после чего exact-head CI стал зелёным.
 - **Post-merge runs:** connector не вернул runs для `409996fe...` и `98ca902b...`; post-merge green не заявляется.
 
