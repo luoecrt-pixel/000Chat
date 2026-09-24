@@ -45,6 +45,31 @@ class ActiveResponseStateTest {
     }
 
     @Test
+    fun stoppedGenerationRemainsInvalidatedAfterStartingAnotherRequest() {
+        val store = ActiveResponseStateStore()
+        val first = store.nextGeneration()
+        store.markUserStop()
+        val second = store.nextGeneration()
+
+        assertTrue(store.state.wasUserStopped(first))
+        assertFalse(store.state.wasUserStopped(second))
+    }
+
+    @Test
+    fun laterStopDoesNotForgetEarlierStoppedGeneration() {
+        val store = ActiveResponseStateStore()
+        val first = store.nextGeneration()
+        store.markUserStop()
+        val second = store.nextGeneration()
+        store.markUserStop()
+        val third = store.nextGeneration()
+
+        assertTrue(store.state.wasUserStopped(first))
+        assertTrue(store.state.wasUserStopped(second))
+        assertFalse(store.state.wasUserStopped(third))
+    }
+
+    @Test
     fun stateSnapshotIsVolatileForCrossThreadReaders() {
         val field = ActiveResponseStateStore::class.java.getDeclaredField("state")
 
