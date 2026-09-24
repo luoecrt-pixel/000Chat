@@ -1627,18 +1627,23 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    val type = event.optString("type")
-                    val terminalState = responseState.terminalState
-                    val terminal = terminalState != null
                     val now = SystemClock.elapsedRealtime()
-                    if (terminal || now - lastCheckpointAt >= 500L) {
+                    val checkpoint = ResponseCheckpointPolicy.decide(
+                        state = responseState,
+                        responseId = responseId,
+                        lastSequenceNumber = lastSequence,
+                        nowElapsedMs = now,
+                        lastCheckpointElapsedMs = lastCheckpointAt,
+                        checkpointIntervalMs = 500L
+                    )
+                    if (checkpoint.shouldPersist) {
                         lastCheckpointAt = now
                         activeResponsePersistence.updateActiveResponse(
                             chatId,
-                            responseId = responseId,
-                            text = responseState.text,
-                            status = terminalState?.wireStatus ?: "in_progress",
-                            lastSequenceNumber = lastSequence,
+                            responseId = checkpoint.responseId,
+                            text = checkpoint.text,
+                            status = checkpoint.status,
+                            lastSequenceNumber = checkpoint.lastSequenceNumber,
                             expectedRequestId = requestId
                         )
                     }
