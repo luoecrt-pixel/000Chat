@@ -60,7 +60,7 @@ object ResponseEventReducer {
 
             "response.reasoning_summary_text.delta" -> {
                 val delta = event.optString("delta")
-                if (delta.isBlank()) {
+                if (delta.isEmpty()) {
                     ResponseEventDecision(current)
                 } else {
                     ResponseEventDecision(
