@@ -11,7 +11,7 @@ import org.json.JSONObject
  * Persistent chat history and lightweight response/effort telemetry.
  * Settings remain in SharedPreferences; chat history no longer lives in one giant JSON blob.
  */
-class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+class ChatDatabase(context: Context, databaseName: String = DB_NAME) : SQLiteOpenHelper(context, databaseName, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
         private const val DB_VERSION = 15
