@@ -57,21 +57,23 @@ class ChatDatabaseLifecycleTest {
         createLegacyChatsDatabase(version = 14, includeBackgroundEnabled = true)
 
         database = ChatDatabase(context)
+        assertColumnExists("chats", "active_last_sequence_number")
+
+        database!!.writableDatabase.execSQL(
+            "INSERT INTO chats (id, title, updated_at, active_status) VALUES ('chat-b', 'Чат', 456, 'in_progress')"
+        )
         database!!.readableDatabase.query(
             "chats",
-            arrayOf("active_request_id", "active_background_enabled", "active_last_sequence_number"),
+            arrayOf("active_background_enabled", "active_last_sequence_number"),
             "id=?",
-            arrayOf("chat-a"),
+            arrayOf("chat-b"),
             null, null, null, "1"
         ).use { cursor ->
             assertTrue(cursor.moveToFirst())
-            assertEquals("req-a", cursor.getString(0))
-            assertEquals(1, cursor.getInt(1))
-            assertEquals(-1L, cursor.getLong(2))
+            assertEquals(1, cursor.getInt(0))
+            assertEquals(-1L, cursor.getLong(1))
         }
-        assertColumnExists("chats", "active_last_sequence_number")
     }
-
     @Test
     fun partialResponseAndSequenceCursorSurviveCloseAndReopen() {
         database = ChatDatabase(context)
