@@ -2862,20 +2862,29 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     runOnUiThread{
-                        if(cancelledUploads.contains(key)) return@runOnUiThread
-                        if(currentChatId()==uploadChatId){
-                            attachedFileIds.add(uploaded.id)
-                            attachedFileNames.add(uploaded.name)
-                            attachedFileSizes.add(uploaded.size)
-                            attachedFilePaths.add(uploaded.path)
-                            attachedFileMimes.add(uploaded.mime)
-                            forgetUploadUri(uri,"file")
-                            refreshAttachChips()
-                            persistComposerStateNow()
-                            status.text="Вложение готово: ${uploaded.name}"
-                        }else{
-                            saveUploadedFileToComposer(uploadChatId,uploaded.id,uploaded.name,uploaded.size,uri.toString(),uploaded.path,uploaded.mime)
-                            status.text="Вложение загружено — оно сохранено в исходном чате"
+                        when (
+                            AttachmentUploadCompletionPolicy.decide(
+                                sourceChatId = uploadChatId,
+                                currentChatId = currentChatId(),
+                                cancelled = cancelledUploads.contains(key)
+                            )
+                        ) {
+                            AttachmentUploadCompletionTarget.DISCARD -> return@runOnUiThread
+                            AttachmentUploadCompletionTarget.CURRENT_COMPOSER -> {
+                                attachedFileIds.add(uploaded.id)
+                                attachedFileNames.add(uploaded.name)
+                                attachedFileSizes.add(uploaded.size)
+                                attachedFilePaths.add(uploaded.path)
+                                attachedFileMimes.add(uploaded.mime)
+                                forgetUploadUri(uri,"file")
+                                refreshAttachChips()
+                                persistComposerStateNow()
+                                status.text="Вложение готово: ${uploaded.name}"
+                            }
+                            AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
+                                saveUploadedFileToComposer(uploadChatId,uploaded.id,uploaded.name,uploaded.size,uri.toString(),uploaded.path,uploaded.mime)
+                                status.text="Вложение загружено — оно сохранено в исходном чате"
+                            }
                         }
                     }
                 }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
