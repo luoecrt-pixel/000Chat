@@ -34,6 +34,17 @@ class ResponseEventReducerTest {
     }
 
     @Test
+    fun preservesWhitespaceOnlyTextDeltas() {
+        val decision = ResponseEventReducer.reduce(
+            ResponseEventState(text = "a"),
+            JSONObject().put("type", "response.output_text.delta").put("delta", " ")
+        )
+
+        assertTrue(decision.textChanged)
+        assertEquals("a ", decision.state.text)
+    }
+
+    @Test
     fun capturesResponseIdFromCreatedAndTerminalEvents() {
         var state = ResponseEventState()
 
