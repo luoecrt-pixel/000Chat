@@ -1,5 +1,7 @@
 package com.example.openaichat
 
+import org.json.JSONObject
+
 enum class BackgroundRecoveryAction {
     RETRY,
     AUTH_FAILURE,
@@ -8,6 +10,12 @@ enum class BackgroundRecoveryAction {
 }
 
 object BackgroundRecoveryPolicy {
+    fun isEligibleForResume(active: JSONObject): Boolean =
+        active.optBoolean("background_enabled", true) &&
+            active.optString("chat_id").isNotBlank() &&
+            active.optString("response_id").isNotBlank() &&
+            active.optString("request_id").isNotBlank()
+
     fun actionForHttpStatus(statusCode: Int): BackgroundRecoveryAction = when (statusCode) {
         401, 403 -> BackgroundRecoveryAction.AUTH_FAILURE
         404, 410 -> BackgroundRecoveryAction.RESPONSE_GONE
