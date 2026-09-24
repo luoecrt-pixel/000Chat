@@ -1,4 +1,4 @@
-# NEXT_AGENT_HANDOFF — 2026-09-22
+# NEXT_AGENT_HANDOFF — 2026-09-24
 
 ## Current state
 
@@ -7,7 +7,7 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 Default branch: `main`
 
 Latest code-changing `main` commit before this documentation reconciliation:
-`ce251af52ef899907e17f11dff237fb9cf3798c6` — PR #20.
+`5f744c180fb359ab49657632cbce8cead31e0e7d` — PR #27.
 
 The current code baseline is:
 
@@ -18,7 +18,7 @@ The current code baseline is:
 - minSdk: `26`
 - MainActivity: ~4.5k lines
 
-This documentation pass changes README/handoff only. Treat `ce251af5...` as the code baseline; later documentation commits must not be mistaken for new implementation work.
+This documentation pass changes README/handoff only. Treat `5f744c180f...` as the current code baseline; later documentation commits must not be mistaken for new implementation work.
 
 ## Current dependencies
 
@@ -127,6 +127,33 @@ Merged commit:
 
 Post-merge Debug and Release CI were green.
 
+### PR #23 — ActiveResponseState visibility
+
+Added `@Volatile` to the immutable `ActiveResponseStateStore.state` snapshot and a JVM test for the cross-thread visibility contract.
+
+### PR #25 — monotonic user-stop invalidation
+
+User-stop invalidation now remains effective for every generation up to the latest user-stop generation, including after state clearing and subsequent requests. Added deterministic JVM coverage for repeated Stop operations.
+
+### PR #27 — background resume UI snapshot guard
+
+Confirmed lifecycle race: `streamBackgroundResponse()` previously read the current Activity generation at callback time instead of the generation belonging to the resumed response. A late callback could therefore pass the UI guard after a newer request had started.
+
+Fix:
+
+- immutable `BackgroundResponseUiSnapshot(chatId, generation, assistantItemId)`;
+- snapshot captured once when a background resume starts;
+- foreground→background continuation preserves the original snapshot;
+- text, reasoning and tool UI updates require matching chat, generation, assistant item, visible/non-finishing Activity;
+- JVM regression coverage verifies generation/chat/assistant mismatch rejection.
+
+CI for PR #27: Debug and Release both passed, including static verifier and full Gradle test/lint/build/bundle steps.
+
+Merged commit:
+`5f744c180fb359ab49657632cbce8cead31e0e7d`.
+
+The post-merge Debug and Release workflows for that merge are the source of truth for the current main result.
+
 ## Current architecture
 
 Already hardened:
@@ -183,12 +210,14 @@ Treat static verifier and real Gradle CI as separate checks.
 
 ## Current thread-safety note
 
-PR #23 added `@Volatile` to the immutable `ActiveResponseStateStore.state` snapshot so Activity/main-thread updates are visible to executor readers.
+Two concrete visibility/ownership boundaries are now explicit:
 
-**New confirmed follow-up:** PR #20/23 still exposed a lifecycle hole in the user-stop marker. `stopCurrentResponse()` cleared the marker immediately, and a later Stop could overwrite the previous marker. The safe contract is monotonic: all generations up to the latest user-stop generation remain classified as user-stopped. PR #25 is the focused fix and test coverage for this contract.
+- PR #23: `ActiveResponseStateStore.state` is `@Volatile`, so executor readers observe the immutable state snapshot published by the Activity/main thread.
+- PR #27: background-resume UI callbacks carry an immutable `chatId + generation + assistantItemId` snapshot instead of reading the current generation at callback time.
 
+PR #25 separately made user-stop invalidation monotonic across generations.
 
-`ActiveResponseStateStore.state` is read from executor callbacks while its immutable snapshots are updated on the Activity/main thread. PR #23 adds `@Volatile` to the snapshot and a structural JVM test for that visibility contract. This addresses one confirmed cross-thread visibility boundary; the broader Activity/Executor/WorkManager thread-safety audit remains open.
+These are confirmed fixes for specific races, not completion of the broader Activity/Executor/WorkManager thread-safety audit.
 
 ## What is still worth doing
 
@@ -221,7 +250,7 @@ Priority order:
    - look for shared mutable state beyond `ActiveResponseStateStore`;
    - only change synchronization after reproducing or proving a race.
 
-   PR #23 covers the confirmed `ActiveResponseStateStore.state` visibility boundary.
+   PR #23 covers state visibility; PR #27 covers background-resume UI ownership. The broader audit remains open.
 
 5. Diagnostics/security review:
    - diagnostics retention/clear;
@@ -253,7 +282,9 @@ Do not re-plan these as unfinished work:
 - O(1) ChatMessageAdapter indexing — done (#18);
 - foreground sequence-gap consistency — done (#19);
 - Stop-generation race fix — done (#20);
-- cursor-based `starting_after` resume — done (#10).
+- cursor-based `starting_after` resume — done (#10);
+- monotonic user-stop invalidation — done (#25);
+- background resume UI snapshot guard — done (#27).
 
 ## Compose decision
 
