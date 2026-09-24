@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.app.*
 import android.content.*
 import androidx.activity.ComponentActivity
+import androidx.annotation.VisibleForTesting
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
@@ -241,6 +242,23 @@ class MainActivity : ComponentActivity() {
         currentChatId() == chatId &&
             activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
 
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun postAssistantTextUpdate(
+        chatId: String,
+        generation: Long,
+        assistantItemId: String,
+        snapshot: String
+    ) {
+        runOnUiThread {
+            // Keep the lifecycle gate immediately before the mutation on the UI thread.
+            if (isRequestCurrent(chatId, generation)) {
+                messageAdapter.updateText(assistantItemId, snapshot)
+                activeAssistantItemId = assistantItemId
+                scrollToLatest()
+            }
+        }
+    }
+
     // ---------- UI ----------
     private fun buildUi() {
         val root = LinearLayout(this).apply {
@@ -458,7 +476,8 @@ class MainActivity : ComponentActivity() {
             }.show()
     }
 
-    private fun deleteChat(id: String) {
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun deleteChat(id: String) {
         val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
@@ -1112,13 +1131,12 @@ class MainActivity : ComponentActivity() {
                                         if(now-lastUiUpdate>=50L){
                                             lastUiUpdate=now
                                             val snapshot=full.toString()
-                                            runOnUiThread{
-                                                if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                    messageAdapter.updateText(assistantItemId, snapshot)
-                                                    activeAssistantItemId = assistantItemId
-                                                    scrollToLatest()
-                                                }
-                                            }
+                                            postAssistantTextUpdate(
+                                                requestChatId,
+                                                requestGeneration,
+                                                assistantItemId,
+                                                snapshot
+                                            )
                                         }
                                         if(now-lastActiveCheckpoint>=750L){
                                             lastActiveCheckpoint=now
@@ -4450,7 +4468,8 @@ class MainActivity : ComponentActivity() {
         return body
     }
 
-    private fun addBubble(
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun addBubble(
         label:String,
         text:String,
         user:Boolean,
