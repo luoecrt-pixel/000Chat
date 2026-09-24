@@ -4,15 +4,15 @@
 
 ## Текущее состояние
 
-- **main code baseline:** `e3b346d78247ccaa08aefbdc31060b65935d827f` (PR #38 squash)
-- **latest handoff docs:** `8badb6df2dacbadcdefd048c0814f6a40b5082e0`
+- **main code baseline:** `a36ff37732931a6aa5ef256e9a03a352395c80a1` (PR #39 squash)
+- **latest handoff docs:** `e9cd5134fb6e99b8eccff5a0b6f34703175577b5`
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
 - **min SDK:** `26`
 - **MainActivity:** ~4.5k строк
 
-#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. #38 добавил pure `ResponseCheckpointPolicy` и перевёл на неё background recovery checkpoint path; foreground 750ms cadence не менялась. PR-head Release зелёный; Debug стал зелёным после повторного запуска lifecycle instrumentation.
+#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. #38 добавил pure `ResponseCheckpointPolicy` и перевёл на неё background recovery checkpoint path; foreground 750ms cadence не менялась. #39 добавил pure `BackgroundResponseUiOwnershipPolicy` и перевёл один background assistant-text UI path на него. PR-head Release/Debug для #39 зелёные, включая lifecycle instrumentation.
 
 GitHub Actions — источник факта о CI. Документальные коммиты после merge не считаются новым code baseline.
 
@@ -56,9 +56,10 @@ GitHub Actions — источник факта о CI. Документальны
 - `ResponseEventReducer` — pure response event semantics;
 - `ResumableResponseStreamClient` — transport + recovery sequence cursor;
 - `ActiveResponsePersistence` — persisted active-response adapter;
-- `ResponseCheckpointPolicy` — pure checkpoint timing/status/payload decision.
+- `ResponseCheckpointPolicy` — pure checkpoint timing/status/payload decision;
+- `BackgroundResponseUiOwnershipPolicy` — pure decision for applying a background UI snapshot.
 
-`MainActivity.kt` остаётся большим orchestration layer. Background checkpoint timing/status уже вынесены из event loop; следующий шаг — ownership decision для immutable runtime snapshot, не превращая reducer/policy в Android/DB/WorkManager объект.
+`MainActivity.kt` остаётся большим orchestration layer. Background checkpoint timing/status и один background assistant-text ownership path уже вынесены из event loop. Следующий шаг — проверять reasoning/tool callbacks на конкретный ownership/race smell, а не делать массовую замену.
 
 RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой после state/controller extraction, а не текущий rewrite.
 
@@ -78,7 +79,7 @@ Tool/UI effects пока не нужно затаскивать в reducer: сн
 
 Только незавершённое:
 
-1. Response/recovery controller: ownership decision contract вокруг immutable `chatId + generation + assistantItemId`; затем один runtime effect path.
+1. Response/recovery controller: audit remaining background reasoning/tool UI callbacks for concrete ownership/race smells; переносить только подтверждённые paths.
 2. Attachment/upload/composer controller.
 3. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
 4. Diagnostics/security review.
