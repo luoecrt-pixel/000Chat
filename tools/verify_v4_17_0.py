@@ -189,8 +189,11 @@ assert 'last_sequence_number' in main
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').exists()
 assert (ROOT / 'app/src/main/java/com/example/openaichat/ActiveResponseState.kt').exists()
 assert (ROOT / 'app/src/test/java/com/example/openaichat/ActiveResponseStateTest.kt').exists()
+assert 'backgroundResumeUiSnapshotMustMatchGenerationChatAndAssistant' in (ROOT / 'app/src/test/java/com/example/openaichat/ActiveResponseStateTest.kt').read_text()
 assert 'ActiveResponseStateStore' in main
+assert 'BackgroundResponseUiSnapshot' in main
 assert 'activeResponseState.state.isCurrent' in main
+assert 'streamBackgroundResponse(a, uiSnapshot)' in main
 assert 'activeResponseState.markUserStop()' in main
 assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
