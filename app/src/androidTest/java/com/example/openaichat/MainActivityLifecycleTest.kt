@@ -77,16 +77,7 @@ class MainActivityLifecycleTest {
     }
 
     private fun addAssistantItem(activity: MainActivity): String =
-        invoke(
-            activity,
-            "addBubble",
-            String::class.java,
-            String::class.java,
-            Boolean::class.javaPrimitiveType!!,
-            "Astra",
-            "initial",
-            false
-        ) as String
+        activity.addBubble("Astra", "initial", false)
 
     private fun invokeCallback(
         activity: MainActivity,
