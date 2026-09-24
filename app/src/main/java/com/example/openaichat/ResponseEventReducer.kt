@@ -48,7 +48,7 @@ object ResponseEventReducer {
 
             "response.output_text.delta" -> {
                 val delta = event.optString("delta")
-                if (delta.isBlank()) {
+                if (delta.isEmpty()) {
                     ResponseEventDecision(current)
                 } else {
                     ResponseEventDecision(
