@@ -1634,7 +1634,7 @@ class MainActivity : ComponentActivity() {
                         chatDb.updateActiveResponse(
                             chatId,
                             responseId = responseId,
-                            text = full.toString(),
+                            text = responseState.text,
                             status = terminalState?.wireStatus ?: "in_progress",
                             lastSequenceNumber = lastSequence,
                             expectedRequestId = requestId
@@ -1650,7 +1650,7 @@ class MainActivity : ComponentActivity() {
                     chatDb.updateActiveResponse(
                         chatId,
                         responseId = responseId,
-                        text = full.toString(),
+                        text = responseState.text,
                         status = when (result.terminalEventType) {
                             "response.completed" -> "completed"
                             "response.failed" -> "failed"
@@ -1671,7 +1671,7 @@ class MainActivity : ComponentActivity() {
                 chatDb.updateActiveResponse(
                     chatId,
                     responseId = responseId,
-                    text = full.toString(),
+                    text = responseState.text,
                     status = "in_progress",
                     lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
                     expectedRequestId = requestId
