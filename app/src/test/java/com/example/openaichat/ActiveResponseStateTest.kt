@@ -66,6 +66,9 @@ class ActiveResponseStateTest {
 
         assertTrue(store.state.wasUserStopped(first))
         assertTrue(store.state.wasUserStopped(second))
+        store.clear()
+        assertTrue(store.state.wasUserStopped(first))
+        assertTrue(store.state.wasUserStopped(second))
         assertFalse(store.state.wasUserStopped(third))
     }
 
