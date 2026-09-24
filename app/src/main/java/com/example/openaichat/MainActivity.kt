@@ -1632,10 +1632,8 @@ class MainActivity : ComponentActivity() {
                     }
 
                     val type = event.optString("type")
-                    val terminal = type == "response.completed" ||
-                        type == "response.failed" ||
-                        type == "response.incomplete" ||
-                        type == "response.cancelled"
+                    val terminalState = responseState.terminalState
+                    val terminal = terminalState != null
                     val now = SystemClock.elapsedRealtime()
                     if (terminal || now - lastCheckpointAt >= 500L) {
                         lastCheckpointAt = now
@@ -1643,13 +1641,7 @@ class MainActivity : ComponentActivity() {
                             chatId,
                             responseId = responseId,
                             text = responseState.text,
-                            status = when (type) {
-                                "response.completed" -> "completed"
-                                "response.failed" -> "failed"
-                                "response.incomplete" -> "incomplete"
-                                "response.cancelled" -> "cancelled"
-                                else -> "in_progress"
-                            },
+                            status = terminalState?.wireStatus ?: "in_progress",
                             lastSequenceNumber = lastSequence,
                             expectedRequestId = requestId
                         )
