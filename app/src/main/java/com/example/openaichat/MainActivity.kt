@@ -1595,23 +1595,26 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        uiSnapshot?.let { snapshot ->
-                        "response.web_search_call.in_progress",
-                        "response.web_search_call.searching" -> updateToolState("web_search", "running", chatId, snapshot.generation)
-                        "response.web_search_call.completed" -> updateToolState("web_search", "completed", chatId, snapshot.generation)
-                        "response.web_search_call.failed" -> updateToolState("web_search", "failed", chatId, snapshot.generation)
-                        "response.file_search_call.in_progress" -> updateToolState("file_search", "running", chatId, snapshot.generation)
-                        "response.file_search_call.completed" -> updateToolState("file_search", "completed", chatId, snapshot.generation)
-                        "response.file_search_call.failed" -> updateToolState("file_search", "failed", chatId, snapshot.generation)
-                        "response.code_interpreter_call.in_progress" -> updateToolState("code_interpreter", "running", chatId, snapshot.generation)
-                        "response.code_interpreter_call.completed" -> updateToolState("code_interpreter", "completed", chatId, snapshot.generation)
-                        "response.code_interpreter_call.failed" -> updateToolState("code_interpreter", "failed", chatId, snapshot.generation)
-                        "response.image_generation_call.in_progress" -> updateToolState("image_generation", "running", chatId, snapshot.generation)
-                        "response.image_generation_call.completed" -> updateToolState("image_generation", "completed", chatId, snapshot.generation)
-                        "response.image_generation_call.failed" -> updateToolState("image_generation", "failed", chatId, snapshot.generation)
-                        "response.computer_call.in_progress" -> updateToolState("computer", "running", chatId, snapshot.generation)
-                        "response.computer_call.completed" -> updateToolState("computer", "completed", chatId, snapshot.generation)
-                        "response.computer_call.failed" -> updateToolState("computer", "failed", chatId, snapshot.generation)
+                    }
+
+                    uiSnapshot?.let { snapshot ->
+                        when (event.optString("type")) {
+                            "response.web_search_call.in_progress",
+                            "response.web_search_call.searching" -> updateToolState("web_search", "running", chatId, snapshot.generation)
+                            "response.web_search_call.completed" -> updateToolState("web_search", "completed", chatId, snapshot.generation)
+                            "response.web_search_call.failed" -> updateToolState("web_search", "failed", chatId, snapshot.generation)
+                            "response.file_search_call.in_progress" -> updateToolState("file_search", "running", chatId, snapshot.generation)
+                            "response.file_search_call.completed" -> updateToolState("file_search", "completed", chatId, snapshot.generation)
+                            "response.file_search_call.failed" -> updateToolState("file_search", "failed", chatId, snapshot.generation)
+                            "response.code_interpreter_call.in_progress" -> updateToolState("code_interpreter", "running", chatId, snapshot.generation)
+                            "response.code_interpreter_call.completed" -> updateToolState("code_interpreter", "completed", chatId, snapshot.generation)
+                            "response.code_interpreter_call.failed" -> updateToolState("code_interpreter", "failed", chatId, snapshot.generation)
+                            "response.image_generation_call.in_progress" -> updateToolState("image_generation", "running", chatId, snapshot.generation)
+                            "response.image_generation_call.completed" -> updateToolState("image_generation", "completed", chatId, snapshot.generation)
+                            "response.image_generation_call.failed" -> updateToolState("image_generation", "failed", chatId, snapshot.generation)
+                            "response.computer_call.in_progress" -> updateToolState("computer", "running", chatId, snapshot.generation)
+                            "response.computer_call.completed" -> updateToolState("computer", "completed", chatId, snapshot.generation)
+                            "response.computer_call.failed" -> updateToolState("computer", "failed", chatId, snapshot.generation)
                         }
                     }
 
