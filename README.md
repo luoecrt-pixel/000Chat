@@ -4,15 +4,15 @@
 
 ## Текущее состояние
 
-- **main code baseline:** `98ca902bd2474129fbb6e95ebfaa23cef8b1cb01` (PR #37 squash)
-- **latest handoff docs:** `12eb9788951ff46ccbe3c84c2bfd35deae8c00c3`
+- **main code baseline:** `e3b346d78247ccaa08aefbdc31060b65935d827f` (PR #38 squash)
+- **latest handoff docs:** `8badb6df2dacbadcdefd048c0814f6a40b5082e0`
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
 - **min SDK:** `26`
 - **MainActivity:** ~4.5k строк
 
-#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. PR-head Debug/Release CI зелёные; Debug прошёл реальный Activity lifecycle instrumentation harness.
+#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. #38 добавил pure `ResponseCheckpointPolicy` и перевёл на неё background recovery checkpoint path; foreground 750ms cadence не менялась. PR-head Release зелёный; Debug стал зелёным после повторного запуска lifecycle instrumentation.
 
 GitHub Actions — источник факта о CI. Документальные коммиты после merge не считаются новым code baseline.
 
@@ -55,29 +55,30 @@ GitHub Actions — источник факта о CI. Документальны
 Текущие seams:
 - `ResponseEventReducer` — pure response event semantics;
 - `ResumableResponseStreamClient` — transport + recovery sequence cursor;
-- `ActiveResponsePersistence` — persisted active-response adapter.
+- `ActiveResponsePersistence` — persisted active-response adapter;
+- `ResponseCheckpointPolicy` — pure checkpoint timing/status/payload decision.
 
-`MainActivity.kt` остаётся большим orchestration layer. Следующий шаг — вынести timing/checkpoint/ownership decisions из event loops, не превращая reducer в Android/DB/WorkManager объект.
+`MainActivity.kt` остаётся большим orchestration layer. Background checkpoint timing/status уже вынесены из event loop; следующий шаг — ownership decision для immutable runtime snapshot, не превращая reducer/policy в Android/DB/WorkManager объект.
 
 RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой после state/controller extraction, а не текущий rewrite.
 
-## Архитектурный обзор — после #37
+## Архитектурный обзор — после #38
 
-Следующий полезный срез — **pure checkpoint/ownership policy** поверх уже общих event semantics и persistence boundary.
-
-Цель:
+`ResponseCheckpointPolicy` закрывает первый pure checkpoint seam:
 - reducer state + timing + sequence → deterministic persistence decision;
-- immutable ownership snapshot остаётся на UI boundary;
+- terminal events checkpoint немедленно;
+- non-terminal background path сохраняет прежние 500ms cadence;
 - adapter выполняет запись, но не решает бизнес-семантику;
-- один foreground/recovery runtime path переносится первым.
+- foreground 750ms cadence и transport sequence cursor не объединены и не изменены.
 
-Tool/UI effects пока не нужно затаскивать в reducer: сначала стабилизировать state + persistence semantics.
+Следующий полезный срез — ownership decision для immutable `chatId + generation + assistantItemId` snapshot.
+Tool/UI effects пока не нужно затаскивать в reducer: сначала стабилизировать state + persistence ownership.
 
 ## Что сейчас в плане
 
 Только незавершённое:
 
-1. Response/recovery controller: pure checkpoint/ownership policy вокруг `ResponseEventReducer` + `ActiveResponsePersistence`.
+1. Response/recovery controller: ownership decision contract вокруг immutable `chatId + generation + assistantItemId`; затем один runtime effect path.
 2. Attachment/upload/composer controller.
 3. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
 4. Diagnostics/security review.
