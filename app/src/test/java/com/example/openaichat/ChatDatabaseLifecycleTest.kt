@@ -22,14 +22,14 @@ class ChatDatabaseLifecycleTest {
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
-        context.deleteDatabase(DB_NAME)
+        resetDatabaseFile()
     }
 
     @After
     fun tearDown() {
         database?.close()
         database = null
-        context.deleteDatabase(DB_NAME)
+        resetDatabaseFile()
     }
 
     @Test
@@ -137,7 +137,13 @@ class ChatDatabaseLifecycleTest {
         assertTrue(active.optBoolean("background_enabled", false))
     }
 
+    private fun resetDatabaseFile() {
+        SQLiteDatabase.deleteDatabase(context.getDatabasePath(DB_NAME))
+    }
+
     private fun createLegacyChatsDatabase(version: Int, includeBackgroundEnabled: Boolean = false) {
+        resetDatabaseFile()
+
         val db = context.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null)
         val backgroundColumn = if (includeBackgroundEnabled) {
             ", active_background_enabled INTEGER NOT NULL DEFAULT 1"
