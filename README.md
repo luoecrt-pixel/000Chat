@@ -4,15 +4,15 @@
 
 ## Текущее состояние
 
-- **main code baseline:** `a36ff37732931a6aa5ef256e9a03a352395c80a1` (PR #39 squash)
-- **latest handoff docs:** `e9cd5134fb6e99b8eccff5a0b6f34703175577b5`
+- **main code baseline:** `e786d557ec6240b050aef12e0898ac6bb7076fc7` (PR #40 squash)
+- **latest handoff docs:** `7cb10d380068aaaed8920c950722d81c5484039f`
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
 - **min SDK:** `26`
 - **MainActivity:** ~4.5k строк
 
-#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. #38 добавил pure `ResponseCheckpointPolicy` и перевёл на неё background recovery checkpoint path; foreground 750ms cadence не менялась. #39 добавил pure `BackgroundResponseUiOwnershipPolicy` и перевёл один background assistant-text UI path на него. PR-head Release/Debug для #39 зелёные, включая lifecycle instrumentation.
+#37 добавил `ActiveResponsePersistence` между response orchestration и `ChatDatabase`, не меняя DB schema или request-aware semantics. #38 добавил pure `ResponseCheckpointPolicy` и перевёл на неё background recovery checkpoint path; foreground 750ms cadence не менялась. #39 добавил pure `BackgroundResponseUiOwnershipPolicy` и перевёл assistant-text path на него. #40 перевёл reasoning-summary callback на тот же immutable snapshot ownership; tool-state path осознанно оставлен на `chatId + generation`, поскольку это глобальный Activity tool label.
 
 GitHub Actions — источник факта о CI. Документальные коммиты после merge не считаются новым code baseline.
 
@@ -59,7 +59,7 @@ GitHub Actions — источник факта о CI. Документальны
 - `ResponseCheckpointPolicy` — pure checkpoint timing/status/payload decision;
 - `BackgroundResponseUiOwnershipPolicy` — pure decision for applying a background UI snapshot.
 
-`MainActivity.kt` остаётся большим orchestration layer. Background checkpoint timing/status и один background assistant-text ownership path уже вынесены из event loop. Следующий шаг — проверять reasoning/tool callbacks на конкретный ownership/race smell, а не делать массовую замену.
+`MainActivity.kt` остаётся большим orchestration layer. Background checkpoint timing/status, assistant-text и reasoning ownership уже вынесены из соответствующих event callbacks. Tool-state ownership отдельно не требует assistant-item snapshot, потому что состояние глобально для Activity. Следующий крупный seam — attachment/upload/composer controller.
 
 RecyclerView/AsyncListDiffer не считаются архитектурной ошибкой. Compose — отложенный следующий слой после state/controller extraction, а не текущий rewrite.
 
@@ -79,8 +79,8 @@ Tool/UI effects пока не нужно затаскивать в reducer: сн
 
 Только незавершённое:
 
-1. Response/recovery controller: audit remaining background reasoning/tool UI callbacks for concrete ownership/race smells; переносить только подтверждённые paths.
-2. Attachment/upload/composer controller.
+1. Attachment/upload/composer controller.
+2. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
 3. Более широкий thread-safety audit после уже подтверждённых границ #23/#27.
 4. Diagnostics/security review.
 5. Release hardening.
