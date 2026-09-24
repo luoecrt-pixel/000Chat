@@ -1,5 +1,11 @@
 package com.example.openaichat
 
+data class BackgroundResponseUiSnapshot(
+    val chatId: String,
+    val generation: Long,
+    val assistantItemId: String
+)
+
 data class ActiveResponseState(
     val generation: Long = 0L,
     val responseId: String? = null,
@@ -11,6 +17,17 @@ data class ActiveResponseState(
 
     fun wasUserStopped(candidateGeneration: Long): Boolean =
         userStopInvalidatedThroughGeneration?.let { candidateGeneration <= it } == true
+
+    fun isCurrent(
+        snapshot: BackgroundResponseUiSnapshot,
+        currentChatId: String,
+        currentAssistantItemId: String?,
+        activityVisible: Boolean,
+        finishing: Boolean
+    ): Boolean =
+        snapshot.chatId == currentChatId &&
+            snapshot.assistantItemId == currentAssistantItemId &&
+            isCurrent(snapshot.generation, activityVisible, finishing)
 }
 
 class ActiveResponseStateStore {
