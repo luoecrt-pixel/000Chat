@@ -1485,6 +1485,17 @@ class MainActivity : ComponentActivity() {
                 }
                 return@forEach
             }
+            val uiSnapshot = if (chatId == currentChatId()) {
+                activeAssistantItemId?.let { itemId ->
+                    BackgroundResponseUiSnapshot(
+                        chatId = chatId,
+                        generation = activeResponseState.state.generation,
+                        assistantItemId = itemId
+                    )
+                }
+            } else {
+                null
+            }
             synchronized(activeResumeChats){
                 if(!activeResumeChats.add(chatId)) return@forEach
             }
@@ -1500,7 +1511,7 @@ class MainActivity : ComponentActivity() {
             }
             executor.execute{
                 try{
-                    streamBackgroundResponse(a)
+                    streamBackgroundResponse(a, uiSnapshot)
                 }finally{
                     synchronized(activeResumeChats){activeResumeChats.remove(chatId)}
                 }
@@ -1508,7 +1519,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun streamBackgroundResponse(active: JSONObject) {
+    private fun streamBackgroundResponse(active: JSONObject, uiSnapshot: BackgroundResponseUiSnapshot?) {
         val chatId = active.optString("chat_id")
         val responseId = active.optString("response_id")
         val requestId = active.optString("request_id").takeIf { it.isNotBlank() && it != "null" } ?: return
@@ -1561,10 +1572,10 @@ class MainActivity : ComponentActivity() {
                             val delta = event.optString("delta")
                             if (delta.isNotEmpty()) {
                                 full.append(delta)
-                                if (chatId == currentChatId()) {
+                                uiSnapshot?.let { snapshot ->
                                     runOnUiThread {
-                                        if (isRequestCurrent(chatId, requestGeneration)) {
-                                            activeAssistantItemId?.let { id -> messageAdapter.updateText(id, full.toString()) }
+                                        if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                                            messageAdapter.updateText(snapshot.assistantItemId, full.toString())
                                             scrollToLatest()
                                         }
                                     }
@@ -1575,29 +1586,33 @@ class MainActivity : ComponentActivity() {
                             val delta = event.optString("delta")
                             if (delta.isNotEmpty()) {
                                 reasoning.append(delta)
-                                if (chatId == currentChatId()) {
+                                uiSnapshot?.let { snapshot ->
                                     runOnUiThread {
-                                        if (currentChatId() == chatId) updateActiveReasoningSummary(reasoning.toString())
+                                        if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                                            updateActiveReasoningSummary(reasoning.toString())
+                                        }
                                     }
                                 }
                             }
                         }
+                        uiSnapshot?.let { snapshot ->
                         "response.web_search_call.in_progress",
-                        "response.web_search_call.searching" -> updateToolState("web_search", "running", chatId, requestGeneration)
-                        "response.web_search_call.completed" -> updateToolState("web_search", "completed", chatId, requestGeneration)
-                        "response.web_search_call.failed" -> updateToolState("web_search", "failed", chatId, requestGeneration)
-                        "response.file_search_call.in_progress" -> updateToolState("file_search", "running", chatId, requestGeneration)
-                        "response.file_search_call.completed" -> updateToolState("file_search", "completed", chatId, requestGeneration)
-                        "response.file_search_call.failed" -> updateToolState("file_search", "failed", chatId, requestGeneration)
-                        "response.code_interpreter_call.in_progress" -> updateToolState("code_interpreter", "running", chatId, requestGeneration)
-                        "response.code_interpreter_call.completed" -> updateToolState("code_interpreter", "completed", chatId, requestGeneration)
-                        "response.code_interpreter_call.failed" -> updateToolState("code_interpreter", "failed", chatId, requestGeneration)
-                        "response.image_generation_call.in_progress" -> updateToolState("image_generation", "running", chatId, requestGeneration)
-                        "response.image_generation_call.completed" -> updateToolState("image_generation", "completed", chatId, requestGeneration)
-                        "response.image_generation_call.failed" -> updateToolState("image_generation", "failed", chatId, requestGeneration)
-                        "response.computer_call.in_progress" -> updateToolState("computer", "running", chatId, requestGeneration)
-                        "response.computer_call.completed" -> updateToolState("computer", "completed", chatId, requestGeneration)
-                        "response.computer_call.failed" -> updateToolState("computer", "failed", chatId, requestGeneration)
+                        "response.web_search_call.searching" -> updateToolState("web_search", "running", chatId, snapshot.generation)
+                        "response.web_search_call.completed" -> updateToolState("web_search", "completed", chatId, snapshot.generation)
+                        "response.web_search_call.failed" -> updateToolState("web_search", "failed", chatId, snapshot.generation)
+                        "response.file_search_call.in_progress" -> updateToolState("file_search", "running", chatId, snapshot.generation)
+                        "response.file_search_call.completed" -> updateToolState("file_search", "completed", chatId, snapshot.generation)
+                        "response.file_search_call.failed" -> updateToolState("file_search", "failed", chatId, snapshot.generation)
+                        "response.code_interpreter_call.in_progress" -> updateToolState("code_interpreter", "running", chatId, snapshot.generation)
+                        "response.code_interpreter_call.completed" -> updateToolState("code_interpreter", "completed", chatId, snapshot.generation)
+                        "response.code_interpreter_call.failed" -> updateToolState("code_interpreter", "failed", chatId, snapshot.generation)
+                        "response.image_generation_call.in_progress" -> updateToolState("image_generation", "running", chatId, snapshot.generation)
+                        "response.image_generation_call.completed" -> updateToolState("image_generation", "completed", chatId, snapshot.generation)
+                        "response.image_generation_call.failed" -> updateToolState("image_generation", "failed", chatId, snapshot.generation)
+                        "response.computer_call.in_progress" -> updateToolState("computer", "running", chatId, snapshot.generation)
+                        "response.computer_call.completed" -> updateToolState("computer", "completed", chatId, snapshot.generation)
+                        "response.computer_call.failed" -> updateToolState("computer", "failed", chatId, snapshot.generation)
+                        }
                     }
 
                     val type = event.optString("type")
