@@ -7,7 +7,7 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 Default branch: `main`
 
 Latest code-changing `main` commit before this documentation reconciliation:
-`5f744c180fb359ab49657632cbce8cead31e0e7d` — PR #27.
+`a26402f9ff65210bf2989402cae57e589f3da4d2` — PR #29.
 
 The current code baseline is:
 
@@ -18,7 +18,7 @@ The current code baseline is:
 - minSdk: `26`
 - MainActivity: ~4.5k lines
 
-This documentation pass changes README/handoff only. Treat `5f744c180f...` as the current code baseline; later documentation commits must not be mistaken for new implementation work.
+This documentation pass changes README/handoff only. Treat `a26402f9ff...` as the current code baseline; later documentation commits must not be mistaken for new implementation work.
 
 ## Current dependencies
 
@@ -153,6 +153,23 @@ Merged commit:
 `5f744c180fb359ab49657632cbce8cead31e0e7d`.
 
 The post-merge Debug and Release workflows for that merge are the source of truth for the current main result.
+### PR #29 — lifecycle ownership contracts
+
+Added deterministic JVM coverage for:
+
+- Stop before `response.created` invalidating the uncreated request generation;
+- chat switch/new generation rejecting an older background UI snapshot;
+- stale Worker finalization being allowed only when `active_request_id == expectedRequestId`;
+- missing/blank ownership IDs being rejected.
+
+The persisted finalization path now uses the pure `ActiveResponseWritePolicy` predicate directly, so the tested predicate is the same contract used by `ChatDatabase`.
+
+Merged commit:
+`a26402f9ff65210bf2989402cae57e589f3da4d2`.
+
+Post-merge Debug and Release CI for this exact `main` commit both completed successfully.
+
+Current lifecycle gaps intentionally remain: Android lifecycle integration for late callbacks after Stop/Delete, orphan active-response recovery, real SQLite migration coverage v13→v14→v15, and end-to-end partial-response preservation.
 
 ## Current architecture
 
@@ -224,13 +241,12 @@ These are confirmed fixes for specific races, not completion of the broader Acti
 Priority order:
 
 1. Deterministic lifecycle/recovery tests:
-   - Stop before `response.created`;
-   - late callback after Stop/Delete;
-   - stale Worker finalization after a new request;
-   - chat switch while callbacks arrive;
-   - orphan active-response state;
+   - late callback after Stop/Delete on Android lifecycle boundary;
+   - orphan active-response recovery;
    - DB v13→v14→v15 migrations;
-   - partial-response preservation.
+   - partial-response preservation through the real SQLite layer.
+
+   Already covered in PR #29: Stop before `response.created`, stale Worker finalization after a new request, and chat/generation invalidation of an older background snapshot.
 
 2. Response/recovery controller extraction from `MainActivity.kt`:
    - generation;

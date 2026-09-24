@@ -12,7 +12,7 @@
 
 Текущий кодовый baseline после последнего reliability merge:
 
-`5f744c180fb359ab49657632cbce8cead31e0e7d` — PR #27.
+`a26402f9ff65210bf2989402cae57e589f3da4d2` — PR #29.
 
 Последние reliability-fix PR без bump версии:
 
@@ -21,6 +21,7 @@
 - **PR #23** — `ActiveResponseStateStore.state` сделан `@Volatile`; добавлен тест контракта visibility.
 - **PR #25** — monotonic user-stop invalidation across generations.
 - **PR #27** — background-resume UI callbacks привязаны к immutable snapshot `chatId + generation + assistantItemId`, чтобы поздний callback старого response не мог перепривязаться к новому запросу.
+- **PR #29** — deterministic JVM lifecycle/ownership coverage: Stop до `response.created`, invalidation старого background snapshot при новом generation, и pure ownership predicate для stale Worker finalization.
 
 Документальный **PR #24** синхронизировал правила работы следующего агента; документальный **PR #26** зафиксировал design notes для chat fork.
 
@@ -81,6 +82,7 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 - **PR #23** — visibility contract для `ActiveResponseStateStore.state` через `@Volatile`.
 - **PR #25** — monotonic user-stop invalidation across generations.
 - **PR #27** — immutable UI snapshot guard для background resume и foreground→background continuation.
+- **PR #29** — lifecycle ownership contracts: Stop-before-create, chat/generation invalidation и request-aware persisted finalization через `ActiveResponseWritePolicy`.
 
 ### Ранние reliability/UI изменения
 
@@ -172,17 +174,12 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 ### 1. Детерминированные lifecycle/recovery tests
 
-Покрыть:
+Продолжить deterministic coverage. PR #29 уже закрыл JVM-контракты Stop-before-create, chat/generation invalidation и stale Worker ownership. Остаются сценарии, где полезна более высокая степень интеграционной уверенности:
 
-PR #27 уже закрыл подтверждённый race, при котором late callback background resume мог читать текущий generation вместо generation исходной операции. Regression test теперь проверяет snapshot guard; оставшееся покрытие — соседние lifecycle-сценарии.
-
-- Stop до `response.created`;
-- late callback после Stop/Delete;
-- stale Worker finalization после нового request;
-- переключение чата во время callback;
-- orphan active-response state;
-- DB v13→v14→v15;
-- partial-response preservation.
+- late callback после Stop/Delete на Android lifecycle boundary;
+- orphan active-response state и поведение recovery scheduler/Worker;
+- DB v13→v14→v15 migrations;
+- partial-response preservation через реальный SQLite слой.
 
 ### 2. Response/recovery controller
 
