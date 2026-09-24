@@ -25,9 +25,16 @@ data class ActiveResponseState(
         activityVisible: Boolean,
         finishing: Boolean
     ): Boolean =
-        snapshot.chatId == currentChatId &&
-            snapshot.assistantItemId == currentAssistantItemId &&
-            isCurrent(snapshot.generation, activityVisible, finishing)
+        BackgroundResponseUiOwnershipPolicy.shouldApply(
+            snapshot = snapshot,
+            current = BackgroundResponseUiOwnershipState(
+                chatId = currentChatId,
+                generation = generation,
+                assistantItemId = currentAssistantItemId,
+                activityVisible = activityVisible,
+                finishing = finishing
+            )
+        )
 }
 
 class ActiveResponseStateStore {
