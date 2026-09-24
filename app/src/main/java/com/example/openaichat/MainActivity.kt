@@ -1601,8 +1601,18 @@ class MainActivity : ComponentActivity() {
                     if (responseDecision.reasoningChanged) {
                         uiSnapshot?.let { snapshot ->
                             runOnUiThread {
-                                if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
-                                    updateActiveReasoningSummary(responseState.reasoningSummary)
+                                val currentUiOwnership = BackgroundResponseUiOwnershipState(
+                                    chatId = currentChatId(),
+                                    generation = activeResponseState.state.generation,
+                                    assistantItemId = activeAssistantItemId,
+                                    activityVisible = activityVisible,
+                                    finishing = isFinishing
+                                )
+                                if (BackgroundResponseUiOwnershipPolicy.shouldApply(snapshot, currentUiOwnership)) {
+                                    updateActiveReasoningSummary(
+                                        assistantItemId = snapshot.assistantItemId,
+                                        summary = responseState.reasoningSummary
+                                    )
                                 }
                             }
                         }
@@ -1937,8 +1947,12 @@ class MainActivity : ComponentActivity() {
 
      private fun updateActiveReasoningSummary(summary:String){
          activeAssistantItemId?.let { id ->
-             messageAdapter.updateReasoningSummary(id, summary.trim())
+             updateActiveReasoningSummary(id, summary)
          }
+     }
+
+     private fun updateActiveReasoningSummary(assistantItemId:String, summary:String){
+         messageAdapter.updateReasoningSummary(assistantItemId, summary.trim())
      }
 
      private fun extractReasoningSummary(response:JSONObject?):String{
