@@ -241,6 +241,22 @@ class MainActivity : ComponentActivity() {
         currentChatId() == chatId &&
             activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
 
+    private fun postAssistantTextUpdate(
+        chatId: String,
+        generation: Long,
+        assistantItemId: String,
+        snapshot: String
+    ) {
+        runOnUiThread {
+            // Keep the lifecycle gate immediately before the mutation on the UI thread.
+            if (isRequestCurrent(chatId, generation)) {
+                messageAdapter.updateText(assistantItemId, snapshot)
+                activeAssistantItemId = assistantItemId
+                scrollToLatest()
+            }
+        }
+    }
+
     // ---------- UI ----------
     private fun buildUi() {
         val root = LinearLayout(this).apply {
@@ -1112,13 +1128,12 @@ class MainActivity : ComponentActivity() {
                                         if(now-lastUiUpdate>=50L){
                                             lastUiUpdate=now
                                             val snapshot=full.toString()
-                                            runOnUiThread{
-                                                if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                    messageAdapter.updateText(assistantItemId, snapshot)
-                                                    activeAssistantItemId = assistantItemId
-                                                    scrollToLatest()
-                                                }
-                                            }
+                                            postAssistantTextUpdate(
+                                                requestChatId,
+                                                requestGeneration,
+                                                assistantItemId,
+                                                snapshot
+                                            )
                                         }
                                         if(now-lastActiveCheckpoint>=750L){
                                             lastActiveCheckpoint=now
