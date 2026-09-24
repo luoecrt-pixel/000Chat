@@ -1583,7 +1583,14 @@ class MainActivity : ComponentActivity() {
                     if (responseDecision.textChanged) {
                         uiSnapshot?.let { snapshot ->
                             runOnUiThread {
-                                if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                                val currentUiOwnership = BackgroundResponseUiOwnershipState(
+                                    chatId = currentChatId(),
+                                    generation = activeResponseState.state.generation,
+                                    assistantItemId = activeAssistantItemId,
+                                    activityVisible = activityVisible,
+                                    finishing = isFinishing
+                                )
+                                if (BackgroundResponseUiOwnershipPolicy.shouldApply(snapshot, currentUiOwnership)) {
                                     messageAdapter.updateText(snapshot.assistantItemId, responseState.text)
                                     scrollToLatest()
                                 }
