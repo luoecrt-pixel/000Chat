@@ -179,11 +179,11 @@ class ChatDatabaseLifecycleTest {
         db.execSQL(
             """
             INSERT INTO chats (
-                id, title, active_response_id, active_request_id, active_text, active_status,
+                id, title, updated_at, active_response_id, active_request_id, active_text, active_status,
                 active_started_at, active_effort_pref, active_effective_effort,
                 active_auto_selected, active_prompt_chars, active_attachments$backgroundInsertColumn
             ) VALUES (
-                'chat-a', 'Чат', 'resp-a', 'req-a', 'partial-v13', 'in_progress',
+                'chat-a', 'Чат', 123, 'resp-a', 'req-a', 'partial-v13', 'in_progress',
                 123, 'high', 'high', 0, 12, 0$backgroundInsertValue
             )
             """.trimIndent()
