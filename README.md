@@ -12,7 +12,7 @@
 
 Текущий кодовый baseline после последнего reliability merge:
 
-`a26402f9ff65210bf2989402cae57e589f3da4d2` — PR #29.
+`6ef5545c8526afe8355bba737f795bd17451dab3` — PR #32.
 
 Последние reliability-fix PR без bump версии:
 
@@ -22,6 +22,8 @@
 - **PR #25** — monotonic user-stop invalidation across generations.
 - **PR #27** — background-resume UI callbacks привязаны к immutable snapshot `chatId + generation + assistantItemId`, чтобы поздний callback старого response не мог перепривязаться к новому запросу.
 - **PR #29** — deterministic JVM lifecycle/ownership coverage: Stop до `response.created`, invalidation старого background snapshot при новом generation, и pure ownership predicate для stale Worker finalization.
+- **PR #31** — explicit/tested eligibility policy for background recovery scheduling.
+- **PR #32** — Robolectric SQLite lifecycle coverage: real v13→v15/v14→v15 migrations, partial-response + sequence-cursor persistence after reopen, and stale-request DB write protection.
 
 Документальный **PR #24** синхронизировал правила работы следующего агента; документальный **PR #26** зафиксировал design notes для chat fork.
 
@@ -83,6 +85,8 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 - **PR #25** — monotonic user-stop invalidation across generations.
 - **PR #27** — immutable UI snapshot guard для background resume и foreground→background continuation.
 - **PR #29** — lifecycle ownership contracts: Stop-before-create, chat/generation invalidation и request-aware persisted finalization через `ActiveResponseWritePolicy`.
+- **PR #31** — explicit `BackgroundRecoveryPolicy` eligibility contract and tests for orphan/missing IDs and background-disabled state.
+- **PR #32** — Robolectric SQLite lifecycle coverage for v13→v15/v14→v15 migrations, persisted partial response + durable cursor, and stale request protection.
 
 ### Ранние reliability/UI изменения
 
@@ -174,12 +178,9 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 ### 1. Детерминированные lifecycle/recovery tests
 
-Продолжить deterministic coverage. PR #29 уже закрыл JVM-контракты Stop-before-create, chat/generation invalidation и stale Worker ownership. Остаются сценарии, где полезна более высокая степень интеграционной уверенности:
+Продолжить deterministic coverage. PR #29 и PR #32 уже закрыли JVM/SQLite-контракты Stop-before-create, chat/generation invalidation, stale Worker ownership, recovery eligibility, миграции v13→v15 и сохранение partial response/cursor. Остаётся сценарий, где полезна более высокая степень интеграционной уверенности:
 
-- late callback после Stop/Delete на Android lifecycle boundary;
-- orphan active-response state и поведение recovery scheduler/Worker;
-- DB v13→v14→v15 migrations;
-- partial-response preservation через реальный SQLite слой.
+- late callback после Stop/Delete на Android lifecycle boundary.
 
 ### 2. Response/recovery controller
 
