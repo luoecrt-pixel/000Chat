@@ -111,6 +111,58 @@ class ChatDatabaseLifecycleTest {
     }
 
     @Test
+    fun lateMetricWriteCannotRecreateDeletedChatTelemetry() {
+        database = ChatDatabase(context)
+        database!!.ensureChat("chat-a", "Чат")
+
+        database!!.recordEffortMetric(
+            requestId = "req-a",
+            chatId = "chat-a",
+            taskClass = "general",
+            effortPref = "high",
+            effectiveEffort = "high",
+            autoSelected = false,
+            promptChars = 3,
+            attachments = 0,
+            latencyMs = 100,
+            inputTokens = 10,
+            cachedTokens = 0,
+            cacheWriteTokens = 0,
+            outputTokens = 5,
+            reasoningTokens = 2,
+            success = true,
+            errorType = null
+        )
+        assertEquals(1, metricCount("chat-a"))
+
+        database!!.deleteChat("chat-a")
+        assertEquals(0, metricCount("chat-a"))
+
+        // Simulates a late foreground callback completing after Delete.
+        database!!.recordEffortMetric(
+            requestId = "req-a",
+            chatId = "chat-a",
+            taskClass = "general",
+            effortPref = "high",
+            effectiveEffort = "high",
+            autoSelected = false,
+            promptChars = 3,
+            attachments = 0,
+            latencyMs = 100,
+            inputTokens = 10,
+            cachedTokens = 0,
+            cacheWriteTokens = 0,
+            outputTokens = 5,
+            reasoningTokens = 2,
+            success = true,
+            errorType = null
+        )
+
+        assertEquals(0, metricCount("chat-a"))
+        assertTrue(database!!.getChat("chat-a") == null)
+    }
+
+    @Test
     fun staleRequestCannotOverwritePartialResponseAfterNewRequestOwnsChat() {
         database = ChatDatabase(context)
         database!!.ensureChat("chat-a", "Чат")
@@ -144,6 +196,15 @@ class ChatDatabaseLifecycleTest {
         assertEquals(-1L, active.optLong("last_sequence_number"))
         assertTrue(active.optBoolean("background_enabled", false))
     }
+
+    private fun metricCount(chatId: String): Int =
+        database!!.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM effort_metrics WHERE chat_id=?",
+            arrayOf(chatId)
+        ).use { cursor ->
+            cursor.moveToFirst()
+            cursor.getInt(0)
+        }
 
     private fun resetDatabaseFile() {
         SQLiteDatabase.deleteDatabase(context.getDatabasePath(DB_NAME))
