@@ -10,17 +10,19 @@
 **DB schema:** `v15`  
 **MainActivity:** ~4.5k строк
 
-Последний кодовый baseline перед этим документальным PR:
+Текущий кодовый baseline после последнего reliability merge:
 
-`ce251af52ef899907e17f11dff237fb9cf3798c6`
+`5f744c180fb359ab49657632cbce8cead31e0e7d` — PR #27.
 
-После baseline были добавлены точечные reliability-fix PR без bump версии:
+Последние reliability-fix PR без bump версии:
 
 - **PR #19** — строгая непрерывность `sequence_number` для foreground SSE и resumable recovery.
 - **PR #20** — Stop/cancellation привязан к generation запроса, чтобы устаревший executor не повторял UI-восстановление.
 - **PR #23** — `ActiveResponseStateStore.state` сделан `@Volatile`; добавлен тест контракта visibility.
+- **PR #25** — monotonic user-stop invalidation across generations.
+- **PR #27** — background-resume UI callbacks привязаны к immutable snapshot `chatId + generation + assistantItemId`, чтобы поздний callback старого response не мог перепривязаться к новому запросу.
 
-Документальный **PR #24** синхронизировал правила работы следующего агента; следующий кодовый reliability fix — **PR #25**.
+Документальный **PR #24** синхронизировал правила работы следующего агента; документальный **PR #26** зафиксировал design notes для chat fork.
 
 ## CI — где смотреть фактический результат
 
@@ -76,6 +78,9 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 - **PR #19** — единый строгий sequence-gap contract для foreground и resumable SSE.
 - **PR #20** — Stop/cancellation generation race fix.
+- **PR #23** — visibility contract для `ActiveResponseStateStore.state` через `@Volatile`.
+- **PR #25** — monotonic user-stop invalidation across generations.
+- **PR #27** — immutable UI snapshot guard для background resume и foreground→background continuation.
 
 ### Ранние reliability/UI изменения
 
@@ -169,7 +174,7 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 Покрыть:
 
-**Подтверждённый новый race:** marker ручного Stop нельзя очищать сразу и нельзя хранить только последний остановленный generation. Иначе поздний executor callback может потерять факт user-stop и снова уйти в background continuation. PR #25 меняет контракт state на инвалидизацию всех generation до последнего user-stop.
+PR #27 уже закрыл подтверждённый race, при котором late callback background resume мог читать текущий generation вместо generation исходной операции. Regression test теперь проверяет snapshot guard; оставшееся покрытие — соседние lifecycle-сценарии.
 
 - Stop до `response.created`;
 - late callback после Stop/Delete;
@@ -203,7 +208,7 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 Проверить границы потоков для `ActiveResponseStateStore`, Executor, Activity и WorkManager. Менять синхронизацию только после подтверждённого race.
 
-**Подтверждённая граница:** PR #23 уже merged и фиксирует visibility `ActiveResponseStateStore.state` через `@Volatile`. Более широкий audit ещё не считается завершённым.
+**Подтверждённые границы:** PR #23 фиксирует visibility `ActiveResponseStateStore.state` через `@Volatile`; PR #27 фиксирует UI ownership background-resume callbacks через immutable `chatId + generation + assistantItemId` snapshot. Более широкий audit ещё не считается завершённым.
 
 ### 5. Diagnostics/security review
 
