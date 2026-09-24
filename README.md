@@ -14,10 +14,13 @@
 
 `ce251af52ef899907e17f11dff237fb9cf3798c6`
 
-После baseline были добавлены два точечных reliability-fix PR без bump версии:
+После baseline были добавлены точечные reliability-fix PR без bump версии:
 
 - **PR #19** — строгая непрерывность `sequence_number` для foreground SSE и resumable recovery.
 - **PR #20** — Stop/cancellation привязан к generation запроса, чтобы устаревший executor не повторял UI-восстановление.
+- **PR #23** — `ActiveResponseStateStore.state` сделан `@Volatile`; добавлен тест контракта visibility.
+
+Документальный **PR #24** синхронизировал правила работы следующего агента; следующий кодовый reliability fix — **PR #25**.
 
 ## CI — где смотреть фактический результат
 
@@ -200,7 +203,7 @@ Release workflow проверяет упаковку APK/AAB. Это не produc
 
 Проверить границы потоков для `ActiveResponseStateStore`, Executor, Activity и WorkManager. Менять синхронизацию только после подтверждённого race.
 
-**Сейчас в работе:** PR #23 фиксирует подтверждённую границу видимости `ActiveResponseStateStore.state`: immutable snapshot помечен `@Volatile`, чтобы Stop/generation updates были видимы callback-потоку. Более широкий audit ещё не считается завершённым.
+**Подтверждённая граница:** PR #23 уже merged и фиксирует visibility `ActiveResponseStateStore.state` через `@Volatile`. Более широкий audit ещё не считается завершённым.
 
 ### 5. Diagnostics/security review
 
