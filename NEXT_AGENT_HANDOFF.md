@@ -26,15 +26,15 @@
 `active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
 Устаревший request не должен финализировать persisted state.
 
-**Тесты:** JVM/pure contracts + Robolectric SQLite уже покрывают большую часть lifecycle/persistence. PR #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete; head CI Debug/Release зелёные.
+**Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. Следующая работа — не big-bang extraction, а общий response-event/controller seam. В частности, foreground и background paths должны получать одну семантику событий, terminal states, checkpoints и ownership. `ResumableResponseStreamClient` уже является источником истины для sequence cursor/duplicate/gap на recovery path; не дублировать этот state в Activity без необходимости. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. Общая event semantics уже вынесена в `ResponseEventReducer`; transport сохраняет ownership sequence cursor, а UI/DB/WorkManager остаются adapters. Следующая стадия — аккуратно вынести persistence/checkpoint/ownership orchestration вокруг reducer, без big-bang rewrite. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
 
 ## Фактический baseline
 
-- main code baseline: `dcef3604ae4c34e5a1c625cf008ae0765dee1a67` (docs follow-up after PR #35; last code merge remains `6c975658698d24cf40da3874f3c96eaf17da634f`)
+- main code baseline: `409996fe2484d5ac71f096a0331fb9c64ada4ff6` (PR #36 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -48,7 +48,7 @@
 - Core KTX: `1.15.0`
 - OkHttp: `4.12.0`
 
-`dcef3604...` — documentation-only follow-up on main; product/code baseline remains the PR #35 squash `6c975658...`.
+Последующие документационные commits не являются новым code baseline.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -61,39 +61,39 @@
 - **#31:** background recovery запускается только при явной eligibility policy.
 - **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
 - **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback больше не может заново создать telemetry для удалённого chat.
-- **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; CI на API 34 Debug/Release зелёный.
+- **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; PR-head Debug/Release зелёные.
+- **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
 ## АРХИТЕКТУРНЫЙ ОБЗОР — 2026-09-24
 
-### Что улучшать первым
+### Что улучшать теперь
 
-1. **Общий response-event seam.** Сейчас foreground SSE и background recovery содержат отдельную бизнес-обработку event types, UI effects и DB checkpoints. Это создаёт риск semantic drift.
-2. **Sequence cursor — один владелец.** `ResumableResponseStreamClient.stream()` уже применяет `ResponseStreamSequenceCursor`, игнорирует duplicates и бросает gap exception. В `streamBackgroundResponse()` дополнительная ручная проверка sequence — в основном дублирование. Не создавать второй cursor authority.
-3. **Controller должен быть pure-ish.** Первый extraction не должен знать про `Activity`, `View`, `runOnUiThread` или конкретный WorkManager API. Он должен принимать immutable request/event state и выдавать решения/effects.
-4. **Transport остаётся adapter'ом.** SSE/HTTP clients сообщают normalized events; foreground Activity и WorkManager одинаково кормят controller/reducer.
-5. **Persistence — отдельный adapter boundary.** Controller не должен напрямую собирать `JSONObject` для DB по всему `MainActivity`. Сначала contract, затем маленький repository/checkpoint adapter.
-6. **UI ownership остаётся snapshot-based.** `chatId + generation + assistantItemId` должен приходить в UI effect как immutable snapshot; не читать current Activity state постфактум из worker/stream callback.
+1. **Persistence/checkpoint adapter.** После #36 следующий natural seam — убрать прямые `chatDb.updateActiveResponse()/clearActiveResponse()` из event-processing loops и дать reducer-driven orchestration небольшой repository/checkpoint boundary.
+2. **Ownership adapter.** Сохранить immutable `chatId + generation + assistantItemId` snapshot на UI boundary; controller не должен читать mutable Activity state постфактум.
+3. **Transport adapter.** SSE/HTTP остаются источником normalized events и sequence semantics; reducer не должен знать OkHttp, Android или WorkManager.
+4. **Tool/UI effects — следующим слоем.** Не переносить все tool events в reducer сразу; сначала стабилизировать response state/checkpoint path.
+5. **Тестировать контракт до переноса.** Любой следующий extraction должен сначала получить pure JVM/Robolectric regression, затем один runtime path.
 
-### Предлагаемый первый PR
+### Что уже реализовано в #36
 
-Сделать маленький `ResponseEventReducer`/controller contract + JVM tests для:
-- sequence accepted / duplicate / gap;
+`ResponseEventReducer` + JVM tests покрывают:
+- response id creation/changes;
 - text delta accumulation;
 - reasoning summary delta;
-- terminal events: completed / failed / incomplete / cancelled;
-- checkpoint decision;
-- ownership-invalidated UI effect;
-- requestId mismatch/no-op.
+- completed / failed / incomplete / cancelled;
+- terminal response / usage / completion error;
+- unknown и empty events;
+- whitespace-preserving deltas.
 
-После этого перенести **только один путь** из `streamBackgroundResponse()` или foreground SSE и сравнить поведение по существующим тестам. Если контракт начинает тащить Android/DB types — граница выбрана неправильно.
+В foreground SSE и background recovery reducer используется в одном смысле; recovery sequence cursor остаётся в `ResumableResponseStreamClient`.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Response/recovery controller
-Сначала общий response-event contract + tests, затем маленькие переносы из `MainActivity.kt`.
-Не делать big-bang rewrite.
+### 1. Response/recovery controller — следующий срез
+Вынести persistence/checkpoint и ownership orchestration вокруг уже общего reducer.
+Сначала общий adapter contract + tests, затем один небольшой runtime перенос.
 
 ### 2. Attachment/upload/composer controller
 URI/file/image upload, ZIP extraction, progress, composer persistence.
@@ -110,7 +110,7 @@ Shrink/minification policy, renderer/reflection/file handling under shrinker; si
 ### 6. Compose migration
 **Не начинать до state/controller extraction.**
 Порядок:
-`response controller → attachment/composer state → immutable screen state/events → one bounded Compose feature → incremental migration`.
+`response reducer/controller → persistence + attachment state → immutable screen state/events → one bounded Compose feature → incremental migration`.
 Compose — не «забытый TODO», а отложенная архитектурная стадия.
 
 ### 7. Отдельные compatibility tasks
@@ -143,12 +143,14 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - если merge — проверить post-merge runs, когда connector их предоставляет; если нет — явно зафиксировать ограничение;
 - обновить план и историю.
 
-## История последнего рабочего захода
+## История последних рабочих заходов
 
 - **#35 merged:** `6c975658698d24cf40da3874f3c96eaf17da634f`.
-- **CI on PR head:** Debug run `36054984135` и Release run `36054984134` — `success`.
-- Исправлены две реальные причины CI/test instability: неверная JVM reflection-сигнатура Kotlin default-args в instrumentation test и отсутствие доступа к KVM на emulator runner. Disk pressure также устранялся отдельным cleanup step.
-- **Follow-up:** `dcef3604ae4c34e5a1c625cf008ae0765dee1a67` обновляет только handoff/continuity; code baseline не меняет.
+- **#35 PR-head CI:** Debug run `36054984135` и Release run `36054984134` — success.
+- **#36 merged:** `409996fe2484d5ac71f096a0331fb9c64ada4ff6`.
+- **#36 final PR-head CI:** Release `36060342110` — success; Debug `36060342139` — success, включая lifecycle instrumentation.
+- В ходе #36 CI поймал два реальные integration остатка после первоначального патча: повреждение header `MainActivity.kt` от промежуточного content update и три старые ссылки на `full` в recovery path. Файл был восстановлен из проверенного baseline, изменения применены заново, затем exact-head CI стал зелёным.
+- Post-merge runs для `409996fe...` текущий connector не вернул; поэтому post-merge green не заявляется.
 
 ## Product radar: fork chat
 
