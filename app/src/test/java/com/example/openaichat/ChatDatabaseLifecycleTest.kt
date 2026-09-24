@@ -57,12 +57,18 @@ class ChatDatabaseLifecycleTest {
         createLegacyChatsDatabase(version = 14, includeBackgroundEnabled = true)
 
         database = ChatDatabase(context)
-        val active = database!!.getActiveResponse("chat-a")
-
-        assertNotNull(active)
-        assertEquals("req-a", active!!.optString("request_id"))
-        assertTrue(active.optBoolean("background_enabled", false))
-        assertEquals(-1L, active.optLong("last_sequence_number", Long.MIN_VALUE))
+        database!!.readableDatabase.query(
+            "chats",
+            arrayOf("active_request_id", "active_background_enabled", "active_last_sequence_number"),
+            "id=?",
+            arrayOf("chat-a"),
+            null, null, null, "1"
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("req-a", cursor.getString(0))
+            assertEquals(1, cursor.getInt(1))
+            assertEquals(-1L, cursor.getLong(2))
+        }
         assertColumnExists("chats", "active_last_sequence_number")
     }
 
