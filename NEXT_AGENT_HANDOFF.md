@@ -60,13 +60,14 @@
 - **#29:** Stop-before-create, stale Worker finalization и ownership проверяются через детерминированные contracts.
 - **#31:** background recovery запускается только при явной eligibility policy.
 - **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
+- **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback больше не может заново создать telemetry для удалённого chat.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. Android lifecycle boundary
-Поздний callback после Stop/Delete на реальной Android lifecycle boundary.
+DB-часть Delete → поздний callback закрыта в #34. Остался отдельный Android lifecycle harness для реального late callback после Stop/Delete.
 
 ### 2. Response/recovery controller
 Постепенно вынести из `MainActivity.kt`:
