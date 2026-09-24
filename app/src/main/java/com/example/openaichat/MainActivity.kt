@@ -1076,9 +1076,8 @@ class MainActivity : ComponentActivity() {
             var completionState = "in_progress"
             var completionError: String? = null
             var completedResponse: JSONObject? = null
+            var responseState = ResponseEventState()
             val toolItems=mutableListOf<String>()
-            val full=StringBuilder()
-            val reasoningSummary=StringBuilder()
             var lastUiUpdate=0L
             var lastActiveCheckpoint=0L
             try {
@@ -1114,52 +1113,64 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                            val responseDecision = ResponseEventReducer.reduce(responseState, ev)
+                            responseState = responseDecision.state
+                            responseState.responseId?.let { newId = it }
+                            responseState.terminalState?.let { completionState = it.wireStatus }
+                            responseState.completionError?.let { completionError = it }
+                            responseState.terminalResponse?.let { completedResponse = it }
+                            responseState.usage?.let { usage = it }
+
+                            if (ev.optString("type") == "response.created" &&
+                                responseDecision.responseIdChanged &&
+                                !newId.isNullOrBlank()
+                            ) {
+                                chatDb.updateActiveResponse(
+                                    requestChatId,
+                                    responseId = newId,
+                                    status = "in_progress",
+                                    lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                    expectedRequestId = localRequestId
+                                )
+                                diagnostics.log("response_created", mapOf(
+                                    "request_id" to requestId,
+                                    "response_id" to newId,
+                                    "chat_id" to requestChatId
+                                ))
+                            }
+
+                            if (responseDecision.textChanged) {
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastUiUpdate >= 50L) {
+                                    lastUiUpdate = now
+                                    postAssistantTextUpdate(
+                                        requestChatId,
+                                        requestGeneration,
+                                        assistantItemId,
+                                        responseState.text
+                                    )
+                                }
+                                if (now - lastActiveCheckpoint >= 750L) {
+                                    lastActiveCheckpoint = now
+                                    chatDb.updateActiveResponse(
+                                        requestChatId,
+                                        responseId = newId,
+                                        text = responseState.text,
+                                        status = "in_progress",
+                                        expectedRequestId = localRequestId
+                                    )
+                                }
+                            }
+
+                            if (responseDecision.reasoningChanged) {
+                                runOnUiThread {
+                                    if (isRequestCurrent(requestChatId, requestGeneration)) {
+                                        updateActiveReasoningSummary(responseState.reasoningSummary)
+                                    }
+                                }
+                            }
+
                             when(ev.optString("type")){
-                                "response.created" -> {
-                                    val r=ev.optJSONObject("response")
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber, expectedRequestId = localRequestId)
-                                        diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
-                                    }
-                                }
-                                "response.output_text.delta" -> {
-                                    val delta=ev.optString("delta")
-                                    if(delta.isNotEmpty()){
-                                        full.append(delta)
-                                        val now=SystemClock.elapsedRealtime()
-                                        if(now-lastUiUpdate>=50L){
-                                            lastUiUpdate=now
-                                            val snapshot=full.toString()
-                                            postAssistantTextUpdate(
-                                                requestChatId,
-                                                requestGeneration,
-                                                assistantItemId,
-                                                snapshot
-                                            )
-                                        }
-                                        if(now-lastActiveCheckpoint>=750L){
-                                            lastActiveCheckpoint=now
-                                            chatDb.updateActiveResponse(
-                                                requestChatId,
-                                                responseId = newId,
-                                                text = full.toString(),
-                                                status = "in_progress", expectedRequestId = localRequestId
-                                            )
-                                        }
-                                    }
-                                }
-                                "response.reasoning_summary_text.delta" -> {
-                                    val delta=ev.optString("delta")
-                                    if(delta.isNotEmpty()){
-                                        reasoningSummary.append(delta)
-                                        runOnUiThread{
-                                            if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                updateActiveReasoningSummary(reasoningSummary.toString())
-                                            }
-                                        }
-                                    }
-                                }
                                 "response.reasoning_summary_text.done" -> {}
                                 "response.web_search_call.completed" -> { toolItems.add("🌐 Web Search"); updateToolState("web_search","completed",requestChatId,requestGeneration) }
                                 "response.file_search_call.completed" -> { toolItems.add("📚 File Search"); updateToolState("file_search","completed",requestChatId,requestGeneration) }
@@ -1176,31 +1187,10 @@ class MainActivity : ComponentActivity() {
                                 "response.code_interpreter_call.failed" -> updateToolState("code_interpreter","failed",requestChatId,requestGeneration)
                                 "response.image_generation_call.failed" -> updateToolState("image_generation","failed",requestChatId,requestGeneration)
                                 "response.computer_call.failed" -> updateToolState("computer","failed",requestChatId,requestGeneration)
-                                "response.incomplete" -> {
-                                    val r=ev.optJSONObject("response")
-                                    completionState="incomplete"
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    usage=r?.optJSONObject("usage")
-                                    completionError=r?.optJSONObject("incomplete_details")?.optString("reason")
-                                    completedResponse=r
-                                }
-                                "response.failed" -> {
-                                    val r=ev.optJSONObject("response")
-                                    completionState="failed"
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    usage=r?.optJSONObject("usage")
-                                    completionError=r?.optJSONObject("error")?.optString("message")
-                                        ?: r?.optString("error")
-                                    completedResponse=r
-                                }
                                 "response.completed" -> {
-                                    completionState="completed"
-                                    val r=ev.optJSONObject("response")
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    usage=r?.optJSONObject("usage")
-                                    completedResponse=r
+                                    val r=responseState.terminalResponse
                                     parseTools(r?.optJSONArray("output"),toolItems,requestChatId,requestGeneration)
-                                    newId?.let { chatDb.updateActiveResponse(requestChatId, responseId = it, text = full.toString(), status = "completed", expectedRequestId = localRequestId) }
+                                    newId?.let { chatDb.updateActiveResponse(requestChatId, responseId = it, text = responseState.text, status = "completed", expectedRequestId = localRequestId) }
                                     val annotations=extractAnnotations(r?.optJSONArray("output"))
                                     fileCites=annotations.first
                                     urlCites=annotations.second
@@ -1235,7 +1225,7 @@ class MainActivity : ComponentActivity() {
                     if(completionState=="failed") {
                         throw IOException("Ответ Astra не завершился: ${completionError?.take(500) ?: "неизвестная ошибка"}")
                     }
-                    val finalText=full.toString().ifBlank{if(completionState=="incomplete") "Ответ завершён не полностью." else "Готово. Ответ не содержит текста."}
+                    val finalText=responseState.text.ifBlank{if(completionState=="incomplete") "Ответ завершён не полностью." else "Готово. Ответ не содержит текста."}
                     val answerAnnotations=JSONArray()
                     fileCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
                     urlCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
@@ -1246,7 +1236,7 @@ class MainActivity : ComponentActivity() {
                         completionState,
                         completionError
                     )
-                    val streamedSummary=reasoningSummary.toString().trim()
+                    val streamedSummary=responseState.reasoningSummary.trim()
                     val responseSummary=parsedModel.reasoningSummary?.takeIf{it.isNotBlank()}
                         ?: extractReasoningSummary(completedResponse).takeIf{it.isNotBlank()}
                         ?: streamedSummary.takeIf{it.isNotBlank()}
@@ -1346,7 +1336,7 @@ class MainActivity : ComponentActivity() {
                                 currentCall=null
                                 status.text="Соединение прервалось — Astra продолжает работу…"
                                 activeAssistantItemId?.let { id ->
-                                    val partial=full.toString()
+                                    val partial=responseState.text
                                     if(partial.isNotBlank()) messageAdapter.updateText(id, partial)
                                 }
                                 setBusy(true)
@@ -1370,8 +1360,8 @@ class MainActivity : ComponentActivity() {
                     setBusy(false)
                     activeAssistantItemId=null
                     currentCall=null
-                    if(!cancelled && completionState=="incomplete" && full.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
-                        val partial=JSONObject().put("role","assistant").put("text",full.toString()).put("incomplete",true).put("status","incomplete")
+                    if(!cancelled && completionState=="incomplete" && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
+                        val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status","incomplete")
                         newId?.let{partial.put("response_id",it)}
                         requestId?.let{partial.put("request_id",it)}
                         chat.add(partial)
@@ -1568,8 +1558,9 @@ class MainActivity : ComponentActivity() {
             }
 
             val cursor = current.optLong("last_sequence_number", -1L)
-            val full = StringBuilder(if (cursor >= 0L) current.optString("text").orEmpty() else "")
-            val reasoning = StringBuilder()
+            var responseState = ResponseEventState(
+                text = if (cursor >= 0L) current.optString("text").orEmpty() else ""
+            )
             var lastSequence = cursor
             var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -1580,46 +1571,37 @@ class MainActivity : ComponentActivity() {
                     onCallCreated = { call -> activeResumeCalls[chatId] = call }
                 ) { event ->
                     val sequence = event.optLong("sequence_number", -1L)
-                    if (sequence >= 0L && sequence > lastSequence) {
-                        if (lastSequence >= 0L && sequence > lastSequence + 1L) {
-                            diagnostics.log("sse_event_sequence_gap", mapOf(
-                                "chat_id" to chatId,
-                                "request_id" to requestId,
-                                "expected_sequence_number" to (lastSequence + 1L),
-                                "received_sequence_number" to sequence
-                            ))
-                        }
+                    if (sequence >= 0L) {
                         lastSequence = sequence
                     }
 
+                    val responseDecision = ResponseEventReducer.reduce(responseState, event)
+                    responseState = responseDecision.state
+
+                    if (responseDecision.textChanged) {
+                        uiSnapshot?.let { snapshot ->
+                            runOnUiThread {
+                                if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                                    messageAdapter.updateText(snapshot.assistantItemId, responseState.text)
+                                    scrollToLatest()
+                                }
+                            }
+                        }
+                    }
+
+                    if (responseDecision.reasoningChanged) {
+                        uiSnapshot?.let { snapshot ->
+                            runOnUiThread {
+                                if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                                    updateActiveReasoningSummary(responseState.reasoningSummary)
+                                }
+                            }
+                        }
+                    }
+
                     when (event.optString("type")) {
-                        "response.output_text.delta" -> {
-                            val delta = event.optString("delta")
-                            if (delta.isNotEmpty()) {
-                                full.append(delta)
-                                uiSnapshot?.let { snapshot ->
-                                    runOnUiThread {
-                                        if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
-                                            messageAdapter.updateText(snapshot.assistantItemId, full.toString())
-                                            scrollToLatest()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "response.reasoning_summary_text.delta" -> {
-                            val delta = event.optString("delta")
-                            if (delta.isNotEmpty()) {
-                                reasoning.append(delta)
-                                uiSnapshot?.let { snapshot ->
-                                    runOnUiThread {
-                                        if (activeResponseState.state.isCurrent(snapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
-                                            updateActiveReasoningSummary(reasoning.toString())
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        "response.output_text.delta" -> Unit
+                        "response.reasoning_summary_text.delta" -> Unit
                     }
 
                     uiSnapshot?.let { snapshot ->
@@ -1644,24 +1626,16 @@ class MainActivity : ComponentActivity() {
                     }
 
                     val type = event.optString("type")
-                    val terminal = type == "response.completed" ||
-                        type == "response.failed" ||
-                        type == "response.incomplete" ||
-                        type == "response.cancelled"
+                    val terminalState = responseState.terminalState
+                    val terminal = terminalState != null
                     val now = SystemClock.elapsedRealtime()
                     if (terminal || now - lastCheckpointAt >= 500L) {
                         lastCheckpointAt = now
                         chatDb.updateActiveResponse(
                             chatId,
                             responseId = responseId,
-                            text = full.toString(),
-                            status = when (type) {
-                                "response.completed" -> "completed"
-                                "response.failed" -> "failed"
-                                "response.incomplete" -> "incomplete"
-                                "response.cancelled" -> "cancelled"
-                                else -> "in_progress"
-                            },
+                            text = responseState.text,
+                            status = terminalState?.wireStatus ?: "in_progress",
                             lastSequenceNumber = lastSequence,
                             expectedRequestId = requestId
                         )
@@ -1676,7 +1650,7 @@ class MainActivity : ComponentActivity() {
                     chatDb.updateActiveResponse(
                         chatId,
                         responseId = responseId,
-                        text = full.toString(),
+                        text = responseState.text,
                         status = when (result.terminalEventType) {
                             "response.completed" -> "completed"
                             "response.failed" -> "failed"
@@ -1697,7 +1671,7 @@ class MainActivity : ComponentActivity() {
                 chatDb.updateActiveResponse(
                     chatId,
                     responseId = responseId,
-                    text = full.toString(),
+                    text = responseState.text,
                     status = "in_progress",
                     lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
                     expectedRequestId = requestId
