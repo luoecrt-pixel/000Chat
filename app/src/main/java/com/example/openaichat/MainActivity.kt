@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
+    private lateinit var activeResponsePersistence: ActiveResponsePersistence
     private lateinit var diagnostics: AstraDiagnostics
     private lateinit var scroll: RecyclerView
     private lateinit var messageAdapter: ChatMessageAdapter
@@ -184,6 +185,7 @@ class MainActivity : ComponentActivity() {
          }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
+        activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
         diagnostics = AstraDiagnostics(this)
         chatDb.migrateLegacyPrefs(prefs)
         ensureChatStore()
@@ -206,7 +208,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         persistComposerStateNow()
         activityVisible = false
-        val active = try { chatDb.listActiveResponses() } catch (_: Exception) { emptyList() }
+        val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
         activeResumeCalls.remove(currentChatId())?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
@@ -478,7 +480,7 @@ class MainActivity : ComponentActivity() {
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun deleteChat(id: String) {
-        val active=try{chatDb.getActiveResponse(id)}catch(_:Exception){null}
+        val active=try{activeResponsePersistence.getActiveResponse(id)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val backgroundEnabled=active?.optBoolean("background_enabled", true) == true
@@ -493,7 +495,7 @@ class MainActivity : ComponentActivity() {
         activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
-        chatDb.clearActiveResponse(id, expectedRequestId = requestId)
+        activeResponsePersistence.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
         clearComposerState(id)
@@ -807,10 +809,10 @@ class MainActivity : ComponentActivity() {
         val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
         activeResumeCalls.remove(chatId)?.cancel()
-        val active=try{chatDb.getActiveResponse(chatId)}catch(_:Exception){null}
+        val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
-        chatDb.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
+        activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
         if(responseId!=null){
             executor.execute{
@@ -940,7 +942,7 @@ class MainActivity : ComponentActivity() {
 
         lastUserText=text
         activeRequestRegenerate=regenerate
-        chatDb.setActiveResponse(
+        activeResponsePersistence.setActiveResponse(
             requestChatId,
             responseId = null,
             requestId = localRequestId,
@@ -1083,7 +1085,7 @@ class MainActivity : ComponentActivity() {
             try {
                 call.execute().use { response ->
                     requestId=response.header("x-request-id")
-                    chatDb.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
+                    activeResponsePersistence.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
@@ -1125,7 +1127,7 @@ class MainActivity : ComponentActivity() {
                                 responseDecision.responseIdChanged &&
                                 !newId.isNullOrBlank()
                             ) {
-                                chatDb.updateActiveResponse(
+                                activeResponsePersistence.updateActiveResponse(
                                     requestChatId,
                                     responseId = newId,
                                     status = "in_progress",
@@ -1152,7 +1154,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 if (now - lastActiveCheckpoint >= 750L) {
                                     lastActiveCheckpoint = now
-                                    chatDb.updateActiveResponse(
+                                    activeResponsePersistence.updateActiveResponse(
                                         requestChatId,
                                         responseId = newId,
                                         text = responseState.text,
@@ -1190,7 +1192,7 @@ class MainActivity : ComponentActivity() {
                                 "response.completed" -> {
                                     val r=responseState.terminalResponse
                                     parseTools(r?.optJSONArray("output"),toolItems,requestChatId,requestGeneration)
-                                    newId?.let { chatDb.updateActiveResponse(requestChatId, responseId = it, text = responseState.text, status = "completed", expectedRequestId = localRequestId) }
+                                    newId?.let { activeResponsePersistence.updateActiveResponse(requestChatId, responseId = it, text = responseState.text, status = "completed", expectedRequestId = localRequestId) }
                                     val annotations=extractAnnotations(r?.optJSONArray("output"))
                                     fileCites=annotations.first
                                     urlCites=annotations.second
@@ -1266,7 +1268,7 @@ class MainActivity : ComponentActivity() {
                         currentResponseId=newId ?: currentResponseId
                         baselineEffort=actualEffort
                         chat.add(assistantMessage)
-                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
+                        activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         persistCurrentChat()
 
                         val finalItemId = activeAssistantItemId ?: assistantItemId
@@ -1322,7 +1324,7 @@ class MainActivity : ComponentActivity() {
                     return@execute
                 }
                 if(canContinueInBackground){
-                    val active=try{chatDb.getActiveResponse(requestChatId)}catch(_:Exception){null}
+                    val active=try{activeResponsePersistence.getActiveResponse(requestChatId)}catch(_:Exception){null}
                     if(!activityVisible && newId!=null){
                         BackgroundResponseWorkScheduler.enqueueImmediate(
                             applicationContext,
@@ -1368,7 +1370,7 @@ class MainActivity : ComponentActivity() {
                         persistCurrentChat()
                     }
                     if(cancelled && userStopped){
-                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
+                        activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         if(chat.isNotEmpty() && chat.lastOrNull()?.optString("role")=="user" && !regenerate){
                             chat.removeAt(chat.lastIndex)
                             persistCurrentChat()
@@ -1392,7 +1394,7 @@ class MainActivity : ComponentActivity() {
                         persistComposerStateNow()
                         status.text="Остановлено — сообщение и вложения возвращены в поле ввода"
                     } else {
-                        chatDb.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
+                        activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
                         val friendly = friendlyApiError(e.message)
                         status.text="Ошибка"
                         addBubble("Ошибка",friendly,false)
@@ -1477,13 +1479,13 @@ class MainActivity : ComponentActivity() {
 
 
     private fun resumeBackgroundResponses(){
-        val active=try{chatDb.listActiveResponses()}catch(_:Exception){emptyList()}
+        val active=try{activeResponsePersistence.listActiveResponses()}catch(_:Exception){emptyList()}
         active.forEach { a ->
             val chatId=a.optString("chat_id")
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
             if (!a.optBoolean("background_enabled", true)) {
-                chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
+                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId=requestId)
                 diagnostics.log("background_recovery_disabled", mapOf(
                     "chat_id" to chatId,
                     "request_id" to requestId,
@@ -1495,7 +1497,7 @@ class MainActivity : ComponentActivity() {
                 val startedAt=a.optLong("started_at",0L)
                 val age=System.currentTimeMillis()-startedAt
                 if(requestId!=null && startedAt>0L && age>120_000L){
-                    chatDb.clearActiveResponse(chatId, expectedRequestId=requestId)
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId=requestId)
                     diagnostics.log("background_response_orphaned",mapOf("chat_id" to chatId,"request_id" to requestId,"age_ms" to age))
                 }
                 return@forEach
@@ -1550,10 +1552,10 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            val current = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+            val current = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_: Exception) { null }
             if (current?.optString("request_id") != requestId) return
             if (!current.optBoolean("background_enabled", true)) {
-                chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
+                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 return
             }
 
@@ -1631,7 +1633,7 @@ class MainActivity : ComponentActivity() {
                     val now = SystemClock.elapsedRealtime()
                     if (terminal || now - lastCheckpointAt >= 500L) {
                         lastCheckpointAt = now
-                        chatDb.updateActiveResponse(
+                        activeResponsePersistence.updateActiveResponse(
                             chatId,
                             responseId = responseId,
                             text = responseState.text,
@@ -1643,11 +1645,11 @@ class MainActivity : ComponentActivity() {
                 }
 
                 activeResumeCalls.remove(chatId)
-                val latest = try { chatDb.getActiveResponse(chatId) } catch (_: Exception) { null }
+                val latest = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_: Exception) { null }
                 if (latest?.optString("request_id") != requestId) return
 
                 if (result.terminalResponse != null) {
-                    chatDb.updateActiveResponse(
+                    activeResponsePersistence.updateActiveResponse(
                         chatId,
                         responseId = responseId,
                         text = responseState.text,
@@ -1662,13 +1664,13 @@ class MainActivity : ComponentActivity() {
                         expectedRequestId = requestId
                     )
                     finalizeBackgroundResponse(
-                        chatDb.getActiveResponse(chatId) ?: active,
+                        activeResponsePersistence.getActiveResponse(chatId) ?: active,
                         result.terminalResponse!!
                     )
                     return
                 }
 
-                chatDb.updateActiveResponse(
+                activeResponsePersistence.updateActiveResponse(
                     chatId,
                     responseId = responseId,
                     text = responseState.text,
@@ -1782,7 +1784,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
-        chatDb.clearActiveResponse(chatId,expectedRequestId=requestId)
+        activeResponsePersistence.clearActiveResponse(chatId,expectedRequestId=requestId)
         if(currentChatId()!=chatId) return
         runOnUiThread{
             if(currentChatId()!=chatId) return@runOnUiThread
@@ -1866,7 +1868,7 @@ class MainActivity : ComponentActivity() {
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
         )
-        chatDb.clearActiveResponse(chatId, expectedRequestId = requestId)
+        activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
             "chat_id" to chatId,
             "response_id" to responseId,
@@ -3475,7 +3477,7 @@ class MainActivity : ComponentActivity() {
         toolLabel.text = restoredTools?.let { tools ->
             (0 until tools.length()).map { tools.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
         }.orEmpty()
-        val active=chatDb.getActiveResponse(currentChatId())
+        val active=activeResponsePersistence.getActiveResponse(currentChatId())
         if(active!=null && active.optString("response_id").isNotBlank()){
             val partial=active.optString("text")
             activeAssistantItemId=addBubble("Astra",partial,false)
