@@ -17,13 +17,11 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class ChatDatabaseLifecycleTest {
     private lateinit var context: Context
-    private lateinit var dbName: String
     private var database: ChatDatabase? = null
 
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
-        dbName = "astra_chats_lifecycle_${System.nanoTime()}.db"
         resetDatabaseFile()
     }
 
@@ -38,7 +36,7 @@ class ChatDatabaseLifecycleTest {
     fun migratesV13ToV15AndPreservesActiveResponseOwnership() {
         createLegacyChatsDatabase(version = 13)
 
-        database = ChatDatabase(context, dbName)
+        database = ChatDatabase(context)
         val active = database!!.getActiveResponse("chat-a")
 
         assertNotNull(active)
@@ -148,13 +146,13 @@ class ChatDatabaseLifecycleTest {
     }
 
     private fun resetDatabaseFile() {
-        SQLiteDatabase.deleteDatabase(context.getDatabasePath(dbName))
+        SQLiteDatabase.deleteDatabase(context.getDatabasePath(DB_NAME))
     }
 
     private fun createLegacyChatsDatabase(version: Int, includeBackgroundEnabled: Boolean = false) {
         resetDatabaseFile()
 
-        val db = context.openOrCreateDatabase(dbName, Context.MODE_PRIVATE, null)
+        val db = context.openOrCreateDatabase(DB_NAME, Context.MODE_PRIVATE, null)
         val backgroundColumn = if (includeBackgroundEnabled) {
             ", active_background_enabled INTEGER NOT NULL DEFAULT 1"
         } else {
@@ -220,6 +218,7 @@ class ChatDatabaseLifecycleTest {
     }
 
     companion object {
+        private const val DB_NAME = "astra_chats.db"
         
     }
 }
