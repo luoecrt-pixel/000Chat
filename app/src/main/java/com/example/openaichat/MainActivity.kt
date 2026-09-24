@@ -1084,8 +1084,6 @@ class MainActivity : ComponentActivity() {
             var completedResponse: JSONObject? = null
             var responseState = ResponseEventState()
             val toolItems=mutableListOf<String>()
-            val full=StringBuilder()
-            val reasoningSummary=StringBuilder()
             var lastUiUpdate=0L
             var lastActiveCheckpoint=0L
             try {
@@ -1179,51 +1177,6 @@ class MainActivity : ComponentActivity() {
                             }
 
                             when(ev.optString("type")){
-                                "response.created" -> {
-                                    val r=ev.optJSONObject("response")
-                                    newId=r?.optString("id")?.takeIf{it.isNotBlank()}
-                                    if(newId!=null) {
-                                        chatDb.updateActiveResponse(requestChatId, responseId = newId, status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber, expectedRequestId = localRequestId)
-                                        diagnostics.log("response_created", mapOf("request_id" to requestId, "response_id" to newId, "chat_id" to requestChatId))
-                                    }
-                                }
-                                "response.output_text.delta" -> {
-                                    val delta=ev.optString("delta")
-                                    if(delta.isNotEmpty()){
-                                        full.append(delta)
-                                        val now=SystemClock.elapsedRealtime()
-                                        if(now-lastUiUpdate>=50L){
-                                            lastUiUpdate=now
-                                            val snapshot=responseState.text
-                                            postAssistantTextUpdate(
-                                                requestChatId,
-                                                requestGeneration,
-                                                assistantItemId,
-                                                snapshot
-                                            )
-                                        }
-                                        if(now-lastActiveCheckpoint>=750L){
-                                            lastActiveCheckpoint=now
-                                            chatDb.updateActiveResponse(
-                                                requestChatId,
-                                                responseId = newId,
-                                                text = full.toString(),
-                                                status = "in_progress", expectedRequestId = localRequestId
-                                            )
-                                        }
-                                    }
-                                }
-                                "response.reasoning_summary_text.delta" -> {
-                                    val delta=ev.optString("delta")
-                                    if(delta.isNotEmpty()){
-                                        reasoningSummary.append(delta)
-                                        runOnUiThread{
-                                            if(isRequestCurrent(requestChatId,requestGeneration)){
-                                                updateActiveReasoningSummary(reasoningSummary.toString())
-                                            }
-                                        }
-                                    }
-                                }
                                 "response.reasoning_summary_text.done" -> {}
                                 "response.web_search_call.completed" -> { toolItems.add("🌐 Web Search"); updateToolState("web_search","completed",requestChatId,requestGeneration) }
                                 "response.file_search_call.completed" -> { toolItems.add("📚 File Search"); updateToolState("file_search","completed",requestChatId,requestGeneration) }
@@ -1295,7 +1248,7 @@ class MainActivity : ComponentActivity() {
                     if(completionState=="failed") {
                         throw IOException("Ответ Astra не завершился: ${completionError?.take(500) ?: "неизвестная ошибка"}")
                     }
-                    val finalText=full.toString().ifBlank{if(completionState=="incomplete") "Ответ завершён не полностью." else "Готово. Ответ не содержит текста."}
+                    val finalText=responseState.text.ifBlank{if(completionState=="incomplete") "Ответ завершён не полностью." else "Готово. Ответ не содержит текста."}
                     val answerAnnotations=JSONArray()
                     fileCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
                     urlCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
