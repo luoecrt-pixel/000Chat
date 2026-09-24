@@ -1,4 +1,4 @@
-# NEXT_AGENT_HANDOFF — 2026-09-24
+# NEXT_AGENT_HANDOFF — 2026-09-25
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -28,13 +28,13 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, а `ActiveResponsePersistence` — boundary к persisted active-response state. Следующая стадия — вынести checkpoint/ownership orchestration из event loops, не добавляя ещё один универсальный слой. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, а `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint. Background recovery уже использует policy; foreground cadence намеренно не менялась. Следующая стадия — ownership orchestration для принятого runtime snapshot, не добавляя ещё один универсальный слой. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
 
 ## Фактический baseline
 
-- main code baseline: `98ca902bd2474129fbb6e95ebfaa23cef8b1cb01` (PR #37 squash)
+- main code baseline: `e3b346d78247ccaa08aefbdc31060b65935d827f` (PR #38 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -64,6 +64,7 @@
 - **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; PR-head Debug/Release зелёные.
 - **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
 - **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; `ChatDatabaseActiveResponsePersistence` сохраняет прежнюю request-aware DB реализацию.
+- **#38:** `ResponseCheckpointPolicy` изолирует pure checkpoint decision: interval vs terminal, persisted status/text/responseId/sequence; background recovery перенесён на policy, foreground 750ms cadence не менялась.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -71,8 +72,8 @@
 
 ### Что улучшать теперь
 
-1. **Checkpoint orchestration.** После #37 event loops всё ещё решают, когда писать checkpoint и каким status/text пользоваться. Следующий seam — маленький pure checkpoint policy/coordinator, который получает reducer state + timing + sequence и выдаёт persistence decision.
-2. **Ownership orchestration.** `chatId + generation + assistantItemId` должен входить в runtime effect как immutable snapshot; controller не должен повторно читать mutable Activity state для уже принятого callback.
+1. **Ownership orchestration.** После #38 checkpoint timing/status для background path вынесен в pure policy. Следующий seam — ownership decision вокруг immutable `chatId + generation + assistantItemId` snapshot, чтобы controller не повторно читал mutable Activity state для уже принятого callback.
+2. **Foreground checkpoint seam.** Только после ownership contract проверить, есть ли смысл переносить foreground 750ms checkpoint без смешивания его cadence с background 500ms path.
 3. **Transport adapter.** SSE/HTTP остаются источником normalized events и sequence semantics; reducer/policy не должны знать OkHttp, Android или WorkManager.
 4. **Tool/UI effects — следующим слоем.** Не переносить все tool events в reducer заранее; сначала стабилизировать state + persistence.
 5. **Тестировать решение отдельно от adapter.** Pure policy tests → один runtime path → Robolectric/instrumentation только там, где Android lifecycle реально нужен.
@@ -93,7 +94,7 @@
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. Response/recovery controller — следующий срез
-Сделать pure checkpoint/ownership decision contract поверх `ResponseEventReducer` и `ActiveResponsePersistence`, затем перенести один timing/checkpoint path.
+Checkpoint policy закрыт в #38. Следующий шаг — pure ownership decision contract вокруг immutable `chatId + generation + assistantItemId`, затем перенос одного runtime effect path.
 
 ### 2. Attachment/upload/composer controller
 URI/file/image upload, ZIP extraction, progress, composer persistence.
@@ -155,6 +156,9 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - **#36 final PR-head CI:** Release `36060342110` — success; Debug `36060342139` — success, включая lifecycle instrumentation.
 - **#37 merged:** `98ca902bd2474129fbb6e95ebfaa23cef8b1cb01`.
 - **#37 final PR-head CI:** Release `36062915006` — success; Debug `36062914977` — success, включая lifecycle instrumentation.
+- **#38 merged:** `e3b346d78247ccaa08aefbdc31060b65935d827f`.
+- **#38 PR-head CI:** Release `36064830714` — success; Debug `36064830967` initially failed only at lifecycle instrumentation, rerun job `107855282931` — success. Static verifier + Gradle test/lint/build were successful on both attempts.
+- **#38 post-merge CI:** connector не вернул workflow runs для merge commit `e3b346d...`; post-merge green не заявляется.
 - Во время #36 были исправлены промежуточные integration проблемы, после чего exact-head CI стал зелёным.
 - **Post-merge runs:** connector не вернул runs для `409996fe...` и `98ca902b...`; post-merge green не заявляется.
 
