@@ -43,6 +43,13 @@ class ResponseEventReducerTest {
         assertTrue(decision.textChanged)
         assertEquals("a ", decision.state.text)
     }
+        val reasoningDecision = ResponseEventReducer.reduce(
+            decision.state,
+            JSONObject().put("type", "response.reasoning_summary_text.delta").put("delta", " ")
+        )
+        assertTrue(reasoningDecision.reasoningChanged)
+        assertEquals(" ", reasoningDecision.state.reasoningSummary)
+    }
 
     @Test
     fun capturesResponseIdFromCreatedAndTerminalEvents() {
