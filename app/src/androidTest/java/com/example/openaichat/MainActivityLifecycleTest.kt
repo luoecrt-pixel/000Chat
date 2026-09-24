@@ -12,42 +12,96 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
     @Test
-    fun lateCallbackIsRejectedAfterStopWithoutChangingGeneration() {
-        var chatId = ""
-        var generation = -1L
-
+    fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
-            chatId = currentChatId(activity)
-            generation = activeGeneration(activity)
-            assertTrue(isRequestCurrent(activity, chatId, generation))
+            val chatId = currentChatId(activity)
+            val generation = activeGeneration(activity)
+            val itemId = invoke(activity, "addBubble", String::class.java, String::class.java, Boolean::class.javaPrimitiveType!!,
+                "Astra", "initial", false) as String
+
+            invoke(
+                activity,
+                "postAssistantTextUpdate",
+                String::class.java,
+                Long::class.javaPrimitiveType!!,
+                String::class.java,
+                String::class.java,
+                chatId,
+                generation,
+                itemId,
+                "updated"
+            )
+
+            assertEquals("updated", adapterSnapshot(activity).first { it.id == itemId }.text)
         }
+        scenario.close()
+    }
 
-        scenario.moveToState(Lifecycle.State.CREATED)
-
+    @Test
+    fun lateCallbackIsRejectedAfterStopWithoutChangingGeneration() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
+            val chatId = currentChatId(activity)
+            val generation = activeGeneration(activity)
+            assertTrue(isRequestCurrent(activity, chatId, generation))
+            val itemId = invoke(activity, "addBubble", String::class.java, String::class.java, Boolean::class.javaPrimitiveType!!,
+                "Astra", "initial", false) as String
+
+            scenario.moveToState(Lifecycle.State.CREATED)
+
             assertEquals(generation, activeGeneration(activity))
             assertFalse(isRequestCurrent(activity, chatId, generation))
+
+            invoke(
+                activity,
+                "postAssistantTextUpdate",
+                String::class.java,
+                Long::class.javaPrimitiveType!!,
+                String::class.java,
+                String::class.java,
+                chatId,
+                generation,
+                itemId,
+                "late"
+            )
+
+            assertEquals("initial", adapterSnapshot(activity).first { it.id == itemId }.text)
         }
         scenario.close()
     }
 
     @Test
     fun lateCallbackIsRejectedAfterDeleteAndDeletedChatStaysGone() {
-        var chatId = ""
-        var generation = -1L
-
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
-            chatId = currentChatId(activity)
-            generation = activeGeneration(activity)
+            val chatId = currentChatId(activity)
+            val generation = activeGeneration(activity)
             assertTrue(isRequestCurrent(activity, chatId, generation))
+            val itemId = invoke(activity, "addBubble", String::class.java, String::class.java, Boolean::class.javaPrimitiveType!!,
+                "Astra", "initial", false) as String
 
             invoke(activity, "deleteChat", String::class.java, chatId)
 
             val database = privateField(activity, "chatDb") as ChatDatabase
             assertTrue(database.getChat(chatId) == null)
             assertFalse(isRequestCurrent(activity, chatId, generation))
+            assertEquals(-1, adapterIndexOf(activity, itemId))
+
+            invoke(
+                activity,
+                "postAssistantTextUpdate",
+                String::class.java,
+                Long::class.javaPrimitiveType!!,
+                String::class.java,
+                String::class.java,
+                chatId,
+                generation,
+                itemId,
+                "late"
+            )
+
+            assertEquals(-1, adapterIndexOf(activity, itemId))
         }
         scenario.close()
     }
@@ -67,6 +121,12 @@ class MainActivityLifecycleTest {
             chatId,
             generation
         ) as Boolean
+
+    private fun adapterSnapshot(activity: MainActivity): List<ChatBubbleItem> =
+        (privateField(activity, "messageAdapter") as ChatMessageAdapter).snapshot()
+
+    private fun adapterIndexOf(activity: MainActivity, itemId: String): Int =
+        (privateField(activity, "messageAdapter") as ChatMessageAdapter).indexOfId(itemId)
 
     private fun privateField(activity: MainActivity, name: String): Any {
         val field = MainActivity::class.java.getDeclaredField(name)
@@ -92,6 +152,30 @@ class MainActivityLifecycleTest {
         arg1: Any?,
         arg2: Any?
     ): Any? = invokeMethod(activity, name, arrayOf(argType1, argType2), arrayOf(arg1, arg2))
+
+    private fun invoke(
+        activity: MainActivity,
+        name: String,
+        argType1: Class<*>,
+        argType2: Class<*>,
+        argType3: Class<*>,
+        arg1: Any?,
+        arg2: Any?,
+        arg3: Any?
+    ): Any? = invokeMethod(activity, name, arrayOf(argType1, argType2, argType3), arrayOf(arg1, arg2, arg3))
+
+    private fun invoke(
+        activity: MainActivity,
+        name: String,
+        argType1: Class<*>,
+        argType2: Class<*>,
+        argType3: Class<*>,
+        argType4: Class<*>,
+        arg1: Any?,
+        arg2: Any?,
+        arg3: Any?,
+        arg4: Any?
+    ): Any? = invokeMethod(activity, name, arrayOf(argType1, argType2, argType3, argType4), arrayOf(arg1, arg2, arg3, arg4))
 
     private fun invokeMethod(
         activity: MainActivity,
