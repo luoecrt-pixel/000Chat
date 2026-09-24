@@ -6,8 +6,8 @@ Canonical repository: `luoecrt-pixel/OpenAIApiChat`
 
 Default branch: `main`
 
-Latest code-changing `main` commit before this documentation reconciliation:
-`a26402f9ff65210bf2989402cae57e589f3da4d2` — PR #29.
+Latest code-changing `main` commit:
+`6ef5545c8526afe8355bba737f795bd17451dab3` — PR #32.
 
 The current code baseline is:
 
@@ -18,7 +18,7 @@ The current code baseline is:
 - minSdk: `26`
 - MainActivity: ~4.5k lines
 
-This documentation pass changes README/handoff only. Treat `a26402f9ff...` as the current code baseline; later documentation commits must not be mistaken for new implementation work.
+PR #32 is now merged. Later documentation commits must not be mistaken for new implementation work.
 
 ## Current dependencies
 
@@ -153,6 +153,31 @@ Merged commit:
 `5f744c180fb359ab49657632cbce8cead31e0e7d`.
 
 The post-merge Debug and Release workflows for that merge are the source of truth for the current main result.
+### PR #31 — background recovery eligibility
+
+Added pure `BackgroundRecoveryPolicy.isEligibleForResume(JSONObject)` and made `BackgroundResponseWorkScheduler.rescheduleAll()` use it. JVM tests cover missing chat/response/request IDs and `background_enabled=false`.
+
+Merged commit:
+`41e0b7744fb120fad0192adb8afe936ca01bf044`.
+
+Post-merge Debug and Release CI for that exact `main` commit both completed successfully.
+
+### PR #32 — Robolectric SQLite lifecycle coverage
+
+Added real SQLite/Robolectric coverage for:
+
+- migration v13→v15, including `active_background_enabled` and `active_last_sequence_number` defaults;
+- migration v14→v15 and the v15 sequence-cursor default;
+- partial response + durable sequence cursor surviving close/reopen;
+- stale-request protection for `updateActiveResponse()`.
+
+The tests use Robolectric 4.14 with Android resources enabled and isolated database-file cleanup around the test fixture. The Android lifecycle boundary itself remains outside this harness.
+
+Merged commit:
+`6ef5545c8526afe8355bba737f795bd17451dab3`.
+
+PR CI for the final PR head was green: Debug run #237 and Release run #59. The GitHub connector currently exposes no post-merge workflow runs/statuses for the merge commit, so do not claim separate post-merge Debug/Release results from this connector response.
+
 ### PR #29 — lifecycle ownership contracts
 
 Added deterministic JVM coverage for:
@@ -169,7 +194,7 @@ Merged commit:
 
 Post-merge Debug and Release CI for this exact `main` commit both completed successfully.
 
-Current lifecycle gaps intentionally remain: Android lifecycle integration for late callbacks after Stop/Delete, orphan active-response recovery, real SQLite migration coverage v13→v14→v15, and end-to-end partial-response preservation.
+Current lifecycle gap intentionally remains: Android lifecycle integration for late callbacks after Stop/Delete. Orphan recovery eligibility and SQLite migration/partial-response persistence contracts are now covered by PR #31/#32.
 
 ## Current architecture
 
@@ -241,12 +266,9 @@ These are confirmed fixes for specific races, not completion of the broader Acti
 Priority order:
 
 1. Deterministic lifecycle/recovery tests:
-   - late callback after Stop/Delete on Android lifecycle boundary;
-   - orphan active-response recovery;
-   - DB v13→v14→v15 migrations;
-   - partial-response preservation through the real SQLite layer.
+   - late callback after Stop/Delete on Android lifecycle boundary.
 
-   Already covered in PR #29: Stop before `response.created`, stale Worker finalization after a new request, and chat/generation invalidation of an older background snapshot.
+   Already covered in PR #29/#31/#32: Stop before `response.created`, stale Worker finalization after a new request, chat/generation invalidation of an older background snapshot, recovery eligibility, SQLite migrations v13→v15, and partial-response/cursor persistence.
 
 2. Response/recovery controller extraction from `MainActivity.kt`:
    - generation;
