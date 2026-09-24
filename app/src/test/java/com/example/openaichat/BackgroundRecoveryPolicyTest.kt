@@ -1,10 +1,28 @@
 package com.example.openaichat
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BackgroundRecoveryPolicyTest {
+    @Test
+    fun resumeRequiresCompleteEligibleActiveResponseState() {
+        fun active(chatId: String, responseId: String, requestId: String, enabled: Boolean = true) =
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("response_id", responseId)
+                .put("request_id", requestId)
+                .put("background_enabled", enabled)
+
+        assertTrue(BackgroundRecoveryPolicy.isEligibleForResume(active("chat-a", "resp-a", "req-a")))
+        assertFalse(BackgroundRecoveryPolicy.isEligibleForResume(active("", "resp-a", "req-a")))
+        assertFalse(BackgroundRecoveryPolicy.isEligibleForResume(active("chat-a", "", "req-a")))
+        assertFalse(BackgroundRecoveryPolicy.isEligibleForResume(active("chat-a", "resp-a", "")))
+        assertFalse(BackgroundRecoveryPolicy.isEligibleForResume(active("chat-a", "resp-a", "req-a", enabled = false)))
+    }
+
     @Test
     fun classifiesPermanentAndRetryableHttpStatuses() {
         assertEquals(BackgroundRecoveryAction.AUTH_FAILURE, BackgroundRecoveryPolicy.actionForHttpStatus(401))

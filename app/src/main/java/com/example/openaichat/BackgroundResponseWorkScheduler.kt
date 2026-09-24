@@ -67,13 +67,13 @@ object BackgroundResponseWorkScheduler {
 
     fun rescheduleAll(context: Context, activeResponses: List<org.json.JSONObject>) {
         activeResponses.forEach { active ->
-            val chatId = active.optString("chat_id")
-            val responseId = active.optString("response_id")
-            val requestId = active.optString("request_id")
-            val backgroundEnabled = active.optBoolean("background_enabled", true)
-            if (backgroundEnabled && chatId.isNotBlank() && responseId.isNotBlank() && requestId.isNotBlank()) {
-                enqueueImmediate(context, chatId, responseId, requestId)
-            }
+            if (!BackgroundRecoveryPolicy.isEligibleForResume(active)) return@forEach
+            enqueueImmediate(
+                context,
+                active.optString("chat_id"),
+                active.optString("response_id"),
+                active.optString("request_id")
+            )
         }
     }
 }
