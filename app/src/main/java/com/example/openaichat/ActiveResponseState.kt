@@ -50,6 +50,9 @@ class ActiveResponseStateStore {
     }
 
     fun clear() {
-        state = ActiveResponseState(generation = state.generation)
+        state = ActiveResponseState(
+            generation = state.generation,
+            userStopInvalidatedThroughGeneration = state.userStopInvalidatedThroughGeneration
+        )
     }
 }
