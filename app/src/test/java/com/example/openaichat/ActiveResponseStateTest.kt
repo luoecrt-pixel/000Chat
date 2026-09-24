@@ -80,6 +80,21 @@ class ActiveResponseStateTest {
     }
 
     @Test
+    fun backgroundResumeUiSnapshotMustMatchGenerationChatAndAssistant() {
+        val store = ActiveResponseStateStore()
+        val firstGeneration = store.nextGeneration()
+        val snapshot = BackgroundResponseUiSnapshot("chat-a", firstGeneration, "assistant-a")
+
+        assertTrue(store.state.isCurrent(snapshot, "chat-a", "assistant-a", true, false))
+
+        store.nextGeneration()
+        assertFalse(store.state.isCurrent(snapshot, "chat-a", "assistant-a", true, false))
+        assertFalse(store.state.isCurrent(snapshot, "chat-b", "assistant-a", true, false))
+        assertFalse(store.state.isCurrent(snapshot, "chat-a", "assistant-b", true, false))
+        assertFalse(store.state.isCurrent(snapshot, "chat-a", "assistant-a", false, false))
+    }
+
+    @Test
     fun responseAndAssistantIdsCanBeClearedIndependently() {
         val store = ActiveResponseStateStore()
         store.setResponseId("resp_1")
