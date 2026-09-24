@@ -26,7 +26,7 @@
 `active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
 Устаревший request не должен финализировать persisted state.
 
-**Тесты:** JVM/pure contracts + Robolectric SQLite уже покрывают большую часть lifecycle/persistence. Android lifecycle boundary с поздним callback после Stop/Delete остаётся отдельным пробелом.
+**Тесты:** JVM/pure contracts + Robolectric SQLite уже покрывают большую часть lifecycle/persistence. PR #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete; head CI Debug/Release зелёные.
 
 **Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. Следующее фундаментальное направление — response/recovery controller extraction. Compose не выброшен: он **следующий UI-слой после extraction**, поэтапно через interop. RecyclerView/AsyncListDiffer сейчас валидны.
 
@@ -34,7 +34,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `6ef5545c8526afe8355bba737f795bd17451dab3` (PR #32)
+- main code baseline: `6c975658698d24cf40da3874f3c96eaf17da634f` (PR #35 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -61,15 +61,13 @@
 - **#31:** background recovery запускается только при явной eligibility policy.
 - **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
 - **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback больше не может заново создать telemetry для удалённого chat.
+- **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; CI на API 34 Debug/Release зелёный.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Android lifecycle boundary
-DB-часть Delete → поздний callback закрыта в #34. Остался отдельный Android lifecycle harness для реального late callback после Stop/Delete.
-
-### 2. Response/recovery controller
+### 1. Response/recovery controller
 Постепенно вынести из `MainActivity.kt`:
 - generation/ownership;
 - response lifecycle;
@@ -79,25 +77,25 @@ DB-часть Delete → поздний callback закрыта в #34. Оста
 
 Сначала общий контракт и тесты, затем маленькие переносы. Не делать big-bang rewrite.
 
-### 3. Attachment/upload/composer controller
+### 2. Attachment/upload/composer controller
 URI/file/image upload, ZIP extraction, progress, composer persistence.
 
-### 4. Thread-safety audit
+### 3. Thread-safety audit
 Проверить оставшиеся Activity/Executor/Worker границы и shared mutable state. Менять синхронизацию только при доказанном race.
 
-### 5. Diagnostics/security
+### 4. Diagnostics/security
 Diagnostics retention/clear, отсутствие API keys/message bodies, orphan local files, FileProvider least privilege.
 
-### 6. Release hardening
+### 5. Release hardening
 Shrink/minification policy, renderer/reflection/file handling under shrinker; signing/publishing отдельно.
 
-### 7. Compose migration
+### 6. Compose migration
 **Не начинать до state/controller extraction.**
 Порядок:
 `response controller → attachment/composer state → immutable screen state/events → one bounded Compose feature → incremental migration`.
 Compose — не «забытый TODO», а отложенная архитектурная стадия.
 
-### 8–9. Отдельные compatibility tasks
+### 7. Отдельные compatibility tasks
 AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 
 ## Контекстный режим для агента
@@ -124,8 +122,14 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - поискать старые symbols/helpers;
 - проверить static verifier;
 - дождаться реального CI результата;
-- если merge — проверить post-merge runs;
+- если merge — проверить post-merge runs, когда connector их предоставляет; если нет — явно зафиксировать ограничение.
 - обновить план и историю.
+
+## История последнего рабочего захода
+
+- **#35 merged:** `6c975658698d24cf40da3874f3c96eaf17da634f`.
+- **CI on PR head:** Debug run `36054984135` и Release run `36054984134` — `success`.
+- Исправлены две реальные причины CI/test instability: неверная JVM reflection-сигнатура Kotlin default-args в instrumentation test и отсутствие доступа к KVM на emulator runner. Disk pressure также устранялся отдельным cleanup step.
 
 ## Product radar: fork chat
 
