@@ -65,7 +65,10 @@
 - **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
 - **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; `ChatDatabaseActiveResponsePersistence` сохраняет прежнюю request-aware DB реализацию.
 - **#38:** `ResponseCheckpointPolicy` изолирует pure checkpoint decision: interval vs terminal, persisted status/text/responseId/sequence; background recovery перенесён на policy, foreground 750ms cadence не менялась.
-- **#39:** `BackgroundResponseUiOwnershipPolicy` изолирует pure decision для применения background UI snapshot по `chatId + generation + assistantItemId + lifecycle`; `ActiveResponseState` делегирует snapshot ownership этой policy; только assistant-text background path переведён на неё.
+- **#39:** `BackgroundResponseUiOwnershipPolicy` изолирует pure decision для применения background UI snapshot по `chatId + generation + assistantItemId + lifecycle`.
+- **#40:** reasoning background callback использует тот же immutable UI snapshot ownership contract и передаёт `assistantItemId` из snapshot в state mutation.
+- **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
+- **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -73,24 +76,16 @@
 
 ### Что улучшать теперь
 
-1. **Ownership orchestration.** После #38 checkpoint timing/status для background path вынесен в pure policy. Следующий seam — ownership decision вокруг immutable `chatId + generation + assistantItemId` snapshot, чтобы controller не повторно читал mutable Activity state для уже принятого callback.
-2. **Foreground checkpoint seam.** Только после ownership contract проверить, есть ли смысл переносить foreground 750ms checkpoint без смешивания его cadence с background 500ms path.
-3. **Transport adapter.** SSE/HTTP остаются источником normalized events и sequence semantics; reducer/policy не должны знать OkHttp, Android или WorkManager.
-4. **Tool/UI effects — следующим слоем.** Не переносить все tool events в reducer заранее; сначала стабилизировать state + persistence.
-5. **Тестировать решение отдельно от adapter.** Pure policy tests → один runtime path → Robolectric/instrumentation только там, где Android lifecycle реально нужен.
+1. **Composer persistence boundary.** Следующий seam — не новый routing policy, а единый snapshot/codec для composer state. Сейчас `persistComposerStateNow()`, `saveUploadedFileToComposer()` и `saveUploadedImageToComposer()` частично дублируют JSON-схему и read-modify-write логику внутри MainActivity.
+2. **Async upload state ownership.** Большая часть upload state фактически UI-thread-owned; не превращать всё в атомики. Сначала зафиксировать правило владения: UI mutable state меняется на main thread, executor только сообщает результат/progress. Конкретное исключение уже найдено: `preparingZipAttachments=false` записывается из executor catch path.
+3. **Persistence correctness before extraction.** До выделения adapter/codec добавить regression test для смены чата во время async upload и для ZIP, который завершает подготовку уже после перехода в другой чат.
+4. **Transport adapter.** SSE/HTTP остаются источником normalized events и sequence semantics; reducer/policy не должны знать OkHttp, Android или WorkManager.
+5. **Tool/UI effects — отдельным слоем.** Не переносить все tool events в reducer заранее; сначала стабилизировать state + persistence.
+6. **Тестировать решение отдельно от adapter.** Pure codec/persistence tests → один runtime path → Robolectric/instrumentation только там, где Android lifecycle реально нужен.
 
-### Что уже реализовано в #36–#37
+### Что уже реализовано в #36–#42
 
-`ResponseEventReducer` + JVM tests покрывают:
-- response id creation/changes;
-- text delta accumulation;
-- reasoning summary delta;
-- completed / failed / incomplete / cancelled;
-- terminal response / usage / completion error;
-- unknown и empty events;
-- whitespace-preserving deltas.
-
-#37 добавил `ActiveResponsePersistence` без изменения DB schema и request-aware semantics.
+`ResponseEventReducer` + JVM tests покрывают response lifecycle semantics; #37 изолировал active-response persistence; #38 — checkpoint decision; #39–#40 — background UI ownership для assistant text/reasoning; #41–#42 — file/image/ZIP attachment completion routing.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
@@ -98,9 +93,13 @@
 Background checkpoint, assistant-text и reasoning callbacks проверены на ownership seam. #39 вынес snapshot ownership, #40 убрал повторное чтение mutable assistant item для reasoning. Tool-state callbacks сознательно не переводились на assistant-item ownership, так как их UI state глобален для текущей Activity. Нового доказанного ownership race в этом срезе не осталось.
 
 ### 2. Attachment/upload/composer controller
+Routing slice закрыт в #41–#42: file/image/ZIP completion используют один pure `AttachmentUploadCompletionPolicy`; image MIME захватывается до async hop. Следующий slice — composer persistence boundary и lifecycle/thread-safety вокруг upload state.
 
-### 2. Attachment/upload/composer controller
-Routing slice закрыт в #41–#42: file/image/ZIP completion используют один pure `AttachmentUploadCompletionPolicy`; image MIME теперь захватывается до async hop. Следующий slice — composer persistence boundary и lifecycle/thread-safety вокруг upload state, без повторного routing abstraction.
+**Перед PR #43 уже подтверждены конкретные риски:**
+- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP только из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Нужен regression test и затем единая persistence operation, которая атомарно «consume pending upload + append uploaded files».
+- `preparingZipAttachments` сбрасывается в executor catch path. Поле используется UI-кодом без `@Volatile`/атомарности; правильнее оставить единственного владельца на main thread и передавать ошибку туда.
+- `pendingUploadUris`, attached-file lists и pending image fields сейчас практически UI-owned; не добавлять synchronized/Concurrent коллекции без нового доказательства race.
+- `pendingPreviewBitmaps`, `uploadProgress`, `uploadCalls`, `activePendingUploadKeys`, `cancelledUploads`, `pendingLocalUploadPaths` уже используют ConcurrentHashMap/set и не являются первыми кандидатами на изменение.
 
 ### 3. Thread-safety audit
 Проверить оставшиеся Activity/Executor/Worker границы и shared mutable state. Менять синхронизацию только при доказанном race.
