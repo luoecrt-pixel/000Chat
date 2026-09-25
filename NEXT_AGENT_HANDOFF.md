@@ -89,7 +89,7 @@
 ### 1. Attachment/upload/composer controller — **следующий**
 Routing slice закрыт в #41–#42. Следующий PR не вводит новый routing abstraction.
 
-**Первый шаг:** regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
+**Первый шаг:** Regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
 
 Подтверждённые риски:
 - `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это preexisting semantics, не регрессия #42.
