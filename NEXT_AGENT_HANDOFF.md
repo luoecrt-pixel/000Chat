@@ -157,6 +157,9 @@ Release:
 Static verifier:
 `python3 tools/verify_v4_17_0.py`
 
+Handoff verifier:
+`python3 tools/verify_handoff.py`
+
 ## История последних рабочих заходов — последние 5 PR
 
 - **#38:** merged `e3b346d78247ccaa08aefbdc31060b65935d827f`; PR-head Release `36064830714` — success; Debug `36064830967` — success после lifecycle instrumentation rerun (`107855282931`). Post-merge run не предоставлен connector.
