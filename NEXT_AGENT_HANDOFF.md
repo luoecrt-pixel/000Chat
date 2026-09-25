@@ -89,7 +89,7 @@
 ### 1. Attachment/upload/composer controller — **следующий**
 Routing slice закрыт в #41–#42. Следующий PR не вводит новый routing abstraction.
 
-**Первый шаг:** regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
+**Первый шаг:** Regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
 
 Подтверждённые риски:
 - `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это preexisting semantics, не регрессия #42.
@@ -180,7 +180,7 @@ Handoff verifier:
 Показывать по запросу компактный «что реально уйдёт»: модель, effort, tools, attachments, примерный объём контекста, background mode, выбранные IDs файлов. Это уменьшит загадочность дорогих/долгих запросов и даст объяснимость auto-effort. Первый шаг: immutable preflight snapshot из уже существующего sendMessage().
 
 ### 3. Поиск по всей истории
-Для длинной локальной истории нужен мгновенный full-text search с переходом прямо к сообщению, а не только список чатов. SQLite уже является source of truth, поэтому первый шаг — оценить FTS5 на messages(text) и тесты по индексации/удалению/поиску.
+Для длинной локальной истории нужен мгновенный full-text search с переходом прямо к сообщению, а не только список чатов. SQLite уже является source of truth, поэтому Первый шаг: оценить FTS5 на messages(text) и тесты по индексации/удалению/поиску.
 
 ### 4. Переиспользование вложений
 После локальной библиотеки файлов следующий полезный шаг — «использовать снова» без повторного выбора/ручной загрузки. Ещё сильнее — локальный content hash → reuse уже загруженного файла там, где это безопасно и совместимо с текущей серверной семантикой. Первый шаг: инвентаризация того, какие file_id + local path + mime + size уже можно считать устойчивым cache key; сеть и dedup пока не менять.

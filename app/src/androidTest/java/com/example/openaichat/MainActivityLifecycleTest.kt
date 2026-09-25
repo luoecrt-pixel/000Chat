@@ -1,10 +1,14 @@
 package com.example.openaichat
 
+import android.content.SharedPreferences
+import android.os.SystemClock
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -49,6 +53,81 @@ class MainActivityLifecycleTest {
             invokeCallback(activity, chatId, generation, itemId, "late")
 
             assertEquals("initial", adapterSnapshot(activity).first { it.id == itemId }.text)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun zipSourceChatCompletionConsumesOnlyCapturedPersistedZip() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val chatId = currentChatId(activity)
+            val pendingZipUri = "content://example/archive.zip"
+            val pendingFileUri = "content://example/notes.txt"
+            val state = JSONObject()
+                .put(
+                    "pending_uploads",
+                    JSONArray()
+                        .put(JSONObject().put("uri", pendingZipUri).put("kind", "zip"))
+                        .put(JSONObject().put("uri", pendingFileUri).put("kind", "file"))
+                )
+
+            val prefs = privateField(activity, "prefs") as SharedPreferences
+            prefs.edit().putString("composer_state_$chatId", state.toString()).commit()
+
+            invokeSaveUploadedFileToComposer(
+                activity = activity,
+                chatId = chatId,
+                fileId = "file-from-zip",
+                name = "extracted.txt",
+                size = 12L,
+                rawUri = pendingZipUri,
+                localPath = "/tmp/extracted.txt",
+                mime = "text/plain",
+                pendingUploadKind = "zip"
+            )
+
+            val saved = JSONObject(prefs.getString("composer_state_$chatId", "") ?: "")
+            val pending = saved.getJSONArray("pending_uploads")
+            assertEquals(1, pending.length())
+            assertEquals(pendingFileUri, pending.getJSONObject(0).getString("uri"))
+            assertEquals("file", pending.getJSONObject(0).getString("kind"))
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun zipPreparationFailureClearsPreparationState() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val brokenZip = java.io.File(activity.cacheDir, "broken.zip").apply {
+                writeText("not a zip archive")
+            }
+            @Suppress("UNCHECKED_CAST")
+            val pending = privateField(activity, "pendingUploadUris") as MutableList<Pair<String, String>>
+            pending.add(android.net.Uri.fromFile(brokenZip).toString() to "zip")
+
+            invoke(
+                activity,
+                "preparePendingZipsThenSend",
+                Boolean::class.javaPrimitiveType!!,
+                false
+            )
+        }
+
+        for (attempt in 0 until 40) {
+            var complete = false
+            scenario.onActivity { activity ->
+                complete = !(privateField(activity, "preparingZipAttachments") as Boolean)
+            }
+            if (complete) break
+            SystemClock.sleep(25L)
+        }
+
+        scenario.onActivity { activity ->
+            assertFalse(privateField(activity, "preparingZipAttachments") as Boolean)
+            val status = privateField(activity, "status") as android.widget.TextView
+            assertTrue(status.text.toString().contains("Не удалось подготовить ZIP"))
         }
         scenario.close()
     }
@@ -110,6 +189,34 @@ class MainActivityLifecycleTest {
 
     private fun adapterIndexOf(activity: MainActivity, itemId: String): Int =
         (privateField(activity, "messageAdapter") as ChatMessageAdapter).indexOfId(itemId)
+
+    private fun invokeSaveUploadedFileToComposer(
+        activity: MainActivity,
+        chatId: String,
+        fileId: String,
+        name: String,
+        size: Long,
+        rawUri: String,
+        localPath: String,
+        mime: String,
+        pendingUploadKind: String
+    ) {
+        invokeMethod(
+            activity,
+            "saveUploadedFileToComposer",
+            arrayOf(
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                Long::class.javaPrimitiveType!!,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                String::class.java
+            ),
+            arrayOf(chatId, fileId, name, size, rawUri, localPath, mime, pendingUploadKind)
+        )
+    }
 
     private fun privateField(activity: MainActivity, name: String): Any {
         val field = MainActivity::class.java.getDeclaredField(name)
