@@ -65,7 +65,7 @@ def main() -> None:
     assert text.count("каждые 5 merged PR или раньше") == 1
 
     radar = text[text.index("## Product radar — идеи с реальной ценностью"):text.index("## Документация")]
-    assert radar.count("### ") == 7, "product radar should contain exactly seven candidate ideas"
+    candidate_headings = [line for line in radar.splitlines() if line.startswith("### ") and not line.startswith("### Что сознательно")]\n    assert len(candidate_headings) == 7, "product radar should contain exactly seven candidate ideas"
     for phrase in [
         "MCP/custom functions и Computer Use",
         "Полный Compose rewrite",
