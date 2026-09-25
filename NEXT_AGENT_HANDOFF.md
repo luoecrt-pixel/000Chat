@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-25 15:26 +03:00  
+**Last updated:** 2026-09-25 17:06 +03:00  
 **Следующий рабочий срез:** PR #43 — сначала regression tests для ZIP consume + chat switch и main-thread ownership `preparingZipAttachments`, затем минимальная persistence operation; не начинать extraction до доказательства.
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -84,7 +84,8 @@
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
-**Architecture review trigger:** каждые 5 merged PR или при исчерпании/смене активного плана.
+
+
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. Attachment/upload/composer controller — **следующий**
@@ -111,9 +112,11 @@ Routing slice закрыт в #41–#42. Следующий PR не вводит
 
 ### 6. Compatibility / build hygiene
 **Первый шаг:** отдельно проверить AGP/Kotlin/compileSdk drift и Gradle Wrapper; не смешивать dependency migration с feature PR.
+
 ## Репозиторий / branches
 
 После #35–#37 накопились локальные feature branches, многие из которых соответствуют уже merged PR. Их удаление **не удаляет commits или PR history** и обычно полезно для hygiene. В текущем GitHub connector нет операции DELETE git ref, поэтому автоматически удалить их здесь нельзя; активным сейчас является только `main` плюс открытые PR branches. Перед ручным удалением ориентируйся на merged/closed PR state, а не на имя ветки.
+
 
 ## Контекстный режим для агента
 
@@ -126,6 +129,7 @@ Routing slice закрыт в #41–#42. Следующий PR не вводит
 - Историю старых PR читай точечно, когда нужен конкретный invariant.
 - Не тащи в текущий контекст завершённые задачи как активные.
 - Краткий пользовательский ответ не означает сокращённого инженерного анализа.
+
 
 ## Как проверять новую работу
 
@@ -152,6 +156,7 @@ Release:
 
 Static verifier:
 `python3 tools/verify_v4_17_0.py`
+
 ## История последних рабочих заходов — последние 5 PR
 
 - **#38:** merged `e3b346d78247ccaa08aefbdc31060b65935d827f`; PR-head Release `36064830714` — success; Debug `36064830967` — success после lifecycle instrumentation rerun (`107855282931`). Post-merge run не предоставлен connector.
@@ -162,7 +167,8 @@ Static verifier:
 - **#35–#37:** merged and verified earlier; подробности сохранены в git history и подтверждённых контрактах выше.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
-## Product radar — идеи с реальной ценностью — 2026-09-25
+
+## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
@@ -187,12 +193,10 @@ Static verifier:
 ### 7. Fork / ветвление чата
 MVP: «Ветвить отсюда» на выбранном сообщении создаёт независимый local snapshot до этой точки. Первый шаг: pure DB/domain contract + tests. Обязательно: новый `chatId`, новые local records, не переносить active response / Worker / temporary UI state, и сначала подтвердить актуальную семантику Responses API для продолжения ровно от fork point.
 ### Что сознательно не тянуть сейчас
-- MCP/custom functions и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает exeatId`;
-- не переносить active response / Worker job / temporary UI state;
-- copied messages — новые local records;
-- не переиспользовать исходный `previous_response_id` вслепую: сначала подтвердить актуальную семантику Responses API для продолжения **ровно от fork point**;
-- первый PR лучше сделать pure DB/domain contract + tests, а не сразу UI + network + branch graph.
-
+- MCP/custom functions и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает execution surface.
+- Полный Compose rewrite — инфраструктурная стадия, не пользовательская функция.
+- «AI сам организует чаты/саммари/теги» — выглядит эффектно, но пока не доказано, что это важнее поиска, обратимости и прозрачности контекста.
+- Синхронизация между устройствами — отдельная security/backend задача, не естественное продолжение текущей local-first архитектуры.
 ## Документация
 
 **README** = человекочитаемый snapshot проекта.
