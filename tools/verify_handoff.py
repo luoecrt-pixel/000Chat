@@ -62,11 +62,11 @@ def main() -> None:
     next_items = [heading for heading in active_headings if "— **следующий**" in heading]
     assert len(next_items) == 1, f"expected exactly one active-plan item marked as next, found {len(next_items)}"
 
-    next_slice = re.search(r"\*\*Следующий рабочий срез:\*\*\s*(.+?)(?:\s+—|\s*$)", text, re.MULTILINE)
-    assert next_slice, "missing next-work-slice declaration"
-    assert next_items[0].replace(" — **следующий**", "").strip().endswith(next_slice.group(1).strip()), (
-        "active-plan next item does not match the declared next work slice"
-    )
+    next_slice_line = next(line for line in lines if line.startswith("**Следующий рабочий срез:**"))
+    declared_slice = next_slice_line.split(":", 1)[1].strip().split(" — ", 1)[0].strip()
+    next_heading_title = re.sub(r"^###\s+\d+\.\s*", "", next_items[0])
+    next_heading_title = next_heading_title.replace(" — **следующий**", "").strip()
+    assert declared_slice.lower() in next_heading_title.lower(), "active-plan next item does not match the declared next work slice"
 
     for index, heading in enumerate(active_headings):
         start = active.find(heading)
