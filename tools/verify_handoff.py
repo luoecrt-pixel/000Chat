@@ -49,7 +49,10 @@ def main() -> None:
         while j < len(lines) and not lines[j].strip():
             j += 1
         assert j < len(lines), f"heading without content: {line}"
-        assert not lines[j].startswith("#"), f"heading without content: {line}"
+        if lines[j].startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            next_level = len(lines[j]) - len(lines[j].lstrip("#"))
+            assert next_level > level, f"heading without content: {line}"
 
     assert text.count("`") % 2 == 0, "unbalanced inline backticks"
     assert "exeatId" not in text, "known fork-radar corruption detected"
