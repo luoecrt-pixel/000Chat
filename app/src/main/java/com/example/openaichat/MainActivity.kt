@@ -2933,14 +2933,17 @@ class MainActivity : ComponentActivity() {
         status.text="Готовлю ZIP-вложение…"
         executor.execute{
             val uploaded=mutableListOf<LocalUploadedFile>()
+            val uploadedByZip=mutableListOf<Pair<String,LocalUploadedFile>>()
             try{
                 zipItems.forEachIndexed { index,(rawUri,_) ->
                     val uri=Uri.parse(rawUri)
                     val zipName=queryName(uri) ?: "archive.zip"
                     val key=attachmentKey(uri,"zip")
-                    uploaded += extractZipForSend(uri,zipName,key){stage,pct->
+                    val extracted=extractZipForSend(uri,zipName,key){stage,pct->
                         runOnUiThread{uploadCards[key]?.details?.text="$stage · $pct%"}
                     }
+                    uploaded += extracted
+                    extracted.forEach { uploadedByZip += rawUri to it }
                     diagnostics.log("zip_prepared",mapOf("chat_id" to sourceChatId,"filename" to zipName,"files_uploaded" to uploaded.size,"index" to index))
                 }
                 runOnUiThread{
@@ -2965,16 +2968,30 @@ class MainActivity : ComponentActivity() {
                         }
                         AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
                             zipItems.forEach{(raw,kind)->pendingUploadUris.remove(raw to kind)}
-                            uploaded.forEach{saveUploadedFileToComposer(sourceChatId,it.id,it.name,it.size,rawUri="",localPath=it.path,mime=it.mime)}
+                            uploadedByZip.forEach { (rawUri,file) ->
+                                saveUploadedFileToComposer(
+                                    sourceChatId,
+                                    file.id,
+                                    file.name,
+                                    file.size,
+                                    rawUri = rawUri,
+                                    localPath = file.path,
+                                    mime = file.mime,
+                                    pendingUploadKind = "zip"
+                                )
+                            }
                             preparingZipAttachments=false
                             status.text="ZIP подготовлен в исходном чате"
                         }
                     }
                 }
             }catch(e:Exception){
-                preparingZipAttachments=false
                 diagnostics.log("zip_prepare_failed",mapOf("chat_id" to sourceChatId,"error" to (e.message?:e.toString()).take(400)))
-                runOnUiThread{refreshAttachChips();status.text="Не удалось подготовить ZIP: ${e.message}"}
+                runOnUiThread{
+                    preparingZipAttachments=false
+                    refreshAttachChips()
+                    status.text="Не удалось подготовить ZIP: ${e.message}"
+                }
             }
         }
     }
@@ -3172,7 +3189,16 @@ class MainActivity : ComponentActivity() {
 
 
 
-    private fun saveUploadedFileToComposer(chatId:String,fileId:String,name:String,size:Long,rawUri:String,localPath:String?=null,mime:String?=null){
+    private fun saveUploadedFileToComposer(
+        chatId:String,
+        fileId:String,
+        name:String,
+        size:Long,
+        rawUri:String,
+        localPath:String?=null,
+        mime:String?=null,
+        pendingUploadKind:String="file"
+    ){
         if(chatId.isBlank()) return
         try{
             val key=composerPrefsKey(chatId)
@@ -3195,7 +3221,7 @@ class MainActivity : ComponentActivity() {
             o.optJSONArray("pending_uploads")?.let{a->
                 for(i in 0 until a.length()){
                     val item=a.optJSONObject(i) ?: continue
-                    if(item.optString("uri")==rawUri && item.optString("kind")=="file") continue
+                    if(item.optString("uri")==rawUri && item.optString("kind")==pendingUploadKind) continue
                     pending.put(item)
                 }
             }
