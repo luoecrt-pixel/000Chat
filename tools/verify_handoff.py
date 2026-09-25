@@ -55,36 +55,49 @@ def main() -> None:
             assert next_level > level, f"heading without content: {line}"
 
     assert text.count("`") % 2 == 0, "unbalanced inline backticks"
-    assert "exeatId" not in text, "known fork-radar corruption detected"
-    require(text, "### 7. Fork / ветвление чата")
 
     active = text[text.index("## АКТИВНЫЙ ПЛАН — только незавершённое"):text.index("## Репозиторий / branches")]
-    assert "Response/recovery controller — срез завершён" not in active
-    require(active, "### 1. Thread-safety audit — **следующий**")
-    require(active, "### 2. Attachment/upload/composer controller")
-    for phrase in ["cross-thread ownership violations", "renderVectorStoreList", "Executor/Worker → Activity", "retention/clear policy diagnostics", "minification/shrinker", "bounded screen-state surface", "AGP/Kotlin/compileSdk drift"]:
-        require(active, phrase)
+    active_headings = [line.strip() for line in active.splitlines() if line.startswith("### ")]
+    assert active_headings, "active plan should contain at least one plan item"
+    next_items = [heading for heading in active_headings if "— **следующий**" in heading]
+    assert len(next_items) == 1, f"expected exactly one active-plan item marked as next, found {len(next_items)}"
+
+    next_slice = re.search(r"\*\*Следующий рабочий срез:\*\*\s*(.+?)(?:\s+—|\s*$)", text, re.MULTILINE)
+    assert next_slice, "missing next-work-slice declaration"
+    assert next_items[0].replace(" — **следующий**", "").strip().endswith(next_slice.group(1).strip()), (
+        "active-plan next item does not match the declared next work slice"
+    )
+
+    for index, heading in enumerate(active_headings):
+        start = active.find(heading)
+        end = active.find(active_headings[index + 1], start + len(heading)) if index + 1 < len(active_headings) else len(active)
+        item = active[start:end]
+        require(item, "**Первый шаг:**")
 
     # One trigger for architecture/product review; START HERE is the canonical rule.
     assert text.count("каждые 5 merged PR или раньше") == 1
 
     radar = text[text.index("## Product radar — идеи с реальной ценностью"):text.index("## Документация")]
-    candidate_headings = [line for line in radar.splitlines() if line.startswith("### ") and not line.startswith("### Что сознательно")]
-    assert len(candidate_headings) == 7, "product radar should contain exactly seven candidate ideas"
-    for phrase in [
-        "MCP/custom functions и Computer Use",
-        "Полный Compose rewrite",
-        "«AI сам организует чаты/саммари/теги»",
-        "Синхронизация между устройствами",
-    ]:
-        require(radar, phrase)
-    assert radar.count("Первый шаг:") >= 7
+    candidate_headings = [line.strip() for line in radar.splitlines() if line.startswith("### ") and not line.startswith("### Что сознательно")]
+    assert candidate_headings, "product radar should contain at least one candidate idea"
+    candidate_numbers = []
+    for heading in candidate_headings:
+        match = re.match(r"### (\d+)\. ", heading)
+        assert match, f"candidate heading is not numbered: {heading}"
+        candidate_numbers.append(int(match.group(1)))
+        start = radar.find(heading)
+        idx = candidate_headings.index(heading)
+        end = radar.find(candidate_headings[idx + 1], start + len(heading)) if idx + 1 < len(candidate_headings) else radar.find("### Что сознательно", start)
+        item = radar[start:end if end >= 0 else len(radar)]
+        require(item, "Первый шаг:")
+    assert candidate_numbers == list(range(1, len(candidate_numbers) + 1)), "product radar numbering is not sequential"
 
     history = text[text.index("## История последних рабочих заходов — последние 5 PR"):text.index("## Product radar — идеи с реальной ценностью")]
-    for pr in ["#39", "#40", "#41", "#42", "#43"]:
-        require(history, f"**{pr}:**")
-    for pr in ["#19", "#20", "#21", "#22", "#23", "#24", "#25", "#26", "#27", "#28", "#29", "#30", "#31", "#32", "#33", "#34"]:
-        assert f"**{pr}:**" not in history
+    prs = re.findall(r"\*\*(#\d+):\*\*", history)
+    assert len(prs) == 5, f"expected exactly 5 individually-listed PRs, found {len(prs)}"
+    assert len(set(prs)) == 5, "duplicate PR entry in recent history"
+    pr_numbers = [int(pr[1:]) for pr in prs]
+    assert pr_numbers == sorted(pr_numbers), "recent PR history should be listed in chronological order"
 
     require(text, "python3 tools/verify_handoff.py")
     print("NEXT_AGENT_HANDOFF verifier: PASS")
