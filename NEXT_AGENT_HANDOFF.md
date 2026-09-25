@@ -86,6 +86,8 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
+Текущий следующий рабочий слой после ZIP/composer slice — thread-safety audit; завершённые slices остаются только в истории.
+
 ### 1. Attachment/upload/composer controller — **следующий**
 Routing slice закрыт в #41–#42. Следующий PR не вводит новый routing abstraction.
 
