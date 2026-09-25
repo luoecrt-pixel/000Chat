@@ -8,7 +8,7 @@ text = HANDOFF.read_text(encoding="utf-8")
 lines = text.splitlines()
 
 assert lines and lines[0] == "# NEXT_AGENT_HANDOFF"
-assert re.match(r"\\*\\*Last updated:\\*\\* \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} [+-]\\d{2}:\\d{2}", lines[2])
+assert re.match(r"\*\*Last updated:\*\* \d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}", lines[2])
 assert lines[3].strip().startswith("**Следующий рабочий срез:**")
 
 required_sections = [
