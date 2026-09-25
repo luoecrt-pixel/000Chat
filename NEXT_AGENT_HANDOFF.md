@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-25 17:06 +03:00  
+**Last updated:** 2026-09-25 17:18 +03:00  
 **Следующий рабочий срез:** PR #43 — сначала regression tests для ZIP consume + chat switch и main-thread ownership `preparingZipAttachments`, затем минимальная persistence operation; не начинать extraction до доказательства.
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -83,8 +83,6 @@
 - Composer/upload mutable lists и flags сейчас преимущественно UI-thread-owned. Не добавлять synchronized/Concurrent коллекции без доказанного cross-thread access.
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
-
-
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
