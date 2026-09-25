@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-25 17:18 +03:00  
-**Следующий рабочий срез:** PR #43 — сначала regression tests для ZIP consume + chat switch и main-thread ownership `preparingZipAttachments`, затем минимальная persistence operation; не начинать extraction до доказательства.
+**Last updated:** 2026-09-25 21:21 +03:00  
+**Следующий рабочий срез:** thread-safety audit — сначала детерминированно проверить off-main UI mutation в Vector Store delete callback и составить таблицу оставшихся `Executor/Worker → Activity` путей; generic controller extraction не начинать до ясной ownership boundary.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -37,7 +37,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `ae47af930dee1b72669be54be9ad595442dea48a` (PR #42 squash)
+- main code baseline: `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996` (PR #43 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -72,6 +72,7 @@
 - **#40:** reasoning background callback использует тот же immutable UI snapshot ownership contract и передаёт `assistantItemId` из snapshot в state mutation.
 - **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
 - **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
+- **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -86,18 +87,15 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Attachment/upload/composer controller — **следующий**
-Routing slice закрыт в #41–#42. Следующий PR не вводит новый routing abstraction.
+### 1. Thread-safety audit — **следующий**
+PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
 
-**Первый шаг:** Regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
+**Первый шаг:** детерминированно покрыть off-main вызов `renderVectorStoreList(vsId)` из Vector Store delete callback и составить таблицу `state / writer thread / reader thread / lifecycle gate` для оставшихся `Executor/Worker → Activity` paths.
 
-Подтверждённые риски:
-- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это preexisting semantics, не регрессия #42.
-- `preparingZipAttachments=false` записывается из executor catch path. Владельцем UI-флага должен быть main thread; executor передаёт только результат/ошибку.
-- `pendingUploadUris`, attached-file lists и pending image fields практически UI-owned; не синхронизировать без нового доказательства.
+### 2. Attachment/upload/composer controller
+Routing slice закрыт в #41–#43; следующий controller slice не вводит новый routing abstraction.
 
-### 2. Thread-safety audit
-**Первый шаг:** пройти оставшиеся `Executor/Worker → Activity` callback paths и составить таблицу `state / writer thread / reader thread / lifecycle gate`; исправлять только реальные cross-thread ownership violations.
+**Первый шаг:** после thread-safety audit выбрать одну bounded composer state/persistence boundary и вынести её как маленький pure snapshot/codec или одну доказанную transactional operation.
 
 ### 3. Diagnostics/security
 **Первый шаг:** проверить retention/clear policy diagnostics, отсутствие API keys/message bodies в логах, orphan local files и FileProvider scope; сначала аудит, потом точечные fixes.
@@ -110,7 +108,6 @@ Routing slice закрыт в #41–#42. Следующий PR не вводит
 
 ### 6. Compatibility / build hygiene
 **Первый шаг:** отдельно проверить AGP/Kotlin/compileSdk drift и Gradle Wrapper; не смешивать dependency migration с feature PR.
-
 ## Репозиторий / branches
 
 После #35–#37 накопились локальные feature branches, многие из которых соответствуют уже merged PR. Их удаление **не удаляет commits или PR history** и обычно полезно для hygiene. В текущем GitHub connector нет операции DELETE git ref, поэтому автоматически удалить их здесь нельзя; активным сейчас является только `main` плюс открытые PR branches. Перед ручным удалением ориентируйся на merged/closed PR state, а не на имя ветки.
@@ -160,15 +157,13 @@ Handoff verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#38:** merged `e3b346d78247ccaa08aefbdc31060b65935d827f`; PR-head Release `36064830714` — success; Debug `36064830967` — success после lifecycle instrumentation rerun (`107855282931`). Post-merge run не предоставлен connector.
 - **#39:** merged `a36ff37732931a6aa5ef256e9a03a352395c80a1`; PR-head Release `36067979922` — success; Debug `36067980079` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#40:** merged `e786d557ec6240b050aef12e0898ac6bb7076fc7`; PR-head Release `36070742037` — success; Debug `36070742104` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
-- **#35–#37:** merged and verified earlier; подробности сохранены в git history и подтверждённых контрактах выше.
+- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
-
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
