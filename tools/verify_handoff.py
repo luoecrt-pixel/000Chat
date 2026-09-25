@@ -60,8 +60,9 @@ def main() -> None:
 
     active = text[text.index("## АКТИВНЫЙ ПЛАН — только незавершённое"):text.index("## Репозиторий / branches")]
     assert "Response/recovery controller — срез завершён" not in active
-    require(active, "### 1. Attachment/upload/composer controller — **следующий**")
-    for phrase in ["Regression tests", "Executor/Worker → Activity", "retention/clear policy diagnostics", "minification/shrinker", "bounded screen-state surface", "AGP/Kotlin/compileSdk drift"]:
+    require(active, "### 1. Thread-safety audit — **следующий**")
+    require(active, "### 2. Attachment/upload/composer controller")
+    for phrase in ["off-main UI mutation", "renderVectorStoreList", "Executor/Worker → Activity", "retention/clear policy diagnostics", "minification/shrinker", "bounded screen-state surface", "AGP/Kotlin/compileSdk drift"]:
         require(active, phrase)
 
     # One trigger for architecture/product review; START HERE is the canonical rule.
@@ -80,7 +81,7 @@ def main() -> None:
     assert radar.count("Первый шаг:") >= 7
 
     history = text[text.index("## История последних рабочих заходов — последние 5 PR"):text.index("## Product radar — идеи с реальной ценностью")]
-    for pr in ["#38", "#39", "#40", "#41", "#42"]:
+    for pr in ["#39", "#40", "#41", "#42", "#43"]:
         require(history, f"**{pr}:**")
     for pr in ["#19", "#20", "#21", "#22", "#23", "#24", "#25", "#26", "#27", "#28", "#29", "#30", "#31", "#32", "#33", "#34"]:
         assert f"**{pr}:**" not in history
