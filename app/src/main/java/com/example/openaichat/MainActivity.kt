@@ -2791,6 +2791,7 @@ class MainActivity : ComponentActivity() {
         if(r==pickImage){
             val uri=d.data ?: return
             val uploadChatId=currentChatId()
+            val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
             rememberUploadUri(uri,"image")
             refreshAttachChips()
@@ -2805,20 +2806,29 @@ class MainActivity : ComponentActivity() {
                     reportUploadProgress(key,"Загрузка",50L,100L)
                     val fileId=uploadImageFile(path,name,key){done,total->reportUploadProgress(key,"Загрузка",50L + (done*50L/total.coerceAtLeast(1L)),100L)}
                     runOnUiThread{
-                        if(cancelledUploads.contains(key)) return@runOnUiThread
-                        if(currentChatId()==uploadChatId){
-                            pendingImagePath=path
-                            pendingImageFileId=fileId
-                            pendingImageName=name
-                            pendingImageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(name)}
-                            pendingImageSize=File(path).length()
-                            forgetUploadUri(uri,"image")
-                            refreshAttachChips()
-                            persistComposerStateNow()
-                            status.text="Изображение готово к отправке"
-                        }else{
-                            saveUploadedImageToComposer(uploadChatId,path,fileId,uri.toString(),name,pendingImageMime ?: mimeForFilename(name),File(path).length())
-                            status.text="Изображение загружено — оно сохранено в исходном чате"
+                        when (
+                            AttachmentUploadCompletionPolicy.decide(
+                                sourceChatId = uploadChatId,
+                                currentChatId = currentChatId(),
+                                cancelled = cancelledUploads.contains(key)
+                            )
+                        ) {
+                            AttachmentUploadCompletionTarget.DISCARD -> return@runOnUiThread
+                            AttachmentUploadCompletionTarget.CURRENT_COMPOSER -> {
+                                pendingImagePath=path
+                                pendingImageFileId=fileId
+                                pendingImageName=name
+                                pendingImageMime=imageMime
+                                pendingImageSize=File(path).length()
+                                forgetUploadUri(uri,"image")
+                                refreshAttachChips()
+                                persistComposerStateNow()
+                                status.text="Изображение готово к отправке"
+                            }
+                            AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
+                                saveUploadedImageToComposer(uploadChatId,path,fileId,uri.toString(),name,imageMime,File(path).length())
+                                status.text="Изображение загружено — оно сохранено в исходном чате"
+                            }
                         }
                     }
                 }catch(e:Exception){
@@ -2934,21 +2944,31 @@ class MainActivity : ComponentActivity() {
                     diagnostics.log("zip_prepared",mapOf("chat_id" to sourceChatId,"filename" to zipName,"files_uploaded" to uploaded.size,"index" to index))
                 }
                 runOnUiThread{
-                    if(sourceChatId==currentChatId()){
-                        zipItems.forEach{(raw,kind)->pendingUploadUris.remove(raw to kind)}
-                        uploaded.forEach{
-                            attachedFileIds.add(it.id);attachedFileNames.add(it.name);attachedFileSizes.add(it.size);attachedFilePaths.add(it.path);attachedFileMimes.add(it.mime)
+                    when (
+                        AttachmentUploadCompletionPolicy.decide(
+                            sourceChatId = sourceChatId,
+                            currentChatId = currentChatId(),
+                            cancelled = false
+                        )
+                    ) {
+                        AttachmentUploadCompletionTarget.DISCARD -> Unit
+                        AttachmentUploadCompletionTarget.CURRENT_COMPOSER -> {
+                            zipItems.forEach{(raw,kind)->pendingUploadUris.remove(raw to kind)}
+                            uploaded.forEach{
+                                attachedFileIds.add(it.id);attachedFileNames.add(it.name);attachedFileSizes.add(it.size);attachedFilePaths.add(it.path);attachedFileMimes.add(it.mime)
+                            }
+                            persistComposerStateNow()
+                            preparingZipAttachments=false
+                            refreshAttachChips()
+                            status.text="ZIP подготовлен · файлов: ${uploaded.size}"
+                            sendMessage(regenerate)
                         }
-                        persistComposerStateNow()
-                        preparingZipAttachments=false
-                        refreshAttachChips()
-                        status.text="ZIP подготовлен · файлов: ${uploaded.size}"
-                        sendMessage(regenerate)
-                    }else{
-                        zipItems.forEach{(raw,kind)->pendingUploadUris.remove(raw to kind)}
-                        uploaded.forEach{saveUploadedFileToComposer(sourceChatId,it.id,it.name,it.size,rawUri="",localPath=it.path,mime=it.mime)}
-                        preparingZipAttachments=false
-                        status.text="ZIP подготовлен в исходном чате"
+                        AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
+                            zipItems.forEach{(raw,kind)->pendingUploadUris.remove(raw to kind)}
+                            uploaded.forEach{saveUploadedFileToComposer(sourceChatId,it.id,it.name,it.size,rawUri="",localPath=it.path,mime=it.mime)}
+                            preparingZipAttachments=false
+                            status.text="ZIP подготовлен в исходном чате"
+                        }
                     }
                 }
             }catch(e:Exception){
