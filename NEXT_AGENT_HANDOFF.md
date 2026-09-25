@@ -1,4 +1,7 @@
-# NEXT_AGENT_HANDOFF — 2026-09-25
+# NEXT_AGENT_HANDOFF
+
+**Last updated:** 2026-09-25 15:26 +03:00  
+**Следующий рабочий срез:** PR #43 — сначала regression tests для ZIP consume + chat switch и main-thread ownership `preparingZipAttachments`, затем минимальная persistence operation; не начинать extraction до доказательства.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -12,7 +15,7 @@
 6. CI: queued/in_progress ≠ green. Static verifier и Gradle CI — отдельные проверки.
 7. После merge проверь post-merge Debug/Release, если GitHub Actions предоставляет эти runs.
 8. После завершения задачи: план → история; устаревшее удалить, а не оставлять вечным backlog.
-9. Периодически делай архитектурный/продуктовый обзор. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
+9. Архитектурный/продуктовый обзор делай **каждые 5 merged PR или раньше, если активный план опустел/сменил слой**. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
 10. **Не теряй общую картину:** Compose, controller extraction, thread-safety и fork chat — это разные уровни одной дорожной карты, а не взаимозаменяемые TODO.
 
 ## 30-секундная карта проекта
@@ -30,7 +33,7 @@
 
 **Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. Compose остаётся следующим UI-слоем после state/controller extraction.
 
-**Продуктовый радар:** fork чата от выбранного сообщения — кандидат для проверки, не обязательная задача.
+**Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
 
 ## Фактический baseline
 
@@ -72,53 +75,42 @@
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
-## АРХИТЕКТУРНЫЙ ОБЗОР — 2026-09-25
+## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
-### Что улучшать теперь
+- `ResponseEventReducer` — response semantics; `ResumableResponseStreamClient` — transport + sequence cursor; `ActiveResponsePersistence` — persisted active-response boundary. `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy` и `AttachmentUploadCompletionPolicy` остаются pure decision seams.
+- Async callbacks должны сначала захватывать immutable ownership data; UI mutation выполняется через main-thread lifecycle gate.
+- `chatId + generation` недостаточны там, где callback меняет конкретный assistant item; для этого нужен immutable `chatId + generation + assistantItemId` snapshot. Tool label — отдельный global Activity state.
+- Composer/upload mutable lists и flags сейчас преимущественно UI-thread-owned. Не добавлять synchronized/Concurrent коллекции без доказанного cross-thread access.
+- Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
+- Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
-1. **Composer persistence boundary.** Следующий seam — не новый routing policy, а единый snapshot/codec для composer state. Сейчас `persistComposerStateNow()`, `saveUploadedFileToComposer()` и `saveUploadedImageToComposer()` частично дублируют JSON-схему и read-modify-write логику внутри MainActivity.
-2. **Async upload state ownership.** Большая часть upload state фактически UI-thread-owned; не превращать всё в атомики. Сначала зафиксировать правило владения: UI mutable state меняется на main thread, executor только сообщает результат/progress. Конкретное исключение уже найдено: `preparingZipAttachments=false` записывается из executor catch path.
-3. **Persistence correctness before extraction.** До выделения adapter/codec добавить regression test для смены чата во время async upload и для ZIP, который завершает подготовку уже после перехода в другой чат.
-4. **Transport adapter.** SSE/HTTP остаются источником normalized events и sequence semantics; reducer/policy не должны знать OkHttp, Android или WorkManager.
-5. **Tool/UI effects — отдельным слоем.** Не переносить все tool events в reducer заранее; сначала стабилизировать state + persistence.
-6. **Тестировать решение отдельно от adapter.** Pure codec/persistence tests → один runtime path → Robolectric/instrumentation только там, где Android lifecycle реально нужен.
-
-### Что уже реализовано в #36–#42
-
-`ResponseEventReducer` + JVM tests покрывают response lifecycle semantics; #37 изолировал active-response persistence; #38 — checkpoint decision; #39–#40 — background UI ownership для assistant text/reasoning; #41–#42 — file/image/ZIP attachment completion routing.
-
+**Architecture review trigger:** каждые 5 merged PR или при исчерпании/смене активного плана.
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Response/recovery controller — срез завершён
-Background checkpoint, assistant-text и reasoning callbacks проверены на ownership seam. #39 вынес snapshot ownership, #40 убрал повторное чтение mutable assistant item для reasoning. Tool-state callbacks сознательно не переводились на assistant-item ownership, так как их UI state глобален для текущей Activity. Нового доказанного ownership race в этом срезе не осталось.
+### 1. Attachment/upload/composer controller — **следующий**
+Routing slice закрыт в #41–#42. Следующий PR не вводит новый routing abstraction.
 
-### 2. Attachment/upload/composer controller
-Routing slice закрыт в #41–#42: file/image/ZIP completion используют один pure `AttachmentUploadCompletionPolicy`; image MIME захватывается до async hop. Следующий slice — composer persistence boundary и lifecycle/thread-safety вокруг upload state.
+**Первый шаг:** regression tests на (a) смену чата во время async upload, (b) ZIP completion после смены чата, (c) SOURCE_CHAT consume pending ZIP из persisted composer state, (d) failure path без off-main state mutation.
 
-**Перед PR #43 уже подтверждены конкретные риски:**
-- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP только из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это не регрессия #42: diff #42 сохраняет прежнюю SOURCE_CHAT semantics. Нужен regression test и затем единая persistence operation, которая атомарно «consume pending upload + append uploaded files».
-- `preparingZipAttachments` сбрасывается в executor catch path. Поле используется UI-кодом без `@Volatile`/атомарности; правильнее оставить единственного владельца на main thread и передавать ошибку туда.
-- `pendingUploadUris`, attached-file lists и pending image fields сейчас практически UI-owned; не добавлять synchronized/Concurrent коллекции без нового доказательства race.
-- `pendingPreviewBitmaps`, `uploadProgress`, `uploadCalls`, `activePendingUploadKeys`, `cancelledUploads`, `pendingLocalUploadPaths` уже используют ConcurrentHashMap/set и не являются первыми кандидатами на изменение.
+Подтверждённые риски:
+- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это preexisting semantics, не регрессия #42.
+- `preparingZipAttachments=false` записывается из executor catch path. Владельцем UI-флага должен быть main thread; executor передаёт только результат/ошибку.
+- `pendingUploadUris`, attached-file lists и pending image fields практически UI-owned; не синхронизировать без нового доказательства.
 
-### 3. Thread-safety audit
-Проверить оставшиеся Activity/Executor/Worker границы и shared mutable state. Менять синхронизацию только при доказанном race.
+### 2. Thread-safety audit
+**Первый шаг:** пройти оставшиеся `Executor/Worker → Activity` callback paths и составить таблицу `state / writer thread / reader thread / lifecycle gate`; исправлять только реальные cross-thread ownership violations.
 
-### 4. Diagnostics/security
-Diagnostics retention/clear, отсутствие API keys/message bodies, orphan local files, FileProvider least privilege.
+### 3. Diagnostics/security
+**Первый шаг:** проверить retention/clear policy diagnostics, отсутствие API keys/message bodies в логах, orphan local files и FileProvider scope; сначала аудит, потом точечные fixes.
 
-### 5. Release hardening
-Shrink/minification policy, renderer/reflection/file handling under shrinker; signing/publishing отдельно.
+### 4. Release hardening
+**Первый шаг:** проверить minification/shrinker на `RichTextRenderer`, reflection/file handling и release-only paths; signing/publishing не смешивать с runtime cleanup.
 
-### 6. Compose migration
-**Не начинать до state/controller extraction.**
-Порядок:
-`response reducer/controller → persistence + attachment state → immutable screen state/events → one bounded Compose feature → incremental migration`.
-Compose — не «забытый TODO», а отложенная архитектурная стадия.
+### 5. Compose migration
+**Первый шаг:** после закрытия controller/persistence slice выбрать один bounded screen-state surface; не начинать полный rewrite.
 
-### 7. Отдельные compatibility tasks
-AGP/Kotlin/compileSdk migration и Gradle Wrapper.
-
+### 6. Compatibility / build hygiene
+**Первый шаг:** отдельно проверить AGP/Kotlin/compileSdk drift и Gradle Wrapper; не смешивать dependency migration с feature PR.
 ## Репозиторий / branches
 
 После #35–#37 накопились локальные feature branches, многие из которых соответствуют уже merged PR. Их удаление **не удаляет commits или PR history** и обычно полезно для hygiene. В текущем GitHub connector нет операции DELETE git ref, поэтому автоматически удалить их здесь нельзя; активным сейчас является только `main` плюс открытые PR branches. Перед ручным удалением ориентируйся на merged/closed PR state, а не на имя ветки.
@@ -150,32 +142,26 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 - если merge — проверить post-merge runs, когда connector их предоставляет; если нет — явно зафиксировать ограничение;
 - обновить план и историю.
 
-## История последних рабочих заходов
+### Командная шпаргалка
 
-- **#35 merged:** `6c975658698d24cf40da3874f3c96eaf17da634f`.
-- **#35 PR-head CI:** Debug `36054984135` и Release `36054984134` — success.
-- **#36 merged:** `409996fe2484d5ac71f096a0331fb9c64ada4ff6`.
-- **#36 final PR-head CI:** Release `36060342110` — success; Debug `36060342139` — success, включая lifecycle instrumentation.
-- **#37 merged:** `98ca902bd2474129fbb6e95ebfaa23cef8b1cb01`.
-- **#37 final PR-head CI:** Release `36062915006` — success; Debug `36062914977` — success, включая lifecycle instrumentation.
-- **#38 merged:** `e3b346d78247ccaa08aefbdc31060b65935d827f`.
-- **#38 PR-head CI:** Release `36064830714` — success; Debug `36064830967` initially failed only at lifecycle instrumentation, rerun job `107855282931` — success. Static verifier + Gradle test/lint/build were successful on both attempts.
-- **#38 post-merge CI:** connector не вернул workflow runs для merge commit `e3b346d...`; post-merge green не заявляется.
-- **#39 merged:** `a36ff37732931a6aa5ef256e9a03a352395c80a1`.
-- **#39 PR-head CI:** Release `36067979922` — success; Debug `36067980079` — success, включая lifecycle instrumentation.
-- **#39 post-merge CI:** connector не вернул workflow runs для merge commit `a36ff377...`; post-merge green не заявляется.
-- **#40 merged:** `e786d557ec6240b050aef12e0898ac6bb7076fc7`.
-- **#40 PR-head CI:** Release `36070742037` — success; Debug `36070742104` — success, включая lifecycle instrumentation.
-- **#40 post-merge CI:** connector не вернул workflow runs для merge commit `e786d557...`; post-merge green не заявляется.
-- **#41 merged:** `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`.
-- **#41 PR-head CI:** Release `36072696907` — success; Debug `36072696947` — success, включая lifecycle instrumentation.
-- **#41 post-merge CI:** connector не вернул workflow runs для merge commit `35ae9fbf...`; post-merge green не заявляется.
-- **#42 merged:** `ae47af930dee1b72669be54be9ad595442dea48a`.
-- **#42 PR-head CI:** Release `36104592806` — success; Debug `36104592766` — success, включая lifecycle instrumentation.
-- **#42 post-merge CI:** connector не вернул workflow runs для merge commit `ae47af93...`; post-merge green не заявляется.
-- Во время #36 были исправлены промежуточные integration проблемы, после чего exact-head CI стал зелёным.
-- **Post-merge runs:** connector не вернул runs для `409996fe...` и `98ca902b...`; post-merge green не заявляется.
+Debug:
+`gradle --no-daemon --stacktrace test lintDebug assembleDebug`
 
+Release:
+`gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease`
+
+Static verifier:
+`python3 tools/verify_v4_17_0.py`
+## История последних рабочих заходов — последние 5 PR
+
+- **#38:** merged `e3b346d78247ccaa08aefbdc31060b65935d827f`; PR-head Release `36064830714` — success; Debug `36064830967` — success после lifecycle instrumentation rerun (`107855282931`). Post-merge run не предоставлен connector.
+- **#39:** merged `a36ff37732931a6aa5ef256e9a03a352395c80a1`; PR-head Release `36067979922` — success; Debug `36067980079` — success incl. instrumentation. Post-merge run не предоставлен connector.
+- **#40:** merged `e786d557ec6240b050aef12e0898ac6bb7076fc7`; PR-head Release `36070742037` — success; Debug `36070742104` — success incl. instrumentation. Post-merge run не предоставлен connector.
+- **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
+- **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
+- **#35–#37:** merged and verified earlier; подробности сохранены в git history и подтверждённых контрактах выше.
+
+**Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 ## Product radar — идеи с реальной ценностью — 2026-09-25
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
@@ -198,18 +184,10 @@ AGP/Kotlin/compileSdk migration и Gradle Wrapper.
 ### 6. «Продолжить / починить ответ» как отдельный UX
 У приложения уже есть сильная recovery-модель. Её можно превратить в пользовательское действие: после incomplete/failed/background interruption предлагать понятные варианты «Продолжить», «Повторить», «Открыть checkpoint». Первый шаг: описать состояния response и разрешённые пользовательские действия как pure policy; это лучше, чем ещё один набор if в MainActivity.
 
+### 7. Fork / ветвление чата
+MVP: «Ветвить отсюда» на выбранном сообщении создаёт независимый local snapshot до этой точки. Первый шаг: pure DB/domain contract + tests. Обязательно: новый `chatId`, новые local records, не переносить active response / Worker / temporary UI state, и сначала подтвердить актуальную семантику Responses API для продолжения ровно от fork point.
 ### Что сознательно не тянуть сейчас
-- MCP/custom functions и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает execution surface.
-- Полный Compose rewrite — инфраструктурная стадия, не пользовательская функция.
-- «AI сам организует чаты/саммари/теги» — выглядит эффектно, но пока не доказано, что это важнее поиска, обратимости и прозрачности контекста.
-- Синхронизация между устройствами — отдельная security/backend задача, не естественное продолжение текущей local-first архитектуры.
-
-## Product radar: fork chat
-
-MVP-идея: «Ветвить отсюда» на выбранном сообщении создаёт **независимый local snapshot** до этой точки.
-
-Обязательные ограничения для первого шага:
-- новый `chatId`;
+- MCP/custom functions и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает exeatId`;
 - не переносить active response / Worker job / temporary UI state;
 - copied messages — новые local records;
 - не переиспользовать исходный `previous_response_id` вслепую: сначала подтвердить актуальную семантику Responses API для продолжения **ровно от fork point**;
