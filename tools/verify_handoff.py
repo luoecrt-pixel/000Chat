@@ -77,6 +77,19 @@ def main() -> None:
     # One trigger for architecture/product review; START HERE is the canonical rule.
     assert text.count("каждые 5 merged PR или раньше") == 1
 
+    confirmed = text[text.index("## Подтверждённые lifecycle/recovery контракты"):text.index("## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила")]
+    contract_lines = [line for line in confirmed.splitlines() if re.search(r"\*\*#\d+:\*\*", line)]
+    assert contract_lines, "confirmed lifecycle/recovery contracts should not be empty"
+    contract_line = re.compile(r"^- \[(instrumentation|robolectric|pure|static)\] \*\*#\d+:\*\* .+$")
+    contract_numbers = []
+    for line in contract_lines:
+        assert contract_line.fullmatch(line), f"contract line missing exactly one valid proof-tag: {line}"
+        proof_tags = re.findall(r"\[(instrumentation|robolectric|pure|static)\]", line)
+        assert len(proof_tags) == 1, f"contract line must contain exactly one proof-tag: {line}"
+        match = re.search(r"\*\*(#\d+):\*\*", line)
+        contract_numbers.append(match.group(1))
+    assert len(contract_numbers) == len(set(contract_numbers)), "duplicate lifecycle contract PR in proof-tagged list"
+
     verification = text[text.index("## Как проверять новую работу"):text.index("### Командная шпаргалка")]
     require(verification, "реально запустить static verifier и любой новый/изменённый verifier-скрипт")
     require(verification, "чтение кода вместо запуска не считается проверкой")

@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-25 21:03 +02:00  
+**Last updated:** 2026-09-25 22:52 +03:00  
 **Следующий рабочий срез:** thread-safety audit — сначала детерминированно проверить off-main UI mutation в Vector Store delete callback и составить таблицу оставшихся `Executor/Worker → Activity` путей; generic controller extraction не начинать до ясной ownership boundary.
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -55,28 +55,35 @@
 
 ## Подтверждённые lifecycle/recovery контракты
 
-- **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
-- **#20:** Stop привязан к generation конкретного request.
-- **#23:** `ActiveResponseStateStore.state` — `@Volatile` immutable snapshot.
-- **#25:** user-stop инвалидирует все поколения до последнего user-stop; повторный Stop не забывает старые поколения.
-- **#27:** background resume захватывает immutable `chatId + generation + assistantItemId` snapshot; callback не читает «текущую» generation постфактум.
-- **#29:** Stop-before-create, stale Worker finalization и ownership проверяются через детерминированные contracts.
-- **#31:** background recovery запускается только при явной eligibility policy.
-- **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
-- **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback больше не может заново создать telemetry для удалённого chat.
-- **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; PR-head Debug/Release зелёные.
-- **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
-- **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; `ChatDatabaseActiveResponsePersistence` сохраняет прежнюю request-aware DB реализацию.
-- **#38:** `ResponseCheckpointPolicy` изолирует pure checkpoint decision: interval vs terminal, persisted status/text/responseId/sequence; background recovery перенесён на policy, foreground 750ms cadence не менялась.
-- **#39:** `BackgroundResponseUiOwnershipPolicy` изолирует pure decision для применения background UI snapshot по `chatId + generation + assistantItemId + lifecycle`.
-- **#40:** reasoning background callback использует тот же immutable UI snapshot ownership contract и передаёт `assistantItemId` из snapshot в state mutation.
-- **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
-- **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
-- **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
+- [pure] **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
+- [static] **#20:** Stop привязан к generation конкретного request.
+- [pure] **#23:** `ActiveResponseStateStore.state` — `@Volatile` immutable snapshot.
+- [pure] **#25:** user-stop инвалидирует все поколения до последнего user-stop; повторный Stop не забывает старые поколения.
+- [pure] **#27:** background resume захватывает immutable `chatId + generation + assistantItemId` snapshot; callback не читает «текущую» generation постфактум.
+- [pure] **#29:** Stop-before-create, stale Worker finalization и ownership проверяются через детерминированные contracts.
+- [pure] **#31:** background recovery запускается только при явной eligibility policy.
+- [robolectric] **#32:** реальные SQLite/Robolectric проверки v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
+- [robolectric] **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback больше не может заново создать telemetry для удалённого chat.
+- [instrumentation] **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; PR-head Debug/Release зелёные.
+- [pure] **#36:** `ResponseEventReducer` содержит общую semantics для response.created, text/reasoning deltas и terminal states; foreground и background paths используют один reducer. Sequence cursor намеренно не дублируется в reducer.
+- [static] **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; `ChatDatabaseActiveResponsePersistence` сохраняет прежнюю request-aware DB реализацию.
+- [pure] **#38:** `ResponseCheckpointPolicy` изолирует pure checkpoint decision: interval vs terminal, persisted status/text/responseId/sequence; background recovery перенесён на policy, foreground 750ms cadence не менялась.
+- [pure] **#39:** `BackgroundResponseUiOwnershipPolicy` изолирует pure decision для применения background UI snapshot по `chatId + generation + assistantItemId + lifecycle`.
+- [static] **#40:** reasoning background callback использует тот же immutable UI snapshot ownership contract и передаёт `assistantItemId` из snapshot в state mutation.
+- [pure] **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
+- [static] **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
+- [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
-Если точно знаешь способ проверки конкретного контракта — помечай в начале строки: `[real-device]` (реальный instrumentation/ActivityScenario run), `[robolectric]` (SQLite/Robolectric без реального device), `[pure]` (только JVM/pure-logic тест без Android runtime). Простановка тега — не отдельная задача и не повод для PR; добавляй его только когда трогаешь соответствующую строку по другой причине или когда уровень доказанности уже точно известен из последней проверки.
+Тег = **сильнейший реально выполненный harness для этого конкретного утверждения**, а не доказательство всего callback/runtime-пути целиком. Если pure-policy покрыта JVM-тестом, это не делает wiring-код, который её вызывает, `[pure]`. Поэтому отдельный wiring без runtime-теста остаётся `[static]` даже при наличии соседнего pure-теста.
+
+- `[instrumentation]` — Android instrumentation/ActivityScenario, выполнявшийся на эмуляторе или устройстве; это не означает физическое устройство.
+- `[robolectric]` — Android/SQLite-сценарий через Robolectric, без реального emulator/device.
+- `[pure]` — JVM/pure-logic тест без Android runtime.
+- `[static]` — утверждение подтверждено только статической/source-level/compile-time проверкой или verifier-wiring; отдельного runtime-теста именно этого утверждения нет.
+
+Для thread-safety audit это различие является частью доказательства: тег показывает уровень реально пройденного harness, но не разрешает переносить proof с соседней policy на весь async callback path.
 
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
