@@ -96,7 +96,7 @@ Background checkpoint, assistant-text и reasoning callbacks проверены 
 Routing slice закрыт в #41–#42: file/image/ZIP completion используют один pure `AttachmentUploadCompletionPolicy`; image MIME захватывается до async hop. Следующий slice — composer persistence boundary и lifecycle/thread-safety вокруг upload state.
 
 **Перед PR #43 уже подтверждены конкретные риски:**
-- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP только из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Нужен regression test и затем единая persistence operation, которая атомарно «consume pending upload + append uploaded files».
+- `preparePendingZipsThenSend()` в SOURCE_CHAT удаляет ZIP только из in-memory `pendingUploadUris`, а `saveUploadedFileToComposer(... rawUri="")` не удаляет соответствующий persisted `kind="zip"` item. Это не регрессия #42: diff #42 сохраняет прежнюю SOURCE_CHAT semantics. Нужен regression test и затем единая persistence operation, которая атомарно «consume pending upload + append uploaded files».
 - `preparingZipAttachments` сбрасывается в executor catch path. Поле используется UI-кодом без `@Volatile`/атомарности; правильнее оставить единственного владельца на main thread и передавать ошибку туда.
 - `pendingUploadUris`, attached-file lists и pending image fields сейчас практически UI-owned; не добавлять synchronized/Concurrent коллекции без нового доказательства race.
 - `pendingPreviewBitmaps`, `uploadProgress`, `uploadCalls`, `activePendingUploadKeys`, `cancelledUploads`, `pendingLocalUploadPaths` уже используют ConcurrentHashMap/set и не являются первыми кандидатами на изменение.
