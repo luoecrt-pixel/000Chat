@@ -41,6 +41,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Verify handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/verify_handoff.py
+
       - name: Verify source
         shell: bash
         run: |
