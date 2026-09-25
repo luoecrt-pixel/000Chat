@@ -62,7 +62,7 @@ def main() -> None:
     assert "Response/recovery controller — срез завершён" not in active
     require(active, "### 1. Thread-safety audit — **следующий**")
     require(active, "### 2. Attachment/upload/composer controller")
-    for phrase in ["off-main UI mutation", "renderVectorStoreList", "Executor/Worker → Activity", "retention/clear policy diagnostics", "minification/shrinker", "bounded screen-state surface", "AGP/Kotlin/compileSdk drift"]:
+    for phrase in ["cross-thread ownership violations", "renderVectorStoreList", "Executor/Worker → Activity", "retention/clear policy diagnostics", "minification/shrinker", "bounded screen-state surface", "AGP/Kotlin/compileSdk drift"]:
         require(active, phrase)
 
     # One trigger for architecture/product review; START HERE is the canonical rule.
