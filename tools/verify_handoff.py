@@ -77,6 +77,12 @@ def main() -> None:
     # One trigger for architecture/product review; START HERE is the canonical rule.
     assert text.count("каждые 5 merged PR или раньше") == 1
 
+    verification = text[text.index("## Как проверять новую работу"):text.index("### Командная шпаргалка")]
+    require(verification, "реально запустить static verifier и любой новый/изменённый verifier-скрипт")
+    require(verification, "чтение кода вместо запуска не считается проверкой")
+    require(verification, "намеренно воспроизвести целевую поломку")
+    require(verification, "позитивный и негативный кейс обязательны оба")
+
     radar = text[text.index("## Product radar — идеи с реальной ценностью"):text.index("## Документация")]
     candidate_headings = [line.strip() for line in radar.splitlines() if line.startswith("### ") and not line.startswith("### Что сознательно")]
     assert candidate_headings, "product radar should contain at least one candidate idea"
