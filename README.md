@@ -5,7 +5,6 @@
 ## Текущее состояние
 
 - **main code baseline:** `ae47af930dee1b72669be54be9ad595442dea48a` (PR #42 squash)
-- **latest handoff docs:** `30abdaf14594d4c7e9b90dbb91bad36b5e73771d`
 - **versionName / code:** `4.17.0 / 64`
 - **DB schema:** `v15`
 - **compile/target SDK:** `35`
