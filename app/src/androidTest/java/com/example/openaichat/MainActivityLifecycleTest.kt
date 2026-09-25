@@ -100,9 +100,12 @@ class MainActivityLifecycleTest {
     fun zipPreparationFailureClearsPreparationState() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
+            val brokenZip = java.io.File(activity.cacheDir, "broken.zip").apply {
+                writeText("not a zip archive")
+            }
             @Suppress("UNCHECKED_CAST")
             val pending = privateField(activity, "pendingUploadUris") as MutableList<Pair<String, String>>
-            pending.add("content://missing/archive.zip" to "zip")
+            pending.add(android.net.Uri.fromFile(brokenZip).toString() to "zip")
 
             invoke(
                 activity,
