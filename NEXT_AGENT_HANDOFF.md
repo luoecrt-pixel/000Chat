@@ -55,7 +55,7 @@
 
 ## Подтверждённые lifecycle/recovery контракты
 
-- [pure] **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
+- [real-device] **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
 - [static] **#20:** Stop привязан к generation конкретного request.
 - [pure] **#23:** `ActiveResponseStateStore.state` — `@Volatile` immutable snapshot.
 - [pure] **#25:** user-stop инвалидирует все поколения до последнего user-stop; повторный Stop не забывает старые поколения.
