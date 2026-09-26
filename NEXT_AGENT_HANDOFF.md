@@ -176,7 +176,6 @@ Handoff verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#39:** merged `a36ff37732931a6aa5ef256e9a03a352395c80a1`; PR-head Release `36067979922` — success; Debug `36067980079` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#40:** merged `e786d557ec6240b050aef12e0898ac6bb7076fc7`; PR-head Release `36070742037` — success; Debug `36070742104` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
