@@ -2619,34 +2619,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderVectorStoreList(vsId:String){
-        vsStatusLine?.text="Загрузка списка файлов…"
-        executor.execute{
-            try{
-                val files=listVectorStoreFiles(vsId)
-                runOnUiThread{
-                    val area=vsListArea ?: return@runOnUiThread
-                    area.removeAllViews()
-                    if(files.isEmpty()){
-                        area.addView(TextView(this).apply{this.text="Файлов пока нет";setTextColor(Color.GRAY);textSize=13f})
-                    }
-                    files.forEach{(fid,name)->
-                        val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,dp(6))}
-                        row.addView(TextView(this).apply{this.text=name;textSize=14f;setTextColor(Color.WHITE)}, LinearLayout.LayoutParams(0,-2,1f))
-                        row.addView(TextView(this).apply{
-                            this.text="✕";setTextColor(Color.rgb(210,120,120));setPadding(dp(12),dp(6),dp(6),dp(6))
-                            setOnClickListener{
-                                executor.execute{
-                                    try{ removeFileFromVectorStore(vsId,fid) }catch(_:Exception){}
-                                    renderVectorStoreList(vsId)
+        runOnUiThread{
+            vsStatusLine?.text="Загрузка списка файлов…"
+            executor.execute{
+                try{
+                    val files=listVectorStoreFiles(vsId)
+                    runOnUiThread{
+                        val area=vsListArea ?: return@runOnUiThread
+                        area.removeAllViews()
+                        if(files.isEmpty()){
+                            area.addView(TextView(this).apply{this.text="Файлов пока нет";setTextColor(Color.GRAY);textSize=13f})
+                        }
+                        files.forEach{(fid,name)->
+                            val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,dp(6))}
+                            row.addView(TextView(this).apply{this.text=name;textSize=14f;setTextColor(Color.WHITE)}, LinearLayout.LayoutParams(0,-2,1f))
+                            row.addView(TextView(this).apply{
+                                this.text="✕";setTextColor(Color.rgb(210,120,120));setPadding(dp(12),dp(6),dp(6),dp(6))
+                                setOnClickListener{
+                                    executor.execute{
+                                        try{ removeFileFromVectorStore(vsId,fid) }catch(_:Exception){}
+                                        renderVectorStoreList(vsId)
+                                    }
                                 }
-                            }
-                        })
-                        area.addView(row)
+                            })
+                            area.addView(row)
+                        }
+                        vsStatusLine?.text="Vector Store: $vsId"
                     }
-                    vsStatusLine?.text="Vector Store: $vsId"
+                }catch(e:Exception){
+                    runOnUiThread{ vsStatusLine?.text="Ошибка загрузки: ${e.message}" }
                 }
-            }catch(e:Exception){
-                runOnUiThread{ vsStatusLine?.text="Ошибка загрузки: ${e.message}" }
             }
         }
     }

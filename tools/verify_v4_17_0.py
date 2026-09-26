@@ -195,6 +195,17 @@ assert 'BackgroundResponseUiSnapshot' in main
 assert 'activeResponseState.state.isCurrent' in main
 assert 'streamBackgroundResponse(a, uiSnapshot)' in main
 assert 'activeResponseState.markUserStop()' in main
+
+# Vector Store list rendering must be UI-thread-safe even when called from an Executor callback.
+vector_start = main.find("private fun renderVectorStoreList(vsId:String)")
+assert vector_start >= 0
+vector_end = main.find("    private fun pickFileForVectorStore()", vector_start)
+assert vector_end > vector_start
+vector_block = main[vector_start:vector_end]
+assert "private fun renderVectorStoreList(vsId:String){\n        runOnUiThread{" in vector_block
+assert vector_block.count("runOnUiThread{") >= 3
+assert "vsStatusLine?.text="Загрузка списка файлов…" in vector_block
+assert "renderVectorStoreList(vsId)" in vector_block
 assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
 assert 'ResponseStreamSequenceGapException' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
