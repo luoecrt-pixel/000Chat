@@ -60,6 +60,12 @@ jobs:
             echo "No Astra static verifier found; continuing to Gradle checks."
           fi
 
+      - name: Verify verifier mutation matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/test_verify_v4_17_0_mutations.py
+
       - name: Decode persistent debug keystore
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}

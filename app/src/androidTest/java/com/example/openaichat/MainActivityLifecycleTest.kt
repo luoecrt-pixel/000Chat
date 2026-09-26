@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.SharedPreferences
 import android.os.SystemClock
+import android.widget.LinearLayout
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -12,6 +13,9 @@ import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
@@ -54,6 +58,42 @@ class MainActivityLifecycleTest {
 
             assertEquals("initial", adapterSnapshot(activity).first { it.id == itemId }.text)
         }
+        scenario.close()
+    }
+
+    @Test
+    fun vectorStoreRenderCanBeInvokedOffMainWithoutUiMutationException() {
+        var activity: MainActivity? = null
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { launched ->
+            activity = launched
+            val attachedStatus = privateField(launched, "status") as android.widget.TextView
+            setPrivateField(launched, "vsStatusLine", attachedStatus)
+            setPrivateField(launched, "vsListArea", LinearLayout(launched))
+        }
+
+        val thrown = AtomicReference<Throwable?>()
+        val done = CountDownLatch(1)
+        Thread {
+            try {
+                invoke(
+                    activity!!,
+                    "renderVectorStoreList",
+                    String::class.java,
+                    "vs-test-background-thread"
+                )
+            } catch (t: Throwable) {
+                thrown.set(t)
+            } finally {
+                done.countDown()
+            }
+        }.start()
+
+        assertTrue(done.await(2, TimeUnit.SECONDS))
+        assertTrue(
+            "off-main renderVectorStoreList invocation threw " + thrown.get(),
+            thrown.get() == null
+        )
         scenario.close()
     }
 
@@ -222,6 +262,12 @@ class MainActivityLifecycleTest {
         val field = MainActivity::class.java.getDeclaredField(name)
         field.isAccessible = true
         return field.get(activity)
+    }
+
+    private fun setPrivateField(activity: MainActivity, name: String, value: Any?) {
+        val field = MainActivity::class.java.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(activity, value)
     }
 
     private fun invoke(activity: MainActivity, name: String, vararg args: Any?): Any? =
