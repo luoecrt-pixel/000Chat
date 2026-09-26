@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-25 22:52 +03:00  
-**Следующий рабочий срез:** thread-safety audit — сначала детерминированно проверить off-main UI mutation в Vector Store delete callback и составить таблицу оставшихся `Executor/Worker → Activity` путей; generic controller extraction не начинать до ясной ownership boundary.
+**Last updated:** 2026-09-26 13:04 +03:00  
+**Следующий рабочий срез:** thread-safety audit — Vector Store off-main UI mutation закрыт в #46; теперь составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -37,7 +37,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996` (PR #43 squash)
+- main code baseline: `bfb26e1d13949b5fc4cde48f41af91003c3f0571` (PR #46 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -73,6 +73,7 @@
 - [pure] **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
 - [static] **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
+- [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -84,6 +85,8 @@
 - `[static]` — утверждение подтверждено только статической/source-level/compile-time проверкой или verifier-wiring; отдельного runtime-теста именно этого утверждения нет.
 
 Для thread-safety audit это различие является частью доказательства: тег показывает уровень реально пройденного harness, но не разрешает переносить proof с соседней policy на весь async callback path.
+
+**Перепроверка 2026-09-26:** текущий `main` test tree проверен целиком (JVM + instrumentation), а не по PR diff: #20 — тестирует `markUserStop()`/state contract, но не вызывает `stopCurrentResponse()`; #37 — отдельного теста `ActiveResponsePersistence` adapter wiring нет; #40 — reasoning runtime wiring callback не гоняется; #42 — есть ZIP/persisted consume regression и pure policy tests, но нет runtime-теста именно image/ZIP completion wiring через policy. Поэтому `[static]` для #20/#37/#40/#42 оставлен без изменения.
 
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
@@ -99,7 +102,7 @@
 ### 1. Thread-safety audit — **следующий**
 PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
 
-**Первый шаг:** детерминированно покрыть off-main вызов `renderVectorStoreList(vsId)` из Vector Store delete callback и составить таблицу `state / writer thread / reader thread / lifecycle gate` для оставшихся `Executor/Worker → Activity` paths.
+**Первый шаг:** для оставшихся `Executor/Worker → Activity` paths составить таблицу `state / writer thread / reader thread / lifecycle gate`, затем выбрать один доказуемый cross-thread mutation и покрыть его минимальным runtime regression test; Vector Store slice уже закрыт в #46.
 
 ### 2. Attachment/upload/composer controller
 Routing slice закрыт в #41–#43; следующий controller slice не вводит новый routing abstraction.
@@ -152,6 +155,7 @@ Routing slice закрыт в #41–#43; следующий controller slice н�
 - если менялся сам NEXT_AGENT_HANDOFF.md — отдельно прогнать `python3 tools/verify_handoff.py`, даже если сам скрипт не менялся;
 - если PR меняет сам verifier/lint-скрипт — дополнительно намеренно воспроизвести целевую поломку и убедиться, что скрипт её ловит, затем вернуть корректное состояние и снова получить PASS (позитивный и негативный кейс обязательны оба);
 - для нового verifier/lint-инварианта негативная проверка — это **намеренная mutation matrix именно этого правила**: как минимум три целевых поломки (например, убрать gate, вынести защищаемую mutation за gate, вернуть прежний баг) должны быть отклонены verifier-ом; случайная syntax error/build failure не считается доказательством. Mutation harness хранится в репозитории и запускается в CI вместе с позитивным кейсом;
+- при падении CI/проверки приводить одну дословную строку из реального failing log (или явное `AssertionError:`/step output), а не только пересказ места остановки;
 - дождаться реального CI результата;
 - если merge — проверить post-merge runs, когда connector их предоставляет; если нет — явно зафиксировать ограничение;
 - обновить план и историю.
