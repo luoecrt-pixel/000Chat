@@ -180,6 +180,7 @@ Handoff verifier:
 - **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
+- **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release run `#157` — success; Debug run `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release run `#158` — success; Debug run `#336` — success incl. instrumentation.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
