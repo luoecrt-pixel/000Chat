@@ -1,8 +1,9 @@
 from pathlib import Path
+import os
 import sqlite3
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("ASTRA_VERIFY_ROOT", Path(__file__).resolve().parents[1]))
 MAIN = ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt"
 DB = ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt"
 MODEL = ROOT / "app/src/main/java/com/example/openaichat/AstraResponseModel.kt"
@@ -196,16 +197,88 @@ assert 'activeResponseState.state.isCurrent' in main
 assert 'streamBackgroundResponse(a, uiSnapshot)' in main
 assert 'activeResponseState.markUserStop()' in main
 
+def find_matching_kotlin_brace(src: str, open_index: int) -> int:
+    assert src[open_index] == "{"
+    depth = 0
+    i = open_index
+    state = "code"
+    while i < len(src):
+        c = src[i]
+        n = src[i + 1] if i + 1 < len(src) else ""
+        if state == "line":
+            if c == "\n":
+                state = "code"
+            i += 1
+            continue
+        if state == "block":
+            if c == "*" and n == "/":
+                state = "code"
+                i += 2
+            else:
+                i += 1
+            continue
+        if state == "string":
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                state = "code"
+            i += 1
+            continue
+        if state == "char":
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'":
+                state = "code"
+            i += 1
+            continue
+        if c == "/" and n == "/":
+            state = "line"
+            i += 2
+            continue
+        if c == "/" and n == "*":
+            state = "block"
+            i += 2
+            continue
+        if c == '"':
+            state = "string"
+            i += 1
+            continue
+        if c == "'":
+            state = "char"
+            i += 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise AssertionError("unterminated Kotlin brace block")
+
+
 # Vector Store list rendering must be UI-thread-safe even when called from an Executor callback.
 vector_start = main.find("private fun renderVectorStoreList(vsId:String)")
 assert vector_start >= 0
 vector_end = main.find("    private fun pickFileForVectorStore()", vector_start)
 assert vector_end > vector_start
 vector_block = main[vector_start:vector_end]
-assert "private fun renderVectorStoreList(vsId:String){\n        runOnUiThread{" in vector_block
-assert vector_block.count("runOnUiThread{") >= 3
+outer_gate = "runOnUiThread{"
+outer_gate_pos = vector_block.find(outer_gate)
+assert outer_gate_pos >= 0
+assert vector_block.startswith("private fun renderVectorStoreList(vsId:String){\n        " + outer_gate)
+outer_gate_open = outer_gate_pos + len(outer_gate) - 1
+outer_gate_close = find_matching_kotlin_brace(vector_block, outer_gate_open)
+outside_outer_gate = vector_block[:outer_gate_open] + vector_block[outer_gate_close + 1:]
+
 assert 'vsStatusLine?.text="Загрузка списка файлов…"' in vector_block
 assert "renderVectorStoreList(vsId)" in vector_block
+for ui_access in ("vsStatusLine?.text", "vsListArea"):
+    assert ui_access not in outside_outer_gate, (
+        f"{ui_access} must remain inside renderVectorStoreList's main-thread gate"
+    )
 assert 'streamClient.stream' in (ROOT / 'app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt').read_text()
 assert 'starting_after' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
 assert 'ResponseStreamSequenceGapException' in (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
