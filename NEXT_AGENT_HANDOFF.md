@@ -73,7 +73,7 @@
 - [pure] **#41:** file upload completion использует `AttachmentUploadCompletionPolicy` для DISCARD/CURRENT_COMPOSER/SOURCE_CHAT.
 - [static] **#42:** image и ZIP completion используют ту же policy; image MIME захватывается до async hop.
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
-- [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены.
+- [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -102,7 +102,7 @@
 ### 1. Thread-safety audit — **следующий**
 PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
 
-**Первый шаг:** для оставшихся `Executor/Worker → Activity` paths составить таблицу `state / writer thread / reader thread / lifecycle gate`, затем выбрать один доказуемый cross-thread mutation и покрыть его минимальным runtime regression test; Vector Store slice уже закрыт в #46.
+**Первый шаг:** составить по текущему `main` таблицу всех оставшихся `Executor/Worker → Activity` paths (`state / writer thread / reader thread / lifecycle gate`), отдельно отметить уже защищённые `runOnUiThread` участки и callbacks с Activity-owned reads/writes. Затем выбрать только один конкретно доказуемый ownership violation, написать минимальный Android runtime regression test, воспроизвести positive/negative path и прогнать Debug/Release + verifier/mutation matrix, если затронут verifier. Vector Store slice уже закрыт в PR #46.
 
 ### 2. Attachment/upload/composer controller
 Routing slice закрыт в #41–#43; следующий controller slice не вводит новый routing abstraction.
@@ -180,7 +180,7 @@ Handoff verifier:
 - **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
-- **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release run `#157` — success; Debug run `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release run `#158` — success; Debug run `#336` — success incl. instrumentation.
+- **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release run `#157` — success; Debug run `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release run `#158` — success; Debug run `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
