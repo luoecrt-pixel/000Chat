@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/test_verify_v4_17_17_0_mutations.py
+          python3 tools/test_verify_v4_17_0_mutations.py
 
       - name: Decode persistent debug keystore
         env:
