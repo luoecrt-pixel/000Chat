@@ -17,11 +17,17 @@ data class OpenRouterCompletionResult(
     val toolNames: List<String>
 )
 
+class OpenRouterCompletionException(
+    message: String,
+    val partialText: String,
+    cause: Throwable? = null
+) : IOException(message, cause)
+
 class OpenRouterChatClient {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
-        .callTimeout(240, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .callTimeout(600, TimeUnit.SECONDS)
         .build()
 
     fun complete(
@@ -30,6 +36,7 @@ class OpenRouterChatClient {
         messages: JSONArray,
         tools: JSONArray?,
         maxTokens: Int,
+        maxRounds: Int = 24,
         reasoningEffort: String?,
         verbosity: String?,
         parallelToolCalls: Boolean,
@@ -38,7 +45,9 @@ class OpenRouterChatClient {
     ): OpenRouterCompletionResult {
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
-        repeat(8) {
+        val accumulatedText = mutableListOf<String>()
+
+        fun requestMessage(toolChoice: String): Pair<JSONObject, JSONObject> {
             val body = JSONObject()
                 .put("model", model)
                 .put("messages", history)
@@ -47,7 +56,7 @@ class OpenRouterChatClient {
                 .put("parallel_tool_calls", parallelToolCalls)
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
-                body.put("tool_choice", "auto")
+                body.put("tool_choice", toolChoice)
             }
             reasoningEffort?.takeIf { it.isNotBlank() && it != "auto" }?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
@@ -75,6 +84,13 @@ class OpenRouterChatClient {
                     ?: throw IOException("OpenRouter response has no choice")
                 val message = choice.optJSONObject("message")
                     ?: throw IOException("OpenRouter response has no message")
+                return json to JSONObject(message.toString())
+            }
+        }
+
+        try {
+            repeat(maxRounds) {
+                val (json, message) = requestMessage("auto")
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
@@ -84,6 +100,7 @@ class OpenRouterChatClient {
                         toolNames = toolNames.distinct()
                     )
                 }
+                message.optString("content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
                 history.put(JSONObject(message.toString()))
                 for (i in 0 until calls.length()) {
                     val callObject = calls.optJSONObject(i) ?: continue
@@ -106,8 +123,31 @@ class OpenRouterChatClient {
                     )
                 }
             }
+
+            history.put(
+                JSONObject()
+                    .put("role", "user")
+                    .put("content", "Лимит вызовов инструментов исчерпан. Подведи итог по уже полученным данным.")
+            )
+            val (json, finalMessage) = requestMessage("none")
+            return OpenRouterCompletionResult(
+                text = finalMessage.optString("content").trim(),
+                usage = json.optJSONObject("usage"),
+                assistantMessage = JSONObject(finalMessage.toString()),
+                toolNames = toolNames.distinct()
+            )
+        } catch (e: Exception) {
+            if (e is OpenRouterCompletionException) throw e
+            val partialText = accumulatedText.joinToString("\n\n").trim()
+            if (partialText.isNotBlank()) {
+                throw OpenRouterCompletionException(
+                    message = e.message ?: e.javaClass.simpleName,
+                    partialText = partialText,
+                    cause = e
+                )
+            }
+            throw e
         }
-        throw IOException("OpenRouter tool loop exceeded 8 rounds")
     }
 
     fun close() {
