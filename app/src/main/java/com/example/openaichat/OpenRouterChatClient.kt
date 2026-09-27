@@ -67,6 +67,9 @@ class OpenRouterChatClient {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
             }
+            if (model.trim().removePrefix("~").startsWith("anthropic/")) {
+                body.put("cache_control", JSONObject().put("type", "ephemeral"))
+            }
             normalizeReasoningEffort(reasoningEffort)?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
             }
