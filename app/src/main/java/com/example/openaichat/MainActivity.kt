@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
     private val executor = Executors.newCachedThreadPool()
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
     private val openRouterClient by lazy { OpenRouterChatClient() }
+    private val openRouterMaxRounds = 24
     private val openRouterActiveCall = AtomicReference<Call?>()
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
@@ -778,8 +779,22 @@ class MainActivity : ComponentActivity() {
 
     private fun buildOpenRouterMessagesSnapshot(): JSONArray {
         val result = JSONArray()
-        prefs.getString("instructions", "")?.takeIf { it.isNotBlank() }?.let {
-            result.put(JSONObject().put("role", "system").put("content", it))
+        val instructions = prefs.getString("instructions", "").orEmpty().trim()
+        val githubToolsEnabled = prefs.getBoolean("github_tools", false)
+        val maxRounds = openRouterMaxRounds
+        if (githubToolsEnabled) {
+            val githubRepo = prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat")
+                ?.trim().orEmpty()
+            val githubBranches = prefs.getString("github_branches", "main")
+                ?.trim().orEmpty()
+            val githubContext = "Доступны GitHub-инструменты. Репозиторий: $githubRepo, " +
+                "разрешённые ветки: $githubBranches. Лимит: $maxRounds раундов вызовов за ответ — " +
+                "экономь их, объединяй независимые вызовы в один раунд."
+            val systemContent = if (instructions.isBlank()) githubContext
+            else "$githubContext\n\n$instructions"
+            result.put(JSONObject().put("role", "system").put("content", systemContent))
+        } else if (instructions.isNotBlank()) {
+            result.put(JSONObject().put("role", "system").put("content", instructions))
         }
         chat.forEach { message ->
             val role = message.optString("role")
@@ -818,6 +833,7 @@ class MainActivity : ComponentActivity() {
                     messages = messagesSnapshot,
                     tools = if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools() else null,
                     maxTokens = maxOut,
+                    maxRounds = openRouterMaxRounds,
                     reasoningEffort = effort,
                     verbosity = verbosity,
                     parallelToolCalls = prefs.getBoolean("parallel_tools", true),
