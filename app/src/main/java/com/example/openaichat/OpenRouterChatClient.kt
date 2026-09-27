@@ -24,6 +24,15 @@ class OpenRouterCompletionException(
 ) : IOException(message, cause)
 
 class OpenRouterChatClient {
+    private fun normalizeReasoningEffort(value: String?): String? =
+        value?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
+            when (it) {
+                "xhigh", "max" -> "high"
+                "auto" -> "medium"
+                else -> it
+            }
+        }
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
@@ -58,7 +67,7 @@ class OpenRouterChatClient {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
             }
-            reasoningEffort?.takeIf { it.isNotBlank() && it != "auto" }?.let {
+            normalizeReasoningEffort(reasoningEffort)?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
             }
             verbosity?.takeIf { it.isNotBlank() }?.let { body.put("verbosity", it) }
