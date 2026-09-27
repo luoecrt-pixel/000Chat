@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-09-28 00:26 +03:00
-**Следующий рабочий срез:** PR F — tool trace в истории — продолжить пользовательскую последовательность после #53.
+**Следующий рабочий срез:** PR I — Anthropic/OpenRouter prompt caching — после #54; сохранить последовательность PR F → I → G → H.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `1eef3da06291c4ed8dcb7b77e810563f968247b3` (PR #53 merge; #52 baseline was `275b25d27c13d01e5d848ed72ae166100c1897d0`)
+- main code baseline: `d262ea8e14554527c0bdaf9eef8b56da76fdb6af` (PR #54 merge; #53 baseline was `1eef3da06291c4ed8dcb7b77e810563f968247b3`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -100,9 +100,12 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR F — **следующий**
-Сохранять в assistant message имена, аргументы и первые ~300 символов результата каждого GitHub tool-call; при сборке snapshot добавлять читаемый блок в assistant text.
-**Первый шаг:** расширить только persisted assistant metadata и snapshot serialization, не менять tool execution semantics.
+### 1. PR I — **следующий**
+Добавить Anthropic/OpenRouter prompt caching:
+- в Anthropic system-message использовать текстовый content block с `cache_control: {"type":"ephemeral"}`;
+- на OpenRouter Claude-запросах использовать top-level `cache_control: {"type":"ephemeral"}`, чтобы breakpoint автоматически продвигался по растущей истории multi-round.
+Не смешивать это с OpenAI `prompt_cache_key`.
+**Первый шаг:** сделать caching условным для Anthropic-моделей OpenRouter и не менять payload других провайдеров.
 
 ### 2. PR G — вложения OpenRouter
 Передавать текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
@@ -110,10 +113,10 @@
 
 ### 3. PR H — документация
 Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #48, убрать дубль пунктов 2/3.
-**Первый шаг:** сначала после завершения A–G обновить только human-facing snapshot, не смешивая README с runtime refactor.
+**Первый шаг:** после завершения пользовательских runtime PR обновить только human-facing snapshot, не смешивая README с refactor.
 
 ### 4. Thread-safety audit
-После пользовательского F–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
+После пользовательских F/I/G/H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
 **Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
 
 ## Репозиторий / branches
@@ -170,11 +173,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
 - **#50:** merged `aae3ed61d2068427bcea025bd97c464274af6789`; initial Debug `#355` failed in `python3 tools/verify_handoff.py` because the history heading was malformed; after correcting the handoff, PR-head Release `#179` — success and Debug `#357` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
 - **#51:** merged `35bc02d95199c3a919455a97cee3f96ff7384f18`; PR-head Release `#182` — success; Debug `#360` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
 - **#52:** merged `275b25d27c13d01e5d848ed72ae166100c1897d0`; PR-head Release `#185` — success; Debug `#363` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not exposed by the connector.
 - **#53:** merged `1eef3da06291c4ed8dcb7b77e810563f968247b3`; PR-head Release `#188` — success; Debug `#366` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not exposed by the connector.
+- **#54:** merged `d262ea8e14554527c0bdaf9eef8b56da76fdb6af`; PR-head Release `#191` — success; Debug `#369` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Tool traces are now persisted in assistant messages and restored into OpenRouter history.
 
 ## Product radar — идеи с реальной ценностью
 
