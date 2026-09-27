@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-27 22:42 +03:00  
-**Следующий рабочий срез:** thread-safety audit — после #46, #47 и #48 составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary. #47 добавил OpenRouter/Claude backend и app-side GitHub tools, а #48 исправил видимость/настройку GitHub-tools toggle; их lifecycle/async boundaries не считать закрытыми runtime-proof без отдельного доказательства.
+**Last updated:** 2026-09-28 00:26 +03:00
+**Следующий рабочий срез:** PR C — контекст GitHub в промпте — после #49; продолжить пользовательскую последовательность B → C → A, затем D–H.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -100,27 +100,37 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Thread-safety audit — **следующий**
-PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
+### 1. PR C — контекст GitHub в промпте — **следующий**
+После #49 следующий срез — добавить в начало system-сообщения OpenRouter явный контекст включённых GitHub-инструментов: repository, разрешённые branches и общий лимит раундов.
+**Первый шаг:** использовать один источник истины для `maxRounds = 24` и собрать system-prefix без дублирования существующих user instructions.
 
-**Первый шаг:** составить по текущему `main` таблицу всех оставшихся `Executor/Worker → Activity` paths, включая новые #47/#48 границы: `Executor → OpenRouterChatClient.complete()`, `executeTool → GitHubToolExecutor`, `confirmGitHubWrite() → runOnUiThread → AlertDialog → CompletableFuture`, `onCallCreated → openRouterActiveCall`, а также финальный OpenRouter `runOnUiThread` UI commit. (`state / writer thread / reader thread / lifecycle gate`), отдельно отметить уже защищённые `runOnUiThread` участки и callbacks с Activity-owned reads/writes. Затем выбрать только один конкретно доказуемый ownership violation, написать минимальный Android runtime regression test, воспроизвести positive/negative path и прогнать Debug/Release + verifier/mutation matrix, если затронут verifier. Vector Store slice уже закрыт в PR #46.
+### 2. PR A — клавиатура / Android 15
+Заменить root insets handler так, чтобы учитывались system bars и IME, а при видимой клавиатуре список прокручивался к последнему сообщению.
+**Первый шаг:** точечно заменить `ViewCompat.setOnApplyWindowInsetsListener(root)` в `MainActivity.buildUi()` и прогнать Debug/Release instrumentation.
 
-### 2. Attachment/upload/composer controller
-Routing slice закрыт в #41–#43; следующий controller slice не вводит новый routing abstraction.
+### 3. PR D — GitHub create_or_update_file content
+Перевести основной параметр write-tool с `content_base64` на обычный UTF-8 `content`, оставив старое имя для совместимости; Base64 должен строить executor.
+**Первый шаг:** изменить только schema + executor normalization, не трогая allow-list/confirmation semantics.
 
-**Первый шаг:** после thread-safety audit выбрать одну bounded composer state/persistence boundary и вынести её как маленький pure snapshot/codec или одну доказанную transactional operation.
+### 4. PR E — reasoning для OpenRouter
+Нормализовать значения effort перед отправкой: `xhigh/max → high`, `auto → medium`, после проверки актуального OpenRouter enum.
+**Первый шаг:** ограничить mapping OpenRouter transport-слоем, не меняя OpenAI Responses path.
 
-### 3. Diagnostics/security
-**Первый шаг:** проверить retention/clear policy diagnostics, отсутствие API keys/message bodies в логах, orphan local files и FileProvider scope; сначала аудит, потом точечные fixes.
+### 5. PR F — tool trace в истории
+Сохранять в assistant message имена, аргументы и первые ~300 символов результата каждого GitHub tool-call; при сборке snapshot добавлять читаемый блок в assistant text.
+**Первый шаг:** расширить только persisted assistant metadata и snapshot serialization, не менять tool execution semantics.
 
-### 4. Release hardening
-**Первый шаг:** проверить minification/shrinker на `RichTextRenderer`, reflection/file handling и release-only paths; signing/publishing не смешивать с runtime cleanup.
+### 6. PR G — вложения OpenRouter
+Передавать текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
+**Первый шаг:** заменить текущий early-return "не переносятся автоматически" на bounded content builder с лимитом для текста и resize для изображений.
 
-### 5. Compose migration
-**Первый шаг:** после закрытия controller/persistence slice выбрать один bounded screen-state surface; не начинать полный rewrite.
+### 7. PR H — документация
+Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #48, убрать дубль пунктов 2/3.
+**Первый шаг:** сначала после завершения A–G обновить только human-facing snapshot, не смешивая README с runtime refactor.
 
-### 6. Compatibility / build hygiene
-**Первый шаг:** отдельно проверить AGP/Kotlin/compileSdk drift и Gradle Wrapper; не смешивать dependency migration с feature PR.
+### 8. Thread-safety audit
+После пользовательского B–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
+**Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
 
 ## Репозиторий / branches
 
@@ -172,19 +182,15 @@ Release:
 Static verifier:
 `python3 tools/verify_v4_17_0.py`
 
-Handoff verifier:
-`python3 tools/verify_handoff.py`
+Hando## История последних рабочих заходов — последние 5 PR
 
-## История последних рабочих заходов — последние 5 PR
-
-- **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
-- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
+- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `#166` — success; Debug `#349` — success incl. instrumentation. Post-merge run detail preserved from prior handoff.
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
-- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. `Verify handoff`; Release `#166` — success.
+- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. Verify handoff; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
-- **Handoff verification follow-up:** docs-only commit `de01d34876e0e46ce59b35e9d20d69de18a8fd2e` failed Debug `#347` at `Verify handoff` because the inserted closed-work section had no blank line before `### 1. Thread-safety audit`. The corrective docs commit `939126a59dfb7b061baa5722dc337708b1505617` then failed Debug `#348` because that closed-work section was incorrectly placed inside the active plan and lacked the required `**Первый шаг:**`; final correction is now in place. Debug `#349` reports `Verify handoff` — success; remaining build/release stages are still in progress/queued. No application code was involved.
+- **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not yet exposed by the connector.
 
-**Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
+е CI детали в operational handoff без причины.
 
 ## Product radar — идеи с реальной ценностью
 
