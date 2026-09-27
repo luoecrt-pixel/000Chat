@@ -108,6 +108,7 @@ PR #48 (`6736c95c36849dbaeca98f0dd034a22ddf4a0126`) добавил:
 - существующий `sendOpenRouterMessage()` продолжает читать `prefs.getBoolean("github_tools", false)` без изменения execution path.
 
 PR #48 был вручную проверен на устройстве пользователем: GitHub tools toggle теперь виден и сценарий работает. PR-head Debug #345 и Release #167 — success; post-merge Debug #346 и Release #168 — success. #48 не добавлял новый verifier/lifecycle contract; это UI wiring fix поверх уже реализованного #47 execution path.
+
 ### 1. Thread-safety audit — **следующий**
 PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
 
@@ -190,6 +191,7 @@ Handoff verifier:
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
 - **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. `Verify handoff`; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
+- **Handoff verification follow-up:** docs-only commit `de01d34876e0e46ce59b35e9d20d69de18a8fd2e` initially failed Debug `#347` at `Verify handoff` because the inserted section lacked a blank line before `### 1. Thread-safety audit`; this is corrected by the next docs commit. No application code was involved.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
