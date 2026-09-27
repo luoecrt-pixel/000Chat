@@ -630,7 +630,8 @@ class MainActivity : ComponentActivity() {
         }
 
         section("Claude → GitHub")
-        val githubTools = chk("Разрешить Claude / OpenRouter GitHub tools", "github_tools")
+        val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")
+        box.addView(githubTools)
         val githubToken = field("GitHub fine-grained PAT", secure.getGitHubToken(), true); spaced(githubToken)
         val githubRepo = field("GitHub repository allow-list", prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat") ?: "luoecrt-pixel/OpenAIApiChat"); spaced(githubRepo)
         val githubBranches = field("Allowed branches (через запятую)", prefs.getString("github_branches", "main") ?: "main"); spaced(githubBranches)
