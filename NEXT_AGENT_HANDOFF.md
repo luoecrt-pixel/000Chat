@@ -32,6 +32,8 @@
 
 **Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery и текущий File API attachment path не переносится в него автоматически. GitHub-tools toggle теперь имеет реальный visible UI wiring; сама app-side execution/confirmation boundary #47 не изменялась. Compose остаётся следующим UI-слоем после state/controller extraction.
 
+**Recent #48 implementation note:** `githubTools` в `showSettings()` был реальным `CheckBox`, созданным через `chk(..., "github_tools")`, но отсутствовал `box.addView(...)`. Это не ломало существующие `prefs` read/write и runtime executor, но делало GitHub tools практически невключаемыми из UI. PR #48 добавил `box.addView(githubTools)` и сохранил инициализацию из `prefs.getBoolean("github_tools", false)`. Никакой логики `SecureStore`, `GitHubToolCatalog`, `GitHubToolExecutor`, confirmation или OpenRouter transport PR #48 не менял.
+
 **Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
 
 ## Фактический baseline
@@ -97,17 +99,6 @@
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
-
-### 0. OpenRouter / GitHub tools wiring — **закрыто PR #48**
-PR #47 оставил `githubTools`-переменную и persistence path, но `CheckBox` не был добавлен в видимый `showSettings()` layout. Поэтому пользователь не мог штатно включить GitHub tools, несмотря на существующие `prefs` write/read и runtime tool path.
-
-PR #48 (`6736c95c36849dbaeca98f0dd034a22ddf4a0126`) добавил:
-- `val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")`;
-- `box.addView(githubTools)` рядом с GitHub PAT/repository/branches;
-- сохранённое состояние остаётся через общий `chk(...)`: `prefs.getBoolean("github_tools", false)`;
-- существующий `sendOpenRouterMessage()` продолжает читать `prefs.getBoolean("github_tools", false)` без изменения execution path.
-
-PR #48 был вручную проверен на устройстве пользователем: GitHub tools toggle теперь виден и сценарий работает. PR-head Debug #345 и Release #167 — success; post-merge Debug #346 и Release #168 — success. #48 не добавлял новый verifier/lifecycle contract; это UI wiring fix поверх уже реализованного #47 execution path.
 
 ### 1. Thread-safety audit — **следующий**
 PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
@@ -191,7 +182,7 @@ Handoff verifier:
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
 - **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. `Verify handoff`; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
-- **Handoff verification follow-up:** docs-only commit `de01d34876e0e46ce59b35e9d20d69de18a8fd2e` initially failed Debug `#347` at `Verify handoff` because the inserted section lacked a blank line before `### 1. Thread-safety audit`; this is corrected by the next docs commit. No application code was involved.
+- **Handoff verification follow-up:** docs-only commit `de01d34876e0e46ce59b35e9d20d69de18a8fd2e` failed Debug `#347` at `Verify handoff` because the inserted closed-work section had no blank line before `### 1. Thread-safety audit`. The corrective docs commit `939126a59dfb7b061baa5722dc337708b1505617` then failed Debug `#348` because that closed-work section was incorrectly placed inside the active plan and lacked the required `**Первый шаг:**`; it is now being removed from the active plan. No application code was involved.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
