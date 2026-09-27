@@ -442,8 +442,10 @@ class MainActivity : ComponentActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            insets
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+            if (insets.isVisible(WindowInsetsCompat.Type.ime())) scroll.post { scrollToLatest() }
+            WindowInsetsCompat.CONSUMED
         }
         ViewCompat.requestApplyInsets(root)
 
