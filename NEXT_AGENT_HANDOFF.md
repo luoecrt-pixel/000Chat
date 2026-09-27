@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `6736c95c36849dbaeca98f0dd034a22ddf4a0126` (PR #48 merge; #47 baseline was `fa4d637aa10d8396468d7ed60a4864001c01b936`)
+- main code baseline: `6ea3749d826ae7434f505bda3e10c43a16fff576` (PR #49 merge; #48 baseline was `6736c95c36849dbaeca98f0dd034a22ddf4a0126`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -100,7 +100,7 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR C — контекст GitHub в промпте — **следующий**
+### 1. PR C — **следующий**
 После #49 следующий срез — добавить в начало system-сообщения OpenRouter явный контекст включённых GitHub-инструментов: repository, разрешённые branches и общий лимит раундов.
 **Первый шаг:** использовать один источник истины для `maxRounds = 24` и собрать system-prefix без дублирования существующих user instructions.
 
@@ -184,13 +184,11 @@ Static verifier:
 
 Hando## История последних рабочих заходов — последние 5 PR
 
-- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `#166` — success; Debug `#349` — success incl. instrumentation. Post-merge run detail preserved from prior handoff.
+- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
 - **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. Verify handoff; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
 - **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not yet exposed by the connector.
-
-е CI детали в operational handoff без причины.
 
 ## Product radar — идеи с реальной ценностью
 
