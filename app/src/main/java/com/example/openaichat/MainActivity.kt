@@ -647,6 +647,7 @@ class MainActivity : ComponentActivity() {
         val parallel=chk("Parallel tool calls","parallel_tools")
         val backgroundResponses=chk("Продолжать ответ, если Astra закрыта","background_responses").apply {
             isChecked = prefs.getBoolean("background_responses", true)
+            isEnabled = currentProvider == "openai"
         }
         val toolsCard=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
@@ -1127,7 +1128,7 @@ class MainActivity : ComponentActivity() {
         val verbosity=prefs.getString("verbosity","medium") ?: "medium"
         val summary=prefs.getString("reasoning_summary","auto") ?: "auto"
         val maxOut=prefs.getString("max_output","128000")?.toIntOrNull()?.coerceIn(256,128000) ?: 128000
-        val backgroundEnabled = prefs.getBoolean("background_responses",true)
+        val backgroundEnabled = provider == "openai" && prefs.getBoolean("background_responses",true)
         val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
 
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
