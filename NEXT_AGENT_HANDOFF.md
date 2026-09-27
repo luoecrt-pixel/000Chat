@@ -182,7 +182,9 @@ Release:
 Static verifier:
 `python3 tools/verify_v4_17_0.py`
 
-Hando## История последних рабочих заходов — последние 5 PR
+
+
+## История последних рабочих заходов — последние 5 PR
 
 - **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
