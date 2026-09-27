@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-09-28 00:26 +03:00
-**Следующий рабочий срез:** PR D — GitHub create_or_update_file content — продолжить пользовательскую последовательность после #51.
+**Следующий рабочий срез:** PR E — reasoning для OpenRouter — продолжить пользовательскую последовательность после #52.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `35bc02d95199c3a919455a97cee3f96ff7384f18` (PR #51 merge; #50 baseline was `aae3ed61d2068427bcea025bd97c464274af6789`)
+- main code baseline: `275b25d27c13d01e5d848ed72ae166100c1897d0` (PR #52 merge; #51 baseline was `35bc02d95199c3a919455a97cee3f96ff7384f18`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -100,28 +100,24 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR D — **следующий**
-Перевести основной параметр write-tool с `content_base64` на обычный UTF-8 `content`, оставив старое имя для совместимости; Base64 должен строить executor.
-**Первый шаг:** изменить только schema + executor normalization, не трогая allow-list/confirmation semantics.
-
-### 2. PR E — reasoning для OpenRouter
+### 1. PR E — **следующий**
 Нормализовать значения effort перед отправкой: `xhigh/max → high`, `auto → medium`, после проверки актуального OpenRouter enum.
 **Первый шаг:** ограничить mapping OpenRouter transport-слоем, не меняя OpenAI Responses path.
 
-### 3. PR F — tool trace в истории
+### 2. PR F — tool trace в истории
 Сохранять в assistant message имена, аргументы и первые ~300 символов результата каждого GitHub tool-call; при сборке snapshot добавлять читаемый блок в assistant text.
 **Первый шаг:** расширить только persisted assistant metadata и snapshot serialization, не менять tool execution semantics.
 
-### 4. PR G — вложения OpenRouter
+### 3. PR G — вложения OpenRouter
 Передавать текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
 **Первый шаг:** заменить текущий early-return "не переносятся автоматически" на bounded content builder с лимитом для текста и resize для изображений.
 
-### 5. PR H — документация
+### 4. PR H — документация
 Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #48, убрать дубль пунктов 2/3.
 **Первый шаг:** сначала после завершения A–G обновить только human-facing snapshot, не смешивая README с runtime refactor.
 
-### 6. Thread-safety audit
-После пользовательского D–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
+### 5. Thread-safety audit
+После пользовательского E–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
 **Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
 
 ## Репозиторий / branches
@@ -178,11 +174,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. Verify handoff; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
 - **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
 - **#50:** merged `aae3ed61d2068427bcea025bd97c464274af6789`; initial Debug `#355` failed in `python3 tools/verify_handoff.py` because the history heading was malformed; after correcting the handoff, PR-head Release `#179` — success and Debug `#357` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
-- **#51:** merged `35bc02d95199c3a919455a97cee3f96ff7384f18`; PR-head Release `#182` — success; Debug `#360` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not exposed by the connector.
+- **#51:** merged `35bc02d95199c3a919455a97cee3f96ff7384f18`; PR-head Release `#182` — success; Debug `#360` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
+- **#52:** merged `275b25d27c13d01e5d848ed72ae166100c1897d0`; PR-head Release `#185` — success; Debug `#363` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not exposed by the connector.
 
 ## Product radar — идеи с реальной ценностью
 
