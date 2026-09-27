@@ -731,13 +731,21 @@ class MainActivity : ComponentActivity() {
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
+                val selectedProvider = if(provider.selectedItemPosition == 1) "openrouter" else "openai"
+                val enteredModel = model.text.toString().trim()
+                val savedModel = when {
+                    selectedProvider == "openrouter" && (enteredModel.isBlank() || enteredModel == "gpt-6-astra") -> "anthropic/claude-opus-5.5"
+                    selectedProvider == "openai" && enteredModel == "anthropic/claude-opus-5.5" -> "gpt-6-astra"
+                    enteredModel.isBlank() -> if (selectedProvider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
+                    else -> enteredModel
+                }
                 secure.setApiKey(key.text.toString().trim())
                 secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
                 secure.setGitHubToken(githubToken.text.toString().trim())
                 prefs.edit()
-                    .putString("provider", if(provider.selectedItemPosition == 1) "openrouter" else "openai")
+                    .putString("provider", selectedProvider)
                     .putString("provider_label", provider.selectedItem.toString())
-                    .putString("model",model.text.toString().trim())
+                    .putString("model", savedModel)
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
                     .putString("instructions",instructions.text.toString())
@@ -824,7 +832,11 @@ class MainActivity : ComponentActivity() {
                     .put("request_id", requestId)
                     .put("provider", "openrouter")
                     .put("model", model)
-                    .put("tools", JSONArray(result.toolNames))
+                    .apply {
+                        val toolArray = JSONArray()
+                        result.toolNames.distinct().forEach { toolArray.put(it) }
+                        put("tools", toolArray)
+                    }
                 result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
 
                 activeResponsePersistence.clearActiveResponse(chatId, requestId)
