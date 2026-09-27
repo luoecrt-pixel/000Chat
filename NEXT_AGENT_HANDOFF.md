@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-09-28 00:26 +03:00
-**Следующий рабочий срез:** PR C — контекст GitHub в промпте — после #49; продолжить пользовательскую последовательность B → C → A, затем D–H.
+**Следующий рабочий срез:** PR A — клавиатура / Android 15 — продолжить пользовательскую последовательность после #50.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `6ea3749d826ae7434f505bda3e10c43a16fff576` (PR #49 merge; #48 baseline was `6736c95c36849dbaeca98f0dd034a22ddf4a0126`)
+- main code baseline: `aae3ed61d2068427bcea025bd97c464274af6789` (PR #50 merge; #49 baseline was `6ea3749d826ae7434f505bda3e10c43a16fff576`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -100,36 +100,32 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR C — **следующий**
-После #49 следующий срез — добавить в начало system-сообщения OpenRouter явный контекст включённых GitHub-инструментов: repository, разрешённые branches и общий лимит раундов.
-**Первый шаг:** использовать один источник истины для `maxRounds = 24` и собрать system-prefix без дублирования существующих user instructions.
-
-### 2. PR A — клавиатура / Android 15
+### 1. PR A — **следующий**
 Заменить root insets handler так, чтобы учитывались system bars и IME, а при видимой клавиатуре список прокручивался к последнему сообщению.
 **Первый шаг:** точечно заменить `ViewCompat.setOnApplyWindowInsetsListener(root)` в `MainActivity.buildUi()` и прогнать Debug/Release instrumentation.
 
-### 3. PR D — GitHub create_or_update_file content
+### 2. PR D — GitHub create_or_update_file content
 Перевести основной параметр write-tool с `content_base64` на обычный UTF-8 `content`, оставив старое имя для совместимости; Base64 должен строить executor.
 **Первый шаг:** изменить только schema + executor normalization, не трогая allow-list/confirmation semantics.
 
-### 4. PR E — reasoning для OpenRouter
+### 3. PR E — reasoning для OpenRouter
 Нормализовать значения effort перед отправкой: `xhigh/max → high`, `auto → medium`, после проверки актуального OpenRouter enum.
 **Первый шаг:** ограничить mapping OpenRouter transport-слоем, не меняя OpenAI Responses path.
 
-### 5. PR F — tool trace в истории
+### 4. PR F — tool trace в истории
 Сохранять в assistant message имена, аргументы и первые ~300 символов результата каждого GitHub tool-call; при сборке snapshot добавлять читаемый блок в assistant text.
 **Первый шаг:** расширить только persisted assistant metadata и snapshot serialization, не менять tool execution semantics.
 
-### 6. PR G — вложения OpenRouter
+### 5. PR G — вложения OpenRouter
 Передавать текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
 **Первый шаг:** заменить текущий early-return "не переносятся автоматически" на bounded content builder с лимитом для текста и resize для изображений.
 
-### 7. PR H — документация
+### 6. PR H — документация
 Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #48, убрать дубль пунктов 2/3.
 **Первый шаг:** сначала после завершения A–G обновить только human-facing snapshot, не смешивая README с runtime refactor.
 
-### 8. Thread-safety audit
-После пользовательского B–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
+### 7. Thread-safety audit
+После пользовательского A, D–H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
 **Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
 
 ## Репозиторий / branches
@@ -186,11 +182,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
 - **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. Verify handoff; Release `#166` — success.
 - **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
-- **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not yet exposed by the connector.
+- **#49:** merged `6ea3749d826ae7434f505bda3e10c43a16fff576`; PR-head Release `#173` — success; Debug `#351` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs were not exposed by the connector.
+- **#50:** merged `aae3ed61d2068427bcea025bd97c464274af6789`; initial Debug `#355` failed in `python3 tools/verify_handoff.py` because the history heading was malformed; after correcting the handoff, PR-head Release `#179` — success and Debug `#357` — success incl. verifier mutation matrix and Android lifecycle instrumentation. Post-merge Debug/Release runs are not yet exposed by the connector.
 
 ## Product radar — идеи с реальной ценностью
 
