@@ -73,10 +73,11 @@ object GitHubToolCatalog {
         out.put(schema("create_or_update_file", "Create or replace one repository file. Requires confirmation.",
             commonRepoProperties().put("path", stringProp("Repository-relative file path"))
                 .put("message", stringProp("Commit message"))
-                .put("content_base64", stringProp("Complete UTF-8 file contents encoded as base64"))
+                .put("content", stringProp("Complete UTF-8 file contents as ordinary text"))
+                .put("content_base64", stringProp("Legacy compatibility: complete UTF-8 file contents encoded as base64"))
                 .put("branch", stringProp("Allowed target branch"))
                 .put("sha", stringProp("Current blob sha when replacing; optional because the app can resolve it")),
-            required("owner", "repo", "path", "message", "content_base64", "branch")))
+            required("owner", "repo", "path", "message", "content", "branch")))
         out.put(schema("trigger_workflow_dispatch", "Dispatch a GitHub Actions workflow. Requires confirmation.",
             commonRepoProperties().put("workflow_id", stringProp("Workflow file name or workflow id"))
                 .put("ref", stringProp("Allowed branch/ref"))

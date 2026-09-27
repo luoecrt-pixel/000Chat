@@ -195,7 +195,15 @@ class GitHubToolExecutor(
         val (owner, repo) = repo(a)
         val path = a.getString("path").trim().removePrefix("/")
         val branchName = a.getString("branch").trim()
-        val content = a.getString("content_base64")
+        val contentBase64 = if (!a.isNull("content")) {
+            Base64.encodeToString(
+                a.getString("content").toByteArray(Charsets.UTF_8),
+                Base64.NO_WRAP
+            )
+        } else {
+            a.optString("content_base64").takeIf { it.isNotBlank() }
+                ?: throw IOException("content is required; content_base64 is supported for compatibility")
+        }
         branch(branchName)
         if (path.isBlank() || path.contains("..")) throw IOException("Invalid path")
         var sha = a.optString("sha").trim().takeIf { it.isNotBlank() }
@@ -205,9 +213,14 @@ class GitHubToolExecutor(
             else if (lookup.first != 404) throw IOException("GitHub HTTP ${lookup.first}: ${lookup.second.take(1600)}")
         }
         requireConfirmation("create_or_update_file", a)
-        val body = JSONObject().put("message", a.getString("message")).put("content", content).put("branch", branchName)
+        val body = JSONObject().put("message", a.getString("message")).put("content", contentBase64).put("branch", branchName)
         sha?.let { body.put("sha", it) }
-        auditWrite("create_or_update_file", sanitized(a).put("resolved_sha", sha ?: JSONObject.NULL).put("content_length_base64", content.length))
+        auditWrite(
+            "create_or_update_file",
+            sanitized(a)
+                .put("resolved_sha", sha ?: JSONObject.NULL)
+                .put("content_length_base64", contentBase64.length)
+        )
         return json(ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}")).put(body.toString().toRequestBody(JSON)).build())))
     }
 
@@ -230,6 +243,7 @@ class GitHubToolExecutor(
 
     private fun sanitized(input: JSONObject): JSONObject = JSONObject(input.toString()).apply {
         remove("body")
+        remove("content")
         remove("content_base64")
         remove("inputs")
     }
