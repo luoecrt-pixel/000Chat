@@ -26,8 +26,8 @@ class OpenRouterCompletionException(
 class OpenRouterChatClient {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
-        .callTimeout(240, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
+        .callTimeout(600, TimeUnit.SECONDS)
         .build()
 
     fun complete(
