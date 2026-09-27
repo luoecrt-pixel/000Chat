@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-26 13:04 +03:00  
-**Следующий рабочий срез:** thread-safety audit — Vector Store off-main UI mutation закрыт в #46; теперь составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary.
+**Last updated:** 2026-09-27 14:12 +03:00  
+**Следующий рабочий срез:** thread-safety audit — после #46 и #47 составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary. #47 добавил OpenRouter/Claude backend и app-side GitHub tools; их lifecycle/async boundaries не считать закрытыми runtime-proof без отдельного доказательства.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -19,7 +19,7 @@
 
 ## 30-секундная карта проекта
 
-**Продукт:** локальный multi-chat Android-клиент с Responses API, tools/files/images и streaming.
+**Продукт:** локальный multi-chat Android-клиент с OpenAI Responses API и OpenRouter Chat Completions, tools/files/images и streaming. #47 добавил отдельный Claude/OpenRouter backend и app-side GitHub tool execution; OpenAI Responses backend остаётся отдельным путём.
 
 **Надёжность:** основная lifecycle-модель:
 `generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
@@ -30,13 +30,13 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery и текущий File API attachment path не переносится в него автоматически. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
 
 ## Фактический baseline
 
-- main code baseline: `bfb26e1d13949b5fc4cde48f41af91003c3f0571` (PR #46 squash)
+- main code baseline: `fa4d637aa10d8396468d7ed60a4864001c01b936` (PR #47 squash)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -175,11 +175,11 @@ Handoff verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#40:** merged `e786d557ec6240b050aef12e0898ac6bb7076fc7`; PR-head Release `36070742037` — success; Debug `36070742104` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
 - **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release run `#157` — success; Debug run `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release run `#158` — success; Debug run `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
+- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success, including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` and Debug `#343` were started; their final conclusions must be rechecked before treating post-merge as green.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
