@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-27 14:12 +03:00  
-**Следующий рабочий срез:** thread-safety audit — после #46 и #47 составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary. #47 добавил OpenRouter/Claude backend и app-side GitHub tools; их lifecycle/async boundaries не считать закрытыми runtime-proof без отдельного доказательства.
+**Last updated:** 2026-09-27 22:42 +03:00  
+**Следующий рабочий срез:** thread-safety audit — после #46, #47 и #48 составить таблицу оставшихся `Executor/Worker → Activity` путей и выбрать следующий доказуемый ownership violation; generic controller extraction не начинать до ясной ownership boundary. #47 добавил OpenRouter/Claude backend и app-side GitHub tools, а #48 исправил видимость/настройку GitHub-tools toggle; их lifecycle/async boundaries не считать закрытыми runtime-proof без отдельного доказательства.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -19,7 +19,7 @@
 
 ## 30-секундная карта проекта
 
-**Продукт:** локальный multi-chat Android-клиент с OpenAI Responses API и OpenRouter Chat Completions, tools/files/images и streaming. #47 добавил отдельный Claude/OpenRouter backend и app-side GitHub tool execution; OpenAI Responses backend остаётся отдельным путём.
+**Продукт:** локальный multi-chat Android-клиент с OpenAI Responses API и OpenRouter Chat Completions, tools/files/images и streaming. #47 добавил отдельный Claude/OpenRouter backend и app-side GitHub tool execution; OpenAI Responses backend остаётся отдельным путём. #48 исправил реальный UI wiring bug: GitHub-tools CheckBox создавался и сохранялся, но не был добавлен в видимый settings layout; теперь он виден рядом с PAT/repository/branches и начальное состояние читается из сохранённого `prefs.getBoolean("github_tools", false)`.
 
 **Надёжность:** основная lifecycle-модель:
 `generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
@@ -30,13 +30,13 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery и текущий File API attachment path не переносится в него автоматически. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery и текущий File API attachment path не переносится в него автоматически. GitHub-tools toggle теперь имеет реальный visible UI wiring; сама app-side execution/confirmation boundary #47 не изменялась. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
 
 ## Фактический baseline
 
-- main code baseline: `fa4d637aa10d8396468d7ed60a4864001c01b936` (PR #47 squash)
+- main code baseline: `6736c95c36849dbaeca98f0dd034a22ddf4a0126` (PR #48 merge; #47 baseline was `fa4d637aa10d8396468d7ed60a4864001c01b936`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
@@ -98,10 +98,20 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
+### 0. OpenRouter / GitHub tools wiring — **закрыто PR #48**
+PR #47 оставил `githubTools`-переменную и persistence path, но `CheckBox` не был добавлен в видимый `showSettings()` layout. Поэтому пользователь не мог штатно включить GitHub tools, несмотря на существующие `prefs` write/read и runtime tool path.
+
+PR #48 (`6736c95c36849dbaeca98f0dd034a22ddf4a0126`) добавил:
+- `val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")`;
+- `box.addView(githubTools)` рядом с GitHub PAT/repository/branches;
+- сохранённое состояние остаётся через общий `chk(...)`: `prefs.getBoolean("github_tools", false)`;
+- существующий `sendOpenRouterMessage()` продолжает читать `prefs.getBoolean("github_tools", false)` без изменения execution path.
+
+PR #48 был вручную проверен на устройстве пользователем: GitHub tools toggle теперь виден и сценарий работает. PR-head Debug #345 и Release #167 — success; post-merge Debug #346 и Release #168 — success. #48 не добавлял новый verifier/lifecycle contract; это UI wiring fix поверх уже реализованного #47 execution path.
 ### 1. Thread-safety audit — **следующий**
 PR #43 закрыл доказанный ZIP/composer regression slice. Следующий слой — только реальные cross-thread ownership violations, без массовой синхронизации.
 
-**Первый шаг:** составить по текущему `main` таблицу всех оставшихся `Executor/Worker → Activity` paths (`state / writer thread / reader thread / lifecycle gate`), отдельно отметить уже защищённые `runOnUiThread` участки и callbacks с Activity-owned reads/writes. Затем выбрать только один конкретно доказуемый ownership violation, написать минимальный Android runtime regression test, воспроизвести positive/negative path и прогнать Debug/Release + verifier/mutation matrix, если затронут verifier. Vector Store slice уже закрыт в PR #46.
+**Первый шаг:** составить по текущему `main` таблицу всех оставшихся `Executor/Worker → Activity` paths, включая новые #47/#48 границы: `Executor → OpenRouterChatClient.complete()`, `executeTool → GitHubToolExecutor`, `confirmGitHubWrite() → runOnUiThread → AlertDialog → CompletableFuture`, `onCallCreated → openRouterActiveCall`, а также финальный OpenRouter `runOnUiThread` UI commit. (`state / writer thread / reader thread / lifecycle gate`), отдельно отметить уже защищённые `runOnUiThread` участки и callbacks с Activity-owned reads/writes. Затем выбрать только один конкретно доказуемый ownership violation, написать минимальный Android runtime regression test, воспроизвести positive/negative path и прогнать Debug/Release + verifier/mutation matrix, если затронут verifier. Vector Store slice уже закрыт в PR #46.
 
 ### 2. Attachment/upload/composer controller
 Routing slice закрыт в #41–#43; следующий controller slice не вводит новый routing abstraction.
@@ -175,11 +185,11 @@ Handoff verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#41:** merged `35ae9fbf1c62a2e855ba25f8a8a9ef6fbae8dc1d`; PR-head Release `36072696907` — success; Debug `36072696947` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#42:** merged `ae47af930dee1b72669be54be9ad595442dea48a`; PR-head Release `36104592806` — success; Debug `36104592766` — success incl. instrumentation. Post-merge run не предоставлен connector.
 - **#43:** merged `39b5d01b3cc6a395d1ddccc0cc4f77ba2b32c996`; PR-head Release `36171645931` — success; Debug `36171645950` — success incl. instrumentation. Post-merge run пока не предоставлен connector.
-- **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release run `#157` — success; Debug run `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release run `#158` — success; Debug run `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
-- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success, including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` and Debug `#343` were started; their final conclusions must be rechecked before treating post-merge as green.
+- **#46:** merged `bfb26e1d13949b5fc4cde48f41af91003c3f0571`; PR-head Release `#157` — success; Debug `#335` — success incl. instrumentation; verifier mutation matrix — success. Post-merge Release `#158` — success; Debug `#336` — success incl. instrumentation. Follow-up handoff commits passed Debug `#339` and Release `#161`.
+- **#47:** merged `fa4d637aa10d8396468d7ed60a4864001c01b936`; PR-head Release `#164` — success; Debug `#342` — success including static verifier + verifier mutation matrix and Android instrumentation stage. Post-merge Release `#165` — cancelled; Debug `#343` — cancelled because the subsequent documentation push superseded that in-progress main run. Follow-up docs commit `6fd523ca...`: Debug `#344` — success incl. `Verify handoff`; Release `#166` — success.
+- **#48:** merged `6736c95c36849dbaeca98f0dd034a22ddf4a0126`; one-file UI wiring fix (`MainActivity.kt`, +2/-1). PR-head Debug `#345` — success; Release `#167` — success. Post-merge Debug `#346` — success; Release `#168` — success. User manually verified the GitHub tools toggle and scenario on-device.
 
 **Старше:** смотри git history; не тащи старые CI детали в operational handoff без причины.
 
