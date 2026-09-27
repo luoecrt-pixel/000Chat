@@ -240,6 +240,7 @@ class MainActivity : ComponentActivity() {
         val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
         activeResumeCalls.remove(currentChatId())?.cancel()
+        openRouterActiveCall.getAndSet(null)?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
         val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
@@ -735,6 +736,7 @@ class MainActivity : ComponentActivity() {
                 secure.setGitHubToken(githubToken.text.toString().trim())
                 prefs.edit()
                     .putString("provider", if(provider.selectedItemPosition == 1) "openrouter" else "openai")
+                    .putString("provider_label", provider.selectedItem.toString())
                     .putString("model",model.text.toString().trim())
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
@@ -864,31 +866,19 @@ class MainActivity : ComponentActivity() {
         return when (name) {
             "merge_pull_request" ->
                 "Модель хочет смержить PR #" + arguments.optInt("pull_number") +
-                    " методом " + arguments.optString("merge_method") + ".
-
-Разрешить?"
+                    " методом " + arguments.optString("merge_method") + ".\n\nРазрешить?"
             "create_or_update_file" ->
                 "Модель хочет записать файл " + arguments.optString("path") +
-                    " в ветку " + arguments.optString("branch") + ".
-
-Разрешить?"
+                    " в ветку " + arguments.optString("branch") + ".\n\nРазрешить?"
             "create_issue_comment" ->
-                "Модель хочет добавить комментарий к issue/PR #" + arguments.optInt("issue_number") + ".
-
-Разрешить?"
+                "Модель хочет добавить комментарий к issue/PR #" + arguments.optInt("issue_number") + ".\n\nРазрешить?"
             "submit_pull_request_review" ->
                 "Модель хочет отправить review для PR #" + arguments.optInt("pull_number") +
-                    " с событием " + arguments.optString("event") + ".
-
-Разрешить?"
+                    " с событием " + arguments.optString("event") + ".\n\nРазрешить?"
             "trigger_workflow_dispatch" ->
                 "Модель хочет запустить GitHub Actions workflow " + arguments.optString("workflow_id") +
-                    " на ref " + arguments.optString("ref") + ".
-
-Разрешить?"
-            else -> "Модель хочет выполнить GitHub-действие " + name + ".
-
-Разрешить?"
+                    " на ref " + arguments.optString("ref") + ".\n\nРазрешить?"
+            else -> "Модель хочет выполнить GitHub-действие " + name + ".\n\nРазрешить?"
         }
     }
 
