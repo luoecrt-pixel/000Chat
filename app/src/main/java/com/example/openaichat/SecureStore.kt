@@ -31,16 +31,20 @@ class SecureStore(context: Context) {
         return gen.generateKey()
     }
 
-    fun setApiKey(v:String){
-        if(v.isBlank()){prefs.edit().remove("key").apply();return}
-        val c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key())
-        val p=c.iv+c.doFinal(v.toByteArray(Charsets.UTF_8))
-        prefs.edit().putString("key",Base64.encodeToString(p,Base64.NO_WRAP)).apply()
+    private fun setSecret(name:String, value:String){
+        if(value.isBlank()){
+            prefs.edit().remove(name).apply()
+            return
+        }
+        val c=Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.ENCRYPT_MODE,key())
+        val p=c.iv+c.doFinal(value.toByteArray(Charsets.UTF_8))
+        prefs.edit().putString(name,Base64.encodeToString(p,Base64.NO_WRAP)).apply()
     }
 
-    fun getApiKey():String{
+    private fun getSecret(name:String):String{
         return try{
-            val p=Base64.decode(prefs.getString("key",null)?:return "",Base64.NO_WRAP)
+            val p=Base64.decode(prefs.getString(name,null)?:return "",Base64.NO_WRAP)
             if(p.size<13)return ""
             val iv=p.copyOfRange(0,12)
             val d=p.copyOfRange(12,p.size)
@@ -49,4 +53,13 @@ class SecureStore(context: Context) {
             String(c.doFinal(d),Charsets.UTF_8)
         }catch(_:Exception){""}
     }
+
+    fun setApiKey(v:String)=setSecret("key",v)
+    fun getApiKey():String=getSecret("key")
+
+    fun setOpenRouterApiKey(v:String)=setSecret("openrouter_key",v)
+    fun getOpenRouterApiKey():String=getSecret("openrouter_key")
+
+    fun setGitHubToken(v:String)=setSecret("github_pat",v)
+    fun getGitHubToken():String=getSecret("github_pat")
 }
