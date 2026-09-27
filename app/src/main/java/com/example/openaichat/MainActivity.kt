@@ -864,9 +864,16 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 openRouterActiveCall.set(null)
                 activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
+                val errorMessage = e.message?.take(800) ?: "неизвестная ошибка"
+                val displayedError = if (accumulatedText.isNotBlank()) {
+                    "$accumulatedText\n\nОшибка OpenRouter: $errorMessage"
+                } else {
+                    "Ошибка OpenRouter: $errorMessage"
+                }
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
-                        messageAdapter.updateText(assistantItemId, "Ошибка OpenRouter: " + (e.message ?: "неизвестная ошибка").take(800))
+                        messageAdapter.updateText(assistantItemId, displayedError)
                         status.text = "Ошибка OpenRouter"
                         setBusy(false)
                         activeAssistantItemId = null
