@@ -45,8 +45,11 @@ import java.io.File
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
-import java.security.KeyStore
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -102,6 +105,32 @@ class MainActivity : ComponentActivity() {
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
+    private val openRouterClient by lazy { OpenRouterChatClient() }
+    private val openRouterActiveCall = AtomicReference<Call?>()
+    private val githubToolExecutor by lazy {
+        GitHubToolExecutor(
+            secureStore = secure,
+            allowedRepository = {
+                prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat")?.trim().orEmpty()
+            },
+            allowedBranches = {
+                prefs.getString("github_branches", "main")
+                    .orEmpty()
+                    .split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+                    .ifEmpty { setOf("main") }
+            },
+            confirmWrite = ::confirmGitHubWrite,
+            auditWrite = { toolName, arguments ->
+                diagnostics.log("github_write", mapOf(
+                    "tool" to toolName,
+                    "arguments" to arguments.toString()
+                ))
+            }
+        )
+    }
     private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
     private lateinit var prefs: SharedPreferences
@@ -235,6 +264,8 @@ class MainActivity : ComponentActivity() {
         currentCall?.cancel()
         draftSaveRunnable?.let(mainHandler::removeCallbacks)
         executor.shutdownNow()
+        try { openRouterActiveCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
+        try { openRouterClient.close() } catch (_: Exception) {}
         try { resumableResponseClient.close() } catch (_: Exception) {}
         try { chatDb.close() } catch (_: Exception) {}
         super.onDestroy()
@@ -572,8 +603,15 @@ class MainActivity : ComponentActivity() {
         }
 
         section("Подключение")
+        val providerOptions = arrayOf("OpenAI Responses API", "OpenRouter / Claude")
+        val provider = spinner(providerOptions, "provider_label", "OpenAI Responses API")
+        labeled("Backend", provider)
+
+        val currentProvider = prefs.getString("provider", "openai") ?: "openai"
+        val modelDefault = if (currentProvider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
+        val model = field("Model ID", prefs.getString("model", modelDefault) ?: modelDefault); spaced(model)
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
-        val model = field("Model ID", prefs.getString("model","gpt-6-astra") ?: "gpt-6-astra"); spaced(model)
+        val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
 
         section("Мышление")
         val efforts = arrayOf("auto","low","medium","high","xhigh","max")
@@ -589,6 +627,18 @@ class MainActivity : ComponentActivity() {
             text=label; setTextColor(Color.LTGRAY); isChecked=prefs.getBoolean(pref,false)
             setPadding(dp(4),dp(6),0,dp(6))
         }
+
+        section("Claude → GitHub")
+        val githubTools = chk("Разрешить Claude / OpenRouter GitHub tools", "github_tools")
+        val githubToken = field("GitHub fine-grained PAT", secure.getGitHubToken(), true); spaced(githubToken)
+        val githubRepo = field("GitHub repository allow-list", prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat") ?: "luoecrt-pixel/OpenAIApiChat"); spaced(githubRepo)
+        val githubBranches = field("Allowed branches (через запятую)", prefs.getString("github_branches", "main") ?: "main"); spaced(githubBranches)
+        val githubNote = TextView(this).apply {
+            text = "PAT хранится в Android Keystore/AES-GCM и модели не передаётся. Любая запись в GitHub требует подтверждения."
+            setTextColor(subtext); textSize = 11.5f; setPadding(dp(2), dp(4), 0, dp(10))
+        }
+        box.addView(githubNote)
+
         val web=chk("Web Search","web")
         val file=chk("File Search","file_search")
         val code=chk("Code Interpreter","code_interpreter")
@@ -681,8 +731,13 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
                 secure.setApiKey(key.text.toString().trim())
+                secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
+                secure.setGitHubToken(githubToken.text.toString().trim())
                 prefs.edit()
+                    .putString("provider", if(provider.selectedItemPosition == 1) "openrouter" else "openai")
                     .putString("model",model.text.toString().trim())
+                    .putString("github_repo", githubRepo.text.toString().trim())
+                    .putString("github_branches", githubBranches.text.toString().trim())
                     .putString("instructions",instructions.text.toString())
                     .putString("vector_store",vector.text.toString().trim())
                     .putString("max_output",max.text.toString().trim())
@@ -699,6 +754,7 @@ class MainActivity : ComponentActivity() {
                     .putBoolean("image_generation",img.isChecked)
                     .putBoolean("parallel_tools",parallel.isChecked)
                     .putBoolean("background_responses",backgroundResponses.isChecked)
+                    .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
                 effortBadge.text="⚡ "+efforts[reasoning.selectedItemPosition]
                 status.text="Настройки сохранены"
@@ -707,6 +763,157 @@ class MainActivity : ComponentActivity() {
 
     // ---------- Chat ----------
     private fun newChatId(): String = "chat_${System.currentTimeMillis()}_${System.nanoTime()}"
+
+    private fun buildOpenRouterMessagesSnapshot(): JSONArray {
+        val result = JSONArray()
+        prefs.getString("instructions", "")?.takeIf { it.isNotBlank() }?.let {
+            result.put(JSONObject().put("role", "system").put("content", it))
+        }
+        chat.forEach { message ->
+            val role = message.optString("role")
+            val text = message.optString("text").trim()
+            if ((role == "user" || role == "assistant") && text.isNotBlank()) {
+                result.put(JSONObject().put("role", role).put("content", text))
+            }
+        }
+        return result
+    }
+
+    private fun sendOpenRouterMessage(
+        chatId: String,
+        generation: Long,
+        startedAt: Long,
+        text: String,
+        requestId: String,
+        model: String,
+        effort: String,
+        verbosity: String,
+        maxOut: Int,
+        messagesSnapshot: JSONArray
+    ) {
+        val assistantItemId = addBubble("Astra", "", false)
+        activeAssistantItemId = assistantItemId
+        executor.execute {
+            try {
+                activeResponsePersistence.updateActiveResponse(
+                    chatId,
+                    status = "in_progress",
+                    expectedRequestId = requestId
+                )
+                val result = openRouterClient.complete(
+                    apiKey = secure.getOpenRouterApiKey(),
+                    model = model,
+                    messages = messagesSnapshot,
+                    tools = if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools() else null,
+                    maxTokens = maxOut,
+                    reasoningEffort = effort,
+                    verbosity = verbosity,
+                    parallelToolCalls = prefs.getBoolean("parallel_tools", true),
+                    executeTool = { name, arguments ->
+                        githubToolExecutor.execute(name, arguments)
+                    },
+                    onCallCreated = { call -> openRouterActiveCall.set(call) }
+                )
+                openRouterActiveCall.set(null)
+                val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
+                val assistantMessage = JSONObject()
+                    .put("role", "assistant")
+                    .put("text", finalText)
+                    .put("request_id", requestId)
+                    .put("provider", "openrouter")
+                    .put("model", model)
+                    .put("tools", JSONArray(result.toolNames))
+                result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
+
+                activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                runOnUiThread {
+                    if (isRequestCurrent(chatId, generation)) {
+                        chat.add(assistantMessage)
+                        messageAdapter.updateText(assistantItemId, finalText)
+                        activeAssistantItemId = assistantItemId
+                        persistCurrentChat()
+                        toolLabel.text = result.toolNames.distinct().joinToString("  ")
+                        status.text = "Готово • OpenRouter"
+                        setBusy(false)
+                        activeAssistantItemId = null
+                        diagnostics.log("openrouter_completed", mapOf(
+                            "chat_id" to chatId,
+                            "request_id" to requestId,
+                            "model" to model,
+                            "tools" to result.toolNames.distinct().joinToString(","),
+                            "latency_ms" to (SystemClock.elapsedRealtime() - startedAt)
+                        ))
+                    }
+                }
+            } catch (e: Exception) {
+                openRouterActiveCall.set(null)
+                activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                runOnUiThread {
+                    if (isRequestCurrent(chatId, generation)) {
+                        messageAdapter.updateText(assistantItemId, "Ошибка OpenRouter: " + (e.message ?: "неизвестная ошибка").take(800))
+                        status.text = "Ошибка OpenRouter"
+                        setBusy(false)
+                        activeAssistantItemId = null
+                    }
+                }
+            }
+        }
+    }
+
+    private fun githubConfirmationText(name: String, arguments: JSONObject): String {
+        return when (name) {
+            "merge_pull_request" ->
+                "Модель хочет смержить PR #" + arguments.optInt("pull_number") +
+                    " методом " + arguments.optString("merge_method") + ".
+
+Разрешить?"
+            "create_or_update_file" ->
+                "Модель хочет записать файл " + arguments.optString("path") +
+                    " в ветку " + arguments.optString("branch") + ".
+
+Разрешить?"
+            "create_issue_comment" ->
+                "Модель хочет добавить комментарий к issue/PR #" + arguments.optInt("issue_number") + ".
+
+Разрешить?"
+            "submit_pull_request_review" ->
+                "Модель хочет отправить review для PR #" + arguments.optInt("pull_number") +
+                    " с событием " + arguments.optString("event") + ".
+
+Разрешить?"
+            "trigger_workflow_dispatch" ->
+                "Модель хочет запустить GitHub Actions workflow " + arguments.optString("workflow_id") +
+                    " на ref " + arguments.optString("ref") + ".
+
+Разрешить?"
+            else -> "Модель хочет выполнить GitHub-действие " + name + ".
+
+Разрешить?"
+        }
+    }
+
+    private fun confirmGitHubWrite(name: String, arguments: JSONObject): Boolean {
+        if (!activityVisible || isFinishing) return false
+        val decision = CompletableFuture<Boolean>()
+        runOnUiThread {
+            if (!activityVisible || isFinishing) {
+                decision.complete(false)
+                return@runOnUiThread
+            }
+            AlertDialog.Builder(this)
+                .setTitle("GitHub: подтверждение")
+                .setMessage(githubConfirmationText(name, arguments))
+                .setNegativeButton("Отмена") { _, _ -> decision.complete(false) }
+                .setPositiveButton("Подтвердить") { _, _ -> decision.complete(true) }
+                .setOnCancelListener { decision.complete(false) }
+                .show()
+        }
+        return try {
+            decision.get(10, TimeUnit.MINUTES)
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     private fun newChat() {
         persistComposerStateNow()
@@ -808,6 +1015,7 @@ class MainActivity : ComponentActivity() {
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
+        openRouterActiveCall.getAndSet(null)?.cancel()
         activeResumeCalls.remove(chatId)?.cancel()
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
@@ -853,7 +1061,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendMessage(regenerate:Boolean) {
-        val key=secure.getApiKey()
+        val provider = prefs.getString("provider", "openai") ?: "openai"
+        val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
         if(key.isBlank()){showSettings();return}
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {
             preparePendingZipsThenSend(regenerate)
@@ -885,8 +1094,13 @@ class MainActivity : ComponentActivity() {
         val requestImageFileId = imageFileId
         if(!regenerate && text.isBlank() && requestImageFileId==null && requestFileIds.isEmpty()) return
         if(regenerate && text.isBlank()) return
+        if (provider == "openrouter" && (requestImageFileId != null || requestFileIds.isNotEmpty())) {
+            status.text = "OpenRouter: текущие OpenAI File API-вложения не переносятся автоматически. Отправьте текст без вложений."
+            return
+        }
 
-        val model=prefs.getString("model","gpt-6-astra") ?: "gpt-6-astra"
+        val modelDefault = if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
+        val model=prefs.getString("model",modelDefault) ?: modelDefault
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
         val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId!=null
@@ -971,8 +1185,30 @@ class MainActivity : ComponentActivity() {
             "auto_effective" to effort,
             "attachments" to requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
             "prompt_chars" to text.length,
-            "model" to model
+            "model" to model,
+            "provider" to provider
         ))
+
+        if (provider == "openrouter") {
+            currentResponseId = null
+            clearAttachedSelection()
+            toolLabel.text = ""
+            refreshAttachChips()
+            val messagesSnapshot = buildOpenRouterMessagesSnapshot()
+            sendOpenRouterMessage(
+                chatId = requestChatId,
+                generation = requestGeneration,
+                startedAt = startedAt,
+                text = text,
+                requestId = localRequestId,
+                model = model,
+                effort = actualEffort,
+                verbosity = verbosity,
+                maxOut = maxOut,
+                messagesSnapshot = messagesSnapshot
+            )
+            return
+        }
 
         val content=JSONArray()
         if(text.isNotBlank()) content.put(JSONObject().put("type","input_text").put("text",text))
@@ -986,6 +1222,15 @@ class MainActivity : ComponentActivity() {
 
         val textObj=JSONObject().put("verbosity",verbosity)
         val inputArr=JSONArray()
+        if (currentResponseId == null && chat.size > 1) {
+            chat.dropLast(1).forEach { message ->
+                val role = message.optString("role")
+                val messageText = message.optString("text").trim()
+                if ((role == "user" || role == "assistant") && messageText.isNotBlank()) {
+                    inputArr.put(JSONObject().put("role", role).put("content", messageText))
+                }
+            }
+        }
         configUpdateEffort?.let{ newEffort->
             inputArr.put(JSONObject().put("type","configuration_update").put("reasoning",JSONObject().put("effort",newEffort)))
             runOnUiThread{
