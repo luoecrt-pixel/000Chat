@@ -802,7 +802,19 @@ class MainActivity : ComponentActivity() {
             val role = message.optString("role")
             val text = message.optString("text").trim()
             if ((role == "user" || role == "assistant") && text.isNotBlank()) {
-                result.put(JSONObject().put("role", role).put("content", text))
+                val trace = message.optJSONArray("tool_trace")
+                val traceBlock = if (role == "assistant" && trace != null && trace.length() > 0) {
+                    val entries = (0 until trace.length()).mapNotNull { index ->
+                        trace.optJSONObject(index)?.let { item ->
+                            val name = item.optString("name")
+                            val arguments = item.optJSONObject("arguments")?.toString().orEmpty()
+                            val resultPreview = item.optString("result")
+                            "$name($arguments): $resultPreview"
+                        }
+                    }
+                    if (entries.isEmpty()) "" else "\n\n[Инструменты в этом ответе: " + entries.joinToString("; ") + "]"
+                } else ""
+                result.put(JSONObject().put("role", role).put("content", text + traceBlock))
             }
         }
         return result
@@ -829,6 +841,7 @@ class MainActivity : ComponentActivity() {
                     status = "in_progress",
                     expectedRequestId = requestId
                 )
+                val toolTrace = JSONArray()
                 val result = openRouterClient.complete(
                     apiKey = secure.getOpenRouterApiKey(),
                     model = model,
@@ -840,7 +853,14 @@ class MainActivity : ComponentActivity() {
                     verbosity = verbosity,
                     parallelToolCalls = prefs.getBoolean("parallel_tools", true),
                     executeTool = { name, arguments ->
-                        githubToolExecutor.execute(name, arguments)
+                        val toolResult = githubToolExecutor.execute(name, arguments)
+                        toolTrace.put(
+                            JSONObject()
+                                .put("name", name)
+                                .put("arguments", JSONObject(arguments.toString()))
+                                .put("result", toolResult.take(300))
+                        )
+                        toolResult
                     },
                     onCallCreated = { call -> openRouterActiveCall.set(call) }
                 )
@@ -856,6 +876,9 @@ class MainActivity : ComponentActivity() {
                         val toolArray = JSONArray()
                         result.toolNames.distinct().forEach { toolArray.put(it) }
                         put("tools", toolArray)
+                        if (toolTrace.length() > 0) {
+                            put("tool_trace", JSONArray(toolTrace.toString()))
+                        }
                     }
                 result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
 
