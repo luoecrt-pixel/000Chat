@@ -151,6 +151,7 @@ class MainActivity : ComponentActivity() {
     private var vsStatusLine: TextView? = null
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
+    private lateinit var githubBadge: TextView
 
     private var currentCall: Call? = null
     private val activeResponseState = ActiveResponseStateStore()
@@ -185,6 +186,7 @@ class MainActivity : ComponentActivity() {
     private val attachedFileSizes = mutableListOf<Long>()
     private val attachedFilePaths = mutableListOf<String>()
     private val attachedFileMimes = mutableListOf<String>()
+    private val attachedOpenRouterAttachments = mutableListOf<OpenRouterLocalAttachment>()
     private var pendingImagePath: String? = null
     private var pendingImageFileId: String? = null
     private var pendingImageName: String? = null
@@ -375,6 +377,13 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { showQuickEffortPicker() }
         }
         row.addView(effortBadge)
+        githubBadge = TextView(this).apply {
+            textSize = 12f
+            setPadding(dp(4),0,dp(6),0)
+            setOnClickListener { showSettings() }
+        }
+        row.addView(githubBadge)
+        updateGithubBadge(prefs.getBoolean("github_tools", false))
 
         val space = Space(this)
         row.addView(space, LinearLayout.LayoutParams(0,1,1f))
@@ -772,6 +781,7 @@ class MainActivity : ComponentActivity() {
                     .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
                 effortBadge.text="⚡ "+efforts[reasoning.selectedItemPosition]
+                updateGithubBadge(githubTools.isChecked)
                 status.text="Настройки сохранены"
             }.show()
     }
@@ -2876,7 +2886,7 @@ class MainActivity : ComponentActivity() {
     }
     private fun chooseImage() {
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
-            type="image/*"; addCategory(Intent.CATEGORY_OPENABLE)
+            type="image/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
         }
         launchActivityForResult(i, pickImage)
     }
