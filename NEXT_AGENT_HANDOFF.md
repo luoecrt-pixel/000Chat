@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-09-28 21:00 +03:00
-**Следующий рабочий срез:** PR G — OpenRouter attachments — после #56; сохранить последовательность PR I → J → G → H.
+**Следующий рабочий срез:** Thread-safety audit после PR G; затем PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -100,17 +100,13 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR G — **следующий**
-Передавать вложения в OpenRouter: текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
-**Первый шаг:** заменить текущий early-return "не переносятся автоматически" на bounded content builder с лимитом для текста и resize для изображений.
+### 1. Thread-safety audit — следующий
+После PR G пройти новые и существующие фоновые операции attachments, ZIP-распаковки и проверки model capabilities.
+Первый шаг: составить таблицу ownership для новых background операций и выбрать один доказуемый violation; не добавлять массовую синхронизацию.
 
 ### 2. PR H — документация
-Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #55, убрать дубль пунктов 2/3.
-**Первый шаг:** обновить только human-facing snapshot после runtime PR, не смешивая README с refactor.
-
-### 3. Thread-safety audit
-После пользовательских F/I/G/H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
-**Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
+Обновить human-facing README про OpenRouter/Claude, attachments, local artifacts и ручной CI.
+Первый шаг: сделать только документационный snapshot после закрытия thread-safety audit.
 
 ## Репозиторий / branches
 
