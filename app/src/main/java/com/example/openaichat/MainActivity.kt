@@ -865,6 +865,12 @@ class MainActivity : ComponentActivity() {
         }
         return result
     }
+    private fun resolveOpenRouterAttachmentsForChat(chatId: String): List<OpenRouterLocalAttachment> {
+        return if (chatId == currentChatId()) {
+            chat.flatMap { message -> if (message.optString("role") == "user") resolveOpenRouterAttachments(message) else emptyList() }
+        } else emptyList()
+    }
+
     private fun sendOpenRouterMessage(
         chatId: String,
         generation: Long,
@@ -887,19 +893,21 @@ class MainActivity : ComponentActivity() {
                     expectedRequestId = requestId
                 )
                 val toolTrace = JSONArray()
+                val githubEnabled = prefs.getBoolean("github_tools", false)
+                validateOpenRouterModalities(secure.getOpenRouterApiKey(), model, resolveOpenRouterAttachmentsForChat(chatId))
                 val result = openRouterClient.complete(
                     apiKey = secure.getOpenRouterApiKey(),
                     model = model,
                     messages = messagesSnapshot,
                     sessionId = chatId,
-                    tools = if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools() else null,
+                    tools = if (githubEnabled) GitHubToolCatalog.tools() else null,
                     maxTokens = maxOut,
                     maxRounds = openRouterMaxRounds,
                     reasoningEffort = effort,
                     verbosity = verbosity,
                     parallelToolCalls = prefs.getBoolean("parallel_tools", true),
                     executeTool = { name, arguments ->
-                        val toolResult = githubToolExecutor.execute(name, arguments)
+                        val toolResult = if (githubEnabled) githubToolExecutor.execute(name, arguments) else "GitHub-инструменты отключены"
                         toolTrace.put(
                             JSONObject()
                                 .put("name", name)
@@ -922,7 +930,7 @@ class MainActivity : ComponentActivity() {
                         val toolArray = JSONArray()
                         result.toolNames.distinct().forEach { toolArray.put(it) }
                         put("tools", toolArray)
-                        if (toolTrace.length() > 0) {
+                        if (githubEnabled && toolTrace.length() > 0) {
                             put("tool_trace", JSONArray(toolTrace.toString()))
                         }
                     }
