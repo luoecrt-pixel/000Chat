@@ -793,7 +793,12 @@ class MainActivity : ComponentActivity() {
     private fun resolveOpenRouterAttachments(message: JSONObject): List<OpenRouterLocalAttachment> {
         val manifest = message.optJSONArray("attachments")
         if (manifest != null && manifest.length() > 0) {
-            return (0 until manifest.length()).mapNotNull { i -> manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) } }
+            val existing = (0 until manifest.length()).mapNotNull { i -> manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) } }
+            existing.forEach {
+                if (!File(it.path).isFile) throw IOException("В истории нет локальной копии файла: " + it.name)
+                if (it.kind == "text" && it.textPath.isNullOrBlank()) throw IOException("Текстовое вложение недоступно: " + it.name)
+            }
+            return existing
         }
         val out = mutableListOf<OpenRouterLocalAttachment>()
         val paths = message.optJSONArray("file_paths")
