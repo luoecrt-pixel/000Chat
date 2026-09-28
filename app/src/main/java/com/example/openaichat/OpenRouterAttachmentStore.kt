@@ -91,7 +91,7 @@ object OpenRouterAttachmentStore {
                 entries++
                 if (entries > MAX_ZIP_ENTRIES) throw IOException("ZIP содержит больше " + MAX_ZIP_ENTRIES + " файлов")
                 val rawEntryPath = entry.name.replace('\\', '/')
-                val unsafeEntry = rawEntryPath.startsWith("/") || rawEntryPath.split('/').any { it == ".." } || Regex("^[A-Za-z]:/").containsMatchIn(rawEntryPath)
+                val unsafeEntry = isUnsafeZipPath(rawEntryPath)
                 val entryName = rawEntryPath.substringAfterLast('/').trim()
                 if (unsafeEntry) {
                     drainZipEntry(zin, entryName, report, "Небезопасный путь ZIP пропущен: " + entry.name) { n -> total += n }
@@ -130,6 +130,10 @@ object OpenRouterAttachmentStore {
         return result
     }
 
+    internal fun isUnsafeZipPath(path: String): Boolean {
+        val normalized = path.replace('\\', '/')
+        return normalized.startsWith("/") || normalized.split('/').any { it == ".." } || Regex("^[A-Za-z]:/").containsMatchIn(normalized)
+    }
     private fun drainZipEntry(zin: ZipInputStream, entryName: String, report: (String) -> Unit, message: String, onBytes: (Long) -> Unit) {
         val buffer = ByteArray(64 * 1024)
         var entryBytes = 0L
@@ -152,7 +156,7 @@ object OpenRouterAttachmentStore {
                 entries++
                 if (entries > MAX_ZIP_ENTRIES) throw IOException("ZIP содержит больше " + MAX_ZIP_ENTRIES + " файлов")
                 val rawEntryPath = entry.name.replace('\\', '/')
-                val unsafeEntry = rawEntryPath.startsWith("/") || rawEntryPath.split('/').any { it == ".." } || Regex("^[A-Za-z]:/").containsMatchIn(rawEntryPath)
+                val unsafeEntry = isUnsafeZipPath(rawEntryPath)
                 val entryName = rawEntryPath.substringAfterLast('/').trim()
                 if (unsafeEntry) {
                     val buffer = ByteArray(64 * 1024)
