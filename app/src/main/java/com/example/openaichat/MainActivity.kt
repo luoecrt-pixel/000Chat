@@ -225,6 +225,7 @@ class MainActivity : ComponentActivity() {
         ensureChatStore()
         buildUi()
         restoreCurrentChat()
+        executor.execute { cleanupOrphanOpenRouterAttachments() }
         diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
     }
 
@@ -789,6 +790,25 @@ class MainActivity : ComponentActivity() {
     }
 
     // ---------- Chat ----------
+    private fun cleanupOrphanOpenRouterAttachments() {
+        try {
+            val dir = File(filesDir, "attachments")
+            if (!dir.isDirectory) return
+            val referenced = linkedSetOf<String>()
+            referenced.addAll(chatDb.listLocalFilePaths(""))
+            referenced.addAll(listComposerLocalFilePaths(currentChatId()))
+            val now = System.currentTimeMillis()
+            dir.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                if (referenced.contains(file.absolutePath)) return@forEach
+                if (now - file.lastModified() < 7L * 24L * 60L * 60L * 1000L) return@forEach
+                deleteOwnedLocalFile(file.absolutePath)
+            }
+        } catch (e: Exception) {
+            diagnostics.log("openrouter_attachment_cleanup_failed", mapOf("error" to (e.message ?: e.toString()).take(300)))
+        }
+    }
+
     private fun newChatId(): String = "chat_${System.currentTimeMillis()}_${System.nanoTime()}"
 
     private fun resolveOpenRouterAttachments(message: JSONObject): List<OpenRouterLocalAttachment> {
