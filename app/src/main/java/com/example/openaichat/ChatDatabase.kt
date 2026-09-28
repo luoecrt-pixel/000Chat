@@ -904,7 +904,7 @@ data class ExistingMessageRow(
         val out = linkedSetOf<String>()
         readableDatabase.query(
             MESSAGE_TABLE,
-            arrayOf("file_paths", "image_path", "annotations", "generated_images"),
+            arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             "chat_id=?",
             arrayOf(chatId),
             null, null, "position ASC"
@@ -917,13 +917,20 @@ data class ExistingMessageRow(
 
                 c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
 
-                val annotations = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
+                val attachments = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until attachments.length()) {
+                    val a = attachments.optJSONObject(i) ?: continue
+                    a.optString("path").takeIf { it.isNotBlank() }?.let(out::add)
+                    a.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add)
+                }
+
+                val annotations = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
                 for (i in 0 until annotations.length()) {
                     annotations.optJSONObject(i)?.optString("local_path")
                         ?.takeIf { it.isNotBlank() }?.let(out::add)
                 }
 
-                val generatedImages = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
+                val generatedImages = try { JSONArray(c.getString(4).orEmpty()) } catch (_: Exception) { JSONArray() }
                 for (i in 0 until generatedImages.length()) {
                     generatedImages.optJSONObject(i)?.optString("local_path")
                         ?.takeIf { it.isNotBlank() }?.let(out::add)
