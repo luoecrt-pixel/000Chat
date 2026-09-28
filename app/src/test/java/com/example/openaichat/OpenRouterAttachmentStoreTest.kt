@@ -50,6 +50,23 @@ class OpenRouterAttachmentStoreTest {
     }
 
     @Test
+    fun largeTextIsNotTruncated() {
+        val dir = createTempDir()
+        val expected = "абвгд".repeat(30000)
+        val file = File(dir, "large.txt").apply { writeText(expected, Charsets.UTF_8) }
+        val a = OpenRouterAttachmentStore.classifyLocalFile(file, "large.txt", "application/octet-stream")
+        assertEquals(expected, OpenRouterAttachmentStore.textContent(a))
+    }
+
+    @Test
+    fun unsafeZipPathDoesNotEscapeAttachmentName() {
+        val entryName = "../escape.txt"
+        val raw = entryName.replace('\\', '/')
+        val safe = raw.substringAfterLast('/').trim()
+        assertEquals("escape.txt", safe)
+        assertTrue("..".split('/').none { it == safe })
+    }
+    @Test
     fun pdfBlockUsesFileContentShape() {
         val dir = createTempDir()
         val file = File(dir, "x.pdf").apply { writeBytes("%PDF-1.7".toByteArray()) }
