@@ -24,6 +24,11 @@ class OpenRouterCompletionException(
 ) : IOException(message, cause)
 
 class OpenRouterChatClient {
+    private companion object {
+        const val COMPLETE_TIME_LIMIT_MS = 20 * 60 * 1000L
+        const val MAX_ACCUMULATED_TOTAL_TOKENS = 200_000
+    }
+
     private fun normalizeReasoningEffort(value: String?): String? =
         value?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
             when (it) {
@@ -43,6 +48,7 @@ class OpenRouterChatClient {
         apiKey: String,
         model: String,
         messages: JSONArray,
+        sessionId: String? = null,
         tools: JSONArray?,
         maxTokens: Int,
         maxRounds: Int = 24,
@@ -55,8 +61,26 @@ class OpenRouterChatClient {
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
+        var accumulatedTotalTokens = 0
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
+
+        fun budgetException(message: String): OpenRouterCompletionException =
+            OpenRouterCompletionException(
+                message = message,
+                partialText = accumulatedText.joinToString("\n\n").trim()
+            )
+
+        fun ensureWithinBudget() {
+            if (System.nanoTime() >= deadlineNanos) {
+                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+            }
+            if (accumulatedTotalTokens >= MAX_ACCUMULATED_TOTAL_TOKENS) {
+                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (200000) исчерпан.")
+            }
+        }
 
         fun requestMessage(toolChoice: String): Pair<JSONObject, JSONObject> {
+            ensureWithinBudget()
             val body = JSONObject()
                 .put("model", model)
                 .put("messages", history)
@@ -66,6 +90,12 @@ class OpenRouterChatClient {
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
+            }
+            sessionId?.trim()?.takeIf { it.isNotBlank() }?.let {
+                body.put("session_id", it)
+            }
+            if (model.trim().removePrefix("~").startsWith("anthropic/")) {
+                body.put("cache_control", JSONObject().put("type", "ephemeral"))
             }
             normalizeReasoningEffort(reasoningEffort)?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
@@ -83,12 +113,21 @@ class OpenRouterChatClient {
 
             val call = httpClient.newCall(request)
             onCallCreated(call)
+            val remainingMillis = TimeUnit.NANOSECONDS.toMillis((deadlineNanos - System.nanoTime()).coerceAtLeast(0L))
+            if (remainingMillis <= 0L) {
+                call.cancel()
+                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+            }
+            call.timeout().timeout(minOf(600_000L, remainingMillis.coerceAtLeast(1L)), TimeUnit.MILLISECONDS)
             call.execute().use { httpResponse ->
                 val raw = httpResponse.body?.string().orEmpty()
                 if (!httpResponse.isSuccessful) {
                     throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
                 }
                 val json = JSONObject(raw)
+                json.optJSONObject("usage")?.optInt("total_tokens", 0)?.takeIf { it > 0 }?.let {
+                    accumulatedTotalTokens += it
+                }
                 val choice = json.optJSONArray("choices")?.optJSONObject(0)
                     ?: throw IOException("OpenRouter response has no choice")
                 val message = choice.optJSONObject("message")
@@ -99,6 +138,7 @@ class OpenRouterChatClient {
 
         try {
             repeat(maxRounds) {
+                ensureWithinBudget()
                 val (json, message) = requestMessage("auto")
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
@@ -112,6 +152,7 @@ class OpenRouterChatClient {
                 message.optString("content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
                 history.put(JSONObject(message.toString()))
                 for (i in 0 until calls.length()) {
+                    ensureWithinBudget()
                     val callObject = calls.optJSONObject(i) ?: continue
                     val function = callObject.optJSONObject("function")
                         ?: throw IOException("Malformed tool call")
@@ -124,15 +165,18 @@ class OpenRouterChatClient {
                         throw IOException("Invalid tool arguments for $name", e)
                     }
                     toolNames += name
+                    val toolResult = executeTool(name, arguments)
+                    ensureWithinBudget()
                     history.put(
                         JSONObject()
                             .put("role", "tool")
                             .put("tool_call_id", id)
-                            .put("content", executeTool(name, arguments))
+                            .put("content", toolResult)
                     )
                 }
             }
 
+            ensureWithinBudget()
             history.put(
                 JSONObject()
                     .put("role", "user")

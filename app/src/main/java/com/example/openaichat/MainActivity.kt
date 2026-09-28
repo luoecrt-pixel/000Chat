@@ -779,7 +779,7 @@ class MainActivity : ComponentActivity() {
     // ---------- Chat ----------
     private fun newChatId(): String = "chat_${System.currentTimeMillis()}_${System.nanoTime()}"
 
-    private fun buildOpenRouterMessagesSnapshot(): JSONArray {
+    private fun buildOpenRouterMessagesSnapshot(cacheAnthropic: Boolean): JSONArray {
         val result = JSONArray()
         val instructions = prefs.getString("instructions", "").orEmpty().trim()
         val githubToolsEnabled = prefs.getBoolean("github_tools", false)
@@ -794,7 +794,21 @@ class MainActivity : ComponentActivity() {
                 "экономь их, объединяй независимые вызовы в один раунд."
             val systemContent = if (instructions.isBlank()) githubContext
             else "$githubContext\n\n$instructions"
-            result.put(JSONObject().put("role", "system").put("content", systemContent))
+            val systemMessage = JSONObject().put("role", "system")
+            if (cacheAnthropic) {
+                systemMessage.put(
+                    "content",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("type", "text")
+                            .put("text", systemContent)
+                            .put("cache_control", JSONObject().put("type", "ephemeral"))
+                    )
+                )
+            } else {
+                systemMessage.put("content", systemContent)
+            }
+            result.put(systemMessage)
         } else if (instructions.isNotBlank()) {
             result.put(JSONObject().put("role", "system").put("content", instructions))
         }
@@ -846,6 +860,7 @@ class MainActivity : ComponentActivity() {
                     apiKey = secure.getOpenRouterApiKey(),
                     model = model,
                     messages = messagesSnapshot,
+                    sessionId = chatId,
                     tools = if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools() else null,
                     maxTokens = maxOut,
                     maxRounds = openRouterMaxRounds,
@@ -1246,7 +1261,8 @@ class MainActivity : ComponentActivity() {
             clearAttachedSelection()
             toolLabel.text = ""
             refreshAttachChips()
-            val messagesSnapshot = buildOpenRouterMessagesSnapshot()
+            val cacheAnthropic = model.trim().removePrefix("~").startsWith("anthropic/")
+            val messagesSnapshot = buildOpenRouterMessagesSnapshot(cacheAnthropic)
             sendOpenRouterMessage(
                 chatId = requestChatId,
                 generation = requestGeneration,
