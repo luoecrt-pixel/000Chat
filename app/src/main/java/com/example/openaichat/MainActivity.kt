@@ -1015,7 +1015,7 @@ class MainActivity : ComponentActivity() {
                 openRouterActiveCall.set(null)
                 activeResponsePersistence.clearActiveResponse(chatId, requestId)
                 val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
-                val errorMessage = e.message?.take(800) ?: "неизвестная ошибка"
+                val errorMessage = (e.message?.take(800) ?: "неизвестная ошибка") + openRouterAttachmentErrorSuffix(chatId)
                 val displayedError = if (accumulatedText.isNotBlank()) {
                     "$accumulatedText\n\nОшибка OpenRouter: $errorMessage"
                 } else {
@@ -1088,6 +1088,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun openRouterAttachmentErrorSuffix(chatId: String): String {
+        return try {
+            val attachments = chat.filter { it.optString("role") == "user" }.flatMap { resolveOpenRouterAttachments(it) }.distinctBy { it.id }
+            if (attachments.isEmpty()) "" else {
+                val details = attachments.joinToString("; ") {
+                    val wireSize = File(it.wirePath ?: it.path).length()
+                    if (wireSize != it.size) it.name + ": исходный " + formatBytes(it.size) + ", отправляемый " + formatBytes(wireSize)
+                    else it.name + ": " + formatBytes(it.size)
+                }
+                " Вложения: " + details + "."
+            }
+        } catch (_: Exception) { "" }
+    }
     private fun updateGithubBadge(enabled: Boolean) {
         if (!::githubBadge.isInitialized) return
         githubBadge.text = if (enabled) "GitHub ✓" else "GitHub выключен"
