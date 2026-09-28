@@ -860,6 +860,7 @@ class MainActivity : ComponentActivity() {
                     apiKey = secure.getOpenRouterApiKey(),
                     model = model,
                     messages = messagesSnapshot,
+                    sessionId = chatId,
                     tools = if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools() else null,
                     maxTokens = maxOut,
                     maxRounds = openRouterMaxRounds,
