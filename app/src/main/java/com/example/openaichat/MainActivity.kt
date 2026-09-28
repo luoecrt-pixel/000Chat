@@ -839,6 +839,7 @@ class MainActivity : ComponentActivity() {
             if (!file.isFile) throw IOException("В истории нет локальной копии изображения: " + message.optString("image_name", "image"))
             out += OpenRouterAttachmentStore.classifyLocalFile(file, message.optString("image_name", file.name), message.optString("image_mime", "image/*"))
         }
+        if (out.isNotEmpty()) message.put("attachments", JSONArray().apply { out.forEach { put(it.toJson()) } })
         return out
     }
     private fun buildOpenRouterMessagesSnapshot(cacheAnthropic: Boolean): JSONArray {
@@ -846,7 +847,7 @@ class MainActivity : ComponentActivity() {
         val instructions = prefs.getString("instructions", "").orEmpty().trim()
         val githubToolsEnabled = prefs.getBoolean("github_tools", false)
         val maxRounds = openRouterMaxRounds
-        val hasAttachmentHistory = chat.any { it.optString("role") == "user" && (it.optJSONArray("attachments")?.length() ?: 0) > 0 || it.optJSONArray("file_paths")?.length() ?: 0 > 0 || it.optString("image_path").isNotBlank() }
+        val hasAttachmentHistory = chat.any { message -> message.optString("role") == "user" && ((message.optJSONArray("attachments")?.length() ?: 0) > 0 || (message.optJSONArray("file_paths")?.length() ?: 0) > 0 || message.optString("image_path").isNotBlank()) }
         val githubContext = if (githubToolsEnabled) {
             val githubRepo = prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat")?.trim().orEmpty()
             val githubBranches = prefs.getString("github_branches", "main")?.trim().orEmpty()
