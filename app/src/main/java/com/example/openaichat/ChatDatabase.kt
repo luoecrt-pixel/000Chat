@@ -940,6 +940,24 @@ data class ExistingMessageRow(
         return out.toList()
     }
 
+    fun listAllLocalFilePaths(): List<String> {
+        val out = linkedSetOf<String>()
+        readableDatabase.query(
+            MESSAGE_TABLE,
+            arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
+            null, null, null, null, "position ASC"
+        ).use { c ->
+            while (c.moveToNext()) {
+                try { JSONArray(c.getString(0).orEmpty()).let { a -> for (i in 0 until a.length()) a.optString(i).takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+                c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
+                try { JSONArray(c.getString(2).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o -> o.optString("path").takeIf { it.isNotBlank() }?.let(out::add); o.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add) } } } catch (_:Exception) {}
+                try { JSONArray(c.getString(3).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+                try { JSONArray(c.getString(4).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+            }
+        }
+        return out.toList()
+    }
+
     fun removeLocalFile(path: String): Boolean {
         if (path.isBlank()) return false
         var removed = false
