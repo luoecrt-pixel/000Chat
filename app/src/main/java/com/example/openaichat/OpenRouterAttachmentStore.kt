@@ -115,6 +115,12 @@ object OpenRouterAttachmentStore {
         return result
     }
 
+    fun toContentBlock(a: OpenRouterLocalAttachment): JSONObject = when (a.kind) {
+        "text" -> JSONObject().put("type", "text").put("text", "<file name=\"" + a.name.replace("\"", "&quot;") + "\">\n" + textContent(a).replace("</file>", "<\\/file>") + "\n</file>")
+        "image" -> JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", toDataUrl(a)))
+        "pdf" -> JSONObject().put("type", "file").put("file", JSONObject().put("filename", a.name).put("file_data", toDataUrl(a)))
+        else -> throw IOException("Вложение " + a.name + " нельзя отправить напрямую")
+    }
     fun toDataUrl(a: OpenRouterLocalAttachment): String =
         "data:" + a.mime + ";base64," + Base64.encodeToString(File(a.path).readBytes(), Base64.NO_WRAP)
 
