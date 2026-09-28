@@ -3286,25 +3286,27 @@ class MainActivity : ComponentActivity() {
                 selectedUris.forEach { uri ->
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
                     val ext = name.substringAfterLast(".", "").lowercase()
-                    if (ext == "zip") {
-                        rememberUploadUri(uri, "zip")
-                        refreshAttachChips()
-                    } else {
-                        beginUpload()
-                        executor.execute {
-                            try {
-                                val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name)
-                                runOnUiThread {
-                                    if (attachedOpenRouterAttachments.none { it.sha256 == local.sha256 && it.name == local.name }) attachedOpenRouterAttachments.add(local)
-                                    forgetUploadUri(uri, "file")
-                                    refreshAttachChips()
-                                    persistComposerStateNow()
-                                    status.text = "Вложение готово: " + local.name
+                    beginUpload()
+                    executor.execute {
+                        try {
+                            val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name)
+                            val prepared = if (local.kind == "zip") {
+                                OpenRouterAttachmentStore.extractZipFile(this, File(local.path), local.name) { message ->
+                                    diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
                                 }
-                            } catch (e: Exception) {
-                                runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл") }
-                            } finally { endUpload() }
-                        }
+                            } else listOf(local)
+                            runOnUiThread {
+                                prepared.forEach { item ->
+                                    if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
+                                }
+                                File(local.path).delete()
+                                refreshAttachChips()
+                                persistComposerStateNow()
+                                status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл") }
+                        } finally { endUpload() }
                     }
                 }
                 return
