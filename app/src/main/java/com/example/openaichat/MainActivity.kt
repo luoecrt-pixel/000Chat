@@ -992,6 +992,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updateGithubBadge(enabled: Boolean) {
+        if (!::githubBadge.isInitialized) return
+        githubBadge.text = if (enabled) "GitHub ✓" else "GitHub выключен"
+        githubBadge.setTextColor(if (enabled) Color.rgb(130, 205, 150) else Color.rgb(145, 150, 160))
+    }
+
     private fun newChat() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
@@ -3699,7 +3705,9 @@ class MainActivity : ComponentActivity() {
             val sizes=JSONArray();attachedFileSizes.forEach{sizes.put(it)}
             val paths=JSONArray();attachedFilePaths.forEach{paths.put(it)}
             val mimes=JSONArray();attachedFileMimes.forEach{mimes.put(it)}
+            val openRouter=JSONArray();attachedOpenRouterAttachments.forEach{openRouter.put(it.toJson())}
             obj.put("file_ids",ids).put("file_names",names).put("file_sizes",sizes).put("file_paths",paths).put("file_mimes",mimes)
+            obj.put("openrouter_attachments", openRouter)
             pendingImagePath?.let{obj.put("image_path",it)}
             pendingImageFileId?.let{obj.put("image_file_id",it)}
             pendingImageName?.let{obj.put("image_name",it)}
@@ -3724,6 +3732,12 @@ class MainActivity : ComponentActivity() {
                 for(i in 0 until arr.length()) arr.optString(i).takeIf{it.isNotBlank()}?.let(out::add)
             }
             obj.optString("image_path").takeIf{it.isNotBlank()}?.let(out::add)
+            obj.optJSONArray("openrouter_attachments")?.let { arr ->
+                for(i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.optString("path")?.takeIf { it.isNotBlank() }?.let(out::add)
+                    arr.optJSONObject(i)?.optString("text_path")?.takeIf { it.isNotBlank() }?.let(out::add)
+                }
+            }
         }catch(_:Exception){}
         return out.toList()
     }
@@ -3768,6 +3782,15 @@ class MainActivity : ComponentActivity() {
             while(attachedFileSizes.size<attachedFileIds.size)attachedFileSizes.add(0L)
             while(attachedFilePaths.size<attachedFileIds.size)attachedFilePaths.add("")
             while(attachedFileMimes.size<attachedFileIds.size)attachedFileMimes.add("")
+            attachedOpenRouterAttachments.clear()
+            o.optJSONArray("openrouter_attachments")?.let { a ->
+                for(i in 0 until a.length()) a.optJSONObject(i)?.let { item ->
+                    try {
+                        val attachment=OpenRouterLocalAttachment.fromJson(item)
+                        if (attachment.path.isNotBlank() && File(attachment.path).isFile) attachedOpenRouterAttachments.add(attachment)
+                    } catch (_:Exception) {}
+                }
+            }
             pendingImagePath=o.optString("image_path").takeIf{it.isNotBlank() && File(it).isFile}
             pendingImageFileId=o.optString("image_file_id").takeIf{it.isNotBlank() && it!="null"}
             pendingImageName=o.optString("image_name").takeIf{it.isNotBlank()}
@@ -4002,6 +4025,7 @@ class MainActivity : ComponentActivity() {
         attachedFileSizes.clear()
         attachedFilePaths.clear()
         attachedFileMimes.clear()
+        attachedOpenRouterAttachments.clear()
         pendingImagePath=null
         pendingImageFileId=null
         pendingImageName=null
