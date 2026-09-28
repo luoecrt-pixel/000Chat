@@ -178,6 +178,7 @@ class MainActivity : ComponentActivity() {
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
     private val cancelledUploads = ConcurrentHashMap.newKeySet<String>()
+    private val openRouterModelModalities = ConcurrentHashMap<String, Set<String>>()
     private val uploadCards = mutableMapOf<String, UploadCardViews>()
     private val pendingLocalUploadPaths = ConcurrentHashMap<String,String>()
     private val chat = mutableListOf<JSONObject>()
@@ -1163,6 +1164,52 @@ class MainActivity : ComponentActivity() {
         toolStates.clear(); renderToolActivity()
     }
 
+    private fun prepareOpenRouterComposerAttachments(): List<OpenRouterLocalAttachment> {
+        val out = mutableListOf<OpenRouterLocalAttachment>()
+        out += attachedOpenRouterAttachments.filter { File(it.path).isFile }
+        if (out.isEmpty()) {
+            for (i in attachedFilePaths.indices) {
+                val path = attachedFilePaths.getOrNull(i).orEmpty()
+                if (path.isBlank()) continue
+                val file = File(path)
+                if (!file.isFile) throw IOException("Локальная копия вложения недоступна")
+                out += OpenRouterAttachmentStore.classifyLocalFile(file, attachedFileNames.getOrNull(i).orEmpty().ifBlank { file.name }, attachedFileMimes.getOrNull(i).orEmpty())
+            }
+            pendingImagePath?.takeIf { File(it).isFile }?.let { path ->
+                out += OpenRouterAttachmentStore.classifyLocalFile(File(path), pendingImageName ?: File(path).name, pendingImageMime ?: "image/*")
+            }
+        }
+        if (out.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) throw IOException("Слишком много вложений за одно сообщение: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS)
+        return out.distinctBy { it.id }
+    }
+
+    private fun validateOpenRouterModalities(apiKey: String, model: String, attachments: List<OpenRouterLocalAttachment>) {
+        val needed = attachments.mapNotNull {
+            when (it.kind) { "image" -> "image"; "pdf" -> "file"; else -> null }
+        }.toSet()
+        if (needed.isEmpty()) return
+        val modalities = openRouterModelModalities[model] ?: run {
+            val req = Request.Builder().url("https://openrouter.ai/api/v1/models").addHeader("Authorization", "Bearer " + apiKey).get().build()
+            client.newCall(req).execute().use { response ->
+                if (!response.isSuccessful) return
+                val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data") ?: return
+                var found: Set<String>? = null
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    if (item.optString("id") == model) {
+                        val mods = item.optJSONObject("architecture")?.optJSONArray("input_modalities") ?: JSONArray()
+                        found = (0 until mods.length()).map { mods.optString(it) }.filter { it.isNotBlank() }.toSet()
+                        break
+                    }
+                }
+                if (found == null) return
+                openRouterModelModalities[model] = found
+                found
+            }
+        } ?: return
+        val missing = needed.firstOrNull { it !in modalities }
+        if (missing != null) throw IOException("Модель " + model + " не поддерживает вложения типа " + missing)
+    }
     private fun sendMessage(regenerate:Boolean) {
         val provider = prefs.getString("provider", "openai") ?: "openai"
         val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
@@ -1187,26 +1234,28 @@ class MainActivity : ComponentActivity() {
         val requestFileSizes = attachedFileSizes.toList()
         val requestFilePaths = attachedFilePaths.toList()
         val requestFileMimes = attachedFileMimes.toList()
+        val requestOpenRouterAttachments = if (provider == "openrouter") {
+            try { prepareOpenRouterComposerAttachments() } catch (e: Exception) {
+                status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл")
+                return
+            }
+        } else emptyList()
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
-        if (knownFileBytes > maxTotalInputFileBytes) {
-            status.text = "Суммарный размер файлов больше ${formatBytes(maxTotalInputFileBytes)} — уменьшите количество/размер вложений"
+        if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
+            status.text = "Суммарный размер файлов больше " + formatBytes(maxTotalInputFileBytes) + " — уменьшите количество/размер вложений"
             return
         }
         val requestImagePath = imagePath
         val requestImageFileId = imageFileId
-        if(!regenerate && text.isBlank() && requestImageFileId==null && requestFileIds.isEmpty()) return
+        if(!regenerate && text.isBlank() && requestImageFileId==null && requestFileIds.isEmpty() && requestOpenRouterAttachments.isEmpty()) return
         if(regenerate && text.isBlank()) return
-        if (provider == "openrouter" && (requestImageFileId != null || requestFileIds.isNotEmpty())) {
-            status.text = "OpenRouter: текущие OpenAI File API-вложения не переносятся автоматически. Отправьте текст без вложений."
-            return
-        }
 
         val modelDefault = if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
         val model=prefs.getString("model",modelDefault) ?: modelDefault
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
-        val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId!=null
+        val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId!=null || requestOpenRouterAttachments.isNotEmpty()
         val autoSelected = effortPref=="auto"
         val taskClass = classifyTask(text, hasAttachments)
         val baselineAutoEffort = autoEffortHeuristic(text,hasAttachments)
@@ -1247,6 +1296,7 @@ class MainActivity : ComponentActivity() {
             pendingImageName?.takeIf{it.isNotBlank()}?.let{put("image_name",it)}
             pendingImageMime?.takeIf{it.isNotBlank()}?.let{put("image_mime",it)}
             put("image_size",pendingImageSize.coerceAtLeast(0L))
+            if (provider == "openrouter" && requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
         }
 
         if(!regenerate) {
@@ -1270,7 +1320,7 @@ class MainActivity : ComponentActivity() {
             effectiveEffort = actualEffort,
             autoSelected = autoSelected,
             promptChars = text.length,
-            attachments = requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
+            attachments = if (provider == "openrouter") requestOpenRouterAttachments.size else requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
             backgroundEnabled = backgroundEnabled
         )
         setBusy(true)
@@ -1286,7 +1336,7 @@ class MainActivity : ComponentActivity() {
             "task_class" to taskClass,
             "auto_baseline" to baselineAutoEffort,
             "auto_effective" to effort,
-            "attachments" to requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
+            "attachments" to if (provider == "openrouter") requestOpenRouterAttachments.size else requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
             "prompt_chars" to text.length,
             "model" to model,
             "provider" to provider
