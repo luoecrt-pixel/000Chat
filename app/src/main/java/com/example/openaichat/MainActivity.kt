@@ -795,7 +795,7 @@ class MainActivity : ComponentActivity() {
             val dir = File(filesDir, "attachments")
             if (!dir.isDirectory) return
             val referenced = linkedSetOf<String>()
-            referenced.addAll(chatDb.listLocalFilePaths(""))
+            referenced.addAll(chatDb.listAllLocalFilePaths())
             referenced.addAll(listComposerLocalFilePaths(currentChatId()))
             val now = System.currentTimeMillis()
             dir.listFiles()?.forEach { file ->
