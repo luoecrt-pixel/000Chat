@@ -1215,7 +1215,8 @@ class MainActivity : ComponentActivity() {
         val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
         if(key.isBlank()){showSettings();return}
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {
-            preparePendingZipsThenSend(regenerate)
+            if (provider == "openrouter") preparePendingOpenRouterZipsThenSend(regenerate)
+            else preparePendingZipsThenSend(regenerate)
             return
         }
         if(pendingUploads>0){ status.text="Дождитесь загрузки вложений…"; return }
@@ -3364,6 +3365,45 @@ class MainActivity : ComponentActivity() {
         "xlt","xlw","xml","yaml","yml"
     )
 
+    private fun preparePendingOpenRouterZipsThenSend(regenerate: Boolean) {
+        if (preparingZipAttachments) return
+        val zipItems = pendingUploadUris.filter { it.second == "zip" }.toList()
+        if (zipItems.isEmpty()) return
+        val sourceChatId = currentChatId()
+        preparingZipAttachments = true
+        send.isEnabled = false
+        status.text = "Готовлю ZIP-вложение…"
+        executor.execute {
+            try {
+                val extracted = mutableListOf<OpenRouterLocalAttachment>()
+                zipItems.forEach { (rawUri, _) ->
+                    val uri = Uri.parse(rawUri)
+                    val zipName = OpenRouterAttachmentStore.queryName(this, uri) ?: "archive.zip"
+                    extracted += OpenRouterAttachmentStore.extractZip(this, uri, zipName) { message ->
+                        diagnostics.log("openrouter_zip_skip", mapOf("chat_id" to sourceChatId, "message" to message.take(300)))
+                    }
+                }
+                runOnUiThread {
+                    zipItems.forEach { pendingUploadUris.remove(it) }
+                    extracted.forEach { a ->
+                        if (attachedOpenRouterAttachments.none { it.sha256 == a.sha256 && it.name == a.name }) attachedOpenRouterAttachments.add(a)
+                    }
+                    preparingZipAttachments = false
+                    persistComposerStateNow()
+                    refreshAttachChips()
+                    status.text = "ZIP подготовлен · файлов: " + extracted.size
+                    sendMessage(regenerate)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    preparingZipAttachments = false
+                    refreshAttachChips()
+                    status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
+                }
+            }
+        }
+    }
+
     private fun preparePendingZipsThenSend(regenerate:Boolean){
         if(preparingZipAttachments)return
         val zipItems=pendingUploadUris.filter{it.second=="zip"}.toList()
@@ -4831,6 +4871,34 @@ class MainActivity : ComponentActivity() {
             row.addView(fileActionButton("Удалить"){pendingImagePath=null;pendingImageFileId=null;pendingImageName=null;pendingImageMime=null;pendingImageSize=0L;refreshAttachChips();persistComposerStateNow()})
             card.addView(row)
             attachRow.addView(card,LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
+        }
+        attachedOpenRouterAttachments.forEach { attachment ->
+            val card = createAttachmentCard()
+            card.addView(TextView(this).apply {
+                text = "📎 " + safeDisplayName(attachment.name)
+                textSize = 13.5f
+                setTextColor(Color.WHITE)
+                setTypeface(null, Typeface.BOLD)
+            })
+            card.addView(TextView(this).apply {
+                text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size)
+                textSize = 11.5f
+                setTextColor(Color.rgb(165,170,180))
+                setPadding(0,dp(3),0,dp(4))
+            })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            when (attachment.kind) {
+                "image" -> row.addView(fileActionButton("Просмотр") { showImagePreviewFromFile(attachment.path, attachment.name) })
+                "text" -> row.addView(fileActionButton("Просмотр") { showTextPreview(attachment.textPath ?: attachment.path, attachment.name) })
+                "pdf" -> row.addView(fileActionButton("Просмотр") { showPdfPreview(attachment.path, attachment.name) })
+            }
+            row.addView(fileActionButton("Удалить") {
+                attachedOpenRouterAttachments.removeAll { it.id == attachment.id }
+                refreshAttachChips()
+                persistComposerStateNow()
+            })
+            card.addView(row)
+            attachRow.addView(card, LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
         }
         attachedFileNames.forEachIndexed{i,name->
             val path=attachedFilePaths.getOrNull(i).orEmpty().takeIf{it.isNotBlank() && File(it).isFile}
