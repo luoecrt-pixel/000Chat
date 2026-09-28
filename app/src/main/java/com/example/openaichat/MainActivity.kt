@@ -4155,6 +4155,15 @@ class MainActivity : ComponentActivity() {
         while(attachedFileSizes.size<attachedFileIds.size)attachedFileSizes.add(0L)
         while(attachedFilePaths.size<attachedFileIds.size)attachedFilePaths.add("")
         while(attachedFileMimes.size<attachedFileIds.size)attachedFileMimes.add("")
+        attachedOpenRouterAttachments.clear()
+        message.optJSONArray("attachments")?.let { arr ->
+            for(i in 0 until arr.length()) arr.optJSONObject(i)?.let {
+                try {
+                    val a = OpenRouterLocalAttachment.fromJson(it)
+                    if (File(a.path).isFile) attachedOpenRouterAttachments.add(a)
+                } catch (_:Exception) {}
+            }
+        }
         message.optString("image_path").takeIf{it.isNotBlank() && File(it).isFile}?.let{pendingImagePath=it}
         message.optString("image_file_id").takeIf{it.isNotBlank() && it!="null"}?.let{pendingImageFileId=it}
         pendingImageName=message.optString("image_name").takeIf{it.isNotBlank()}
