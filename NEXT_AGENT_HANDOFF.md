@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `a1857bfacc56584ea6244fdfafc21ec22793227a` (PR #56 merge; #55 baseline was `16b712112e2710c8725de4203d75f23c51e15ad6`)
+- main code baseline: `f0612cf585adcba5f9ab05079f7c28cbe0513b1f` (main after disabling automatic Debug/Release triggers; PR #56 merge remains `a1857bfacc56584ea6244fdfafc21ec22793227a`)
 - versionName/code: `4.17.0 / 64`
 - DB: `v15`
 - compile/target SDK: `35`
