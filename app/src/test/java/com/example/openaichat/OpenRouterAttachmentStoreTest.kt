@@ -60,11 +60,11 @@ class OpenRouterAttachmentStoreTest {
 
     @Test
     fun unsafeZipPathDoesNotEscapeAttachmentName() {
-        val entryName = "../escape.txt"
-        val raw = entryName.replace('\\', '/')
-        val safe = raw.substringAfterLast('/').trim()
-        assertEquals("escape.txt", safe)
-        assertTrue("..".split('/').none { it == safe })
+        assertTrue(OpenRouterAttachmentStore.isUnsafeZipPath(".." + "/escape.txt"))
+        assertTrue(OpenRouterAttachmentStore.isUnsafeZipPath("a/" + "../escape.txt"))
+        assertTrue(OpenRouterAttachmentStore.isUnsafeZipPath("/absolute.txt"))
+        assertTrue(OpenRouterAttachmentStore.isUnsafeZipPath("C:/absolute.txt"))
+        assertTrue(!OpenRouterAttachmentStore.isUnsafeZipPath("nested/ok.txt"))
     }
     @Test
     fun pdfBlockUsesFileContentShape() {
