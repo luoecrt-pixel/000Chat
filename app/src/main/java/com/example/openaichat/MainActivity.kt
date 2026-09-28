@@ -3189,6 +3189,39 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
+        val provider = prefs.getString("provider", "openai") ?: "openai"
+
+        if (provider == "openrouter" && r != pickVectorStoreFile && r != pickExportTxt && r != pickSaveGenerated && r != pickVoice) {
+            val selectedUris = urisFromIntent(d)
+            if (selectedUris.isNotEmpty()) {
+                selectedUris.forEach { uri ->
+                    val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
+                    val ext = name.substringAfterLast(".", "").lowercase()
+                    if (ext == "zip") {
+                        rememberUploadUri(uri, "zip")
+                        refreshAttachChips()
+                    } else {
+                        beginUpload()
+                        executor.execute {
+                            try {
+                                val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name)
+                                runOnUiThread {
+                                    if (attachedOpenRouterAttachments.none { it.sha256 == local.sha256 && it.name == local.name }) attachedOpenRouterAttachments.add(local)
+                                    forgetUploadUri(uri, "file")
+                                    refreshAttachChips()
+                                    persistComposerStateNow()
+                                    status.text = "Вложение готово: " + local.name
+                                }
+                            } catch (e: Exception) {
+                                runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл") }
+                            } finally { endUpload() }
+                        }
+                    }
+                }
+                return
+            }
+        }
+
         if(r==pickImage){
             val uri=d.data ?: return
             val uploadChatId=currentChatId()
@@ -3302,6 +3335,13 @@ class MainActivity : ComponentActivity() {
                 finally{ endUpload(); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
             }
         }
+    }
+
+    private fun urisFromIntent(data: Intent): List<Uri> {
+        val out = mutableListOf<Uri>()
+        data.data?.let { out.add(it) }
+        data.clipData?.let { clip -> for (i in 0 until clip.itemCount) out.add(clip.getItemAt(i).uri) }
+        return out.distinct()
     }
 
     private fun launchActivityForResult(intent: Intent, requestCode: Int) {
