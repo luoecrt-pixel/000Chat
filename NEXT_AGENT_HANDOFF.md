@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-28 16:10 +03:00
+**Last updated:** 2026-09-28 21:00 +03:00
 **Следующий рабочий срез:** PR G — OpenRouter attachments — после #56; сохранить последовательность PR I → J → G → H.
 
 # START HERE — ОБЯЗАТЕЛЬНО
