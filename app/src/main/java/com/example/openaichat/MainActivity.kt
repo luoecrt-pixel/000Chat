@@ -180,6 +180,7 @@ class MainActivity : ComponentActivity() {
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
     private val cancelledUploads = ConcurrentHashMap.newKeySet<String>()
     private val openRouterModelModalities = ConcurrentHashMap<String, Set<String>>()
+    private val openRouterModelModalitiesRetryAfter = ConcurrentHashMap<String, Long>()
     private val uploadCards = mutableMapOf<String, UploadCardViews>()
     private val pendingLocalUploadPaths = ConcurrentHashMap<String,String>()
     private val chat = mutableListOf<JSONObject>()
@@ -1277,10 +1278,19 @@ class MainActivity : ComponentActivity() {
         }.toSet()
         if (needed.isEmpty()) return
         val modalities = openRouterModelModalities[model] ?: run {
+            val now = System.currentTimeMillis()
+            if (openRouterModelModalitiesRetryAfter[model]?.let { it > now } == true) return
             val req = Request.Builder().url("https://openrouter.ai/api/v1/models").addHeader("Authorization", "Bearer " + apiKey).get().build()
             client.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) return
-                val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data") ?: return
+                if (!response.isSuccessful) {
+                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                    return
+                }
+                val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data")
+                if (arr == null) {
+                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                    return
+                }
                 var found: Set<String>? = null
                 for (i in 0 until arr.length()) {
                     val item = arr.optJSONObject(i) ?: continue
@@ -1290,8 +1300,12 @@ class MainActivity : ComponentActivity() {
                         break
                     }
                 }
-                if (found == null) return
+                if (found == null) {
+                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                    return
+                }
                 openRouterModelModalities[model] = found
+                openRouterModelModalitiesRetryAfter.remove(model)
                 found
             }
         } ?: return
