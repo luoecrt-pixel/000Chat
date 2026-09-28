@@ -75,6 +75,73 @@ object OpenRouterAttachmentStore {
     fun classifyLocalFile(file: File, displayName: String = file.name, mime: String = mimeForFilename(displayName)): OpenRouterLocalAttachment =
         finalizeFile(file.parentFile ?: throw IOException("Нет каталога вложения"), file, sanitizeDisplayName(displayName), mime)
 
+    fun extractZipFile(context: Context, zipFile: File, zipName: String, report: (String) -> Unit = {}): List<OpenRouterLocalAttachment> {
+        zipFile.inputStream().use { source ->
+            return extractZipStream(context, source, zipName, report)
+        }
+    }
+
+    private fun extractZipStream(context: Context, source: InputStream, zipName: String, report: (String) -> Unit): List<OpenRouterLocalAttachment> {
+        val result = mutableListOf<OpenRouterLocalAttachment>()
+        var entries = 0
+        var total = 0L
+        ZipInputStream(source.buffered()).use { zin ->
+            var entry = zin.nextEntry
+            while (entry != null) {
+                entries++
+                if (entries > MAX_ZIP_ENTRIES) throw IOException("ZIP содержит больше " + MAX_ZIP_ENTRIES + " файлов")
+                val rawEntryPath = entry.name.replace('\\', '/')
+                val unsafeEntry = rawEntryPath.startsWith("/") || rawEntryPath.split('/').any { it == ".." } || Regex("^[A-Za-z]:/").containsMatchIn(rawEntryPath)
+                val entryName = rawEntryPath.substringAfterLast('/').trim()
+                if (unsafeEntry) {
+                    drainZipEntry(zin, entryName, report, "Небезопасный путь ZIP пропущен: " + entry.name) { n -> total += n }
+                    if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                } else if (!entry.isDirectory && entryName.isNotBlank()) {
+                    val ext = entryName.substringAfterLast('.', "").lowercase()
+                    val supported = ext in textExtensions || ext in imageExtensions || ext == "pdf"
+                    val nested = ext == "zip" || ext == "apk" || ext == "jar"
+                    if (supported) {
+                        val dir = File(context.filesDir, "attachments").apply { mkdirs() }
+                        val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
+                        var entryBytes = 0L
+                        local.outputStream().use { out ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = zin.read(buffer); if (n < 0) break
+                                entryBytes += n; total += n
+                                if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP-файл " + entryName + " превышает 25 МБ")
+                                if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                                out.write(buffer, 0, n)
+                            }
+                        }
+                        if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
+                        else result += finalizeFile(dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                    } else {
+                        drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n -> total += n }
+                        if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                    }
+                }
+                zin.closeEntry()
+                entry = zin.nextEntry
+            }
+        }
+        if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
+        report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
+        return result
+    }
+
+    private fun drainZipEntry(zin: ZipInputStream, entryName: String, report: (String) -> Unit, message: String, onBytes: (Long) -> Unit) {
+        val buffer = ByteArray(64 * 1024)
+        var entryBytes = 0L
+        while (true) {
+            val n = zin.read(buffer); if (n < 0) break
+            entryBytes += n
+            onBytes(n.toLong())
+            if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP entry превышает 25 МБ: " + entryName)
+        }
+        report(message)
+    }
+
     fun extractZip(context: Context, uri: Uri, zipName: String, report: (String) -> Unit = {}): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
         var entries = 0
