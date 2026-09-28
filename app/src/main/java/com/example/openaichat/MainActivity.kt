@@ -3299,7 +3299,18 @@ class MainActivity : ComponentActivity() {
         }
 
         if(r==pickImage){
-            val uri=d.data ?: return
+            val imageUris = urisFromIntent(d)
+            if (imageUris.isEmpty()) return
+            if (imageUris.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) {
+                status.text = "Слишком много изображений: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS
+                return
+            }
+            if (provider == "openrouter") return
+            if (imageUris.size > 1) {
+                status.text = "В режиме OpenAI текущий attachment path поддерживает одно изображение за раз. Для нескольких изображений выберите OpenRouter."
+                return
+            }
+            val uri = imageUris.first()
             val uploadChatId=currentChatId()
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
