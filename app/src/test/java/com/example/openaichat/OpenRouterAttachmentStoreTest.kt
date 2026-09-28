@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import java.io.File
 import java.nio.charset.Charset
+import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -45,7 +46,7 @@ class OpenRouterAttachmentStoreTest {
         val data = OpenRouterAttachmentStore.toDataUrl(a)
         assertTrue(data.startsWith("data:image/jpeg;base64,"))
         val encoded = data.substringAfter(",")
-        assertTrue(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT).contentEquals(original))
+        assertTrue(Base64.getDecoder().decode(encoded).contentEquals(original))
     }
 
     @Test
