@@ -983,9 +983,21 @@ class MainActivity : ComponentActivity() {
             "merge_pull_request" ->
                 "Модель хочет смержить PR #" + arguments.optInt("pull_number") +
                     " методом " + arguments.optString("merge_method") + ".\n\nРазрешить?"
-            "create_or_update_file" ->
-                "Модель хочет записать файл " + arguments.optString("path") +
-                    " в ветку " + arguments.optString("branch") + ".\n\nРазрешить?"
+            "create_or_update_file" -> {
+                val repo = arguments.optString("owner") + "/" + arguments.optString("repo")
+                val path = arguments.optString("path")
+                val branch = arguments.optString("branch")
+                val content = if (!arguments.isNull("content")) arguments.optString("content") else {
+                    try { String(Base64.decode(arguments.optString("content_base64"), Base64.DEFAULT), Charsets.UTF_8) } catch (_:Exception) { "" }
+                }
+                val preview = content.take(3000)
+                "Модель хочет записать файл в GitHub.\nРепозиторий: " + repo +
+                    "\nВетка: " + branch +
+                    "\nПуть: " + path +
+                    "\nРазмер: " + content.toByteArray(Charsets.UTF_8).size + " байт" +
+                    "\n\nPreview:\n" + preview + if (content.length > 3000) "\n… preview truncated …" else "" +
+                    "\n\nРазрешить?"
+            }
             "create_issue_comment" ->
                 "Модель хочет добавить комментарий к issue/PR #" + arguments.optInt("issue_number") + ".\n\nРазрешить?"
             "submit_pull_request_review" ->
