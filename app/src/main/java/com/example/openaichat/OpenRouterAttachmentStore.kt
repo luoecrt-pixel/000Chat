@@ -1,6 +1,10 @@
 package com.example.openaichat
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -24,17 +28,22 @@ data class OpenRouterLocalAttachment(
     val size: Long,
     val sha256: String,
     val textPath: String? = null,
-    val textEncoding: String? = null
+    val textEncoding: String? = null,
+    val wirePath: String? = null,
+    val wireMime: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("kind", kind).put("path", path).put("mime", mime).put("size", size).put("sha256", sha256).apply {
         textPath?.let { put("text_path", it) }
         textEncoding?.let { put("text_encoding", it) }
+        wirePath?.let { put("wire_path", it) }
+        wireMime?.let { put("wire_mime", it) }
     }
     companion object {
         fun fromJson(o: JSONObject) = OpenRouterLocalAttachment(
             o.optString("id"), o.optString("name", "attachment"), o.optString("kind", "unknown"),
             o.optString("path"), o.optString("mime", "application/octet-stream"), o.optLong("size", 0L),
-            o.optString("sha256"), o.optString("text_path").takeIf { it.isNotBlank() }, o.optString("text_encoding").takeIf { it.isNotBlank() }
+            o.optString("sha256"), o.optString("text_path").takeIf { it.isNotBlank() }, o.optString("text_encoding").takeIf { it.isNotBlank() },
+            o.optString("wire_path").takeIf { it.isNotBlank() }, o.optString("wire_mime").takeIf { it.isNotBlank() }
         )
     }
 }
@@ -75,8 +84,20 @@ object OpenRouterAttachmentStore {
             while (entry != null) {
                 entries++
                 if (entries > MAX_ZIP_ENTRIES) throw IOException("ZIP содержит больше " + MAX_ZIP_ENTRIES + " файлов")
-                val entryName = entry.name.substringAfterLast('/').trim()
-                if (!entry.isDirectory && entryName.isNotBlank()) {
+                val rawEntryPath = entry.name.replace('\\', '/')
+                val unsafeEntry = rawEntryPath.startsWith("/") || rawEntryPath.split('/').any { it == ".." } || Regex("^[A-Za-z]:/").containsMatchIn(rawEntryPath)
+                val entryName = rawEntryPath.substringAfterLast('/').trim()
+                if (unsafeEntry) {
+                    val buffer = ByteArray(64 * 1024)
+                    var entryBytes = 0L
+                    while (true) {
+                        val n = zin.read(buffer); if (n < 0) break
+                        entryBytes += n; total += n
+                        if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP entry превышает 25 МБ")
+                        if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                    }
+                    report("Небезопасный путь ZIP пропущен: " + entry.name)
+                } else if (!entry.isDirectory && entryName.isNotBlank()) {
                     val ext = entryName.substringAfterLast('.', "").lowercase()
                     val supported = ext in textExtensions || ext in imageExtensions || ext == "pdf"
                     val nested = ext == "zip" || ext == "apk" || ext == "jar"
@@ -121,8 +142,11 @@ object OpenRouterAttachmentStore {
         "pdf" -> JSONObject().put("type", "file").put("file", JSONObject().put("filename", a.name).put("file_data", toDataUrl(a)))
         else -> throw IOException("Вложение " + a.name + " нельзя отправить напрямую")
     }
-    fun toDataUrl(a: OpenRouterLocalAttachment): String =
-        "data:" + a.mime + ";base64," + Base64.encodeToString(File(a.path).readBytes(), Base64.NO_WRAP)
+    fun toDataUrl(a: OpenRouterLocalAttachment): String {
+        val wireFile = File(a.wirePath ?: a.path)
+        val wireMime = a.wireMime ?: a.mime
+        return "data:" + wireMime + ";base64," + Base64.encodeToString(wireFile.readBytes(), Base64.NO_WRAP)
+    }
 
     fun textContent(a: OpenRouterLocalAttachment): String = File(a.textPath ?: a.path).readText(Charsets.UTF_8)
 
@@ -136,7 +160,14 @@ object OpenRouterAttachmentStore {
             val textFile = File(dir, "txt_" + UUID.randomUUID() + ".utf8")
             textFile.writeText(decoded.first, Charsets.UTF_8)
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, decoded.second)
-        } else OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, when (kind) { "pdf" -> "application/pdf"; "image" -> mimeForFilename(name).takeIf { it.startsWith("image/") } ?: mime; else -> mime }, size, sha)
+        } else if (kind == "image") {
+            val normalized = normalizeImageOrientation(file, dir, name)
+            OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath,
+                if (normalized != null) "image/png" else (mimeForFilename(name).takeIf { it.startsWith("image/") } ?: mime),
+                size, sha, null, null, normalized?.absolutePath, if (normalized != null) "image/png" else null)
+        } else {
+            OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
+        }
     }
 
     private fun classifyKind(file: File, name: String): String {
@@ -152,6 +183,45 @@ object OpenRouterAttachmentStore {
         if (ext in imageExtensions) return "image"
         if (ext == "pdf") return "pdf"
         return "unsupported"
+    }
+
+    private fun normalizeImageOrientation(file: File, dir: File, name: String): File? {
+        val orientation = try {
+            ExifInterface(file.absolutePath).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        } catch (_: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == ExifInterface.ORIENTATION_UNDEFINED) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("Не удалось декодировать изображение '$name' для коррекции EXIF-ориентации")
+        val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
+        if (pixels > 80_000_000L) throw IOException("Изображение '$name' имеет слишком большое разрешение для безопасной коррекции EXIF ($pixels пикселей)")
+        return try {
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                ?: throw IOException("Не удалось декодировать изображение '$name'")
+            val matrix = Matrix()
+            when (orientation) {
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
+                ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.setRotate(90f); matrix.postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+                ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.setRotate(-90f); matrix.postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(-90f)
+                else -> {}
+            }
+            val oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (oriented !== bitmap) bitmap.recycle()
+            val out = File(dir, "oriented_" + UUID.randomUUID() + ".png")
+            out.outputStream().use { stream ->
+                if (!oriented.compress(Bitmap.CompressFormat.PNG, 100, stream)) throw IOException("Не удалось сохранить ориентированное изображение '$name'")
+            }
+            oriented.recycle()
+            out
+        } catch (e: OutOfMemoryError) {
+            throw IOException("Недостаточно памяти для безопасной коррекции EXIF-ориентации '$name'", e)
+        }
     }
 
     private fun decodeText(file: File, name: String): Pair<String,String> {
