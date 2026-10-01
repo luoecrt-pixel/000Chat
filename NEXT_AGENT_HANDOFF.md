@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-01 12:18 +03:00
-**Следующий рабочий срез:** PR H — human-facing documentation.
+**Следующий рабочий срез:** PR H — human-facing documentation — pending CI verification.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
