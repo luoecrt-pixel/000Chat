@@ -108,6 +108,8 @@ class MainActivity : ComponentActivity() {
     private val openRouterClient by lazy { OpenRouterChatClient() }
     private val openRouterMaxRounds = 24
     private val openRouterActiveCall = AtomicReference<Call?>()
+    private val openRouterCallOwnerToken = AtomicReference<String?>()
+    private val openRouterCallLock = Any()
     private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
@@ -251,7 +253,7 @@ class MainActivity : ComponentActivity() {
         val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
         activeResumeCalls.remove(currentChatId())?.cancel()
-        openRouterActiveCall.getAndSet(null)?.cancel()
+        cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
@@ -278,7 +280,7 @@ class MainActivity : ComponentActivity() {
         currentCall?.cancel()
         draftSaveRunnable?.let(mainHandler::removeCallbacks)
         executor.shutdownNow()
-        try { openRouterActiveCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
+        try { cancelOpenRouterRequest() } catch (_: Exception) {}
         try { openRouterModelPreflightCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
         try { openRouterClient.close() } catch (_: Exception) {}
         try { resumableResponseClient.close() } catch (_: Exception) {}
@@ -289,6 +291,46 @@ class MainActivity : ComponentActivity() {
     private fun isRequestCurrent(chatId: String, generation: Long): Boolean =
         currentChatId() == chatId &&
             activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
+
+
+    private fun beginOpenRouterRequestOwnership(requestId: String) {
+        synchronized(openRouterCallLock) {
+            openRouterCallOwnerToken.set(requestId)
+            openRouterActiveCall.getAndSet(null)?.cancel()
+        }
+    }
+
+    private fun cancelOpenRouterRequest() {
+        synchronized(openRouterCallLock) {
+            openRouterCallOwnerToken.set(null)
+            openRouterActiveCall.getAndSet(null)?.cancel()
+        }
+    }
+
+    private fun registerOpenRouterCallIfOwned(
+        requestId: String,
+        chatId: String,
+        generation: Long,
+        call: Call
+    ): Boolean {
+        synchronized(openRouterCallLock) {
+            if (openRouterCallOwnerToken.get() != requestId || !isRequestCurrent(chatId, generation)) {
+                call.cancel()
+                return false
+            }
+            openRouterActiveCall.getAndSet(call)?.cancel()
+            return true
+        }
+    }
+
+    private fun clearOpenRouterActiveCallIfOwned(requestId: String): Boolean {
+        synchronized(openRouterCallLock) {
+            if (openRouterCallOwnerToken.get() != requestId) return false
+            openRouterCallOwnerToken.set(null)
+            openRouterActiveCall.getAndSet(null)?.cancel()
+            return true
+        }
+    }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun postAssistantTextUpdate(
@@ -919,6 +961,7 @@ class MainActivity : ComponentActivity() {
         maxOut: Int,
         messagesSnapshot: JSONArray
     ) {
+        beginOpenRouterRequestOwnership(requestId)
         val assistantItemId = addBubble("Astra", "", false)
         activeAssistantItemId = assistantItemId
         executor.execute {
@@ -985,9 +1028,9 @@ class MainActivity : ComponentActivity() {
                             toolResult
                         }
                     },
-                    onCallCreated = { call -> openRouterActiveCall.set(call) }
+                    onCallCreated = { call -> registerOpenRouterCallIfOwned(requestId, chatId, generation, call) }
                 )
-                openRouterActiveCall.set(null)
+                clearOpenRouterActiveCallIfOwned(requestId)
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
@@ -1038,7 +1081,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (e: Exception) {
-                openRouterActiveCall.set(null)
+                clearOpenRouterActiveCallIfOwned(requestId)
                 activeResponsePersistence.clearActiveResponse(chatId, requestId)
                 val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
                 val errorMessage = (e.message?.take(800) ?: "неизвестная ошибка") + openRouterAttachmentErrorSuffix(chatId)
@@ -1171,7 +1214,7 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         currentCall?.cancel()
-        openRouterActiveCall.getAndSet(null)?.cancel()
+        cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
         persistCurrentChat()
         val id = newChatId()
@@ -1196,7 +1239,7 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         currentCall?.cancel()
-        openRouterActiveCall.getAndSet(null)?.cancel()
+        cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
         persistCurrentChat()
         prefs.edit().putString("current_chat",id).apply()
@@ -1271,7 +1314,7 @@ class MainActivity : ComponentActivity() {
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
-        openRouterActiveCall.getAndSet(null)?.cancel()
+        cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
         cancelPendingGitHubConfirmation()
         activeResumeCalls.remove(chatId)?.cancel()
@@ -1434,7 +1477,7 @@ class MainActivity : ComponentActivity() {
     private fun sendMessage(regenerate:Boolean) {
         val provider = prefs.getString("provider", "openai") ?: "openai"
         if (provider == "openrouter") {
-            openRouterActiveCall.getAndSet(null)?.cancel()
+            cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
         }
         val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
