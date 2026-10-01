@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private val openRouterClient by lazy { OpenRouterChatClient() }
     private val openRouterMaxRounds = 24
     private val openRouterActiveCall = AtomicReference<Call?>()
+    private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
     private val githubToolExecutor by lazy {
@@ -167,7 +168,7 @@ class MainActivity : ComponentActivity() {
         get() = activeResponseState.state.assistantItemId
         set(value) = activeResponseState.setAssistantItemId(value)
     private var activeRequestRegenerate = false
-    private var activityVisible = false
+    @Volatile private var activityVisible = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var draftSaveRunnable: Runnable? = null
     private var restoringComposer = false
@@ -251,6 +252,7 @@ class MainActivity : ComponentActivity() {
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
         activeResumeCalls.remove(currentChatId())?.cancel()
         openRouterActiveCall.getAndSet(null)?.cancel()
+        openRouterModelPreflightCall.getAndSet(null)?.cancel()
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
         val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
@@ -277,6 +279,7 @@ class MainActivity : ComponentActivity() {
         draftSaveRunnable?.let(mainHandler::removeCallbacks)
         executor.shutdownNow()
         try { openRouterActiveCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
+        try { openRouterModelPreflightCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
         try { openRouterClient.close() } catch (_: Exception) {}
         try { resumableResponseClient.close() } catch (_: Exception) {}
         try { chatDb.close() } catch (_: Exception) {}
@@ -920,6 +923,10 @@ class MainActivity : ComponentActivity() {
         activeAssistantItemId = assistantItemId
         executor.execute {
             try {
+                if (!isRequestCurrent(chatId, generation)) {
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
+                    return@execute
+                }
                 activeResponsePersistence.updateActiveResponse(
                     chatId,
                     status = "in_progress",
@@ -928,7 +935,20 @@ class MainActivity : ComponentActivity() {
                 val toolTrace = JSONArray()
                 val localArtifacts = mutableListOf<JSONObject>()
                 val githubEnabled = prefs.getBoolean("github_tools", false)
-                validateOpenRouterModalities(secure.getOpenRouterApiKey(), model, resolveOpenRouterAttachmentsForChat(chatId))
+                if (!validateOpenRouterModalities(
+                        secure.getOpenRouterApiKey(),
+                        model,
+                        resolveOpenRouterAttachmentsForChat(chatId),
+                        chatId,
+                        generation
+                    )) {
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
+                    return@execute
+                }
+                if (!isRequestCurrent(chatId, generation)) {
+                    activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                    return@execute
+                }
                 val toolCatalog = JSONArray()
                 if (githubEnabled) {
                     val githubTools = GitHubToolCatalog.tools()
@@ -1150,6 +1170,8 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         currentCall?.cancel()
+        openRouterActiveCall.getAndSet(null)?.cancel()
+        openRouterModelPreflightCall.getAndSet(null)?.cancel()
         persistCurrentChat()
         val id = newChatId()
         prefs.edit().putString("current_chat",id).apply()
@@ -1173,6 +1195,8 @@ class MainActivity : ComponentActivity() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         currentCall?.cancel()
+        openRouterActiveCall.getAndSet(null)?.cancel()
+        openRouterModelPreflightCall.getAndSet(null)?.cancel()
         persistCurrentChat()
         prefs.edit().putString("current_chat",id).apply()
         restoreCurrentChat()
@@ -1247,6 +1271,7 @@ class MainActivity : ComponentActivity() {
         val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
         openRouterActiveCall.getAndSet(null)?.cancel()
+        openRouterModelPreflightCall.getAndSet(null)?.cancel()
         cancelPendingGitHubConfirmation()
         activeResumeCalls.remove(chatId)?.cancel()
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
@@ -1311,45 +1336,99 @@ class MainActivity : ComponentActivity() {
         return out.distinctBy { it.id }
     }
 
-    private fun validateOpenRouterModalities(apiKey: String, model: String, attachments: List<OpenRouterLocalAttachment>) {
+    private fun saveOpenRouterAttachmentsToComposer(
+        chatId: String,
+        attachments: List<OpenRouterLocalAttachment>,
+        completedPending: List<Pair<String, String>> = emptyList()
+    ) {
+        if (chatId.isBlank()) return
+        try {
+            val key = composerPrefsKey(chatId)
+            val o = try { JSONObject(prefs.getString(key, null).orEmpty()) } catch (_: Exception) { JSONObject() }
+            val stored = o.optJSONArray("openrouter_attachments") ?: JSONArray()
+            val existing = mutableSetOf<String>()
+            for (i in 0 until stored.length()) {
+                val item = stored.optJSONObject(i) ?: continue
+                existing += item.optString("sha256") + "|" + item.optString("name")
+            }
+            attachments.forEach { attachment ->
+                val keyValue = attachment.sha256 + "|" + attachment.name
+                if (existing.add(keyValue)) stored.put(attachment.toJson())
+            }
+            val completed = completedPending.toSet()
+            val pending = JSONArray()
+            o.optJSONArray("pending_uploads")?.let { array ->
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val pair = item.optString("uri") to item.optString("kind")
+                    if (pair !in completed) pending.put(item)
+                }
+            }
+            o.put("openrouter_attachments", stored).put("pending_uploads", pending).put("saved_at", System.currentTimeMillis())
+            prefs.edit().putString(key, o.toString()).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun deleteOpenRouterAttachmentFiles(attachments: List<OpenRouterLocalAttachment>) {
+        attachments.flatMap { listOfNotNull(it.path, it.textPath, it.wirePath) }.distinct().forEach { path ->
+            try { File(path).delete() } catch (_: Exception) {}
+        }
+    }
+    private fun validateOpenRouterModalities(
+        apiKey: String,
+        model: String,
+        attachments: List<OpenRouterLocalAttachment>,
+        chatId: String? = null,
+        generation: Long? = null
+    ): Boolean {
+        fun requestStillCurrent(): Boolean = chatId == null || generation == null || isRequestCurrent(chatId, generation)
+        if (!requestStillCurrent()) return false
         val needed = attachments.mapNotNull {
             when (it.kind) { "image" -> "image"; "pdf" -> "file"; else -> null }
         }.toSet()
-        if (needed.isEmpty()) return
+        if (needed.isEmpty()) return true
         val modalities = openRouterModelModalities[model] ?: run {
             val now = System.currentTimeMillis()
-            if (openRouterModelModalitiesRetryAfter[model]?.let { it > now } == true) return
+            if (openRouterModelModalitiesRetryAfter[model]?.let { it > now } == true) return true
             val req = Request.Builder().url("https://openrouter.ai/api/v1/models").addHeader("Authorization", "Bearer " + apiKey).get().build()
-            client.newCall(req).execute().use { response ->
-                if (!response.isSuccessful) {
-                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
-                    return
-                }
-                val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data")
-                if (arr == null) {
-                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
-                    return
-                }
-                var found: Set<String>? = null
-                for (i in 0 until arr.length()) {
-                    val item = arr.optJSONObject(i) ?: continue
-                    if (item.optString("id") == model) {
-                        val mods = item.optJSONObject("architecture")?.optJSONArray("input_modalities") ?: JSONArray()
-                        found = (0 until mods.length()).map { mods.optString(it) }.filter { it.isNotBlank() }.toSet()
-                        break
+            val call = client.newCall(req)
+            openRouterModelPreflightCall.set(call)
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                        return true
                     }
+                    val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data")
+                    if (arr == null) {
+                        openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                        return true
+                    }
+                    var found: Set<String>? = null
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        if (item.optString("id") == model) {
+                            val mods = item.optJSONObject("architecture")?.optJSONArray("input_modalities") ?: JSONArray()
+                            found = (0 until mods.length()).map { mods.optString(it) }.filter { it.isNotBlank() }.toSet()
+                            break
+                        }
+                    }
+                    if (found == null) {
+                        openRouterModelModalitiesRetryAfter[model] = now + 120_000L
+                        return true
+                    }
+                    openRouterModelModalities[model] = found
+                    openRouterModelModalitiesRetryAfter.remove(model)
+                    found
                 }
-                if (found == null) {
-                    openRouterModelModalitiesRetryAfter[model] = now + 120_000L
-                    return
-                }
-                openRouterModelModalities[model] = found
-                openRouterModelModalitiesRetryAfter.remove(model)
-                found
+            } finally {
+                openRouterModelPreflightCall.compareAndSet(call, null)
             }
-        } ?: return
+        } ?: return true
+        if (!requestStillCurrent()) return false
         val missing = needed.firstOrNull { it !in modalities }
         if (missing != null) throw IOException("Модель " + model + " не поддерживает вложения типа " + missing)
+        return true
     }
     private fun sendMessage(regenerate:Boolean) {
         val provider = prefs.getString("provider", "openai") ?: "openai"
@@ -1363,6 +1442,7 @@ class MainActivity : ComponentActivity() {
         if(pendingUploads>0){ status.text="Дождитесь загрузки вложений…"; return }
         if(preparingZipAttachments){ status.text="Готовлю ZIP-вложения…"; return }
         val requestChatId = currentChatId()
+        if (provider == "openrouter") openRouterModelPreflightCall.getAndSet(null)?.cancel()
         val requestGeneration = activeResponseState.nextGeneration()
         val startedAt = SystemClock.elapsedRealtime()
 
@@ -3338,7 +3418,8 @@ class MainActivity : ComponentActivity() {
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
-                    val ext = name.substringAfterLast(".", "").lowercase()
+                    val uploadChatId = currentChatId()
+                    val uploadGeneration = activeResponseState.state.generation
                     beginUpload()
                     executor.execute {
                         try {
@@ -3348,24 +3429,59 @@ class MainActivity : ComponentActivity() {
                                     diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
                                 }
                             } else listOf(local)
-                            runOnUiThread {
-                                prepared.forEach { item ->
-                                    if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
+                            val target = OpenRouterBackgroundOwnershipPolicy.decide(
+                                uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
+                            )
+                            when (target) {
+                                OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> runOnUiThread {
+                                    val rechecked = OpenRouterBackgroundOwnershipPolicy.decide(
+                                        uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
+                                    )
+                                    if (rechecked == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                                        prepared.forEach { item ->
+                                            if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
+                                        }
+                                        if (local.kind == "zip") File(local.path).delete()
+                                        refreshAttachChips()
+                                        persistComposerStateNow()
+                                        status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
+                                    } else if (rechecked == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
+                                        saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
+                                        if (local.kind == "zip") File(local.path).delete()
+                                    } else {
+                                        deleteOpenRouterAttachmentFiles(prepared)
+                                        if (local.kind == "zip") File(local.path).delete()
+                                    }
                                 }
-                                File(local.path).delete()
-                                refreshAttachChips()
-                                persistComposerStateNow()
-                                status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
+                                OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
+                                    saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
+                                    if (local.kind == "zip") File(local.path).delete()
+                                }
+                                OpenRouterAttachmentCompletionTarget.DISCARD -> {
+                                    deleteOpenRouterAttachmentFiles(prepared)
+                                    if (local.kind == "zip") File(local.path).delete()
+                                }
                             }
                         } catch (e: Exception) {
-                            runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл") }
+                            if (OpenRouterBackgroundOwnershipPolicy.decide(
+                                    uploadChatId,
+                                    currentChatId(),
+                                    uploadGeneration,
+                                    activeResponseState.state.generation,
+                                    activityVisible,
+                                    false
+                                ) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER
+                            ) {
+                                runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось обработать файл") }
+                            } else {
+                                diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
+                            }
                         } finally { endUpload() }
                     }
                 }
                 return
             }
         }
-
         if(r==pickImage){
             val imageUris = urisFromIntent(d)
             if (imageUris.isEmpty()) return
@@ -3524,6 +3640,7 @@ class MainActivity : ComponentActivity() {
         val zipItems = pendingUploadUris.filter { it.second == "zip" }.toList()
         if (zipItems.isEmpty()) return
         val sourceChatId = currentChatId()
+        val sourceGeneration = activeResponseState.state.generation
         preparingZipAttachments = true
         send.isEnabled = false
         status.text = "Готовлю ZIP-вложение…"
@@ -3537,27 +3654,69 @@ class MainActivity : ComponentActivity() {
                         diagnostics.log("openrouter_zip_skip", mapOf("chat_id" to sourceChatId, "message" to message.take(300)))
                     }
                 }
+                val initialTarget = OpenRouterBackgroundOwnershipPolicy.decide(
+                    sourceChatId = sourceChatId,
+                    currentChatId = currentChatId(),
+                    sourceGeneration = sourceGeneration,
+                    currentGeneration = activeResponseState.state.generation,
+                    activityVisible = activityVisible,
+                    cancelled = false
+                )
+                if (initialTarget != OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                    if (initialTarget == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
+                        saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
+                    } else deleteOpenRouterAttachmentFiles(extracted)
+                    if (activityVisible) runOnUiThread { preparingZipAttachments = false }
+                    return@execute
+                }
                 runOnUiThread {
-                    zipItems.forEach { pendingUploadUris.remove(it) }
-                    extracted.forEach { a ->
-                        if (attachedOpenRouterAttachments.none { it.sha256 == a.sha256 && it.name == a.name }) attachedOpenRouterAttachments.add(a)
+                    val target = OpenRouterBackgroundOwnershipPolicy.decide(
+                        sourceChatId, currentChatId(), sourceGeneration, activeResponseState.state.generation, activityVisible, false
+                    )
+                    when (target) {
+                        OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> {
+                            zipItems.forEach { pendingUploadUris.remove(it) }
+                            extracted.forEach { a ->
+                                if (attachedOpenRouterAttachments.none { it.sha256 == a.sha256 && it.name == a.name }) attachedOpenRouterAttachments.add(a)
+                            }
+                            preparingZipAttachments = false
+                            persistComposerStateNow()
+                            refreshAttachChips()
+                            status.text = "ZIP подготовлен · файлов: " + extracted.size
+                            sendMessage(regenerate)
+                        }
+                        OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
+                            saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
+                            preparingZipAttachments = false
+                            diagnostics.log("openrouter_zip_saved_source_chat", mapOf("chat_id" to sourceChatId, "generation" to sourceGeneration))
+                        }
+                        OpenRouterAttachmentCompletionTarget.DISCARD -> {
+                            deleteOpenRouterAttachmentFiles(extracted)
+                            preparingZipAttachments = false
+                        }
                     }
-                    preparingZipAttachments = false
-                    persistComposerStateNow()
-                    refreshAttachChips()
-                    status.text = "ZIP подготовлен · файлов: " + extracted.size
-                    sendMessage(regenerate)
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    preparingZipAttachments = false
-                    refreshAttachChips()
-                    status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
+                val target = OpenRouterBackgroundOwnershipPolicy.decide(
+                    sourceChatId,
+                    currentChatId(),
+                    sourceGeneration,
+                    activeResponseState.state.generation,
+                    activityVisible,
+                    false
+                )
+                if (target == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                    runOnUiThread {
+                        preparingZipAttachments = false
+                        refreshAttachChips()
+                        status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
+                    }
+                } else {
+                    diagnostics.log("openrouter_zip_prepare_stale_failure", mapOf("chat_id" to sourceChatId, "error" to (e.message ?: e.toString()).take(300)))
                 }
             }
         }
     }
-
     private fun preparePendingZipsThenSend(regenerate:Boolean){
         if(preparingZipAttachments)return
         val zipItems=pendingUploadUris.filter{it.second=="zip"}.toList()
