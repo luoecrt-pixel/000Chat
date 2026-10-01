@@ -108,16 +108,16 @@ class MainActivityLifecycleTest {
             }.start()
         }
 
-        var pendingSeen = false
+        var dialogSeen = false
         repeat(100) {
             scenario.onActivity { activity ->
                 @Suppress("UNCHECKED_CAST")
-                val futureRef = privateField(activity, "pendingGitHubConfirmation") as AtomicReference<CompletableFuture<Boolean>?>
-                if (futureRef.get() != null) pendingSeen = true
+                val dialogRef = privateField(activity, "pendingGitHubConfirmationDialog") as AtomicReference<android.app.AlertDialog?>
+                dialogSeen = dialogRef.get()?.isShowing == true
             }
-            if (!pendingSeen) SystemClock.sleep(10L)
+            if (!dialogSeen) SystemClock.sleep(10L)
         }
-        assertTrue("GitHub confirmation was not opened", pendingSeen)
+        assertTrue("GitHub confirmation dialog was not shown", dialogSeen)
 
         scenario.onActivity { activity ->
             invoke(activity, "stopCurrentResponse")
