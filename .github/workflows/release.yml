@@ -1,6 +1,9 @@
 name: Build Android Release
 
 on:
+  push:
+    branches:
+      - '**'
   workflow_dispatch:
 
 concurrency:
