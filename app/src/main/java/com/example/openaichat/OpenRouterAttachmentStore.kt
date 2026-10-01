@@ -7,7 +7,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.util.Base64
+import java.util.Base64
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -216,7 +216,7 @@ object OpenRouterAttachmentStore {
     fun toDataUrl(a: OpenRouterLocalAttachment): String {
         val wireFile = File(a.wirePath ?: a.path)
         val wireMime = a.wireMime ?: a.mime
-        return "data:" + wireMime + ";base64," + Base64.encodeToString(wireFile.readBytes(), Base64.NO_WRAP)
+        return "data:" + wireMime + ";base64," + Base64.getEncoder().encodeToString(wireFile.readBytes())
     }
 
     fun textContent(a: OpenRouterLocalAttachment): String = File(a.textPath ?: a.path).readText(Charsets.UTF_8)
