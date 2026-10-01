@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}-${{ contains(github.event.head_commit.message, '[ci]') }}
   cancel-in-progress: true
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    if: vars.CI_AUTO_RUN == 'true' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || vars.CI_AUTO_RUN == 'true' || contains(github.event.head_commit.message, '[ci]')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
