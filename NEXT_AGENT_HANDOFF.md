@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 09:55 +03:00
-**Следующий рабочий срез:** Thread-safety audit — после PR G; затем PR H — human-facing documentation.
+**Last updated:** 2026-10-01 10:52 +03:00
+**Следующий рабочий срез:** PR #60 — GitHub-confirmation rotation proof.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -24,7 +24,7 @@
 **Надёжность:** основная lifecycle-модель:
 `generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
 
-**Persistence:** DB schema v15; важные поля:
+**Persistence:** DB schema v16; важные поля:
 `active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
 Устаревший request не должен финализировать persisted state.
 
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `593009176082f32881d1f310e07bf54a14aaa4b6` (PR #57 merged into main; cleanup commit immediately follows to restore manual-only CI triggers)
+- main code baseline: `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0` (main after PR #58 handoff/docs snapshot; current code baseline for #59)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -77,6 +77,7 @@
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 - [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 - [robolectric] **#57:** миграция ChatDatabase с v13/v14 до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки существующей истории; PR-head Debug `36826110992` прошёл эти lifecycle tests, а Release `36826110999` также завершился success.
+- [instrumentation] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; the Android ActivityScenario regression exercises Stop against both the pending confirmation and `openRouterActiveCall`. New PR Actions could not be dispatched because the repository workflows are manual-only and the connector exposes no workflow-dispatch operation; this proof is therefore source-backed plus instrumentation test code until a manual run is performed.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -102,13 +103,21 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Thread-safety audit — **следующий**
-После PR G пройти новые и существующие фоновые операции attachments, ZIP-распаковки и проверки model capabilities.
-Первый шаг: составить таблицу ownership для новых background операций и выбрать один доказуемый violation; не добавлять массовую синхронизацию.
+### 1. PR #60 — GitHub-confirmation rotation proof — **следующий**
+Prove that recreating `MainActivity` while confirmation is open cannot leave `decision.get()` waiting.
+Первый шаг: add one ActivityScenario rotation/recreate regression that requires the confirmation worker to finish `false` and the dialog to be gone.
 
-### 2. PR H — документация
-Обновить human-facing README про OpenRouter/Claude, attachments, local artifacts и ручной CI.
-Первый шаг: сделать только документационный snapshot после закрытия thread-safety audit.
+### 2. PR #61 — PR G background ownership
+Audit copy/unzip/model-capability preflight against `chatId + generation`, including destroy/navigation during the operation.
+Первый шаг: capture immutable ownership at the async boundary, route stale completion to persisted source-chat state or discard, and add instrumentation for navigation/destroy mid-operation.
+
+### 3. PR #62 — OpenRouter tool-loop cancellation
+Make a new message invalidate and cancel the old OpenRouter tool loop with the same request-ownership discipline as OpenAI.
+Первый шаг: add an explicit cancellation gate around every OpenRouter round/tool boundary and an instrumentation/runtime regression for a new message during an active loop.
+
+### 4. PR #62 final report
+Close the audit with a checked-in `THREAD_SAFETY_AUDIT_REPORT.md`, include the four claims, exact PR/test evidence, unresolved limitations, and update the next slice to PR H documentation.
+Первый шаг: write the report from the merged PRs rather than from planned changes.
 
 ## Репозиторий / branches
 
@@ -164,11 +173,12 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#53:** merged `1eef3da06291c4ed8dcb7b77e810563f968247b3`; PR-head Release `#188` — success; Debug `#366` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation.
-- **#54:** merged `d262ea8e14554527c0bdaf9eef8b56da76fdb6af`; PR-head Release `#191` — success; Debug `#369` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Tool traces are now persisted in assistant messages and restored into OpenRouter history.
-- **#55:** merged `16b712112e2710c8725de4203d75f23c51e15ad6`; PR-head Release `#196` — success; Debug `#374` — success; post-merge Debug `#376` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter caching uses explicit system breakpoint + top-level automatic breakpoint, `session_id` sticky routing, a 20-minute whole-cycle budget, and a 200000 cumulative-token soft cap.
-- **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter cache breakpoint now requests `ttl: "1h"`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input. No provider/model-side `ttl: auto` exists.
+- **#55:** merged `16b712112e2710c8725de4203d75f23c51e15ad6`; PR-head Release `#196` — success; Debug `#374` — success; post-merge Debug `#376` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter caching uses explicit system breakpoint + top-level automatic breakpoint, `session_id`, a 20-minute whole-cycle budget, and a 200000 cumulative-token soft cap.
+- **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success. Anthropic OpenRouter cache breakpoint requests `ttl: `1h`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input.
 - **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; PR-head Release `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G added local OpenRouter/Claude attachments, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
+- **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
+- **#59:** open; head `baef192e2b101165d25fe679c38e70a3b8e61625`. Thread-safety item 1: explicit pending GitHub confirmation ownership; Stop/onStop/onDestroy cancel it; instrumentation regression covers Stop + OpenRouter Call cancellation. Actions are manual-only and this connector cannot dispatch them.
+
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
