@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 12:18 +03:00
+**Last updated:** 2026-10-01 12:31 +03:00
 **Следующий рабочий срез:** PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `e376cf5783d64052506caf2d4549a96a6137dd0b` (main after merged PR #61; current code baseline for #62)
+- main code baseline: `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31` (main after merged thread-safety PR #62; current code baseline for next work)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -169,10 +169,10 @@ Static verifier:
 ## История последних рабочих заходов — последние 5 PR
 
 - **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
-- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; Android instrumentation regression covers both.
-- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario recreation regression proves an open GitHub confirmation cannot leave `decision.get()` waiting.
-- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G copy/unzip/model-preflight paths now obey `chatId + generation`, with source-chat persistence and cancellation gates.
-- **#62:** open; final thread-safety report is included in this PR; OpenRouter new-message cancellation + tool-loop ownership gate are covered by test code and source-level checks, but not executed by GitHub Actions in this environment.
+- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; instrumentation regression was added, but not executed here.
+- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario recreation regression was added to prove an open GitHub confirmation cannot leave `decision.get()` waiting; not executed here.
+- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G copy/unzip/model-preflight paths now obey `chatId + generation`, with source-chat persistence and cancellation gates; new JVM/instrumentation tests were added, not executed here.
+- **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter new-message cancellation + tool-loop ownership gate are implemented; final `THREAD_SAFETY_AUDIT_REPORT.md` is on main. Post-merge workflow runs: none, because Actions are manual-only and the connector has no dispatch operation.
 
 ## Product radar — идеи с реальной ценностью
 
