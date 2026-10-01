@@ -71,19 +71,23 @@ Tests:
 - JVM `OpenRouterChatClientTest.toolLoopStopsBeforeStartingNextRoundAfterOwnershipLoss()` uses a local HTTP server, blocks inside the first tool, invalidates ownership, then proves the old loop sends exactly one HTTP round.
 - Android `MainActivityLifecycleTest.newOpenRouterMessageCancelsPreviousActiveCall()` proves new-message wiring cancels the previous active OpenRouter Call.
 
-## Test execution limitation
+## Final CI validation
 
-The repository intentionally keeps GitHub Actions manual-only via `workflow_dispatch`. The available GitHub connector in this environment exposes workflow-run inspection and rerun operations but does not expose workflow dispatch.
+To close the audit, temporary `push` triggers were enabled only for the final validation cycle, then removed again.
 
-Therefore the new PRs could not be launched through GitHub Actions without reintroducing automatic push/PR triggers, which was explicitly avoided.
+The final cumulative main after PR #64 was validated by GitHub Actions:
+- Debug run `36865960013` — **success**; Verify handoff, source verifier, verifier mutation matrix, JVM tests/lint/build, and Android lifecycle instrumentation all completed successfully.
+- Release run `36865960153` — **success**; source verifier, release lint/tests, assembleRelease and bundleRelease completed successfully.
 
-The following were still performed against the PR branches:
-- source-level invariant inspection for every new ownership/cancellation gate;
-- targeted test-file inspection;
-- handoff invariant inspection;
-- GitHub mergeability/status checks.
+An earlier PR #63-head validation also passed:
+- Debug `36861232439` — success.
+- Release `36861232390` — success.
 
-The repository's existing PR G Debug/Release proof remains the known green baseline; this audit's new Android/JVM tests are present but were not executed by Actions in this environment.
+PR #64 was a test-stability follow-up only; it did not alter runtime behavior. Its validation was superseded by the final cumulative main Debug/Release runs above.
+
+The temporary `push` triggers are now removed again. `.github/workflows/build.yml` and `release.yml` are back to `workflow_dispatch:` only.
+
+One earlier PR #64-head Release attempt (`36861029734`) failed in `OpenRouterChatClientTest.toolLoopStopsBeforeStartingNextRoundAfterOwnershipLoss` at the initial tool-start wait. The test was subsequently stabilized, and the final cumulative Debug/Release runs are green.
 
 ## Final architecture conclusion
 

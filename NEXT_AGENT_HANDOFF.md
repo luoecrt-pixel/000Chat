@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 12:31 +03:00
+**Last updated:** 2026-10-01 15:58 +03:00
 **Следующий рабочий срез:** PR H
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31` (main after merged thread-safety PR #62; current code baseline for next work)
+- main code baseline: `30288bf78d77307ce75aa135910696d592fa25a2` (main after merged thread-safety PR #64 and final CI validation; current code baseline for next work)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -77,10 +77,10 @@
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 - [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 - [robolectric] **#57:** миграция ChatDatabase с v13/v14 до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки существующей истории; PR-head Debug `36826110992` прошёл эти lifecycle tests, а Release `36826110999` также завершился success.
-- [static] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; the Android ActivityScenario regression exercises Stop against both the pending confirmation and `openRouterActiveCall`. New PR Actions could not be dispatched because the repository workflows are manual-only and the connector exposes no workflow-dispatch operation; this proof is therefore source-backed plus instrumentation test code until a manual run is performed.
-- [static] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open now verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Actions remained manual-only, so this runtime test has not been executed by GitHub Actions here.
-- [static] **#61:** PR G OpenRouter picker copy/unzip now routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Instrumentation covers preflight cancellation on Stop and source-chat persistence after navigation; JVM policy tests cover current/source/discard routing.
-- [static] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Instrumentation covers active-Call cancellation; a JVM local HTTP-server test proves a stale loop cannot start a second round.
+- [instrumentation] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; ActivityScenario regression covers Stop against both the pending confirmation and `openRouterActiveCall`. Final cumulative Debug run `36865960013` passed the Android lifecycle instrumentation suite.
+- [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Final cumulative Debug run `36865960013` passed.
+- [instrumentation] **#61:** PR G OpenRouter picker copy/unzip routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Final cumulative Debug run `36865960013` passed the instrumentation suite; JVM policy tests are included in the same CI build.
+- [instrumentation] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Final cumulative Debug run `36865960013` passed the Android instrumentation suite and JVM tool-loop test.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -168,11 +168,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
-- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; instrumentation regression was added, but not executed here.
-- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario recreation regression was added to prove an open GitHub confirmation cannot leave `decision.get()` waiting; not executed here.
-- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G copy/unzip/model-preflight paths now obey `chatId + generation`, with source-chat persistence and cancellation gates; new JVM/instrumentation tests were added, not executed here.
-- **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter new-message cancellation + tool-loop ownership gate are implemented; final `THREAD_SAFETY_AUDIT_REPORT.md` is on main. Post-merge workflow runs: none, because Actions are manual-only and the connector has no dispatch operation.
+- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario rotation regression for GitHub confirmation; final cumulative Debug `36865960013` passed.
+- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G background copy/unzip/model-preflight ownership fix; final cumulative Debug `36865960013` passed.
+- **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter tool-loop cancellation ownership fix; final cumulative Debug `36865960013` and Release `36865960153` passed.
+- **#63:** merged `b50ce46bb6793d30d6d7e40aae3e96c1665ffc0a`; final handoff/verifier consistency plus temporary validation trigger; Debug `36864783897` and Release `36864783961` passed.
+- **#64:** merged `30288bf78d77307ce75aa135910696d592fa25a2`; test-stability follow-up only, no runtime behavior change; final cumulative Debug `36865960013` and Release `36865960153` passed.
 
 ## Product radar — идеи с реальной ценностью
 
