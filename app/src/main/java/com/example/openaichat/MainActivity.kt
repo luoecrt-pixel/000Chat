@@ -1442,6 +1442,7 @@ class MainActivity : ComponentActivity() {
         if(pendingUploads>0){ status.text="Дождитесь загрузки вложений…"; return }
         if(preparingZipAttachments){ status.text="Готовлю ZIP-вложения…"; return }
         val requestChatId = currentChatId()
+        if (provider == "openrouter") openRouterModelPreflightCall.getAndSet(null)?.cancel()
         val requestGeneration = activeResponseState.nextGeneration()
         val startedAt = SystemClock.elapsedRealtime()
 
@@ -3665,7 +3666,7 @@ class MainActivity : ComponentActivity() {
                     if (initialTarget == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
                         saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
                     } else deleteOpenRouterAttachmentFiles(extracted)
-                    runOnUiThread { preparingZipAttachments = false }
+                    if (activityVisible) runOnUiThread { preparingZipAttachments = false }
                     return@execute
                 }
                 runOnUiThread {
@@ -3696,14 +3697,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    preparingZipAttachments = false
-                    if (OpenRouterBackgroundOwnershipPolicy.decide(sourceChatId, currentChatId(), sourceGeneration, activeResponseState.state.generation, activityVisible, false) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                val target = OpenRouterBackgroundOwnershipPolicy.decide(
+                    sourceChatId,
+                    currentChatId(),
+                    sourceGeneration,
+                    activeResponseState.state.generation,
+                    activityVisible,
+                    false
+                )
+                if (target == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                    runOnUiThread {
+                        preparingZipAttachments = false
                         refreshAttachChips()
                         status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
-                    } else {
-                        diagnostics.log("openrouter_zip_prepare_stale_failure", mapOf("chat_id" to sourceChatId, "error" to (e.message ?: e.toString()).take(300)))
                     }
+                } else {
+                    diagnostics.log("openrouter_zip_prepare_stale_failure", mapOf("chat_id" to sourceChatId, "error" to (e.message ?: e.toString()).take(300)))
                 }
             }
         }
