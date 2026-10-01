@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.content.SharedPreferences
 import android.os.SystemClock
 import android.widget.LinearLayout
+import android.app.AlertDialog
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -126,6 +127,58 @@ class MainActivityLifecycleTest {
         assertTrue("confirmation thread did not finish", confirmationDone.await(2, TimeUnit.SECONDS))
         assertEquals(false, confirmationResult.get())
         assertTrue("OpenRouter active Call was not cancelled", callCancelled.get())
+        scenario.close()
+    }
+
+    @Test
+    fun recreateCancelsOpenGitHubConfirmationDecision() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val confirmationDone = CountDownLatch(1)
+        val confirmationResult = AtomicReference<Boolean?>(null)
+        val oldDialog = AtomicReference<AlertDialog?>(null)
+
+        scenario.onActivity { activity ->
+            Thread {
+                try {
+                    confirmationResult.set(
+                        invoke(
+                            activity,
+                            "confirmGitHubWrite",
+                            String::class.java,
+                            JSONObject::class.java,
+                            "create_issue_comment",
+                            JSONObject().put("issue_number", 2)
+                        ) as Boolean
+                    )
+                } finally {
+                    confirmationDone.countDown()
+                }
+            }.start()
+        }
+
+        var dialogSeen = false
+        repeat(100) {
+            scenario.onActivity { activity ->
+                @Suppress("UNCHECKED_CAST")
+                val dialogRef = privateField(activity, "pendingGitHubConfirmationDialog") as AtomicReference<AlertDialog?>
+                oldDialog.set(dialogRef.get())
+                dialogSeen = dialogRef.get()?.isShowing == true
+            }
+            if (!dialogSeen) SystemClock.sleep(10L)
+        }
+        assertTrue("GitHub confirmation dialog was not shown", dialogSeen)
+
+        scenario.recreate()
+
+        assertTrue("confirmation did not finish after recreation", confirmationDone.await(2, TimeUnit.SECONDS))
+        assertEquals(false, confirmationResult.get())
+        assertFalse("old confirmation dialog remained visible", oldDialog.get()?.isShowing == true)
+
+        scenario.onActivity { activity ->
+            @Suppress("UNCHECKED_CAST")
+            val pending = privateField(activity, "pendingGitHubConfirmation") as AtomicReference<java.util.concurrent.CompletableFuture<Boolean>?>
+            assertEquals(null, pending.get())
+        }
         scenario.close()
     }
 
