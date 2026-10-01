@@ -186,12 +186,10 @@ class MainActivityLifecycleTest {
             )
 
             val prefs = privateField(activity, "prefs") as SharedPreferences
-            val sourceState = JSONObject(
-                prefs.getString("composer_state_$sourceChatId", "") ?: ""
-            )
-            val currentState = JSONObject(
-                prefs.getString("composer_state_$currentChatId", "") ?: ""
-            )
+            val sourceRaw = prefs.getString("composer_state_$sourceChatId", null)
+            val currentRaw = prefs.getString("composer_state_$currentChatId", null)
+            val sourceState = if (sourceRaw.isNullOrBlank()) JSONObject() else JSONObject(sourceRaw)
+            val currentState = if (currentRaw.isNullOrBlank()) JSONObject() else JSONObject(currentRaw)
             assertEquals(1, sourceState.optJSONArray("openrouter_attachments")?.length() ?: 0)
             assertEquals(0, currentState.optJSONArray("openrouter_attachments")?.length() ?: 0)
         }
