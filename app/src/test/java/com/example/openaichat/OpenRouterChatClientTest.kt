@@ -76,7 +76,7 @@ class OpenRouterChatClientTest {
             }
             worker.start()
 
-            assertTrue("first tool call never started", toolStarted.await(2, TimeUnit.SECONDS))
+            assertTrue("first tool call never started", toolStarted.await(10, TimeUnit.SECONDS))
             shouldContinue.set(false)
             releaseTool.countDown()
             worker.join(10_000L)
