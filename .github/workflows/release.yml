@@ -2,6 +2,9 @@ name: Build Android Release
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/pr-g-openrouter-attachments
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
