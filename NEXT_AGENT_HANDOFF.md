@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-01 12:31 +03:00
-**Следующий рабочий срез:** PR H — human-facing documentation.
+**Следующий рабочий срез:** PR H
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -106,8 +106,8 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR H — human-facing documentation — **следующий**
-Update README for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
+### 1. PR H — **следующий**
+Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
 Первый шаг: make a documentation-only snapshot from the final merged audit state.
 
 ### 2. EXIF image-wire follow-up
