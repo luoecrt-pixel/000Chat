@@ -131,9 +131,11 @@ class MainActivityLifecycleTest {
     }
 
     @Test
-    fun newOpenRouterMessageCancelsPreviousActiveCall() {
+    fun newOpenRouterMessageCancelsPreviousActiveCallAndAdvancesGeneration() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val callCancelled = AtomicReference(false)
+        var generationBefore = -1L
+        var generationAfter = -1L
 
         scenario.onActivity { activity ->
             val fakeCall = Proxy.newProxyInstance(
@@ -152,16 +154,83 @@ class MainActivityLifecycleTest {
             } as Call
             val prefs = privateField(activity, "prefs") as SharedPreferences
             prefs.edit().putString("provider", "openrouter").apply()
+            val secure = privateField(activity, "secure") as SecureStore
+            secure.setOpenRouterApiKey("test-key")
+            val input = privateField(activity, "input") as android.widget.EditText
+            input.setText("hello")
+            generationBefore = activeGeneration(activity)
+
             @Suppress("UNCHECKED_CAST")
             val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
             activeCall.set(fakeCall)
 
             invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            generationAfter = activeGeneration(activity)
+
+            assertTrue("sendMessage did not reach nextGeneration()", generationAfter > generationBefore)
+            assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
+
+            invoke(activity, "stopCurrentResponse")
+            secure.setOpenRouterApiKey("")
         }
 
-        assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
         scenario.close()
     }
+
+    @Test
+    fun staleOpenRouterCallCreatedAfterGenerationChangeIsCancelledAndNotStored() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val staleCancelled = AtomicReference(false)
+
+        scenario.onActivity { activity ->
+            val secure = privateField(activity, "secure") as SecureStore
+            secure.setOpenRouterApiKey("test-key")
+            val prefs = privateField(activity, "prefs") as SharedPreferences
+            prefs.edit().putString("provider", "openrouter").apply()
+            val input = privateField(activity, "input") as android.widget.EditText
+            input.setText("hello")
+            val oldGeneration = activeGeneration(activity)
+
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            assertTrue("sendMessage did not advance generation", activeGeneration(activity) > oldGeneration)
+
+            val staleCall = Proxy.newProxyInstance(
+                Call::class.java.classLoader,
+                arrayOf(Call::class.java)
+            ) { _, method, _ ->
+                when (method.name) {
+                    "cancel" -> {
+                        staleCancelled.set(true)
+                        null
+                    }
+                    "isCanceled" -> staleCancelled.get()
+                    "isExecuted" -> true
+                    else -> null
+                }
+            } as Call
+
+            val accepted = invoke(
+                activity,
+                "registerOpenRouterCallIfOwned",
+                String::class.java,
+                String::class.java,
+                Long::class.javaPrimitiveType!!,
+                Call::class.java,
+                "stale-token",
+                currentChatId(activity),
+                oldGeneration,
+                staleCall
+            ) as Boolean
+
+            assertFalse("stale Call was incorrectly claimed by OpenRouter owner", accepted)
+            assertTrue("stale Call was not cancelled", staleCancelled.get())
+
+            invoke(activity, "stopCurrentResponse")
+            secure.setOpenRouterApiKey("")
+        }
+        scenario.close()
+    }
+
 
     @Test
     fun stopCancelsOpenRouterModelPreflightCall() {
