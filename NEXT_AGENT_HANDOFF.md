@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-28 16:10 +03:00
-**Следующий рабочий срез:** PR G — OpenRouter attachments — после #56; сохранить последовательность PR I → J → G → H.
+**Last updated:** 2026-09-28 21:00 +03:00
+**Следующий рабочий срез:** Thread-safety audit — после PR G; затем PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -30,7 +30,7 @@
 
 **Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery и текущий File API attachment path не переносится в него автоматически. GitHub-tools toggle теперь имеет реальный visible UI wiring; сама app-side execution/confirmation boundary #47 не изменялась. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery. PR G добавляет отдельный local attachment path: content:// сразу копируется в private storage; text/image/pdf/zip готовятся локально; history хранит attachment manifest, а OpenAI File API path остаётся отдельным. GitHub-tools toggle теперь имеет реальный visible UI wiring; сама app-side execution/confirmation boundary #47 не изменялась. Compose остаётся следующим UI-слоем после state/controller extraction.
 
 **Recent #48 implementation note:** `githubTools` в `showSettings()` был реальным `CheckBox`, созданным через `chk(..., "github_tools")`, но отсутствовал `box.addView(...)`. Это не ломало существующие `prefs` read/write и runtime executor, но делало GitHub tools практически невключаемыми из UI. PR #48 добавил `box.addView(githubTools)` и сохранил инициализацию из `prefs.getBoolean("github_tools", false)`. Никакой логики `SecureStore`, `GitHubToolCatalog`, `GitHubToolExecutor`, confirmation или OpenRouter transport PR #48 не менял.
 
@@ -38,9 +38,9 @@
 
 ## Фактический baseline
 
-- main code baseline: `a1857bfacc56584ea6244fdfafc21ec22793227a` (PR #56 merge; #55 baseline was `16b712112e2710c8725de4203d75f23c51e15ad6`)
+- main code baseline: `f0612cf585adcba5f9ab05079f7c28cbe0513b1f` (main after disabling automatic Debug/Release triggers; PR #56 merge remains `a1857bfacc56584ea6244fdfafc21ec22793227a`)
 - versionName/code: `4.17.0 / 64`
-- DB: `v15`
+- DB: `v16`
 - compile/target SDK: `35`
 - min SDK: `26`
 - JDK: `17`
@@ -100,17 +100,13 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR G — **следующий**
-Передавать вложения в OpenRouter: текстовые файлы как UTF-8 text, изображения как JPEG data URL, PDF как file data URL; ZIP отклонять понятным сообщением.
-**Первый шаг:** заменить текущий early-return "не переносятся автоматически" на bounded content builder с лимитом для текста и resize для изображений.
+### 1. Thread-safety audit — **следующий**
+После PR G пройти новые и существующие фоновые операции attachments, ZIP-распаковки и проверки model capabilities.
+Первый шаг: составить таблицу ownership для новых background операций и выбрать один доказуемый violation; не добавлять массовую синхронизацию.
 
 ### 2. PR H — документация
-Обновить README про OpenRouter/Claude и GitHub-инструменты, зафиксировать baseline #55, убрать дубль пунктов 2/3.
-**Первый шаг:** обновить только human-facing snapshot после runtime PR, не смешивая README с refactor.
-
-### 3. Thread-safety audit
-После пользовательских F/I/G/H пройти оставшиеся `Executor/Worker → Activity` paths по текущим правилам ownership.
-**Первый шаг:** составить таблицу границ и выбрать один доказуемый ownership violation; не добавлять массовую синхронизацию.
+Обновить human-facing README про OpenRouter/Claude, attachments, local artifacts и ручной CI.
+Первый шаг: сделать только документационный snapshot после закрытия thread-safety audit.
 
 ## Репозиторий / branches
 

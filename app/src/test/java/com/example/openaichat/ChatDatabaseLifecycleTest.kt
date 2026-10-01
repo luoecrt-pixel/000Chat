@@ -33,7 +33,7 @@ class ChatDatabaseLifecycleTest {
     }
 
     @Test
-    fun migratesV13ToV15AndPreservesActiveResponseOwnership() {
+    fun migratesV13ToV16AndPreservesActiveResponseOwnership() {
         createLegacyChatsDatabase(version = 13)
 
         database = ChatDatabase(context)
@@ -51,7 +51,7 @@ class ChatDatabaseLifecycleTest {
     }
 
     @Test
-    fun migratesV14ToV15WithSequenceCursorDefault() {
+    fun migratesV14ToV16WithSequenceCursorDefault() {
         createLegacyChatsDatabase(version = 14, includeBackgroundEnabled = true)
 
         database = ChatDatabase(context)
@@ -243,6 +243,7 @@ class ChatDatabaseLifecycleTest {
         )
         val backgroundInsertColumn = if (includeBackgroundEnabled) ", active_background_enabled" else ""
         val backgroundInsertValue = if (includeBackgroundEnabled) ", 1" else ""
+        db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, content_hash TEXT)")
         db.execSQL(
             """
             INSERT INTO chats (

@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 15
+        private const val DB_VERSION = 16
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -61,6 +61,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 file_sizes TEXT,
                 file_paths TEXT,
                 file_mimes TEXT,
+                attachments TEXT,
                 image_path TEXT,
                 image_file_id TEXT,
                 image_name TEXT,
@@ -177,6 +178,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         if (oldVersion < 15) {
             db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_last_sequence_number INTEGER NOT NULL DEFAULT -1")
+        }
+        if (oldVersion < 16) {
+            db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
         }
     }
 
@@ -425,6 +429,7 @@ data class ExistingMessageRow(
         putStringOrNull("file_sizes", message.optJSONArray("file_sizes")?.toString())
         putStringOrNull("file_paths", message.optJSONArray("file_paths")?.toString())
         putStringOrNull("file_mimes", message.optJSONArray("file_mimes")?.toString())
+        putStringOrNull("attachments", message.optJSONArray("attachments")?.toString())
         putStringOrNull("image_path", message.optString("image_path").takeIf { it.isNotBlank() })
         putStringOrNull("image_file_id", message.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
         putStringOrNull("image_name", message.optString("image_name").takeIf { it.isNotBlank() })
@@ -899,7 +904,7 @@ data class ExistingMessageRow(
         val out = linkedSetOf<String>()
         readableDatabase.query(
             MESSAGE_TABLE,
-            arrayOf("file_paths", "image_path", "annotations", "generated_images"),
+            arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             "chat_id=?",
             arrayOf(chatId),
             null, null, "position ASC"
@@ -912,17 +917,42 @@ data class ExistingMessageRow(
 
                 c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
 
-                val annotations = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
+                val attachments = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
+                for (i in 0 until attachments.length()) {
+                    val a = attachments.optJSONObject(i) ?: continue
+                    a.optString("path").takeIf { it.isNotBlank() }?.let(out::add)
+                    a.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add)
+                }
+
+                val annotations = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
                 for (i in 0 until annotations.length()) {
                     annotations.optJSONObject(i)?.optString("local_path")
                         ?.takeIf { it.isNotBlank() }?.let(out::add)
                 }
 
-                val generatedImages = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
+                val generatedImages = try { JSONArray(c.getString(4).orEmpty()) } catch (_: Exception) { JSONArray() }
                 for (i in 0 until generatedImages.length()) {
                     generatedImages.optJSONObject(i)?.optString("local_path")
                         ?.takeIf { it.isNotBlank() }?.let(out::add)
                 }
+            }
+        }
+        return out.toList()
+    }
+
+    fun listAllLocalFilePaths(): List<String> {
+        val out = linkedSetOf<String>()
+        readableDatabase.query(
+            MESSAGE_TABLE,
+            arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
+            null, null, null, null, "position ASC"
+        ).use { c ->
+            while (c.moveToNext()) {
+                try { JSONArray(c.getString(0).orEmpty()).let { a -> for (i in 0 until a.length()) a.optString(i).takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+                c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
+                try { JSONArray(c.getString(2).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o -> o.optString("path").takeIf { it.isNotBlank() }?.let(out::add); o.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add) } } } catch (_:Exception) {}
+                try { JSONArray(c.getString(3).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+                try { JSONArray(c.getString(4).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
             }
         }
         return out.toList()
@@ -1023,6 +1053,7 @@ data class ExistingMessageRow(
                 parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_sizes")))?.let { m.put("file_sizes", it) }
                 parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_paths")))?.let { m.put("file_paths", it) }
                 parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_mimes")))?.let { m.put("file_mimes", it) }
+                parseArrayColumn(c.getString(c.getColumnIndexOrThrow("attachments")))?.let { m.put("attachments", it) }
                 c.getString(c.getColumnIndexOrThrow("image_path"))?.let { if (it.isNotBlank()) m.put("image_path", it) }
                 c.getString(c.getColumnIndexOrThrow("image_file_id"))?.let { if (it.isNotBlank()) m.put("image_file_id", it) }
                 c.getString(c.getColumnIndexOrThrow("image_name"))?.let { if (it.isNotBlank()) m.put("image_name", it) }
@@ -1069,6 +1100,7 @@ data class ExistingMessageRow(
                 putStringOrNull("file_sizes", m.optJSONArray("file_sizes")?.toString())
                 putStringOrNull("file_paths", m.optJSONArray("file_paths")?.toString())
                 putStringOrNull("file_mimes", m.optJSONArray("file_mimes")?.toString())
+                putStringOrNull("attachments", m.optJSONArray("attachments")?.toString())
                 putStringOrNull("image_path", m.optString("image_path").takeIf { it.isNotBlank() })
                 putStringOrNull("image_file_id", m.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
                 putStringOrNull("image_name", m.optString("image_name").takeIf { it.isNotBlank() })

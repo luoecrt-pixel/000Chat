@@ -72,7 +72,7 @@ def main() -> None:
         start = active.find(heading)
         end = active.find(active_headings[index + 1], start + len(heading)) if index + 1 < len(active_headings) else len(active)
         item = active[start:end]
-        require(item, "**Первый шаг:**")
+        require(item, "Первый шаг:")
 
     # One trigger for architecture/product review; START HERE is the canonical rule.
     assert text.count("каждые 5 merged PR или раньше") == 1
