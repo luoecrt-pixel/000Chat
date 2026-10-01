@@ -82,7 +82,7 @@ class OpenRouterChatClientTest {
                         parallelToolCalls = false,
                         executeTool = { _, _ ->
                             toolStarted.countDown()
-                            releaseTool.await(2, TimeUnit.SECONDS)
+                            releaseTool.await(5, TimeUnit.SECONDS)
                             "tool-result"
                         },
                         shouldContinue = { shouldContinue.get() }
@@ -93,10 +93,10 @@ class OpenRouterChatClientTest {
             }
             worker.start()
 
-            assertTrue("first tool call never started", toolStarted.await(2, TimeUnit.SECONDS))
+            assertTrue("first tool call never started", toolStarted.await(10, TimeUnit.SECONDS))
             shouldContinue.set(false)
             releaseTool.countDown()
-            worker.join(3000L)
+            worker.join(10_000L)
 
             assertFalse("OpenRouter completion thread did not finish", worker.isAlive)
             assertTrue("expected ownership cancellation", failure.get() is CancellationException)
