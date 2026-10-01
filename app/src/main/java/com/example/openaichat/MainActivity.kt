@@ -108,6 +108,8 @@ class MainActivity : ComponentActivity() {
     private val openRouterClient by lazy { OpenRouterChatClient() }
     private val openRouterMaxRounds = 24
     private val openRouterActiveCall = AtomicReference<Call?>()
+    private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
+    private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
             secureStore = secure,
@@ -242,6 +244,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activityVisible = false
         val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
@@ -263,6 +266,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         activeResumeCalls.values.forEach { it.cancel() }
@@ -1066,25 +1070,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun completePendingGitHubConfirmation(
+        decision: CompletableFuture<Boolean>,
+        approved: Boolean
+    ) {
+        if (pendingGitHubConfirmation.compareAndSet(decision, null)) {
+            val dialog = pendingGitHubConfirmationDialog.getAndSet(null)
+            if (dialog != null && dialog.isShowing) dialog.dismiss()
+            decision.complete(approved)
+        }
+    }
+
+    private fun cancelPendingGitHubConfirmation() {
+        val decision = pendingGitHubConfirmation.getAndSet(null)
+        pendingGitHubConfirmationDialog.getAndSet(null)?.let { dialog ->
+            if (dialog.isShowing) runOnUiThread {
+                if (dialog.isShowing) dialog.dismiss()
+            }
+        }
+        decision?.complete(false)
+    }
+
     private fun confirmGitHubWrite(name: String, arguments: JSONObject): Boolean {
         if (!activityVisible || isFinishing) return false
         val decision = CompletableFuture<Boolean>()
+        if (!pendingGitHubConfirmation.compareAndSet(null, decision)) return false
         runOnUiThread {
-            if (!activityVisible || isFinishing) {
-                decision.complete(false)
+            if (!activityVisible || isFinishing || pendingGitHubConfirmation.get() !== decision || decision.isDone) {
+                completePendingGitHubConfirmation(decision, false)
                 return@runOnUiThread
             }
-            AlertDialog.Builder(this)
+            val dialog = AlertDialog.Builder(this)
                 .setTitle("GitHub: подтверждение")
                 .setMessage(githubConfirmationText(name, arguments))
-                .setNegativeButton("Отмена") { _, _ -> decision.complete(false) }
-                .setPositiveButton("Подтвердить") { _, _ -> decision.complete(true) }
-                .setOnCancelListener { decision.complete(false) }
-                .show()
+                .setNegativeButton("Отмена") { _, _ ->
+                    completePendingGitHubConfirmation(decision, false)
+                }
+                .setPositiveButton("Подтвердить") { _, _ ->
+                    completePendingGitHubConfirmation(decision, true)
+                }
+                .create()
+            pendingGitHubConfirmationDialog.set(dialog)
+            dialog.setOnCancelListener {
+                completePendingGitHubConfirmation(decision, false)
+            }
+            dialog.show()
+            if (pendingGitHubConfirmation.get() !== decision || decision.isDone) {
+                completePendingGitHubConfirmation(decision, false)
+            }
         }
         return try {
             decision.get(10, TimeUnit.MINUTES)
         } catch (_: Exception) {
+            completePendingGitHubConfirmation(decision, false)
             false
         }
     }
@@ -1209,6 +1247,7 @@ class MainActivity : ComponentActivity() {
         val generation=activeResponseState.markUserStop()
         currentCall?.cancel()
         openRouterActiveCall.getAndSet(null)?.cancel()
+        cancelPendingGitHubConfirmation()
         activeResumeCalls.remove(chatId)?.cancel()
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
