@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-09-28 21:00 +03:00
-**Следующий рабочий срез:** Thread-safety audit после PR G; затем PR H — human-facing documentation.
+**Следующий рабочий срез:** Thread-safety audit — после PR G; затем PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -40,7 +40,7 @@
 
 - main code baseline: `f0612cf585adcba5f9ab05079f7c28cbe0513b1f` (main after disabling automatic Debug/Release triggers; PR #56 merge remains `a1857bfacc56584ea6244fdfafc21ec22793227a`)
 - versionName/code: `4.17.0 / 64`
-- DB: `v15`
+- DB: `v16`
 - compile/target SDK: `35`
 - min SDK: `26`
 - JDK: `17`
