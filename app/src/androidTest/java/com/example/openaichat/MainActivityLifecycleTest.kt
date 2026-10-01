@@ -16,6 +16,9 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import okhttp3.Call
+import java.lang.reflect.Proxy
+import java.util.concurrent.CompletableFuture
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
@@ -58,6 +61,71 @@ class MainActivityLifecycleTest {
 
             assertEquals("initial", adapterSnapshot(activity).first { it.id == itemId }.text)
         }
+        scenario.close()
+    }
+
+    @Test
+    fun stopCancelsOpenRouterCallAndPendingGitHubConfirmation() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val callCancelled = AtomicReference(false)
+        val confirmationDone = CountDownLatch(1)
+        val confirmationResult = AtomicReference<Boolean?>(null)
+
+        scenario.onActivity { activity ->
+            val fakeCall = Proxy.newProxyInstance(
+                Call::class.java.classLoader,
+                arrayOf(Call::class.java)
+            ) { _, method, _ ->
+                when (method.name) {
+                    "cancel" -> {
+                        callCancelled.set(true)
+                        null
+                    }
+                    "isCanceled" -> callCancelled.get()
+                    "isExecuted" -> true
+                    else -> null
+                }
+            } as Call
+            @Suppress("UNCHECKED_CAST")
+            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
+            activeCall.set(fakeCall)
+
+            Thread {
+                try {
+                    confirmationResult.set(
+                        invoke(
+                            activity,
+                            "confirmGitHubWrite",
+                            String::class.java,
+                            JSONObject::class.java,
+                            "create_issue_comment",
+                            JSONObject().put("issue_number", 1)
+                        ) as Boolean
+                    )
+                } finally {
+                    confirmationDone.countDown()
+                }
+            }.start()
+        }
+
+        var pendingSeen = false
+        repeat(100) {
+            scenario.onActivity { activity ->
+                @Suppress("UNCHECKED_CAST")
+                val futureRef = privateField(activity, "pendingGitHubConfirmation") as AtomicReference<CompletableFuture<Boolean>?>
+                if (futureRef.get() != null) pendingSeen = true
+            }
+            if (!pendingSeen) SystemClock.sleep(10L)
+        }
+        assertTrue("GitHub confirmation was not opened", pendingSeen)
+
+        scenario.onActivity { activity ->
+            invoke(activity, "stopCurrentResponse")
+        }
+
+        assertTrue("confirmation thread did not finish", confirmationDone.await(2, TimeUnit.SECONDS))
+        assertEquals(false, confirmationResult.get())
+        assertTrue("OpenRouter active Call was not cancelled", callCancelled.get())
         scenario.close()
     }
 
