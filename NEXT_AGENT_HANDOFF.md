@@ -173,9 +173,9 @@ Static verifier:
 
 - **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; PR-head Release `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G added local OpenRouter/Claude attachments, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
 - **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
-- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8c39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; Android instrumentation regression covers both.
+- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; Android instrumentation regression covers both.
 - **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario recreation regression proves an open GitHub confirmation cannot leave `decision.get()` waiting.
-- **#61:** open; head `83dcb0c2c5bcad978a739fb962d0caa2b`. PR G background paths now use `chatId + generation`; preflight cancellation and source-chat completion routing are covered by tests.
+- **#61:** open; head `83dcb0c2c5bcad978a739fb962d0caa97b051bc2`. PR G background paths now use `chatId + generation`; preflight cancellation and source-chat completion routing are covered by tests.
 
 ## Product radar — идеи с реальной ценностью
 
