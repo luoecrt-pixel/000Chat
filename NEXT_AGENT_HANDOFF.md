@@ -164,11 +164,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
+- **#53:** merged `1eef3da06291c4ed8dcb7b77e810563f968247b3`; PR-head Release `#188` — success; Debug `#366` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation.
 - **#54:** merged `d262ea8e14554527c0bdaf9eef8b56da76fdb6af`; PR-head Release `#191` — success; Debug `#369` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Tool traces are now persisted in assistant messages and restored into OpenRouter history.
 - **#55:** merged `16b712112e2710c8725de4203d75f23c51e15ad6`; PR-head Release `#196` — success; Debug `#374` — success; post-merge Debug `#376` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter caching uses explicit system breakpoint + top-level automatic breakpoint, `session_id` sticky routing, a 20-minute whole-cycle budget, and a 200000 cumulative-token soft cap.
 - **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter cache breakpoint now requests `ttl: "1h"`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input. No provider/model-side `ttl: auto` exists.
 - **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; PR-head Release `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G added local OpenRouter/Claude attachments, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
-- **#H1 (current):** проверка внешних image-size limits выявила риск EXIF→PNG для больших JPEG; handoff дополнен подтверждённым v16 lifecycle contract и этим provider-limit finding. Поведенческого изменения пока нет.
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
