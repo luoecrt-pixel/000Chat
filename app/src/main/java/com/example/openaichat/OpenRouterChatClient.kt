@@ -25,7 +25,8 @@ class OpenRouterCompletionException(
 ) : IOException(message, cause)
 
 class OpenRouterChatClient(
-    private val baseUrl: String = "https://openrouter.ai/api/v1"
+    private val baseUrl: String = "https://openrouter.ai/api/v1",
+    httpClientOverride: OkHttpClient? = null
 ) {
     private companion object {
         const val COMPLETE_TIME_LIMIT_MS = 20 * 60 * 1000L
@@ -41,7 +42,7 @@ class OpenRouterChatClient(
             }
         }
 
-    private val httpClient = OkHttpClient.Builder()
+    private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
         .callTimeout(600, TimeUnit.SECONDS)
