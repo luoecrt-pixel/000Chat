@@ -131,6 +131,74 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun stopCancelsOpenRouterModelPreflightCall() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val callCancelled = AtomicReference(false)
+        scenario.onActivity { activity ->
+            val fakeCall = Proxy.newProxyInstance(
+                Call::class.java.classLoader,
+                arrayOf(Call::class.java)
+            ) { _, method, _ ->
+                when (method.name) {
+                    "cancel" -> {
+                        callCancelled.set(true)
+                        null
+                    }
+                    "isCanceled" -> callCancelled.get()
+                    "isExecuted" -> true
+                    else -> null
+                }
+            } as Call
+            @Suppress("UNCHECKED_CAST")
+            val preflight = privateField(activity, "openRouterModelPreflightCall") as AtomicReference<Call?>
+            preflight.set(fakeCall)
+        }
+
+        scenario.moveToState(Lifecycle.State.CREATED)
+
+        assertTrue("OpenRouter model preflight Call was not cancelled on Stop", callCancelled.get())
+        scenario.close()
+    }
+
+    @Test
+    fun staleOpenRouterAttachmentCanPersistToSourceChatAfterNavigation() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val sourceChatId = currentChatId(activity)
+            invoke(activity, "newChat")
+            val currentChatId = currentChatId(activity)
+            assertFalse(sourceChatId == currentChatId)
+
+            val attachment = OpenRouterLocalAttachment(
+                id = "test-attachment",
+                name = "notes.txt",
+                kind = "text",
+                path = "/tmp/notes.txt",
+                mime = "text/plain",
+                size = 12L,
+                sha256 = "sha-source"
+            )
+            invokeMethod(
+                activity,
+                "saveOpenRouterAttachmentsToComposer",
+                arrayOf(String::class.java, List::class.java, List::class.java),
+                arrayOf(sourceChatId, listOf(attachment), emptyList<Pair<String, String>>())
+            )
+
+            val prefs = privateField(activity, "prefs") as SharedPreferences
+            val sourceState = JSONObject(
+                prefs.getString("composer_state_$sourceChatId", "") ?: ""
+            )
+            val currentState = JSONObject(
+                prefs.getString("composer_state_$currentChatId", "") ?: ""
+            )
+            assertEquals(1, sourceState.optJSONArray("openrouter_attachments")?.length() ?: 0)
+            assertEquals(0, currentState.optJSONArray("openrouter_attachments")?.length() ?: 0)
+        }
+        scenario.close()
+    }
+
+    @Test
     fun recreateCancelsOpenGitHubConfirmationDecision() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val confirmationDone = CountDownLatch(1)
