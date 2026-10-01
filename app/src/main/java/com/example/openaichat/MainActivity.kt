@@ -923,7 +923,10 @@ class MainActivity : ComponentActivity() {
         activeAssistantItemId = assistantItemId
         executor.execute {
             try {
-                if (!isRequestCurrent(chatId, generation)) return@execute
+                if (!isRequestCurrent(chatId, generation)) {
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
+                    return@execute
+                }
                 activeResponsePersistence.updateActiveResponse(
                     chatId,
                     status = "in_progress",
@@ -939,7 +942,7 @@ class MainActivity : ComponentActivity() {
                         chatId,
                         generation
                     )) {
-                    activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return@execute
                 }
                 if (!isRequestCurrent(chatId, generation)) {
@@ -1343,10 +1346,14 @@ class MainActivity : ComponentActivity() {
             val key = composerPrefsKey(chatId)
             val o = try { JSONObject(prefs.getString(key, null).orEmpty()) } catch (_: Exception) { JSONObject() }
             val stored = o.optJSONArray("openrouter_attachments") ?: JSONArray()
-            val existing = stored.toList().mapNotNull { (it as? JSONObject)?.optString("sha256") + "|" + (it as? JSONObject)?.optString("name") }.toSet()
+            val existing = mutableSetOf<String>()
+            for (i in 0 until stored.length()) {
+                val item = stored.optJSONObject(i) ?: continue
+                existing += item.optString("sha256") + "|" + item.optString("name")
+            }
             attachments.forEach { attachment ->
                 val keyValue = attachment.sha256 + "|" + attachment.name
-                if (keyValue !in existing) stored.put(attachment.toJson())
+                if (existing.add(keyValue)) stored.put(attachment.toJson())
             }
             val completed = completedPending.toSet()
             val pending = JSONArray()
@@ -3655,6 +3662,7 @@ class MainActivity : ComponentActivity() {
                     if (initialTarget == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
                         saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
                     } else deleteOpenRouterAttachmentFiles(extracted)
+                    runOnUiThread { preparingZipAttachments = false }
                     return@execute
                 }
                 runOnUiThread {
