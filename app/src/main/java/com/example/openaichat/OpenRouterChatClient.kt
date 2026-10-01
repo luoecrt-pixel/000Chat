@@ -128,7 +128,12 @@ class OpenRouterChatClient(
                 .build()
 
             val call = httpClient.newCall(request)
+            if (!shouldContinue()) {
+                call.cancel()
+                throw CancellationException("OpenRouter request is no longer current.")
+            }
             onCallCreated(call)
+            ensureActive()
             val remainingMillis = TimeUnit.NANOSECONDS.toMillis((deadlineNanos - System.nanoTime()).coerceAtLeast(0L))
             if (remainingMillis <= 0L) {
                 call.cancel()
