@@ -3417,11 +3417,8 @@ class MainActivity : ComponentActivity() {
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
-                    val kind = if (name.substringAfterLast('.', "").lowercase() == "zip") "zip" else "file"
                     val uploadChatId = currentChatId()
                     val uploadGeneration = activeResponseState.state.generation
-                    val key = attachmentKey(uri, kind)
-                    rememberUploadUri(uri, kind)
                     beginUpload()
                     executor.execute {
                         try {
@@ -3431,17 +3428,15 @@ class MainActivity : ComponentActivity() {
                                     diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
                                 }
                             } else listOf(local)
-                            val cancelled = cancelledUploads.contains(key)
                             val target = OpenRouterBackgroundOwnershipPolicy.decide(
-                                uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, cancelled
+                                uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
                             )
                             when (target) {
                                 OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> runOnUiThread {
                                     val rechecked = OpenRouterBackgroundOwnershipPolicy.decide(
-                                        uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, cancelledUploads.contains(key)
+                                        uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
                                     )
                                     if (rechecked == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
-                                        pendingUploadUris.remove(uri.toString() to kind)
                                         prepared.forEach { item ->
                                             if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
                                         }
@@ -3450,7 +3445,7 @@ class MainActivity : ComponentActivity() {
                                         persistComposerStateNow()
                                         status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
                                     } else if (rechecked == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
-                                        saveOpenRouterAttachmentsToComposer(uploadChatId, prepared, listOf(uri.toString() to kind))
+                                        saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
                                         if (local.kind == "zip") File(local.path).delete()
                                     } else {
                                         deleteOpenRouterAttachmentFiles(prepared)
@@ -3458,7 +3453,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                                 OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
-                                    saveOpenRouterAttachmentsToComposer(uploadChatId, prepared, listOf(uri.toString() to kind))
+                                    saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
                                     if (local.kind == "zip") File(local.path).delete()
                                 }
                                 OpenRouterAttachmentCompletionTarget.DISCARD -> {
