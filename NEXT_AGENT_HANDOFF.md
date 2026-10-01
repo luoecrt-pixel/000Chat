@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 15:58 +03:00
+**Last updated:** 2026-10-01 16:48 +03:00
 **Следующий рабочий срез:** PR H
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `30288bf78d77307ce75aa135910696d592fa25a2` (main after merged thread-safety PR #64 and final CI validation; current code baseline for next work)
+- main code baseline: `3206f177401e25a9a3ab971c3872a1276f46bfb3` (main after merged PR #65; thread-safety audit is closed; current code baseline for PR H)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -81,6 +81,8 @@
 - [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Final cumulative Debug run `36865960013` passed.
 - [instrumentation] **#61:** PR G OpenRouter picker copy/unzip routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Final cumulative Debug run `36865960013` passed the instrumentation suite; JVM policy tests are included in the same CI build.
 - [instrumentation] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Final cumulative Debug run `36865960013` passed the Android instrumentation suite and JVM tool-loop test.
+
+**Thread-safety audit closeout:** PRs #59, #60, #61 and #62 each correspond to one of the four requested assertions. PR #63 fixed handoff/verifier consistency, #64 stabilized the OpenRouter tool-loop regression test without runtime behavior changes, and #65 recorded the final green CI evidence and restored both workflows to manual-only `workflow_dispatch:`. Final Debug `36865960013` and Release `36865960153` are green. No open PRs remain. The checked-in `THREAD_SAFETY_AUDIT_REPORT.md` is the canonical audit report.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -168,12 +170,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario rotation regression for GitHub confirmation; final cumulative Debug `36865960013` passed.
 - **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G background copy/unzip/model-preflight ownership fix; final cumulative Debug `36865960013` passed.
 - **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter tool-loop cancellation ownership fix; final cumulative Debug `36865960013` and Release `36865960153` passed.
-- **#63:** merged `b50ce46bb6793d30d6d7e40aae3e96c1665ffc0a`; final handoff/verifier consistency plus temporary validation trigger; Debug `36864783897` and Release `36864783961` passed.
+- **#63:** merged `b50ce46bb6793d30d6d7e40aae3e96c1665ffc0a`; handoff/verifier consistency; Debug `36864783897` and Release `36864783961` passed.
 - **#64:** merged `30288bf78d77307ce75aa135910696d592fa25a2`; test-stability follow-up only, no runtime behavior change; final cumulative Debug `36865960013` and Release `36865960153` passed.
-
+- **#65:** merged `3206f177401e25a9a3ab971c3872a1276f46bfb3`; final audit closeout: records final green Debug/Release evidence, updates handoff/report, restores `build.yml` and `release.yml` to manual-only `workflow_dispatch:`.
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
