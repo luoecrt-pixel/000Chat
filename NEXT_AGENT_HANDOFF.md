@@ -106,7 +106,7 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR H — human-facing documentation — **следующий**
+### 1. PR H — **следующий**
 Update README for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
 Первый шаг: make a documentation-only snapshot from the final merged audit state.
 
