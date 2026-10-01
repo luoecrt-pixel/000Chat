@@ -154,8 +154,8 @@ class MainActivityLifecycleTest {
             } as Call
             val prefs = privateField(activity, "prefs") as SharedPreferences
             prefs.edit().putString("provider", "openrouter").apply()
-            val secure = privateField(activity, "secure") as SecureStore
-            secure.setOpenRouterApiKey("test-key")
+            val secureStore = SecureStore(activity)
+            secureStore.setOpenRouterApiKey("test-key")
             val input = privateField(activity, "input") as android.widget.EditText
             input.setText("hello")
             generationBefore = activeGeneration(activity)
@@ -171,7 +171,7 @@ class MainActivityLifecycleTest {
             assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
 
             invoke(activity, "stopCurrentResponse")
-            secure.setOpenRouterApiKey("")
+            secureStore.setOpenRouterApiKey("")
         }
 
         scenario.close()
@@ -183,8 +183,8 @@ class MainActivityLifecycleTest {
         val staleCancelled = AtomicReference(false)
 
         scenario.onActivity { activity ->
-            val secure = privateField(activity, "secure") as SecureStore
-            secure.setOpenRouterApiKey("test-key")
+            val secureStore = SecureStore(activity)
+            secureStore.setOpenRouterApiKey("test-key")
             val prefs = privateField(activity, "prefs") as SharedPreferences
             prefs.edit().putString("provider", "openrouter").apply()
             val input = privateField(activity, "input") as android.widget.EditText
@@ -226,7 +226,7 @@ class MainActivityLifecycleTest {
             assertTrue("stale Call was not cancelled", staleCancelled.get())
 
             invoke(activity, "stopCurrentResponse")
-            secure.setOpenRouterApiKey("")
+            secureStore.setOpenRouterApiKey("")
         }
         scenario.close()
     }
