@@ -3462,10 +3462,18 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         } catch (e: Exception) {
-                            if (!cancelledUploads.contains(key)) runOnUiThread {
-                                if (OpenRouterBackgroundOwnershipPolicy.decide(uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
-                                    status.text = "Ошибка вложения: " + (e.message ?: "не удалось обработать файл")
-                                } else diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
+                            if (OpenRouterBackgroundOwnershipPolicy.decide(
+                                    uploadChatId,
+                                    currentChatId(),
+                                    uploadGeneration,
+                                    activeResponseState.state.generation,
+                                    activityVisible,
+                                    false
+                                ) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER
+                            ) {
+                                runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось обработать файл") }
+                            } else {
+                                diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
                             }
                         } finally { endUpload() }
                     }
