@@ -6,9 +6,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.net.ServerSocket
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
@@ -20,14 +19,26 @@ import java.util.concurrent.atomic.AtomicReference
 class OpenRouterChatClientTest {
     @Test
     fun toolLoopStopsBeforeStartingNextRoundAfterOwnershipLoss() {
-        val server = ServerSocket(0)
-        server.soTimeout = 10_000
         val requestCount = AtomicInteger(0)
         val toolStarted = CountDownLatch(1)
         val releaseTool = CountDownLatch(1)
         val shouldContinue = AtomicBoolean(true)
         val failure = AtomicReference<Throwable?>(null)
-        val client = OpenRouterChatClient("http://127.0.0.1:" + server.localPort)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/chat/completions") { exchange ->
+            requestCount.incrementAndGet()
+            val body = if (requestCount.get() == 1) {
+                """{"choices":[{"message":{"content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"total_tokens":1}}"""
+            } else {
+                """{"choices":[{"message":{"content":"unexpected second round","tool_calls":[]}}]}"""
+            }
+            val bytes = body.toByteArray(StandardCharsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        val client = OpenRouterChatClient("http://127.0.0.1:" + server.address.port)
 
         try {
             val worker = Thread {
@@ -59,22 +70,6 @@ class OpenRouterChatClientTest {
             }
             worker.start()
 
-            server.accept().use { socket ->
-                BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII)).use { reader ->
-                    while (reader.readLine().orEmpty().isNotEmpty()) Unit
-                }
-                requestCount.incrementAndGet()
-                val body = """{"choices":[{"message":{"content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"total_tokens":1}}"""
-                val bytes = body.toByteArray(StandardCharsets.UTF_8)
-                val response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
-                    bytes.size + "\r\nConnection: close\r\n\r\n"
-                socket.getOutputStream().use { out ->
-                    out.write(response.toByteArray(StandardCharsets.US_ASCII))
-                    out.write(bytes)
-                    out.flush()
-                }
-            }
-
             assertTrue(
                 "first tool call never started; failure=" + (failure.get()?.stackTraceToString() ?: "none"),
                 toolStarted.await(10, TimeUnit.SECONDS)
@@ -88,7 +83,7 @@ class OpenRouterChatClientTest {
             assertEquals("old tool loop started a second HTTP round", 1, requestCount.get())
         } finally {
             client.close()
-            server.close()
+            server.stop(0)
         }
     }
 }
