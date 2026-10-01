@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    if: vars.CI_AUTO_RUN == 'true' || github.event_name == 'workflow_dispatch' || github.run_attempt > 1
+    # Temporary CI exercise: restored after this run.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
