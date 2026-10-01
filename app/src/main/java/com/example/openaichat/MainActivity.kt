@@ -1017,7 +1017,7 @@ class MainActivity : ComponentActivity() {
                     }
                 result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
 
-                activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         chat.add(assistantMessage)
