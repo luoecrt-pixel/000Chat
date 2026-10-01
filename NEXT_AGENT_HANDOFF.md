@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 10:52 +03:00
-**Следующий рабочий срез:** PR #60 — GitHub-confirmation rotation proof.
+**Last updated:** 2026-10-01 11:08 +03:00
+**Следующий рабочий срез:** PR #61 — PR G background ownership.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0` (main after PR #58 handoff/docs snapshot; current code baseline for #59)
+- main code baseline: `f850331a90ff4ae21fce98eff618e7737d3d8e39` (main after merged PR #59; current code baseline for #60)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -78,6 +78,7 @@
 - [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 - [robolectric] **#57:** миграция ChatDatabase с v13/v14 до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки существующей истории; PR-head Debug `36826110992` прошёл эти lifecycle tests, а Release `36826110999` также завершился success.
 - [instrumentation] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; the Android ActivityScenario regression exercises Stop against both the pending confirmation and `openRouterActiveCall`. New PR Actions could not be dispatched because the repository workflows are manual-only and the connector exposes no workflow-dispatch operation; this proof is therefore source-backed plus instrumentation test code until a manual run is performed.
+- [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open now verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Actions remained manual-only, so this runtime test has not been executed by GitHub Actions here.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -103,21 +104,21 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR #60 — GitHub-confirmation rotation proof — **следующий**
-Prove that recreating `MainActivity` while confirmation is open cannot leave `decision.get()` waiting.
-Первый шаг: add one ActivityScenario rotation/recreate regression that requires the confirmation worker to finish `false` and the dialog to be gone.
-
-### 2. PR #61 — PR G background ownership
+### 1. PR #61 — PR G background ownership — **следующий**
 Audit copy/unzip/model-capability preflight against `chatId + generation`, including destroy/navigation during the operation.
 Первый шаг: capture immutable ownership at the async boundary, route stale completion to persisted source-chat state or discard, and add instrumentation for navigation/destroy mid-operation.
 
-### 3. PR #62 — OpenRouter tool-loop cancellation
+### 2. PR #62 — OpenRouter tool-loop cancellation
 Make a new message invalidate and cancel the old OpenRouter tool loop with the same request-ownership discipline as OpenAI.
 Первый шаг: add an explicit cancellation gate around every OpenRouter round/tool boundary and an instrumentation/runtime regression for a new message during an active loop.
 
-### 4. PR #62 final report
-Close the audit with a checked-in `THREAD_SAFETY_AUDIT_REPORT.md`, include the four claims, exact PR/test evidence, unresolved limitations, and update the next slice to PR H documentation.
-Первый шаг: write the report from the merged PRs rather than from planned changes.
+### 3. PR #63 — final thread-safety report
+Close the audit with a checked-in `THREAD_SAFETY_AUDIT_REPORT.md`, include all four claims, exact PR/test evidence, unresolved limitations, and update the next slice to PR H documentation.
+Первый шаг: write the report from the merged audit PRs rather than from planned changes.
+
+### 4. PR H — human-facing documentation
+Update README for OpenRouter/Claude, attachments, local artifacts and manual CI after the audit is closed.
+Первый шаг: make a documentation-only snapshot from the merged audit state.
 
 ## Репозиторий / branches
 
@@ -173,11 +174,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#55:** merged `16b712112e2710c8725de4203d75f23c51e15ad6`; PR-head Release `#196` — success; Debug `#374` — success; post-merge Debug `#376` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter caching uses explicit system breakpoint + top-level automatic breakpoint, `session_id`, a 20-minute whole-cycle budget, and a 200000 cumulative-token soft cap.
-- **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success. Anthropic OpenRouter cache breakpoint requests `ttl: `1h`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input.
+- **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success. Anthropic OpenRouter cache breakpoint requests `ttl: "1h"`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input.
 - **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; PR-head Release `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G added local OpenRouter/Claude attachments, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
 - **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
-- **#59:** open; head `baef192e2b101165d25fe679c38e70a3b8e61625`. Thread-safety item 1: explicit pending GitHub confirmation ownership; Stop/onStop/onDestroy cancel it; instrumentation regression covers Stop + OpenRouter Call cancellation. Actions are manual-only and this connector cannot dispatch them.
+- **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; Android instrumentation regression covers both.
+- **#60:** open; head `e92e9c58f6348a5f2c92d46a55d8501e5f61c89d`. Android instrumentation regression covers Activity recreation with an open GitHub confirmation.
 
 ## Product radar — идеи с реальной ценностью
 
