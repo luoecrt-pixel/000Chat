@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-09-28 21:00 +03:00
+**Last updated:** 2026-10-01 09:55 +03:00
 **Следующий рабочий срез:** Thread-safety audit — после PR G; затем PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -38,7 +38,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `f0612cf585adcba5f9ab05079f7c28cbe0513b1f` (main after disabling automatic Debug/Release triggers; PR #56 merge remains `a1857bfacc56584ea6244fdfafc21ec22793227a`)
+- main code baseline: `593009176082f32881d1f310e07bf54a14aaa4b6` (PR #57 merged into main; cleanup commit immediately follows to restore manual-only CI triggers)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -162,11 +162,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#52:** merged `275b25d27c13d01e5d848ed72ae166100c1897d0`; PR-head Release `#185` — success; Debug `#363` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation.
 - **#53:** merged `1eef3da06291c4ed8dcb7b77e810563f968247b3`; PR-head Release `#188` — success; Debug `#366` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation.
 - **#54:** merged `d262ea8e14554527c0bdaf9eef8b56da76fdb6af`; PR-head Release `#191` — success; Debug `#369` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Tool traces are now persisted in assistant messages and restored into OpenRouter history.
 - **#55:** merged `16b712112e2710c8725de4203d75f23c51e15ad6`; PR-head Release `#196` — success; Debug `#374` — success; post-merge Debug `#376` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter caching uses explicit system breakpoint + top-level automatic breakpoint, `session_id` sticky routing, a 20-minute whole-cycle budget, and a 200000 cumulative-token soft cap.
 - **#56:** merged `a1857bfacc56584ea6244fdfafc21ec22793227a`; PR-head Release `#199` — success; Debug `#377` — success incl. `Verify handoff`, verifier mutation matrix and Android lifecycle instrumentation. Anthropic OpenRouter cache breakpoint now requests `ttl: "1h"`; 1-hour writes cost 2.0x input versus 1.25x for the default 5-minute TTL, while cache reads remain 0.1x input. No provider/model-side `ttl: auto` exists.
+- **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; final PR-head Release run `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G adds the separate local OpenRouter/Claude attachment path, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
 
 ## Product radar — идеи с реальной ценностью
 
