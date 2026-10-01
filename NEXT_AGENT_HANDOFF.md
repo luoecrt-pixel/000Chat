@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 11:32 +03:00
-**Следующий рабочий срез:** PR #62 — OpenRouter tool-loop cancellation.
+**Last updated:** 2026-10-01 12:18 +03:00
+**Следующий рабочий срез:** PR H — human-facing documentation.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -39,7 +39,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `f14ba434d9231ccb2ef9c8f83c909730073136ae` (main after merged PR #60; current code baseline for #61)
+- main code baseline: `e376cf5783d64052506caf2d4549a96a6137dd0b` (main after merged PR #61; current code baseline for #62)
 - versionName/code: `4.17.0 / 64`
 - DB: `v16`
 - compile/target SDK: `35`
@@ -77,9 +77,10 @@
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 - [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 - [robolectric] **#57:** миграция ChatDatabase с v13/v14 до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки существующей истории; PR-head Debug `36826110992` прошёл эти lifecycle tests, а Release `36826110999` также завершился success.
-- [instrumentation] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; the Android ActivityScenario regression exercises Stop against both the pending confirmation and `openRouterActiveCall`. New PR Actions could not be dispatched because the repository workflows are manual-only and the connector exposes no workflow-dispatch operation; this proof is therefore source-backed plus instrumentation test code until a manual run is performed.
-- [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open now verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Actions remained manual-only, so this runtime test has not been executed by GitHub Actions here.
-- [instrumentation] **#61:** PR G OpenRouter picker copy/unzip now routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Instrumentation covers preflight cancellation on Stop and source-chat persistence after navigation; JVM policy tests cover current/source/discard routing.
+- [static] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; the Android ActivityScenario regression exercises Stop against both the pending confirmation and `openRouterActiveCall`. New PR Actions could not be dispatched because the repository workflows are manual-only and the connector exposes no workflow-dispatch operation; this proof is therefore source-backed plus instrumentation test code until a manual run is performed.
+- [static] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open now verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Actions remained manual-only, so this runtime test has not been executed by GitHub Actions here.
+- [static] **#61:** PR G OpenRouter picker copy/unzip now routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Instrumentation covers preflight cancellation on Stop and source-chat persistence after navigation; JVM policy tests cover current/source/discard routing.
+- [static] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Instrumentation covers active-Call cancellation; a JVM local HTTP-server test proves a stale loop cannot start a second round.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -105,17 +106,13 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR #62 — OpenRouter tool-loop cancellation — **следующий**
-Make a new message invalidate and cancel the old OpenRouter tool loop with the same request-ownership discipline as OpenAI.
-Первый шаг: add an explicit cancellation gate around every OpenRouter round/tool boundary and an instrumentation/runtime regression for a new message during an active loop.
+### 1. PR H — human-facing documentation — **следующий**
+Update README for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
+Первый шаг: make a documentation-only snapshot from the final merged audit state.
 
-### 2. PR #63 — final thread-safety report
-Close the audit with a checked-in `THREAD_SAFETY_AUDIT_REPORT.md`, include all four claims, exact PR/test evidence, unresolved limitations, and update the next slice to PR H documentation.
-Первый шаг: write the report from the merged audit PRs rather than from planned changes.
-
-### 3. PR H — human-facing documentation
-Update README for OpenRouter/Claude, attachments, local artifacts and manual CI after the audit is closed.
-Первый шаг: make a documentation-only snapshot from the merged audit state.
+### 2. EXIF image-wire follow-up
+Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
+Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
 
 ## Репозиторий / branches
 
@@ -171,11 +168,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#57:** merged `593009176082f32881d1f310e07bf54a14aaa4b6`; PR-head Release `36826110999` — success; Debug `36826110992` — success incl. handoff verifier, verifier mutation matrix, JVM tests, lint/build and Android lifecycle instrumentation. PR G added local OpenRouter/Claude attachments, multi-select, ZIP-safe extraction, EXIF wire normalization, attachment history manifest, model-modality preflight and `create_local_text_file`.
 - **#58:** merged `ca2185a34346f9227fb87d58f8c7aa1511ca9bd0`; docs-only handoff snapshot for PR G lifecycle proof and current image-size findings. No behavior changes.
 - **#59:** merged `f850331a90ff4ae21fce98eff618e7737d3d8e39`; Stop now cancels OpenRouter active Call and explicitly resolves/cancels the pending GitHub confirmation; Android instrumentation regression covers both.
 - **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario recreation regression proves an open GitHub confirmation cannot leave `decision.get()` waiting.
-- **#61:** open; head `83dcb0c2c5bcad978a739fb962d0caa97b051bc2`. PR G background paths now use `chatId + generation`; preflight cancellation and source-chat completion routing are covered by tests.
+- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G copy/unzip/model-preflight paths now obey `chatId + generation`, with source-chat persistence and cancellation gates.
+- **#62:** open; final thread-safety report is included in this PR; OpenRouter new-message cancellation + tool-loop ownership gate are covered by test code and source-level checks, but not executed by GitHub Actions in this environment.
 
 ## Product radar — идеи с реальной ценностью
 

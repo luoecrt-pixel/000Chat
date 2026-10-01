@@ -946,7 +946,7 @@ class MainActivity : ComponentActivity() {
                     return@execute
                 }
                 if (!isRequestCurrent(chatId, generation)) {
-                    activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return@execute
                 }
                 val toolCatalog = JSONArray()
@@ -967,6 +967,7 @@ class MainActivity : ComponentActivity() {
                     reasoningEffort = effort,
                     verbosity = verbosity,
                     parallelToolCalls = prefs.getBoolean("parallel_tools", true),
+                    shouldContinue = { isRequestCurrent(chatId, generation) },
                     executeTool = { name, arguments ->
                         if (name == "create_local_text_file") {
                             val artifact = localArtifactToolExecutor.createTextFile(arguments)
@@ -1016,7 +1017,7 @@ class MainActivity : ComponentActivity() {
                     }
                 result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
 
-                activeResponsePersistence.clearActiveResponse(chatId, requestId)
+                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         chat.add(assistantMessage)
@@ -1432,6 +1433,10 @@ class MainActivity : ComponentActivity() {
     }
     private fun sendMessage(regenerate:Boolean) {
         val provider = prefs.getString("provider", "openai") ?: "openai"
+        if (provider == "openrouter") {
+            openRouterActiveCall.getAndSet(null)?.cancel()
+            cancelPendingGitHubConfirmation()
+        }
         val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
         if(key.isBlank()){showSettings();return}
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {

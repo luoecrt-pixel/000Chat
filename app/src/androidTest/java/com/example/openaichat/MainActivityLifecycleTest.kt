@@ -131,6 +131,39 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun newOpenRouterMessageCancelsPreviousActiveCall() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val callCancelled = AtomicReference(false)
+
+        scenario.onActivity { activity ->
+            val fakeCall = Proxy.newProxyInstance(
+                Call::class.java.classLoader,
+                arrayOf(Call::class.java)
+            ) { _, method, _ ->
+                when (method.name) {
+                    "cancel" -> {
+                        callCancelled.set(true)
+                        null
+                    }
+                    "isCanceled" -> callCancelled.get()
+                    "isExecuted" -> true
+                    else -> null
+                }
+            } as Call
+            val prefs = privateField(activity, "prefs") as SharedPreferences
+            prefs.edit().putString("provider", "openrouter").apply()
+            @Suppress("UNCHECKED_CAST")
+            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
+            activeCall.set(fakeCall)
+
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+        }
+
+        assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
+        scenario.close()
+    }
+
+    @Test
     fun stopCancelsOpenRouterModelPreflightCall() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val callCancelled = AtomicReference(false)

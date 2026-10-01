@@ -9,6 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
 
 data class OpenRouterCompletionResult(
     val text: String,
@@ -23,7 +24,9 @@ class OpenRouterCompletionException(
     cause: Throwable? = null
 ) : IOException(message, cause)
 
-class OpenRouterChatClient {
+class OpenRouterChatClient(
+    private val baseUrl: String = "https://openrouter.ai/api/v1"
+) {
     private companion object {
         const val COMPLETE_TIME_LIMIT_MS = 20 * 60 * 1000L
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 200_000
@@ -56,7 +59,8 @@ class OpenRouterChatClient {
         verbosity: String?,
         parallelToolCalls: Boolean,
         executeTool: (name: String, arguments: JSONObject) -> String,
-        onCallCreated: (Call) -> Unit = {}
+        onCallCreated: (Call) -> Unit = {},
+        shouldContinue: () -> Boolean = { true }
     ): OpenRouterCompletionResult {
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
@@ -70,7 +74,14 @@ class OpenRouterChatClient {
                 partialText = accumulatedText.joinToString("\n\n").trim()
             )
 
+        fun ensureActive() {
+            if (!shouldContinue()) {
+                throw CancellationException("OpenRouter request is no longer current.")
+            }
+        }
+
         fun ensureWithinBudget() {
+            ensureActive()
             if (System.nanoTime() >= deadlineNanos) {
                 throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
             }
@@ -108,7 +119,7 @@ class OpenRouterChatClient {
             verbosity?.takeIf { it.isNotBlank() }?.let { body.put("verbosity", it) }
 
             val request = Request.Builder()
-                .url("https://openrouter.ai/api/v1/chat/completions")
+                .url(baseUrl.trimEnd('/') + "/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .addHeader("Content-Type", "application/json")
                 .addHeader("HTTP-Referer", "com.example.openaichat")
@@ -117,7 +128,12 @@ class OpenRouterChatClient {
                 .build()
 
             val call = httpClient.newCall(request)
+            if (!shouldContinue()) {
+                call.cancel()
+                throw CancellationException("OpenRouter request is no longer current.")
+            }
             onCallCreated(call)
+            ensureActive()
             val remainingMillis = TimeUnit.NANOSECONDS.toMillis((deadlineNanos - System.nanoTime()).coerceAtLeast(0L))
             if (remainingMillis <= 0L) {
                 call.cancel()
@@ -125,6 +141,7 @@ class OpenRouterChatClient {
             }
             call.timeout().timeout(minOf(600_000L, remainingMillis.coerceAtLeast(1L)), TimeUnit.MILLISECONDS)
             call.execute().use { httpResponse ->
+                ensureActive()
                 val raw = httpResponse.body?.string().orEmpty()
                 if (!httpResponse.isSuccessful) {
                     throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
@@ -170,7 +187,9 @@ class OpenRouterChatClient {
                         throw IOException("Invalid tool arguments for $name", e)
                     }
                     toolNames += name
+                    ensureActive()
                     val toolResult = executeTool(name, arguments)
+                    ensureActive()
                     ensureWithinBudget()
                     history.put(
                         JSONObject()
