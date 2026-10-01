@@ -9,7 +9,7 @@ import java.util.UUID
 class LocalArtifactToolExecutor(private val context: Context) {
     fun execute(name: String, arguments: JSONObject): String {
         return when (name) {
-            "create_local_text_file" -> createTextFile(arguments)
+            "create_local_text_file" -> createTextFile(arguments).toString()
             else -> throw IOException("Unknown local artifact tool: $name")
         }
     }
