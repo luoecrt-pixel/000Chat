@@ -23,9 +23,11 @@ class OpenRouterChatClientTest {
     fun toolLoopStopsBeforeStartingNextRoundAfterOwnershipLoss() {
         val server = ServerSocket(0)
         val requestCount = AtomicInteger(0)
+        val serverReady = CountDownLatch(1)
         val serverDone = CountDownLatch(1)
         val serverThread = Thread {
             try {
+                serverReady.countDown()
                 while (!server.isClosed) {
                     val socket = try {
                         server.accept()
@@ -64,6 +66,7 @@ class OpenRouterChatClientTest {
         val client = OpenRouterChatClient("http://127.0.0.1:" + server.localPort)
 
         try {
+            assertTrue("local test server did not start", serverReady.await(2, TimeUnit.SECONDS))
             val worker = Thread {
                 try {
                     client.complete(
@@ -93,7 +96,7 @@ class OpenRouterChatClientTest {
             }
             worker.start()
 
-            assertTrue("first tool call never started", toolStarted.await(10, TimeUnit.SECONDS))
+            assertTrue("first tool call never started; failure=${failure.get()}", toolStarted.await(10, TimeUnit.SECONDS))
             shouldContinue.set(false)
             releaseTool.countDown()
             worker.join(10_000L)
