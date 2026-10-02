@@ -48,7 +48,7 @@
 - PR #68 — open/unmerged; rebased onto the merged #72 main. Its remaining scope is the blocking `AttachmentInputStreamSource` harness and the real-path copy/ZIP instrumentation tests. No new full #68 run was claimed after rebasing; audit remains `[static]`.
 - PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful. The targeted stale-end regression passed on real Android instrumentation, but the broader attachment callback path remains `[static]` because #68's blocking real-path tests were not run green.
 - PR #69 — merged; the Release cancellation caused by the old shared concurrency group was later rerun successfully.
-- PR #66 — closed without merge after Verify handoff failed on the missing blank line before `## Product radar — идеи с реальной ценностью`.
+- PR #66 — closed without merge after Verify handoff failed on the missing blank line before the Product radar section.
 
 ## Подтверждённые lifecycle/recovery контракты
 
