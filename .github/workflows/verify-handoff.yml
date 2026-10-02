@@ -1,0 +1,24 @@
+name: Verify handoff
+
+on:
+  pull_request:
+    paths:
+      - NEXT_AGENT_HANDOFF.md
+      - tools/**
+
+permissions:
+  contents: read
+
+jobs:
+  verify-handoff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run handoff verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/verify_handoff.py
