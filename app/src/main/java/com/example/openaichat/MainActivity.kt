@@ -3556,6 +3556,7 @@ class MainActivity : ComponentActivity() {
             }
             val uri = imageUris.first()
             val uploadChatId=currentChatId()
+            val uploadGeneration=activeResponseState.state.generation
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
             rememberUploadUri(uri,"image")
@@ -3610,6 +3611,7 @@ class MainActivity : ComponentActivity() {
             val name=queryName(uri) ?: "attachment"
             val ext=name.substringAfterLast('.',"").lowercase()
             val uploadChatId=currentChatId()
+            val uploadGeneration=activeResponseState.state.generation
             val kind=if(ext=="zip")"zip" else "file"
             if(ext=="zip"){
                 rememberUploadUri(uri,"zip")
@@ -4124,6 +4126,7 @@ class MainActivity : ComponentActivity() {
     private fun resumePendingUploads(){
         val pending=pendingUploadUris.toList()
         val uploadChatId=currentChatId()
+        val uploadGeneration=activeResponseState.state.generation
         pending.forEach { (rawUri,kind) ->
             if(kind=="zip") return@forEach // ZIP is intentionally prepared only when the user taps Send.
             val key="$kind|$rawUri"
