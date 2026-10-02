@@ -310,6 +310,7 @@ class MainActivityLifecycleTest {
             chatId = launched.currentChatIdForTesting()
             generation = launched.activeGenerationForTesting()
             launched.setPendingUploadCountForTesting(1)
+            launched.setSendEnabledForTesting(false)
             assertEquals(1, launched.pendingUploadCountForTesting())
         }
 

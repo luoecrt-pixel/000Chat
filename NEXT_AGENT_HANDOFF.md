@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 15:58 +03:00
-**Следующий рабочий срез:** PR H
+**Last updated:** 2026-10-02 14:34 +03:00
+**Следующий рабочий срез:** PR #68 unstable instrumentation follow-up
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -40,22 +40,15 @@
 
 ## Фактический baseline
 
-- main code baseline: `30288bf78d77307ce75aa135910696d592fa25a2` (main after merged thread-safety PR #64 and final CI validation; current code baseline for next work)
-- versionName/code: `4.17.0 / 64`
-- DB: `v16`
-- compile/target SDK: `35`
-- min SDK: `26`
-- JDK: `17`
-- AGP: `8.7.3`
-- Kotlin Gradle Plugin: `2.0.21`
-- Gradle CI: `8.9`
-- WorkManager: `2.11.2`
-- RecyclerView: `1.4.0`
-- Core KTX: `1.15.0`
-- OkHttp: `4.12.0`
+- main code baseline: `ba31caea8999c3b17b654d6a3f84c051b69ebb8f` (production upload-gate split from #68; code baseline for the next merged main)
 
-Последующие документационные commits не являются новым code baseline.
-
+Последний рабочий срез 2026-10-02:
+- PR #71 — merged; Build run `36998520844` and Release run `36998520970` both completed Successful after the workflow-specific concurrency fix.
+- PR #67 — merged; runtime instrumentation is green, so its follow-up proof remains `[instrumentation]`.
+- PR #68 — open/unmerged; the final corrected full run was red at compile time before instrumentation, so no `[instrumentation]` tag is claimed.
+- PR #72 — production split from #68; pending the final green pair before merge.
+- PR #69 — merged; the Release cancellation caused by the old shared concurrency group was later rerun successfully.
+- PR #66 — closed without merge after Verify handoff failed on the missing blank line before `## Product radar — идеи с реальной ценностью`.
 ## Подтверждённые lifecycle/recovery контракты
 
 - [pure] **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
@@ -82,6 +75,9 @@
 - [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Final cumulative Debug run `36865960013` passed.
 - [instrumentation] **#61:** PR G OpenRouter picker copy/unzip routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Final cumulative Debug run `36865960013` passed the instrumentation suite; JVM policy tests are included in the same CI build.
 - [instrumentation] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Final cumulative Debug run `36865960013` passed the Android instrumentation suite and JVM tool-loop test.
+- [instrumentation] **#67:** OpenRouter active-Call ownership is request-owned at the Activity boundary; stale calls are cancelled and never published. Final Build `36922114233` and Release `36922114294` passed; PR #67 is merged.
+- [static] **#68:** The old runtime failures were traced to two independent issues: reflection over `registerOpenRouterCallIfOwned`, and the Kotlin `ContentProvider` loading `kotlin.jvm.internal.Intrinsics` in process `com.example.openaichat.test`. The attempted `androidTestImplementation(kotlin("stdlib"))` did not fix that process-level class loading. The provider harness was replaced with a blocking `AttachmentInputStreamSource`, and the new tests call test-visible MainActivity methods directly. The final permitted corrected full run (`37000319077` Build, `37000319146` Release) still failed earlier at compile time with `Unresolved reference 'uploadGeneration'`; instrumentation did not start. #68 remains open/unmerged.
+- [static] **#72:** Stable production-side attachment ownership was split into a separate PR: captured `chatId + generation`, AtomicInteger upload bookkeeping, and `endUpload()` lifecycle gating. OpenRouter Call ownership itself was already merged in #67. The unstable blocking-input instrumentation remains isolated in #68, so this production split does not close the broader real-path audit claim.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -105,13 +101,22 @@
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
+## Уроки этого захода
+
+1. **Тесты не должны лезть в MainActivity рефлексией:** `by lazy`, `internal` и Kotlin name mangling меняют runtime-имя/видимость методов и полей. Для новых lifecycle tests нужен прямой test-visible API.
+2. **Concurrency group всегда включает имя workflow:** иначе Build и Release с одним `[ci]` push отменяют друг друга.
+
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR H — **следующий**
-Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
-Первый шаг: make a documentation-only snapshot from the final merged audit state.
+### 1. PR #68 unstable instrumentation follow-up — **следующий**
+PR #68 остаётся открытым и не смёржен. Последний разрешённый полный прогон завершился раньше instrumentation: Build/Release оба упали на компиляции из-за несведённых `uploadGeneration` call-sites. Production-часть `endUpload` + captured ownership вынесена в #72; блокирующий real-path test остаётся отдельным доказательством, а не частью merged production gate.
+Первый шаг: на свежем `main` заново проверить только blocking `AttachmentInputStreamSource` instrumentation path, без возврата к reflection или ContentProvider harness.
 
-### 2. EXIF image-wire follow-up
+### 2. PR H
+Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety follow-up is closed.
+Первый шаг: make a documentation-only snapshot from the final merged follow-up state.
+
+### 3. EXIF image-wire follow-up
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
 Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
 
@@ -169,11 +174,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario rotation regression for GitHub confirmation; final cumulative Debug `36865960013` passed.
-- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G background copy/unzip/model-preflight ownership fix; final cumulative Debug `36865960013` passed.
-- **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter tool-loop cancellation ownership fix; final cumulative Debug `36865960013` and Release `36865960153` passed.
-- **#63:** merged `b50ce46bb6793d30d6d7e40aae3e96c1665ffc0a`; final handoff/verifier consistency plus temporary validation trigger; Debug `36864783897` and Release `36864783961` passed.
-- **#64:** merged `30288bf78d77307ce75aa135910696d592fa25a2`; test-stability follow-up only, no runtime behavior change; final cumulative Debug `36865960013` and Release `36865960153` passed.
+- **#65:** merged `3206f177401e25a9a3ab971c3872a1276f46bfb3`; final thread-safety audit closeout.
+- **#67:** merged `6c285bfd4eb186cd8c8da14508b454196c68b123`; request-owned OpenRouter active Call follow-up; final Build `36922114233` and Release `36922114294` passed.
+- **#69:** merged `bf8269cc804f4f4dfc0860e551e712571cf14d14`; PR-only main policy and CI event/marker gating; Release was later rerun successfully after the old concurrency cancellation.
+- **#71:** merged; workflow-specific Build/Release concurrency groups; Build `36998520844` and Release `36998520970` both passed.
+- **#72:** production split for attachment lifecycle ownership; merge pending the final green pair on the corrected test head.
 
 ## Product radar — идеи с реальной ценностью
 

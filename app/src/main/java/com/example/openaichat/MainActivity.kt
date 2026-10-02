@@ -5355,6 +5355,11 @@ class MainActivity : ComponentActivity() {
     fun isSendEnabledForTesting(): Boolean = send.isEnabled
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun setSendEnabledForTesting(value: Boolean) {
+        send.isEnabled = value
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun currentChatIdForTesting(): String = currentChatId()
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
