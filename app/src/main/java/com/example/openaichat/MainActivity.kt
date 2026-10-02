@@ -140,14 +140,16 @@ class MainActivity : ComponentActivity() {
     }
     private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
-    private lateinit var prefs: SharedPreferences
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    lateinit var prefs: SharedPreferences
     private lateinit var chatDb: ChatDatabase
     private lateinit var activeResponsePersistence: ActiveResponsePersistence
     private lateinit var diagnostics: AstraDiagnostics
     private lateinit var scroll: RecyclerView
     private lateinit var messageAdapter: ChatMessageAdapter
     private lateinit var input: EditText
-    private lateinit var send: Button
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    lateinit var send: Button
     private lateinit var stop: Button
     private lateinit var status: TextView
     private lateinit var toolLabel: TextView
@@ -177,10 +179,13 @@ class MainActivity : ComponentActivity() {
     private var restoringComposer = false
     private val activeResumeChats = mutableSetOf<String>()
     private val toolStates = linkedMapOf<String, String>()
-    private val pendingUploadUris = mutableListOf<Pair<String,String>>() // uri -> image|file|zip
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    val pendingUploadUris = mutableListOf<Pair<String,String>>() // uri -> image|file|zip
     private var baselineEffort: String? = null
-    private val pendingUploads = AtomicInteger(0)
-    private var preparingZipAttachments = false
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    val pendingUploads = AtomicInteger(0)
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    var preparingZipAttachments = false
     private val uploadCalls = ConcurrentHashMap<String, Call>()
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
@@ -206,7 +211,10 @@ class MainActivity : ComponentActivity() {
     private var pendingActivityResultCode: Int? = null
 
     private val secure by lazy { SecureStore(this) }
-    private val pickAny = 5100
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    var openRouterAttachmentInputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    val pickAny = 5100
     private val pickImage = 5101
     private val pickVoice = 5102
     private val pickVectorStoreFile = 5103
@@ -308,7 +316,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun registerOpenRouterCallIfOwned(
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun registerOpenRouterCallIfOwned(
         requestId: String,
         chatId: String,
         generation: Long,
@@ -1211,7 +1220,8 @@ class MainActivity : ComponentActivity() {
         githubBadge.setTextColor(if (enabled) Color.rgb(130, 205, 150) else Color.rgb(145, 150, 160))
     }
 
-    private fun newChat() {
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun newChat() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         currentCall?.cancel()
@@ -3404,7 +3414,8 @@ class MainActivity : ComponentActivity() {
         }finally{temp.delete()}
     }
 
-    private fun handleActivityResult(r:Int,c:Int,d:Intent?){
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun handleActivityResult(r:Int,c:Int,d:Intent?){
         if(c!=RESULT_OK || d==null)return
         if(r==pickExportTxt){
             val uri=d.data ?: return
@@ -3466,13 +3477,13 @@ class MainActivity : ComponentActivity() {
             val selectedUris = urisFromIntent(d)
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
-                    val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
+                    val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
                     val uploadChatId = currentChatId()
                     val uploadGeneration = activeResponseState.state.generation
                     beginUpload(uploadChatId, uploadGeneration)
                     executor.execute {
                         try {
-                            val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name)
+                            val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource)
                             val prepared = if (local.kind == "zip") {
                                 OpenRouterAttachmentStore.extractZipFile(this, File(local.path), local.name) { message ->
                                     diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
@@ -3686,7 +3697,8 @@ class MainActivity : ComponentActivity() {
         "xlt","xlw","xml","yaml","yml"
     )
 
-    private fun preparePendingOpenRouterZipsThenSend(regenerate: Boolean) {
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun preparePendingOpenRouterZipsThenSend(regenerate: Boolean) {
         if (preparingZipAttachments) return
         val zipItems = pendingUploadUris.filter { it.second == "zip" }.toList()
         if (zipItems.isEmpty()) return
@@ -3700,10 +3712,10 @@ class MainActivity : ComponentActivity() {
                 val extracted = mutableListOf<OpenRouterLocalAttachment>()
                 zipItems.forEach { (rawUri, _) ->
                     val uri = Uri.parse(rawUri)
-                    val zipName = OpenRouterAttachmentStore.queryName(this, uri) ?: "archive.zip"
-                    extracted += OpenRouterAttachmentStore.extractZip(this, uri, zipName) { message ->
+                    val zipName = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "archive.zip"
+                    extracted += OpenRouterAttachmentStore.extractZip(this, uri, zipName, { message ->
                         diagnostics.log("openrouter_zip_skip", mapOf("chat_id" to sourceChatId, "message" to message.take(300)))
-                    }
+                    }, openRouterAttachmentInputStreamSource)
                 }
                 val initialTarget = OpenRouterBackgroundOwnershipPolicy.decide(
                     sourceChatId = sourceChatId,
@@ -4342,6 +4354,12 @@ class MainActivity : ComponentActivity() {
         val id=currentChatId()
         return chatDb.getChatTitle(id) ?: "Новый чат"
     }
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun currentChatIdForTesting(): String = currentChatId()
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun activeGenerationForTesting(): Long = activeResponseState.state.generation
+
     private fun currentChatId()=prefs.getString("current_chat","") ?: ""
     private fun currentChatTitle():String = currentChatTitleSafe()
     private fun currentChatObj():JSONObject = chatDb.getChat(currentChatId())
@@ -5342,29 +5360,6 @@ class MainActivity : ComponentActivity() {
             if (remaining == 0 && stop.visibility != View.VISIBLE) send.isEnabled = true
         }
     }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun pendingUploadCountForTesting(): Int = pendingUploads.get()
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun setPendingUploadCountForTesting(value: Int) {
-        pendingUploads.set(value)
-    }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun isSendEnabledForTesting(): Boolean = send.isEnabled
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun setSendEnabledForTesting(value: Boolean) {
-        send.isEnabled = value
-    }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun currentChatIdForTesting(): String = currentChatId()
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun activeGenerationForTesting(): Long = activeResponseState.state.generation
-
     private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
         orientation=LinearLayout.VERTICAL
         setPadding(dp(13),dp(10),dp(13),dp(10))

@@ -1,8 +1,11 @@
 package com.example.openaichat
 
 import android.content.SharedPreferences
+import android.content.Intent
 import android.os.SystemClock
 import android.widget.LinearLayout
+import android.widget.Button
+import android.app.Activity
 import android.app.AlertDialog
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -14,12 +17,20 @@ import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import android.net.Uri
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
 import java.lang.reflect.Proxy
 import java.util.concurrent.CompletableFuture
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
@@ -131,6 +142,39 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun newOpenRouterMessageCancelsPreviousActiveCall() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val callCancelled = AtomicReference(false)
+
+        scenario.onActivity { activity ->
+            val fakeCall = Proxy.newProxyInstance(
+                Call::class.java.classLoader,
+                arrayOf(Call::class.java)
+            ) { _, method, _ ->
+                when (method.name) {
+                    "cancel" -> {
+                        callCancelled.set(true)
+                        null
+                    }
+                    "isCanceled" -> callCancelled.get()
+                    "isExecuted" -> true
+                    else -> null
+                }
+            } as Call
+            val prefs = activity.prefs
+            prefs.edit().putString("provider", "openrouter").apply()
+            @Suppress("UNCHECKED_CAST")
+            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
+            activeCall.set(fakeCall)
+
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+        }
+
+        assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
+        scenario.close()
+    }
+
+    @Test
     fun newOpenRouterMessageCancelsPreviousActiveCallAndAdvancesGeneration() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val callCancelled = AtomicReference(false)
@@ -152,7 +196,7 @@ class MainActivityLifecycleTest {
                     else -> null
                 }
             } as Call
-            val prefs = privateField(activity, "prefs") as SharedPreferences
+            val prefs = activity.prefs
             prefs.edit().putString("provider", "openrouter").apply()
             val secureStore = SecureStore(activity)
             secureStore.setOpenRouterApiKey("test-key")
@@ -185,7 +229,7 @@ class MainActivityLifecycleTest {
         scenario.onActivity { activity ->
             val secureStore = SecureStore(activity)
             secureStore.setOpenRouterApiKey("test-key")
-            val prefs = privateField(activity, "prefs") as SharedPreferences
+            val prefs = activity.prefs
             prefs.edit().putString("provider", "openrouter").apply()
             val input = privateField(activity, "input") as android.widget.EditText
             input.setText("hello")
@@ -287,13 +331,78 @@ class MainActivityLifecycleTest {
                 arrayOf(sourceChatId, listOf(attachment), emptyList<Pair<String, String>>())
             )
 
-            val prefs = privateField(activity, "prefs") as SharedPreferences
+            val prefs = activity.prefs
             val sourceRaw = prefs.getString("composer_state_$sourceChatId", null)
             val currentRaw = prefs.getString("composer_state_$currentChatId", null)
             val sourceState = if (sourceRaw.isNullOrBlank()) JSONObject() else JSONObject(sourceRaw)
             val currentState = if (currentRaw.isNullOrBlank()) JSONObject() else JSONObject(currentRaw)
             assertEquals(1, sourceState.optJSONArray("openrouter_attachments")?.length() ?: 0)
             assertEquals(0, currentState.optJSONArray("openrouter_attachments")?.length() ?: 0)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun staleOpenRouterPickerCopyPersistsSourceChatThroughExecutorAfterNavigation() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val source = BlockingAttachmentInputStreamSource()
+        var sourceChatId = ""
+        var sourceUri: Uri? = null
+
+        scenario.onActivity { launched ->
+            launched.openRouterAttachmentInputStreamSource = source
+            sourceChatId = currentChatId(launched)
+            sourceUri = Uri.parse("content://blocking.test/notes.txt")
+            launched.prefs.edit().putString("provider", "openrouter").apply()
+            launched.handleActivityResult(
+                launched.pickAny,
+                Activity.RESULT_OK,
+                Intent().setData(sourceUri)
+            )
+        }
+
+        val uri = sourceUri!!
+        assertTrue("copyAndClassify did not reach the blocking source", source.waitUntilOpened(uri))
+
+        scenario.onActivity { launched -> launched.newChat() }
+        source.release(uri)
+
+        assertTrue("stale copy completion did not persist to the source chat", waitForSourceAttachmentCount(scenario, sourceChatId, 1))
+
+        scenario.onActivity { launched ->
+            val currentId = currentChatId(launched)
+            assertEquals(0, composerAttachmentCount(launched, currentId))
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun staleOpenRouterZipExtractionPersistsSourceChatThroughExecutorAfterNavigation() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val source = BlockingAttachmentInputStreamSource()
+        var sourceChatId = ""
+        var sourceUri: Uri? = null
+
+        scenario.onActivity { launched ->
+            launched.openRouterAttachmentInputStreamSource = source
+            sourceChatId = currentChatId(launched)
+            sourceUri = Uri.parse("content://blocking.test/archive.zip")
+            launched.pendingUploadUris.add(sourceUri.toString() to "zip")
+            launched.preparePendingOpenRouterZipsThenSend(false)
+        }
+
+        val uri = sourceUri!!
+        assertTrue("extractZip did not reach the blocking source", source.waitUntilOpened(uri))
+
+        scenario.onActivity { launched -> launched.newChat() }
+        source.release(uri)
+
+        assertTrue("stale ZIP completion did not persist to the source chat", waitForSourceAttachmentCount(scenario, sourceChatId, 1))
+
+        scenario.onActivity { launched ->
+            val currentId = currentChatId(launched)
+            assertEquals(0, composerAttachmentCount(launched, currentId))
+            assertFalse(launched.preparingZipAttachments)
         }
         scenario.close()
     }
@@ -307,11 +416,10 @@ class MainActivityLifecycleTest {
 
         scenario.onActivity { launched ->
             activity = launched
-            chatId = launched.currentChatIdForTesting()
-            generation = launched.activeGenerationForTesting()
-            launched.setPendingUploadCountForTesting(1)
-            launched.setSendEnabledForTesting(false)
-            assertEquals(1, launched.pendingUploadCountForTesting())
+            chatId = currentChatId(launched)
+            generation = activeGeneration(launched)
+            launched.pendingUploads.set(1)
+            launched.send.isEnabled = false
         }
 
         scenario.moveToState(Lifecycle.State.CREATED)
@@ -320,11 +428,7 @@ class MainActivityLifecycleTest {
         SystemClock.sleep(100L)
 
         scenario.onActivity { launched ->
-            assertEquals(0, launched.pendingUploadCountForTesting())
-            assertFalse(
-                "stale endUpload re-enabled a stopped Activity send button",
-                launched.isSendEnabledForTesting()
-            )
+            assertFalse("stale endUpload re-enabled a stopped Activity send button", launched.send.isEnabled)
         }
         scenario.close()
     }
@@ -432,7 +536,7 @@ class MainActivityLifecycleTest {
                         .put(JSONObject().put("uri", pendingFileUri).put("kind", "file"))
                 )
 
-            val prefs = privateField(activity, "prefs") as SharedPreferences
+            val prefs = activity.prefs
             prefs.edit().putString("composer_state_$chatId", state.toString()).commit()
 
             invokeSaveUploadedFileToComposer(
@@ -528,11 +632,9 @@ class MainActivityLifecycleTest {
         activity.postAssistantTextUpdate(chatId, generation, itemId, snapshot)
     }
 
-    private fun activeGeneration(activity: MainActivity): Long =
-        (privateField(activity, "activeResponseState") as ActiveResponseStateStore).state.generation
+    private fun activeGeneration(activity: MainActivity): Long = activity.activeGenerationForTesting()
 
-    private fun currentChatId(activity: MainActivity): String =
-        invoke(activity, "currentChatId") as String
+    private fun currentChatId(activity: MainActivity): String = activity.currentChatIdForTesting()
 
     private fun isRequestCurrent(activity: MainActivity, chatId: String, generation: Long): Boolean =
         invoke(
@@ -576,6 +678,29 @@ class MainActivityLifecycleTest {
             ),
             arrayOf(chatId, fileId, name, size, rawUri, localPath, mime, pendingUploadKind)
         )
+    }
+
+    private fun waitForSourceAttachmentCount(
+        scenario: ActivityScenario<MainActivity>,
+        chatId: String,
+        expected: Int
+    ): Boolean {
+        repeat(100) {
+            var count = 0
+            scenario.onActivity { activity ->
+                count = composerAttachmentCount(activity, chatId)
+            }
+            if (count >= expected) return true
+            SystemClock.sleep(25L)
+        }
+        return false
+    }
+
+    private fun composerAttachmentCount(activity: MainActivity, chatId: String): Int {
+        val prefs = activity.prefs
+        val raw = prefs.getString("composer_state_$chatId", null)
+        if (raw.isNullOrBlank()) return 0
+        return JSONObject(raw).optJSONArray("openrouter_attachments")?.length() ?: 0
     }
 
     private fun privateField(activity: MainActivity, name: String): Any {
@@ -643,4 +768,43 @@ class MainActivityLifecycleTest {
         method.isAccessible = true
         return method.invoke(activity, *args)
     }
+    private class BlockingAttachmentInputStreamSource : AttachmentInputStreamSource {
+        private val opened = ConcurrentHashMap.newKeySet<String>()
+        private val releases = ConcurrentHashMap<String, CountDownLatch>()
+
+        override fun openInputStream(context: android.content.Context, uri: Uri): InputStream {
+            val key = uri.toString()
+            opened += key
+            val gate = CountDownLatch(1)
+            releases[key] = gate
+            check(gate.await(10L, TimeUnit.SECONDS)) { "blocking attachment source timed out: $uri" }
+            return ByteArrayInputStream(
+                if (uri.lastPathSegment.orEmpty().endsWith(".zip", ignoreCase = true)) zipBytes()
+                else "attachment from blocking source".toByteArray(Charsets.UTF_8)
+            )
+        }
+
+        fun waitUntilOpened(uri: Uri): Boolean {
+            repeat(100) {
+                if (opened.contains(uri.toString())) return true
+                SystemClock.sleep(20L)
+            }
+            return false
+        }
+
+        fun release(uri: Uri) {
+            releases[uri.toString()]?.countDown()
+        }
+
+        private fun zipBytes(): ByteArray {
+            val buffer = ByteArrayOutputStream()
+            ZipOutputStream(buffer).use { zip ->
+                zip.putNextEntry(ZipEntry("notes.txt"))
+                zip.write("attachment extracted from blocking source".toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+            return buffer.toByteArray()
+        }
+    }
+
 }
