@@ -109,14 +109,21 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR H — **следующий**
+### 1. PR #73 final handoff closeout — **следующий**
+#68 и #75 закрыты с реальным зелёным Android instrumentation evidence; #74 добавил отдельный дешёвый handoff verifier workflow.
+Первый шаг: получить Successful `Verify handoff` check на этом PR и смержить #73.
+
+### 2. Main baseline sanity
+Отдельная ветка от текущего `main` содержит пустой `[ci]` commit `710e50dbf1a3b379c659f06a8ce5a34c0c184ac7`; полный Build/Release sanity pair выполняется отдельно и не изменяет `main`.
+Первый шаг: дождаться обоих Successful runs и зафиксировать их как baseline evidence.
+
+### 3. PR H
 Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the attachment lifecycle follow-ups are closed.
 Первый шаг: make a documentation-only snapshot from the final merged lifecycle/audit state.
 
-### 2. EXIF image-wire follow-up
+### 4. EXIF image-wire follow-up
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
 Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
-
 ## Репозиторий / branches
 
 После #35–#37 накопились локальные feature branches, многие из которых соответствуют уже merged PR. Их удаление **не удаляет commits или PR history** и обычно полезно для hygiene. В текущем GitHub connector нет операции DELETE git ref, поэтому автоматически удалить их здесь нельзя; активным сейчас является только `main` плюс открытые PR branches. Перед ручным удалением ориентируйся на merged/closed PR state, а не на имя ветки.
