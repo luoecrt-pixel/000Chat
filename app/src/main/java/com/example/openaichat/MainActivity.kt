@@ -253,6 +253,7 @@ class MainActivity : ComponentActivity() {
         synchronized(activeResumeChats) { activeResumeChats.clear() }
         resumePendingUploads()
         resumeBackgroundResponses()
+        refreshAttachChips()
     }
 
     override fun onStop() {
