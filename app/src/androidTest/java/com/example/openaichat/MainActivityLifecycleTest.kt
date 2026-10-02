@@ -455,7 +455,7 @@ class MainActivityLifecycleTest {
         SystemClock.sleep(100L)
 
         scenario.onActivity { launched ->
-            assertEquals(0, launched.pendingUploadCountForTesting())
+            assertEquals(0, launched.pendingUploads.get())
             assertFalse("Send should stay disabled while Activity is stopped", launched.send.isEnabled)
         }
 
