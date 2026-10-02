@@ -174,12 +174,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#65:** merged `3206f177401e25a9a3ab971c3872a1276f46bfb3`; final thread-safety audit closeout.
 - **#67:** merged `6c285bfd4eb186cd8c8da14508b454196c68b123`; request-owned OpenRouter active Call follow-up; final Build `36922114233` and Release `36922114294` passed.
 - **#69:** merged `bf8269cc804f4f4dfc0860e551e712571cf14d14`; PR-only main policy and CI event/marker gating; Release was later rerun successfully after the old concurrency cancellation.
+- **#70:** merged `bdf5b56d9ce75bc2a4da40b9d8b02224ac1b0fac`; handoff/verifier maintenance snapshot.
 - **#71:** merged; workflow-specific Build/Release concurrency groups; Build `36998520844` and Release `36998520970` both passed.
 - **#72:** merged; production upload lifecycle ownership gate; final Build `37005211862` and Release `37005211936` both passed.
-- **#70:** merged; handoff/verifier maintenance snapshot. This final handoff refresh keeps audit item #3 `[static]` until #68's real-path instrumentation is green.
 
 ## Product radar — идеи с реальной ценностью
 
