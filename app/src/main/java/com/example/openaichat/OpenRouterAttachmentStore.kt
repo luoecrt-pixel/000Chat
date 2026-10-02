@@ -47,6 +47,16 @@ data class OpenRouterLocalAttachment(
         )
     }
 }
+ 
+fun interface AttachmentInputStreamSource {
+    fun openInputStream(context: Context, uri: Uri): InputStream?
+}
+
+object DefaultAttachmentInputStreamSource : AttachmentInputStreamSource {
+    override fun openInputStream(context: Context, uri: Uri): InputStream? =
+        context.contentResolver.openInputStream(uri)
+}
+
 
 object OpenRouterAttachmentStore {
     const val MAX_ATTACHMENTS = 12
@@ -58,16 +68,25 @@ object OpenRouterAttachmentStore {
 
     fun supportedFormatsText() = "txt, md, kt, java, json, csv, xml, yaml, yml, log, png, jpg, jpeg, webp, gif, pdf, zip"
 
-    fun queryName(context: Context, uri: Uri): String? = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-        if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null
-    }
+    fun queryName(context: Context, uri: Uri): String? = try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null
+        }
+    } catch (_: Exception) {
+        null
+    } ?: uri.lastPathSegment?.takeIf { it.isNotBlank() }
 
-    fun copyAndClassify(context: Context, uri: Uri, forcedName: String? = null): OpenRouterLocalAttachment {
+    fun copyAndClassify(
+        context: Context,
+        uri: Uri,
+        forcedName: String? = null,
+        inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
+    ): OpenRouterLocalAttachment {
         val name = sanitizeDisplayName(forcedName ?: queryName(context, uri) ?: "attachment")
-        val mime = context.contentResolver.getType(uri).orEmpty().ifBlank { mimeForFilename(name) }
+        val mime = runCatching { context.contentResolver.getType(uri).orEmpty() }.getOrDefault("").ifBlank { mimeForFilename(name) }
         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
         val raw = File(dir, "or_" + UUID.randomUUID() + "_" + safeFileName(name))
-        context.contentResolver.openInputStream(uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
+        inputStreamSource.openInputStream(context, uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
             ?: throw IOException("Не удалось открыть файл: " + name)
         return finalizeFile(dir, raw, name, mime)
     }
@@ -146,11 +165,17 @@ object OpenRouterAttachmentStore {
         report(message)
     }
 
-    fun extractZip(context: Context, uri: Uri, zipName: String, report: (String) -> Unit = {}): List<OpenRouterLocalAttachment> {
+    fun extractZip(
+        context: Context,
+        uri: Uri,
+        zipName: String,
+        report: (String) -> Unit = {},
+        inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
+    ): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
         var entries = 0
         var total = 0L
-        context.contentResolver.openInputStream(uri)?.use { source -> ZipInputStream(source.buffered()).use { zin ->
+        inputStreamSource.openInputStream(context, uri)?.use { source -> ZipInputStream(source.buffered()).use { zin ->
             var entry = zin.nextEntry
             while (entry != null) {
                 entries++
