@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-01 15:58 +03:00
+**Last updated:** 2026-10-02 18:58 +03:00
 **Следующий рабочий срез:** PR H
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -40,21 +40,14 @@
 
 ## Фактический baseline
 
-- main code baseline: `30288bf78d77307ce75aa135910696d592fa25a2` (main after merged thread-safety PR #64 and final CI validation; current code baseline for next work)
-- versionName/code: `4.17.0 / 64`
-- DB: `v16`
-- compile/target SDK: `35`
-- min SDK: `26`
-- JDK: `17`
-- AGP: `8.7.3`
-- Kotlin Gradle Plugin: `2.0.21`
-- Gradle CI: `8.9`
-- WorkManager: `2.11.2`
-- RecyclerView: `1.4.0`
-- Core KTX: `1.15.0`
-- OkHttp: `4.12.0`
+- main code baseline: `8bfd85aea222dfd12ac3bd3345c09c1712f28c29` (PR #75 merged foreground upload-gate reconciliation)
 
-Последующие документационные commits не являются новым code baseline.
+Последний рабочий срез 2026-10-02:
+- PR #75 — merged; push Build `37027054462` and Release `37027053533` both completed Successful. The new foreground-resume upload-gate regression passed on real Android instrumentation.
+- PR #74 — merged; lightweight `Verify handoff` workflow added for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
+- PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful.
+- PR #71 — merged; Build `36998520844` and Release `36998520970` both completed Successful after the workflow-specific concurrency fix.
+- PR #68 — merged; Build `37024281184` (#491) and Release `37024281948` (#311) both completed Successful, with real Android lifecycle instrumentation green.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -82,6 +75,10 @@
 - [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Final cumulative Debug run `36865960013` passed.
 - [instrumentation] **#61:** PR G OpenRouter picker copy/unzip routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Final cumulative Debug run `36865960013` passed the instrumentation suite; JVM policy tests are included in the same CI build.
 - [instrumentation] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Final cumulative Debug run `36865960013` passed the Android instrumentation suite and JVM tool-loop test.
+- [instrumentation] **#67:** OpenRouter active-Call ownership is request-owned at the Activity boundary; stale calls are cancelled and never published. Final Build `36922114233` and Release `36922114294` passed; PR #67 is merged.
+- [instrumentation] **#68:** The residual blocking `AttachmentInputStreamSource` harness and stale OpenRouter picker-copy / ZIP-extraction ActivityScenario tests completed on a real Android emulator. Final push Build `37024281184` (#491) and Release `37024281948` (#311) both succeeded; the Build instrumentation step was Successful.
+- [instrumentation] **#72:** Stable production-side attachment ownership is on main: captured `chatId + generation`, AtomicInteger upload bookkeeping, and lifecycle-gated `endUpload()`. Final push Build `37005211862` and Release `37005211936` both succeeded; the targeted stopped-Activity regression is green.
+- [instrumentation] **#75:** `onStart()` now reconciles attachment/Send UI after async upload completion while Activity is stopped. ActivityScenario covers Stop → `endUpload()` → Resume and verifies Send becomes enabled again. Final push Build `37027054462` (#501) and Release `37027053533` (#321) both succeeded.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -105,11 +102,16 @@
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
+## Уроки этого захода
+
+1. **Тесты не должны лезть в MainActivity рефлексией:** `by lazy`, `internal` и Kotlin name mangling меняют runtime-имя/видимость методов и полей. Для новых lifecycle tests нужен прямой test-visible API.
+2. **Concurrency group всегда включает имя workflow:** иначе Build и Release с одним `[ci]` push отменяют друг друга.
+
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. PR H — **следующий**
-Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the thread-safety audit is closed.
-Первый шаг: make a documentation-only snapshot from the final merged audit state.
+Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the attachment lifecycle follow-ups are closed.
+Первый шаг: make a documentation-only snapshot from the final merged lifecycle/audit state.
 
 ### 2. EXIF image-wire follow-up
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
@@ -169,11 +171,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#60:** merged `f14ba434d9231ccb2ef9c8f83c909730073136ae`; ActivityScenario rotation regression for GitHub confirmation; final cumulative Debug `36865960013` passed.
-- **#61:** merged `e376cf5783d64052506caf2d4549a96a6137dd0b`; PR G background copy/unzip/model-preflight ownership fix; final cumulative Debug `36865960013` passed.
-- **#62:** merged `b2b68923e3e8cbbbbd41aba84ac8ddb75cf31e31`; OpenRouter tool-loop cancellation ownership fix; final cumulative Debug `36865960013` and Release `36865960153` passed.
-- **#63:** merged `b50ce46bb6793d30d6d7e40aae3e96c1665ffc0a`; final handoff/verifier consistency plus temporary validation trigger; Debug `36864783897` and Release `36864783961` passed.
-- **#64:** merged `30288bf78d77307ce75aa135910696d592fa25a2`; test-stability follow-up only, no runtime behavior change; final cumulative Debug `36865960013` and Release `36865960153` passed.
+- **#70:** merged `bdf5b56d9ce75bc2a4da40b9d8b02224ac1b0fac`; handoff snapshot was merged despite containing runtime upload-gate code in addition to docs.
+- **#71:** merged; workflow-specific Build/Release concurrency groups; Build `36998520844` and Release `36998520970` both passed.
+- **#72:** merged; production upload lifecycle ownership gate; final Build `37005211862` and Release `37005211936` both passed.
+- **#74:** merged `5887780df908584b61959153c8ac8938bc86cd4c`; lightweight handoff verifier workflow.
+- **#75:** merged `8bfd85aea222dfd12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
 
 ## Product radar — идеи с реальной ценностью
 
