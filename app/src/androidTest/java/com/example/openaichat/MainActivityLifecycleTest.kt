@@ -434,6 +434,43 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun uploadCompletionWhileStoppedReconcilesSendOnForegroundResume() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var activity: MainActivity? = null
+        var chatId = ""
+        var generation = -1L
+
+        scenario.onActivity { launched ->
+            activity = launched
+            chatId = currentChatId(launched)
+            generation = activeGeneration(launched)
+            launched.pendingUploadUris.clear()
+            launched.pendingUploads.set(1)
+            launched.send.isEnabled = false
+        }
+
+        scenario.moveToState(Lifecycle.State.CREATED)
+
+        activity!!.endUpload(chatId, generation)
+        SystemClock.sleep(100L)
+
+        scenario.onActivity { launched ->
+            assertEquals(0, launched.pendingUploads.get())
+            assertFalse("Send should stay disabled while Activity is stopped", launched.send.isEnabled)
+        }
+
+        scenario.moveToState(Lifecycle.State.RESUMED)
+
+        scenario.onActivity { launched ->
+            assertTrue(
+                "Send was not reconciled after returning to foreground with no pending uploads",
+                launched.send.isEnabled
+            )
+        }
+        scenario.close()
+    }
+
+    @Test
     fun recreateCancelsOpenGitHubConfirmationDecision() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val confirmationDone = CountDownLatch(1)
