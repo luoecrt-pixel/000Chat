@@ -299,6 +299,36 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun staleEndUploadDoesNotMutateStoppedActivityUi() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var activity: MainActivity? = null
+        var chatId = ""
+        var generation = -1L
+
+        scenario.onActivity { launched ->
+            activity = launched
+            chatId = launched.currentChatIdForTesting()
+            generation = launched.activeGenerationForTesting()
+            launched.setPendingUploadCountForTesting(1)
+            assertEquals(1, launched.pendingUploadCountForTesting())
+        }
+
+        scenario.moveToState(Lifecycle.State.CREATED)
+
+        activity!!.endUpload(chatId, generation)
+        SystemClock.sleep(100L)
+
+        scenario.onActivity { launched ->
+            assertEquals(0, launched.pendingUploadCountForTesting())
+            assertFalse(
+                "stale endUpload re-enabled a stopped Activity send button",
+                launched.isSendEnabledForTesting()
+            )
+        }
+        scenario.close()
+    }
+
+    @Test
     fun recreateCancelsOpenGitHubConfirmationDecision() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val confirmationDone = CountDownLatch(1)

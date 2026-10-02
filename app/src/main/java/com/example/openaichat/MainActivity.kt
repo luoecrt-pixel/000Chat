@@ -48,6 +48,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.security.KeyStore
 import java.util.UUID
@@ -178,7 +179,7 @@ class MainActivity : ComponentActivity() {
     private val toolStates = linkedMapOf<String, String>()
     private val pendingUploadUris = mutableListOf<Pair<String,String>>() // uri -> image|file|zip
     private var baselineEffort: String? = null
-    private var pendingUploads = 0
+    private val pendingUploads = AtomicInteger(0)
     private var preparingZipAttachments = false
     private val uploadCalls = ConcurrentHashMap<String, Call>()
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
@@ -1487,7 +1488,7 @@ class MainActivity : ComponentActivity() {
             else preparePendingZipsThenSend(regenerate)
             return
         }
-        if(pendingUploads>0){ status.text="Дождитесь загрузки вложений…"; return }
+        if(pendingUploads.get()>0){ status.text="Дождитесь загрузки вложений…"; return }
         if(preparingZipAttachments){ status.text="Готовлю ZIP-вложения…"; return }
         val requestChatId = currentChatId()
         if (provider == "openrouter") openRouterModelPreflightCall.getAndSet(null)?.cancel()
@@ -3468,7 +3469,7 @@ class MainActivity : ComponentActivity() {
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: "attachment"
                     val uploadChatId = currentChatId()
                     val uploadGeneration = activeResponseState.state.generation
-                    beginUpload()
+                    beginUpload(uploadChatId, uploadGeneration)
                     executor.execute {
                         try {
                             val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name)
@@ -3524,7 +3525,7 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
                             }
-                        } finally { endUpload() }
+                        } finally { endUpload(uploadChatId, uploadGeneration) }
                     }
                 }
                 return
@@ -3544,12 +3545,13 @@ class MainActivity : ComponentActivity() {
             }
             val uri = imageUris.first()
             val uploadChatId=currentChatId()
+            val uploadGeneration=activeResponseState.state.generation
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
             rememberUploadUri(uri,"image")
             refreshAttachChips()
             startPendingPreview(uri,"image")
-            beginUpload()
+            beginUpload(uploadChatId, uploadGeneration)
             executor.execute{
                 try{
                     reportUploadProgress(key,"Подготовка изображения",0L,100L)
@@ -3586,7 +3588,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }catch(e:Exception){
                     if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка изображения: ${e.message}"}
-                }finally{ endUpload(); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key) }
+                }finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key) }
             }
             return
         }
@@ -3598,6 +3600,7 @@ class MainActivity : ComponentActivity() {
             val name=queryName(uri) ?: "attachment"
             val ext=name.substringAfterLast('.',"").lowercase()
             val uploadChatId=currentChatId()
+            val uploadGeneration=activeResponseState.state.generation
             val kind=if(ext=="zip")"zip" else "file"
             if(ext=="zip"){
                 rememberUploadUri(uri,"zip")
@@ -3613,7 +3616,7 @@ class MainActivity : ComponentActivity() {
             rememberUploadUri(uri,"file")
             refreshAttachChips()
             if(contentResolver.getType(uri).orEmpty().startsWith("image/")) startPendingPreview(uri,"file")
-            beginUpload()
+            beginUpload(uploadChatId, uploadGeneration)
             executor.execute{
                 try{
                     val uploaded=uploadFile(uri,key,{done,total->reportUploadProgress(key,"Загрузка",done,total)}){localPath,localMime,localSize->
@@ -3651,7 +3654,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
-                finally{ endUpload(); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
+                finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
             }
         }
     }
@@ -4111,13 +4114,14 @@ class MainActivity : ComponentActivity() {
     private fun resumePendingUploads(){
         val pending=pendingUploadUris.toList()
         val uploadChatId=currentChatId()
+        val uploadGeneration=activeResponseState.state.generation
         pending.forEach { (rawUri,kind) ->
             if(kind=="zip") return@forEach // ZIP is intentionally prepared only when the user taps Send.
             val key="$kind|$rawUri"
             if(!activePendingUploadKeys.add(key)) return@forEach
             val uri=try{Uri.parse(rawUri)}catch(_:Exception){activePendingUploadKeys.remove(key);return@forEach}
             if(kind=="image"){
-                beginUpload()
+                beginUpload(uploadChatId, uploadGeneration)
                 startPendingPreview(uri,"image")
                 executor.execute{
                     try{
@@ -4149,12 +4153,12 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread{status.text="Не удалось восстановить изображение: ${e.message}"}
                         }
                     }finally{
-                        endUpload(); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key)
+                        endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key)
                     }
                 }
             }else{
                 if(contentResolver.getType(uri).orEmpty().startsWith("image/")) startPendingPreview(uri,"file")
-                beginUpload()
+                beginUpload(uploadChatId, uploadGeneration)
                 executor.execute{
                     try{
                         val ext=(queryName(uri) ?: "").substringAfterLast('.', "").lowercase()
@@ -4189,7 +4193,7 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread{status.text="Не удалось восстановить вложение: ${e.message}"}
                         }
                     }finally{
-                        endUpload(); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key)
+                        endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key)
                     }
                 }
             }
@@ -5292,7 +5296,7 @@ class MainActivity : ComponentActivity() {
             attachRow.addView(card,LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
         }
         attachScroll.visibility=if(attachRow.childCount>0)View.VISIBLE else View.GONE
-        send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads == 0 && !preparingZipAttachments
+        send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads.get() == 0 && !preparingZipAttachments
     }
 
     private fun isNearLatest(): Boolean {
@@ -5317,14 +5321,45 @@ class MainActivity : ComponentActivity() {
 
     // ---------- utils ----------
     private fun setBusy(v:Boolean){
-        send.isEnabled=!v && pendingUploads==0 && !preparingZipAttachments
+        send.isEnabled=!v && pendingUploads.get()==0 && !preparingZipAttachments
         stop.visibility=if(v)View.VISIBLE else View.GONE
     }
-    private fun beginUpload(){ runOnUiThread{ pendingUploads++; send.isEnabled=false } }
-    private fun endUpload(){ runOnUiThread{
-        pendingUploads=(pendingUploads-1).coerceAtLeast(0)
-        if(pendingUploads==0 && stop.visibility!=View.VISIBLE) send.isEnabled=true
-    } }
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun beginUpload(chatId: String, generation: Long) {
+        if (!isRequestCurrent(chatId, generation)) return
+        pendingUploads.incrementAndGet()
+        runOnUiThread {
+            if (!isRequestCurrent(chatId, generation)) return@runOnUiThread
+            send.isEnabled = false
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun endUpload(chatId: String, generation: Long) {
+        val remaining = pendingUploads.updateAndGet { (it - 1).coerceAtLeast(0) }
+        runOnUiThread {
+            if (!isRequestCurrent(chatId, generation)) return@runOnUiThread
+            if (remaining == 0 && stop.visibility != View.VISIBLE) send.isEnabled = true
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun pendingUploadCountForTesting(): Int = pendingUploads.get()
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun setPendingUploadCountForTesting(value: Int) {
+        pendingUploads.set(value)
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun isSendEnabledForTesting(): Boolean = send.isEnabled
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun currentChatIdForTesting(): String = currentChatId()
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun activeGenerationForTesting(): Long = activeResponseState.state.generation
+
     private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
         orientation=LinearLayout.VERTICAL
         setPadding(dp(13),dp(10),dp(13),dp(10))
