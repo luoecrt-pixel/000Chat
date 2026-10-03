@@ -70,9 +70,9 @@ class OpenRouterChatClient(
         var accumulatedTotalTokens = 0
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
-        fun addUsageLong(key: String, value: Long) {
+        fun addUsageLong(object: JSONObject, key: String, value: Long) {
             if (value <= 0L) return
-            accumulatedUsage.put(key, accumulatedUsage.optLong(key, 0L) + value)
+            object.put(key, object.optLong(key, 0L) + value)
         }
 
         fun addUsageDouble(key: String, value: Double) {
@@ -82,16 +82,22 @@ class OpenRouterChatClient(
 
         fun accumulateUsage(source: JSONObject?) {
             if (source == null) return
-            addUsageLong("prompt_tokens", source.optLong("prompt_tokens", 0L))
-            addUsageLong("completion_tokens", source.optLong("completion_tokens", 0L))
-            addUsageLong("total_tokens", source.optLong("total_tokens", 0L))
+            addUsageLong(accumulatedUsage, "prompt_tokens", source.optLong("prompt_tokens", 0L))
+            addUsageLong(accumulatedUsage, "completion_tokens", source.optLong("completion_tokens", 0L))
+            addUsageLong(accumulatedUsage, "total_tokens", source.optLong("total_tokens", 0L))
             addUsageDouble("cost", source.optDouble("cost", 0.0))
             source.optJSONObject("prompt_tokens_details")?.let { details ->
-                addUsageLong("cached_tokens", details.optLong("cached_tokens", 0L))
-                addUsageLong("cache_write_tokens", details.optLong("cache_write_tokens", 0L))
+                val target = accumulatedUsage.optJSONObject("prompt_tokens_details") ?: JSONObject().also {
+                    accumulatedUsage.put("prompt_tokens_details", it)
+                }
+                addUsageLong(target, "cached_tokens", details.optLong("cached_tokens", 0L))
+                addUsageLong(target, "cache_write_tokens", details.optLong("cache_write_tokens", 0L))
             }
             source.optJSONObject("completion_tokens_details")?.let { details ->
-                addUsageLong("reasoning_tokens", details.optLong("reasoning_tokens", 0L))
+                val target = accumulatedUsage.optJSONObject("completion_tokens_details") ?: JSONObject().also {
+                    accumulatedUsage.put("completion_tokens_details", it)
+                }
+                addUsageLong(target, "reasoning_tokens", details.optLong("reasoning_tokens", 0L))
             }
         }
 
