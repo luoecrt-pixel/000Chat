@@ -29,7 +29,8 @@ class OpenRouterChatClient(
     httpClientOverride: OkHttpClient? = null
 ) {
     private companion object {
-        // Global safety ceilings for one OpenRouter task; per-request max_tokens and maxRounds remain separate.
+        // Safety ceiling for one OpenRouter task. Do not add smaller per-response
+        // time/iteration caps here: this ceiling is the emergency stop.
         const val COMPLETE_TIME_LIMIT_MS = 5 * 60 * 60 * 1000L
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
@@ -45,8 +46,8 @@ class OpenRouterChatClient(
 
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)
-        .callTimeout(600, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
         .build()
 
     fun complete(
@@ -55,8 +56,7 @@ class OpenRouterChatClient(
         messages: JSONArray,
         sessionId: String? = null,
         tools: JSONArray?,
-        maxTokens: Int,
-        maxRounds: Int = 24,
+        maxTokens: Int?,
         reasoningEffort: String?,
         verbosity: String?,
         parallelToolCalls: Boolean,
@@ -129,10 +129,10 @@ class OpenRouterChatClient(
             val body = JSONObject()
                 .put("model", model)
                 .put("messages", history)
-                .put("max_tokens", maxTokens.coerceIn(256, 128000))
                 .put("stream", false)
                 .put("parallel_tool_calls", parallelToolCalls)
                 .put("usage", JSONObject().put("include", true))
+            maxTokens?.takeIf { it > 0 }?.let { body.put("max_tokens", it) }
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
@@ -174,7 +174,7 @@ class OpenRouterChatClient(
                 call.cancel()
                 throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
-            call.timeout().timeout(minOf(600_000L, remainingMillis.coerceAtLeast(1L)), TimeUnit.MILLISECONDS)
+            call.timeout().timeout(remainingMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
             call.execute().use { httpResponse ->
                 ensureActive()
                 val raw = httpResponse.body?.string().orEmpty()
@@ -195,9 +195,9 @@ class OpenRouterChatClient(
         }
 
         try {
-            repeat(maxRounds) {
+            while (true) {
                 ensureWithinBudget()
-                val (json, message) = requestMessage("auto")
+                val (_, message) = requestMessage("auto")
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
@@ -235,20 +235,6 @@ class OpenRouterChatClient(
                     )
                 }
             }
-
-            ensureWithinBudget()
-            history.put(
-                JSONObject()
-                    .put("role", "user")
-                    .put("content", "Лимит вызовов инструментов исчерпан. Подведи итог по уже полученным данным.")
-            )
-            val (json, finalMessage) = requestMessage("none")
-            return OpenRouterCompletionResult(
-                text = finalMessage.optString("content").trim(),
-                usage = if (accumulatedUsage.length() > 0) JSONObject(accumulatedUsage.toString()) else null,
-                assistantMessage = JSONObject(finalMessage.toString()),
-                toolNames = toolNames.distinct()
-            )
         } catch (e: Exception) {
             if (e is OpenRouterCompletionException) throw e
             val partialText = accumulatedText.joinToString("\n\n").trim()
