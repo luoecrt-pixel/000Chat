@@ -970,6 +970,11 @@ class MainActivity : ComponentActivity() {
         effort: String,
         verbosity: String,
         maxOut: Int,
+        taskClass: String,
+        effortPref: String,
+        autoSelected: Boolean,
+        promptChars: Int,
+        attachments: Int,
         messagesSnapshot: JSONArray
     ) {
         beginOpenRouterRequestOwnership(requestId)
@@ -1043,6 +1048,33 @@ class MainActivity : ComponentActivity() {
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
+                result.usage?.let { usage ->
+                    val inputTokens = usage.optLong("prompt_tokens", 0L)
+                    val cachedTokens = usage.optLong("cached_tokens", 0L)
+                    val cacheWriteTokens = usage.optLong("cache_write_tokens", 0L)
+                    val outputTokens = usage.optLong("completion_tokens", 0L)
+                    val reasoningTokens = usage.optLong("reasoning_tokens", 0L)
+                    val cost = usage.optDouble("cost", 0.0).coerceAtLeast(0.0)
+                    chatDb.recordEffortMetric(
+                        requestId = requestId,
+                        chatId = chatId,
+                        taskClass = taskClass,
+                        effortPref = effortPref,
+                        effectiveEffort = effort,
+                        autoSelected = autoSelected,
+                        promptChars = promptChars,
+                        attachments = attachments,
+                        latencyMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L),
+                        inputTokens = inputTokens,
+                        cachedTokens = cachedTokens,
+                        cacheWriteTokens = cacheWriteTokens,
+                        outputTokens = outputTokens,
+                        reasoningTokens = reasoningTokens,
+                        success = true,
+                        errorType = null,
+                        estimatedCostUsd = cost
+                    )
+                }
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
                     .put("text", finalText)
@@ -1079,7 +1111,14 @@ class MainActivity : ComponentActivity() {
                         activeAssistantItemId = assistantItemId
                         persistCurrentChat()
                         toolLabel.text = result.toolNames.distinct().joinToString("  ")
-                        status.text = "Готово • OpenRouter"
+                        val usageSuffix = result.usage?.let { usage ->
+                            val inputTokens = usage.optLong("prompt_tokens", 0L)
+                            val cachedTokens = usage.optLong("cached_tokens", 0L)
+                            val outputTokens = usage.optLong("completion_tokens", 0L)
+                            val costText = if (usage.has("cost")) " · $"+("%.4f".format(usage.optDouble("cost", 0.0).coerceAtLeast(0.0))) else ""
+                            " · "+fmtTokens(inputTokens)+" in"+(if (cachedTokens > 0) " · cache "+fmtTokens(cachedTokens) else "")+" · "+fmtTokens(outputTokens)+" out"+costText
+                        }.orEmpty()
+                        status.text = "Готово • OpenRouter$usageSuffix"
                         setBusy(false)
                         activeAssistantItemId = null
                         diagnostics.log("openrouter_completed", mapOf(
@@ -1641,6 +1680,11 @@ class MainActivity : ComponentActivity() {
                 effort = actualEffort,
                 verbosity = verbosity,
                 maxOut = maxOut,
+                taskClass = taskClass,
+                effortPref = effortPref,
+                autoSelected = autoSelected,
+                promptChars = text.length,
+                attachments = requestOpenRouterAttachments.size,
                 messagesSnapshot = messagesSnapshot
             )
             return
