@@ -117,7 +117,7 @@ class OpenRouterChatClient(
         fun ensureWithinBudget() {
             ensureActive()
             if (System.nanoTime() >= deadlineNanos) {
-                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+                throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             if (accumulatedTotalTokens >= MAX_ACCUMULATED_TOTAL_TOKENS) {
                 throw budgetException("Мягкий лимит накопленных токенов OpenRouter (5 млн) исчерпан.")
@@ -172,7 +172,7 @@ class OpenRouterChatClient(
             val remainingMillis = TimeUnit.NANOSECONDS.toMillis((deadlineNanos - System.nanoTime()).coerceAtLeast(0L))
             if (remainingMillis <= 0L) {
                 call.cancel()
-                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+                throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             call.timeout().timeout(minOf(600_000L, remainingMillis.coerceAtLeast(1L)), TimeUnit.MILLISECONDS)
             call.execute().use { httpResponse ->
