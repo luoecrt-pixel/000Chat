@@ -67,12 +67,12 @@ class OpenRouterChatClient(
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
         val accumulatedUsage = JSONObject()
-        var accumulatedTotalTokens = 0
+        var accumulatedTotalTokens = 0L
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
-        fun addUsageLong(object: JSONObject, key: String, value: Long) {
+        fun addUsageLong(target: JSONObject, key: String, value: Long) {
             if (value <= 0L) return
-            object.put(key, object.optLong(key, 0L) + value)
+            target.put(key, target.optLong(key, 0L) + value)
         }
 
         fun addUsageDouble(key: String, value: Double) {
