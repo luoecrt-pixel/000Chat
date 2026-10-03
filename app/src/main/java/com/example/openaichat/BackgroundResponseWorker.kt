@@ -34,7 +34,8 @@ class BackgroundResponseWorker(
 
         private const val CHANNEL_ID = "astra_response_recovery"
         private const val NOTIFICATION_ID = 41062
-        private const val MAX_RECOVERY_MS = 30L * 60L * 1000L
+        // One-response recovery window; this is not a session-wide chat limit.
+        private const val MAX_RECOVERY_MS = 5L * 60L * 60L * 1000L
     }
 
     private val client by lazy {
