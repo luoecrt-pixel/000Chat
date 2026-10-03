@@ -769,7 +769,7 @@ class MainActivity : ComponentActivity() {
         spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
-        val max = field("Max output tokens (пусто = ограничение определяет API/модель)", prefs.getString("max_output","") ?: ""); spaced(max)
+        val savedMaxOutput = prefs.getString("max_output","")?.trim().orEmpty().takeUnless { it == "128000" }.orEmpty()\n        val max = field("Max output tokens (пусто = ограничение определяет API/модель)", savedMaxOutput); spaced(max)
         val cache = field("Prompt cache key (optional)", prefs.getString("cache_key","") ?: ""); spaced(cache)
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
@@ -1596,7 +1596,7 @@ class MainActivity : ComponentActivity() {
         val actualEffort = configUpdateEffort ?: effectiveEffort
         val verbosity=prefs.getString("verbosity","medium") ?: "medium"
         val summary=prefs.getString("reasoning_summary","auto") ?: "auto"
-        val maxOut=prefs.getString("max_output","")?.trim()?.takeIf{it.isNotBlank()}?.toLongOrNull()?.coerceAtLeast(1L)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+        val maxOut=configuredMaxOutputTokens()
         val backgroundEnabled = provider == "openai" && prefs.getBoolean("background_responses",true)
         val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
 
@@ -2145,6 +2145,15 @@ class MainActivity : ComponentActivity() {
         return text.lineSequence().firstOrNull()?.take(500) ?: "Ошибка запроса"
     }
 
+
+    private fun configuredMaxOutputTokens(): Int? {
+        val raw = prefs.getString("max_output", "")?.trim().orEmpty()
+        if (raw.isBlank() || raw == "128000") return null
+        return raw.toLongOrNull()
+            ?.takeIf { it > 0L }
+            ?.coerceAtMost(Int.MAX_VALUE.toLong())
+            ?.toInt()
+    }
 
     private fun buildPreflightWarning(text:String, totalFileBytes:Long, maxOut:Int?, effort:String):String? {
         val warnings=mutableListOf<String>()
