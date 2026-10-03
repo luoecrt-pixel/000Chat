@@ -66,8 +66,40 @@ class OpenRouterChatClient(
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
-        var accumulatedTotalTokens = 0
+        val accumulatedUsage = JSONObject()
+        var accumulatedTotalTokens = 0L
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
+
+        fun addUsageLong(target: JSONObject, key: String, value: Long) {
+            if (value <= 0L) return
+            target.put(key, target.optLong(key, 0L) + value)
+        }
+
+        fun addUsageDouble(key: String, value: Double) {
+            if (!value.isFinite() || value <= 0.0) return
+            accumulatedUsage.put(key, accumulatedUsage.optDouble(key, 0.0) + value)
+        }
+
+        fun accumulateUsage(source: JSONObject?) {
+            if (source == null) return
+            addUsageLong(accumulatedUsage, "prompt_tokens", source.optLong("prompt_tokens", 0L))
+            addUsageLong(accumulatedUsage, "completion_tokens", source.optLong("completion_tokens", 0L))
+            addUsageLong(accumulatedUsage, "total_tokens", source.optLong("total_tokens", 0L))
+            addUsageDouble("cost", source.optDouble("cost", 0.0))
+            source.optJSONObject("prompt_tokens_details")?.let { details ->
+                val target = accumulatedUsage.optJSONObject("prompt_tokens_details") ?: JSONObject().also {
+                    accumulatedUsage.put("prompt_tokens_details", it)
+                }
+                addUsageLong(target, "cached_tokens", details.optLong("cached_tokens", 0L))
+                addUsageLong(target, "cache_write_tokens", details.optLong("cache_write_tokens", 0L))
+            }
+            source.optJSONObject("completion_tokens_details")?.let { details ->
+                val target = accumulatedUsage.optJSONObject("completion_tokens_details") ?: JSONObject().also {
+                    accumulatedUsage.put("completion_tokens_details", it)
+                }
+                addUsageLong(target, "reasoning_tokens", details.optLong("reasoning_tokens", 0L))
+            }
+        }
 
         fun budgetException(message: String): OpenRouterCompletionException =
             OpenRouterCompletionException(
@@ -99,6 +131,7 @@ class OpenRouterChatClient(
                 .put("max_tokens", maxTokens.coerceIn(256, 128000))
                 .put("stream", false)
                 .put("parallel_tool_calls", parallelToolCalls)
+                .put("usage", JSONObject().put("include", true))
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
@@ -148,8 +181,9 @@ class OpenRouterChatClient(
                     throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
                 }
                 val json = JSONObject(raw)
-                json.optJSONObject("usage")?.optInt("total_tokens", 0)?.takeIf { it > 0 }?.let {
-                    accumulatedTotalTokens += it
+                json.optJSONObject("usage")?.let { usage ->
+                    accumulateUsage(usage)
+                    usage.optLong("total_tokens", 0L).takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
                 }
                 val choice = json.optJSONArray("choices")?.optJSONObject(0)
                     ?: throw IOException("OpenRouter response has no choice")
@@ -167,7 +201,7 @@ class OpenRouterChatClient(
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
                         text = message.optString("content").trim(),
-                        usage = json.optJSONObject("usage"),
+                        usage = if (accumulatedUsage.length() > 0) JSONObject(accumulatedUsage.toString()) else null,
                         assistantMessage = JSONObject(message.toString()),
                         toolNames = toolNames.distinct()
                     )
@@ -210,7 +244,7 @@ class OpenRouterChatClient(
             val (json, finalMessage) = requestMessage("none")
             return OpenRouterCompletionResult(
                 text = finalMessage.optString("content").trim(),
-                usage = json.optJSONObject("usage"),
+                usage = if (accumulatedUsage.length() > 0) JSONObject(accumulatedUsage.toString()) else null,
                 assistantMessage = JSONObject(finalMessage.toString()),
                 toolNames = toolNames.distinct()
             )
