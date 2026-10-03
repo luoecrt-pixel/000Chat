@@ -29,8 +29,8 @@ class OpenRouterChatClient(
     httpClientOverride: OkHttpClient? = null
 ) {
     private companion object {
-        const val COMPLETE_TIME_LIMIT_MS = 20 * 60 * 1000L
-        const val MAX_ACCUMULATED_TOTAL_TOKENS = 200_000
+        const val COMPLETE_TIME_LIMIT_MS = 5 * 60 * 60 * 1000L
+        const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
 
     private fun normalizeReasoningEffort(value: String?): String? =
@@ -119,7 +119,7 @@ class OpenRouterChatClient(
                 throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
             }
             if (accumulatedTotalTokens >= MAX_ACCUMULATED_TOTAL_TOKENS) {
-                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (200000) исчерпан.")
+                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (5 млн) исчерпан.")
             }
         }
 
