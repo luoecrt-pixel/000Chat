@@ -29,8 +29,9 @@ class OpenRouterChatClient(
     httpClientOverride: OkHttpClient? = null
 ) {
     private companion object {
-        const val COMPLETE_TIME_LIMIT_MS = 20 * 60 * 1000L
-        const val MAX_ACCUMULATED_TOTAL_TOKENS = 200_000
+        // Global safety ceilings for one OpenRouter task; per-request max_tokens and maxRounds remain separate.
+        const val COMPLETE_TIME_LIMIT_MS = 5 * 60 * 60 * 1000L
+        const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
 
     private fun normalizeReasoningEffort(value: String?): String? =
@@ -116,10 +117,10 @@ class OpenRouterChatClient(
         fun ensureWithinBudget() {
             ensureActive()
             if (System.nanoTime() >= deadlineNanos) {
-                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+                throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             if (accumulatedTotalTokens >= MAX_ACCUMULATED_TOTAL_TOKENS) {
-                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (200000) исчерпан.")
+                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (5 млн) исчерпан.")
             }
         }
 
@@ -171,7 +172,7 @@ class OpenRouterChatClient(
             val remainingMillis = TimeUnit.NANOSECONDS.toMillis((deadlineNanos - System.nanoTime()).coerceAtLeast(0L))
             if (remainingMillis <= 0L) {
                 call.cancel()
-                throw budgetException("Лимит времени OpenRouter complete() (20 минут) исчерпан.")
+                throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             call.timeout().timeout(minOf(600_000L, remainingMillis.coerceAtLeast(1L)), TimeUnit.MILLISECONDS)
             call.execute().use { httpResponse ->
