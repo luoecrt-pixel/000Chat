@@ -29,6 +29,7 @@ class OpenRouterChatClient(
     httpClientOverride: OkHttpClient? = null
 ) {
     private companion object {
+        // Global safety ceilings for one OpenRouter task; per-request max_tokens and maxRounds remain separate.
         const val COMPLETE_TIME_LIMIT_MS = 5 * 60 * 60 * 1000L
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
