@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-03 09:18 +03:00
+**Last updated:** 2026-10-03 (after PR #78)
 **Следующий рабочий срез:** EXIF image-wire follow-up
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -64,7 +64,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2` (PR #76 merged OpenRouter usage/cache telemetry)
+- main code baseline: `fdc151d4c271c1fed54eb8039203fb87e8d0a648` (PR #78 merged OpenRouter safety limits; PR #77 was docs-only)
 
 Последний рабочий срез 2026-10-03:
 - PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
@@ -106,6 +106,7 @@
 - [instrumentation] **#72:** production-владение вложением на main: captured `chatId + generation`, AtomicInteger-счётчик, lifecycle-gated `endUpload()`; регрессия stopped-Activity зелёная. Build `37005211862`, Release `37005211936`.
 - [instrumentation] **#75:** `onStart()` пересчитывает UI вложений/Send после upload, завершившегося в stopped Activity; ActivityScenario: Stop → `endUpload()` → Resume → Send включён. Build `37027054462` (#501), Release `37027053533` (#321).
 - [pure] **#76:** `OpenRouterChatClient` запрашивает provider usage, агрегирует usage по всем HTTP-раундам tool loop и сохраняет вложенные cached/cache-write/reasoning token details в результате. JVM regression покрывает этот client-level contract; runtime MainActivity wiring не считать отдельно доказанным.
+- [static] **#78:** `OpenRouterChatClient` имеет app-side safety ceilings: 5 часов на весь `complete()` cycle и 5 000 000 накопленных `usage.total_tokens`; это не модельный лимит. Отдельный HTTP-вызов по-прежнему ограничен 10 минутами, а tool loop — 24 раундами. Build `37113754488` и Release `37113754543` прошли Successful на последнем коммите PR.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -205,11 +206,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#72:** merged; production upload lifecycle ownership gate; Build `37005211862` and Release `37005211936` both passed.
 - **#73:** merged; handoff update (docs-only); `Verify handoff` Successful, full CI Skipped by design.
 - **#74:** merged `5887780df908584b61959153c8ac8938bc86cd4c`; lightweight handoff verifier workflow.
 - **#75:** merged `8bfd85aea222df12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
 - **#76:** merged `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2`; OpenRouter usage/cache telemetry; Build `37111989401` and Release `37111989339` both passed, with real Android lifecycle instrumentation and Successful `Verify handoff` `37111992407`.
+- **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful, including Android lifecycle instrumentation.
 
 ## Product radar — идеи с реальной ценностью
 
