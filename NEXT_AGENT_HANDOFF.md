@@ -11,16 +11,37 @@
 2. Сначала докажи, что проблема существует. Не делай PR ради уменьшения TODO.
 3. Для lifecycle/recovery смотри границу **Activity ↔ Executor ↔ Worker ↔ DB**, а не только один метод.
 4. Используй узкие чтения файлов. Не загружай весь README, весь `MainActivity` или полные CI-логи без причины.
-5. CI: queued/in_progress ≠ green. Static verifier и Gradle CI — отдельные проверки.
-6. После merge проверь post-merge Debug/Release, если GitHub Actions предоставляет эти runs.
+5. CI: queued/in_progress/Skipped/Cancelled ≠ green. Static verifier и Gradle CI — отдельные проверки. Правила — в разделе «CI и merge-правила».
+6. После merge push-runs Build/Release на main будут Skipped (в merge-коммите нет `[ci]`) — это не проверка и не провал; опирайся на реальные Successful run'ы ветки PR.
 7. После завершения задачи: план → история; устаревшее удалить, а не оставлять вечным backlog.
 8. Архитектурный/продуктовый обзор делай **каждые 5 merged PR или раньше, если активный план опустел/сменил слой**. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
 9. **Не теряй общую картину:** Compose, controller extraction, thread-safety и fork chat — это разные уровни одной дорожной карты, а не взаимозаменяемые TODO.
 10. **Изменения в main только через PR:** прямые коммиты/push в `main` запрещены, включая CI, docs и handoff. Любое изменение, даже одной строки, сначала делается в ветке и идёт через PR. Единственное исключение — если пользователь прямо написал «коммить в main». Формулировка «без код-ревью» сама по себе PR не отменяет; она может означать, например, изменение repository variable в настройках без коммита.
 
+## CI и merge-правила
+
+- Полный прогон (Build с эмулятором ≈ 9–13 мин, Release ≈ 4–5 мин) идёт только по метке: `[ci]` в сообщении head-коммита push, `CI_AUTO_RUN=true` или ручной `workflow_dispatch`; иначе run = **Skipped** (минуты не тратятся). Точное условие — в `build.yml`/`release.yml`.
+- Коннектор не умеет `workflow_dispatch` и repository variables, поэтому рычаг агента — `[ci]` в коммите ветки PR: ставь, когда прогон нужен, и перед повтором назови причину прошлого падения строкой из лога. Пользователь может запустить вручную: Actions → Run workflow → ветка.
+- На странице PR смотри `(push)` у Build и Release; `(pull_request)` Skipped — норма, а счётчик «4/4» с галочкой может значить «всё пропущено». Новый push в ветку отменяет идущий прогон — не пушь, пока он идёт.
+- После merge push-runs на main Skipped по дизайну. Свежий APK оттуда не собирается: для APK или проверки main — ветка от main + пустой коммит `[ci]`, назови run, откуда скачать artifact.
+- `Verify handoff` — дешёвый workflow (без Android) на PR, меняющие `NEXT_AGENT_HANDOFF.md` или `tools/**`.
+
+**Merge-гейт.**
+1. Код или workflow: оба `(push)` — Build и Release — на последнем коммите ветки Successful, включая instrumentation. Docs-only (handoff/README): достаточно Successful `Verify handoff`, `[ci]` не нужен.
+2. Описание PR точно перечисляет изменённые файлы — сверь с Files changed (#70 влит с «No runtime code changes» при правках `MainActivity.kt`).
+3. Не мержи при красном/Cancelled/Skipped обязательном run, даже при «Able to merge» (#70 влит с красным Build). Force-push после старта проверок — только с сообщением пользователю и перезапуском проверок.
+4. В отчёте: PR, merge SHA, run ID и результат каждого обязательного run; отдельно — что не проверено.
+
+## Пользователь и стиль работы
+
+- Не программист: объясняй просто и коротко; ветки, PR, `[ci]` и merge по гейту делай сам. Проси только то, чего коннектор не умеет: настройки GitHub, repository variable, установку и проверку APK на телефоне.
+- Решения пользователя: картинки уходят в оригинале, без lossy-сжатия и тихого downscale; предупреждения о размере вложений не нужны (при отказе провайдера — понятная ошибка с размером).
+- Стоимость важна: один ответ Opus (6 раундов, 7 файлов, среди них `MainActivity.kt` ~4.5k строк) стоил ≈ $10 по оценке пользователя — каждый раунд заново отправляет историю. Читай файлы узко.
+- Пользователь сверяет работу с другим ассистентом и скриншотами GitHub. Чужие оценки — гипотезы: проверяй по коду и логам, не соглашайся рефлекторно; «зелёным» называй только Successful run.
+
 ## 30-секундная карта проекта
 
-**Продукт:** локальный multi-chat Android-клиент с OpenAI Responses API и OpenRouter Chat Completions, tools/files/images и streaming. #47 добавил отдельный Claude/OpenRouter backend и app-side GitHub tool execution; OpenAI Responses backend остаётся отдельным путём. #48 исправил реальный UI wiring bug: GitHub-tools CheckBox создавался и сохранялся, но не был добавлен в видимый settings layout; теперь он виден рядом с PAT/repository/branches и начальное состояние читается из сохранённого `prefs.getBoolean("github_tools", false)`.
+**Продукт:** локальный multi-chat Android-клиент. Основной путь — OpenAI Responses API; отдельный путь — OpenRouter Chat Completions для Claude (#47). GitHub-инструменты исполняет само приложение; включаются чекбоксом в настройках (#48).
 
 **Надёжность:** основная lifecycle-модель:
 `generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
@@ -29,12 +50,15 @@
 `active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
 Устаревший request не должен финализировать persisted state.
 
-**Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence. #35 добавил реальный Android ActivityScenario harness для callback после Stop/Delete. #36 добавил общий pure response-event reducer и прогнал его через foreground + background paths. #37 вынес active-response DB access за persistence adapter.
+**Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence; Android ActivityScenario/instrumentation — критичные callback-пути (с #35). Что доказано, а что нет — в разделе контрактов.
 
-**Архитектура:** `MainActivity.kt` всё ещё ~4.5k строк. `ResponseEventReducer` владеет response semantics, `ActiveResponsePersistence` — boundary к persisted active-response state, `ResponseCheckpointPolicy` — pure timing/status/payload decision для checkpoint, `BackgroundResponseUiOwnershipPolicy` — pure UI ownership decision для принятого background snapshot, а `AttachmentUploadCompletionPolicy` — pure routing decision для async attachment completion. Background checkpoint, assistant-text/reasoning UI paths и file/image/ZIP attachment completion routing уже переведены на эти seams; foreground cadence намеренно не менялась. Tool-state path оставлен на `chatId + generation`, потому что он обновляет глобальный Activity tool label, а не конкретный assistant item. #47 добавил второй model transport без замены существующего Responses path: OpenRouter работает через отдельный Chat Completions client с собственным synchronous tool loop; GitHub API вызывается только приложением через allow-listed repository/branches, а write/merge/review/workflow actions требуют пользовательского подтверждения и audit log. OpenRouter пока не подключён к существующему OpenAI background-response recovery. PR G добавляет отдельный local attachment path: content:// сразу копируется в private storage; text/image/pdf/zip готовятся локально; history хранит attachment manifest, а OpenAI File API path остаётся отдельным. GitHub-tools toggle теперь имеет реальный visible UI wiring; сама app-side execution/confirmation boundary #47 не изменялась. Compose остаётся следующим UI-слоем после state/controller extraction.
+**Архитектура:** `MainActivity.kt` ~4.5k строк. Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
 
-**Размер изображений — подтверждённый внешний лимит:** Anthropic сейчас допускает до 10 MB base64 на одно изображение и 32 MB на стандартный API request; OpenRouter не объявляет единого универсального лимита, поэтому ограничения зависят от provider/model. Наш путь EXIF→PNG для non-normal orientation может многократно увеличить wire bytes у больших JPEG. До отдельного решения не добавлять lossy compression и не считать PNG-бюджет безопасным для Claude/OpenRouter.
-**Recent #48 implementation note:** `githubTools` в `showSettings()` был реальным `CheckBox`, созданным через `chk(..., "github_tools")`, но отсутствовал `box.addView(...)`. Это не ломало существующие `prefs` read/write и runtime executor, но делало GitHub tools практически невключаемыми из UI. PR #48 добавил `box.addView(githubTools)` и сохранил инициализацию из `prefs.getBoolean("github_tools", false)`. Никакой логики `SecureStore`, `GitHubToolCatalog`, `GitHubToolExecutor`, confirmation или OpenRouter transport PR #48 не менял.
+**OpenRouter/Claude (#47–#57):** отдельный Chat Completions client с синхронным tool loop: лимит 24 раунда, partial output при ошибке; репозиторий и ветки GitHub добавляются в system prompt; `tool_trace` сохраняется в историю; `reasoning.effort` нормализуется на границе. GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
+
+**Вложения (#57):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8).
+
+**Размер изображений:** Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model. EXIF→PNG для non-normal orientation может многократно раздуть байты. Lossy-сжатие не добавлять до отдельного решения пользователя.
 
 **Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
 
@@ -43,13 +67,15 @@
 - main code baseline: `8bfd85aea222dfd12ac3bd3345c09c1712f28c29` (PR #75 merged foreground upload-gate reconciliation)
 
 Последний рабочий срез 2026-10-02:
-- PR #75 — merged; push Build `37027054462` and Release `37027053533` both completed Successful. The new foreground-resume upload-gate regression passed on real Android instrumentation.
-- PR #74 — merged; lightweight `Verify handoff` workflow added for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
+- PR #75 — merged; push Build `37027054462` and Release `37027053533` both completed Successful. The foreground-resume upload-gate regression passed on real Android instrumentation.
+- PR #74 — merged; lightweight `Verify handoff` workflow for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
+- PR #73 — merged; handoff update (docs-only: `Verify handoff` Successful, full Build/Release Skipped by design).
 - PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful.
-- PR #71 — merged; Build `36998520844` and Release `36998520970` both completed Successful after the workflow-specific concurrency fix.
 - PR #68 — merged; Build `37024281184` (#491) and Release `37024281948` (#311) both completed Successful, with real Android lifecycle instrumentation green.
 
 ## Подтверждённые lifecycle/recovery контракты
+
+Единая карта доказанности: подтверждено запуском (теги ниже) → только source-level (тег static) → не подтверждено (список в конце раздела).
 
 - [pure] **#19:** foreground и resumable SSE используют строгий sequence-gap contract.
 - [static] **#20:** Stop привязан к generation конкретного request.
@@ -71,14 +97,14 @@
 - [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume теперь привязан к captured `rawUri + kind`, `preparingZipAttachments` failure-state mutation выполняется на main thread; Android regression tests подтверждают persisted consume и failure path.
 - [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при вызове из off-main Executor callback: начальная UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression test и post-merge Debug/Release подтверждены. **Контракт #44 закрыт PR #46**; PR #44 и PR #45 были отдельными отрицательными verifier-checks и не закрывали этот lifecycle-контракт.
 - [robolectric] **#57:** миграция ChatDatabase с v13/v14 до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки существующей истории; PR-head Debug `36826110992` прошёл эти lifecycle tests, а Release `36826110999` также завершился success.
-- [instrumentation] **#59:** pending GitHub confirmation now has explicit future/dialog ownership; Stop, onStop and onDestroy complete the pending decision as `false`; ActivityScenario regression covers Stop against both the pending confirmation and `openRouterActiveCall`. Final cumulative Debug run `36865960013` passed the Android lifecycle instrumentation suite.
-- [instrumentation] **#60:** ActivityScenario `recreate()` while the GitHub confirmation dialog is open verifies the old confirmation decision completes `false`, the old dialog is no longer showing, and the new Activity has no pending confirmation. Final cumulative Debug run `36865960013` passed.
-- [instrumentation] **#61:** PR G OpenRouter picker copy/unzip routes completion using captured `chatId + generation`; stale work persists to the source chat instead of mutating the current composer, and model-capability preflight has a cancellable Call plus pre/post ownership gates. Final cumulative Debug run `36865960013` passed the instrumentation suite; JVM policy tests are included in the same CI build.
-- [instrumentation] **#62:** New OpenRouter messages now cancel the previous active Call and pending GitHub confirmation; `OpenRouterChatClient` checks a request-ownership callback before/after HTTP and around every tool boundary, including the onCallCreated race. Final cumulative Debug run `36865960013` passed the Android instrumentation suite and JVM tool-loop test.
-- [instrumentation] **#67:** OpenRouter active-Call ownership is request-owned at the Activity boundary; stale calls are cancelled and never published. Final Build `36922114233` and Release `36922114294` passed; PR #67 is merged.
-- [instrumentation] **#68:** The residual blocking `AttachmentInputStreamSource` harness and stale OpenRouter picker-copy / ZIP-extraction ActivityScenario tests completed on a real Android emulator. Final push Build `37024281184` (#491) and Release `37024281948` (#311) both succeeded; the Build instrumentation step was Successful.
-- [instrumentation] **#72:** Stable production-side attachment ownership is on main: captured `chatId + generation`, AtomicInteger upload bookkeeping, and lifecycle-gated `endUpload()`. Final push Build `37005211862` and Release `37005211936` both succeeded; the targeted stopped-Activity regression is green.
-- [instrumentation] **#75:** `onStart()` now reconciles attachment/Send UI after async upload completion while Activity is stopped. ActivityScenario covers Stop → `endUpload()` → Resume and verifies Send becomes enabled again. Final push Build `37027054462` (#501) and Release `37027053533` (#321) both succeeded.
+- [instrumentation] **#59:** pending GitHub confirmation имеет явного владельца (future/dialog); Stop, onStop и onDestroy завершают решение как `false`; ActivityScenario проверяет Stop против подтверждения и `openRouterActiveCall`. Cumulative Debug `36865960013`.
+- [instrumentation] **#60:** ActivityScenario `recreate()` при открытом GitHub-диалоге: старое решение завершается `false`, старый диалог закрыт, в новой Activity нет pending confirmation. Cumulative Debug `36865960013`.
+- [instrumentation] **#61:** Stop отменяет сохранённый `Call` model-capability preflight, а helper сохранения вложения в исходный чат работает после навигации (ActivityScenario, уровень поля/helper-а). Не доказано здесь: реальный путь executor → copy/ZIP → policy (подтвердил #68) и pre/post ownership gates вокруг HTTP preflight (только source-level). Cumulative Debug `36865960013`.
+- [instrumentation] **#62:** новое OpenRouter-сообщение отменяет предыдущий active Call и pending GitHub confirmation; `OpenRouterChatClient` проверяет request-ownership до/после HTTP и вокруг каждого tool boundary. Cumulative Debug `36865960013` + JVM tool-loop test. Гонка за общий `openRouterActiveCall` (stale `onCallCreated`, безусловный сброс) найдена после merge и закрыта в #67.
+- [instrumentation] **#67:** active Call принадлежит запросу на границе Activity: stale Call отменяется и не публикуется. Build `36922114233`, Release `36922114294`.
+- [instrumentation] **#68:** блокирующий `AttachmentInputStreamSource` и real-path ActivityScenario тесты picker-copy/ZIP после навигации прошли на эмуляторе. Build `37024281184` (#491), Release `37024281948` (#311).
+- [instrumentation] **#72:** production-владение вложением на main: captured `chatId + generation`, AtomicInteger-счётчик, lifecycle-gated `endUpload()`; регрессия stopped-Activity зелёная. Build `37005211862`, Release `37005211936`.
+- [instrumentation] **#75:** `onStart()` пересчитывает UI вложений/Send после upload, завершившегося в stopped Activity; ActivityScenario: Stop → `endUpload()` → Resume → Send включён. Build `37027054462` (#501), Release `37027053533` (#321).
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -91,7 +117,17 @@
 
 Для thread-safety audit это различие является частью доказательства: тег показывает уровень реально пройденного harness, но не разрешает переносить proof с соседней policy на весь async callback path.
 
-**Перепроверка 2026-09-26:** текущий `main` test tree проверен целиком (JVM + instrumentation), а не по PR diff: #20 — тестирует `markUserStop()`/state contract, но не вызывает `stopCurrentResponse()`; #37 — отдельного теста `ActiveResponsePersistence` adapter wiring нет; #40 — reasoning runtime wiring callback не гоняется; #42 — есть ZIP/persisted consume regression и pure policy tests, но нет runtime-теста именно image/ZIP completion wiring через policy. Поэтому `[static]` для #20/#37/#40/#42 оставлен без изменения.
+**Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
+
+Только source-level (тег static выше): #20 — тест проверяет state-контракт `markUserStop()`, но не вызывает `stopCurrentResponse()`; #37 — нет теста wiring adapter; #40 — runtime wiring reasoning callback не гоняется; #42 — нет runtime-теста image/ZIP completion wiring через policy.
+
+Не подтверждено вообще (нет ни теста, ни наблюдения):
+1. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся.
+2. Предел стоимости ответа: подтверждены лимит 24 раунда и таймауты вызовов; общий лимит времени/токенов на весь цикл и `session_id` — нет.
+3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
+4. Вложения Claude (#57): чтение моделью картинки/PDF/текста, multi-select через `clipData` и EXIF-повёрнутое фото не подтверждены на реальной модели; раздувание EXIF→PNG не решено.
+5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
+6. Остальные async-границы `MainActivity` вне четырёх аудированных (подтверждение при Stop и rotation, фоновые пути PR G, tool loop OpenRouter) не аудировались: аудит не называть завершённым.
 
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
@@ -106,6 +142,10 @@
 
 1. **Тесты не должны лезть в MainActivity рефлексией:** `by lazy`, `internal` и Kotlin name mangling меняют runtime-имя/видимость методов и полей. Для новых lifecycle tests нужен прямой test-visible API.
 2. **Concurrency group всегда включает имя workflow:** иначе Build и Release с одним `[ci]` push отменяют друг друга.
+3. **Тест должен дойти до проверяемого пути:** без непустого API key «новое сообщение отменяет цикл» не доходил до `nextGeneration()` (#62 → #67); предусловие создавай реальным вызовом (`beginUpload`), а не выставляй счётчик напрямую (#72).
+4. **ContentProvider в androidTest** падал с `NoClassDefFoundError: kotlin/jvm/internal/Intrinsics`; заменён инжектируемым `AttachmentInputStreamSource` (#68).
+5. **Gate, пропускающий мутацию в stopped Activity, требует реконсиляции при возврате** (`onStart()` → `refreshAttachChips()`, #75).
+6. **Отчёт ≠ факт:** merge при красном CI и неверное описание PR (#70), «зелёный» счётчик из одних Skipped (#73), «нового прогона не было» при красном `[ci]`-прогоне (#68). Сверяй PR и run ID со страницей GitHub.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
@@ -117,23 +157,20 @@ Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, 
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
 Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
 
+### 3. OpenRouter: стоимость и видимость кэша — сначала read-only проверка
+Первый шаг (без PR): по коду проверить (а) есть ли общий предел времени/токенов на весь цикл `OpenRouterChatClient.complete()` (подтверждены только 24 раунда и таймауты вызовов); (б) передаётся ли `session_id`; (в) разбирается ли `usage` с cached tokens и показывается ли в строке usage. Для каждого отсутствующего — отдельный маленький PR (мягкий предел: при достижении завершить ответ по собранным данным, как для лимита раундов). Если пробелы найдены — перенеси маркер на этот пункт, PR H станет вторым.
+
+### 4. Claude через OpenRouter: серверные tools (web search / image generation / files) — ждёт решения пользователя
+Нет в PR #49–#75; чекбоксы Web Search / File Search / Code Interpreter / Image Generation относятся только к OpenAI path. У OpenRouter это beta-серверные tools (аналог code interpreter — только `/api/v1/responses`). Первый шаг: не начинать без подтверждения пользователя; затем один инструмент (web search) отдельным PR.
+
 ## Репозиторий / branches
 
-После #35–#37 накопились локальные feature branches, многие из которых соответствуют уже merged PR. Их удаление **не удаляет commits или PR history** и обычно полезно для hygiene. В текущем GitHub connector нет операции DELETE git ref, поэтому автоматически удалить их здесь нельзя; активным сейчас является только `main` плюс открытые PR branches. Перед ручным удалением ориентируйся на merged/closed PR state, а не на имя ветки.
-
+Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
 
 ## Контекстный режим для агента
 
-Чтобы не перегружать рабочую память:
-
-- В начале читай **этот файл**, а не полный README.
-- README открывай только когда меняется человекочитаемое описание проекта.
-- Для кода сначала fetch конкретных файлов/символов; полный `MainActivity.kt` нужен только при действительно сквозном анализе.
-- CI logs запрашивай только для конкретного failing run/step.
-- Историю старых PR читай точечно, когда нужен конкретный invariant.
-- Не тащи в текущий контекст завершённые задачи как активные.
-- Краткий пользовательский ответ не означает сокращённого инженерного анализа.
-
+- Читай этот файл, а не весь README; код — узко (конкретные файлы/символы); CI-логи — только для конкретного failing run/step; старые PR — точечно.
+- Не тащи завершённые задачи как активные. Краткий ответ пользователю не означает сокращённого инженерного анализа.
 
 ## Как проверять новую работу
 
@@ -152,8 +189,8 @@ Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression 
 - если PR меняет сам verifier/lint-скрипт — дополнительно намеренно воспроизвести целевую поломку и убедиться, что скрипт её ловит, затем вернуть корректное состояние и снова получить PASS (позитивный и негативный кейс обязательны оба);
 - для нового verifier/lint-инварианта негативная проверка — это **намеренная mutation matrix именно этого правила**: как минимум три целевых поломки (например, убрать gate, вынести защищаемую mutation за gate, вернуть прежний баг) должны быть отклонены verifier-ом; случайная syntax error/build failure не считается доказательством. Mutation harness хранится в репозитории и запускается в CI вместе с позитивным кейсом;
 - при падении CI/проверки приводить одну дословную строку из реального failing log (или явное `AssertionError:`/step output), а не только пересказ места остановки;
-- дождаться реального CI результата;
-- если merge — проверить post-merge runs, когда connector их предоставляет; если нет — явно зафиксировать ограничение;
+- дождаться реального CI результата по правилам «CI и merge-правила» (Successful `(push)` Build и Release на последнем коммите; Skipped не считается);
+- после merge push-runs на main Skipped по дизайну; зафиксируй, на какой реальный прогон ты опираешься;
 - обновить план и историю.
 
 ### Командная шпаргалка
@@ -171,9 +208,9 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#70:** merged `bdf5b56d9ce75bc2a4da40b9d8b02224ac1b0fac`; handoff snapshot was merged despite containing runtime upload-gate code in addition to docs.
-- **#71:** merged; workflow-specific Build/Release concurrency groups; Build `36998520844` and Release `36998520970` both passed.
-- **#72:** merged; production upload lifecycle ownership gate; final Build `37005211862` and Release `37005211936` both passed.
+- **#68:** merged; blocking `AttachmentInputStreamSource` harness + OpenRouter picker-copy/ZIP real-path tests; Build `37024281184` and Release `37024281948` both passed.
+- **#72:** merged; production upload lifecycle ownership gate; Build `37005211862` and Release `37005211936` both passed.
+- **#73:** merged; handoff update (docs-only); `Verify handoff` Successful, full CI Skipped by design.
 - **#74:** merged `5887780df908584b61959153c8ac8938bc86cd4c`; lightweight handoff verifier workflow.
 - **#75:** merged `8bfd85aea222dfd12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
 
