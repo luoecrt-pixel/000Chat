@@ -78,6 +78,7 @@ class OpenRouterChatClientTest {
             assertEquals(20L, usage.getJSONObject("prompt_tokens_details").getLong("cache_write_tokens"))
             assertEquals(15L, usage.getJSONObject("completion_tokens_details").getLong("reasoning_tokens"))
             assertEquals(0.03, usage.getDouble("cost"), 0.000001)
+            assertEquals(300L, usage.getLong("total_tokens"))
             assertEquals("done", result.text)
             assertEquals(2, requestCount.get())
         } finally {
