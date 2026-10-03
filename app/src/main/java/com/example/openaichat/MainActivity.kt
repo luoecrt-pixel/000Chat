@@ -4994,3 +4994,585 @@ class MainActivity : ComponentActivity() {
             }catch(e:Exception){runOnUiThread{status.text="Не удалось прочитать $name: ${e.message}"}}
         }
     }
+
+    private fun showPdfPreview(path:String,name:String){
+        executor.execute{
+            try{
+                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                PdfRenderer(pfd).use{renderer->
+                    if(renderer.pageCount<=0)throw IOException("PDF не содержит страниц")
+                    renderer.openPage(0).use{page->
+                        val scale=minOf(2f,1600f/maxOf(page.width,1).toFloat(),1600f/maxOf(page.height,1).toFloat())
+                        val bmp=Bitmap.createBitmap(maxOf((page.width*scale).toInt(),1),maxOf((page.height*scale).toInt(),1),Bitmap.Config.ARGB_8888)
+                        bmp.eraseColor(Color.WHITE)
+                        page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        runOnUiThread{
+                            val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(6),dp(6),dp(6),dp(6))}
+                            box.addView(ImageView(this).apply{setImageBitmap(bmp);scaleType=ImageView.ScaleType.FIT_CENTER;adjustViewBounds=true},LinearLayout.LayoutParams(-1,dp(540)))
+                            AlertDialog.Builder(this).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть полностью"){_,_->openLocalFile(path,name,"application/pdf")}.show()
+                        }
+                    }
+                }
+                pfd.close()
+            }catch(e:Exception){runOnUiThread{status.text="Не удалось показать PDF: ${e.message}"}}
+        }
+    }
+
+    private fun addUploadProgressCard(uri:Uri,kind:String):UploadCardViews{
+        val key=attachmentKey(uri,kind)
+        val card=createAttachmentCard()
+        val name=queryName(uri) ?: if(kind=="image")"image" else "attachment"
+        val mime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(name)}
+        val preview=createThumbnailView(null)
+        if(kind=="image" || mime.startsWith("image/")){
+            preview.tag="attachment_local_preview"
+            card.addView(preview,LinearLayout.LayoutParams(dp(180),dp(120)))
+        }
+        val nameView=TextView(this).apply{text=if(kind=="zip")"🗜 $name" else if(kind=="image")"🖼 $name" else "📄 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))}
+        val details=TextView(this).apply{
+            text=if(kind=="zip")"Архив будет распакован только при отправке" else {
+                val base=formatAttachmentDetails(mime,querySize(uri))
+                val pct=uploadProgress[key]?.second ?: 0
+                if(pct>0)"$base · подготовка $pct%" else "$base · подготовка…"
+            }
+            textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(2),0,dp(4))
+        }
+        val progressBar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;progress=uploadProgress[key]?.second ?: 0}
+        val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        val action=TextView(this).apply{text="✕ Удалить";textSize=12.5f;setTextColor(Color.rgb(220,125,125));setPadding(0,dp(5),dp(10),dp(2));setOnClickListener{cancelPendingUpload(uri,kind)}}
+        actions.addView(action)
+        card.addView(nameView);card.addView(details);card.addView(progressBar);card.addView(actions)
+        attachRow.addView(card,LinearLayout.LayoutParams(dp(240),-2).apply{rightMargin=dp(6)})
+        val views=UploadCardViews(card,preview,nameView,details,progressBar,actions,action)
+        uploadCards[key]=views
+        pendingPreviewBitmaps[key]?.let { bm ->
+            preview.setImageBitmap(bm)
+            preview.setOnClickListener { showImagePreviewFromBitmap(bm,name) }
+        }
+        return views
+    }
+
+    private fun addCompactTextPreview(parent:LinearLayout,path:String,name:String){
+        val preview=TextView(this).apply{
+            tag="attachment_local_preview"
+            text="Читаю файл…"
+            textSize=11.5f
+            setTextColor(Color.rgb(205,210,220))
+            typeface=Typeface.MONOSPACE
+            setPadding(dp(10),dp(8),dp(10),dp(8))
+            setBackgroundColor(Color.rgb(24,26,30))
+            maxLines=9
+            ellipsize=TextUtils.TruncateAt.END
+            setOnClickListener{showTextPreview(path,name)}
+        }
+        parent.addView(preview,LinearLayout.LayoutParams(-1,dp(118)).apply{bottomMargin=dp(6)})
+        executor.execute{
+            try{
+                val maxPreview=48*1024
+                val file=File(path)
+                val buffer=ByteArray(maxPreview)
+                var offset=0
+                file.inputStream().use{input->
+                    while(offset<buffer.size){
+                        val n=input.read(buffer,offset,buffer.size-offset)
+                        if(n<0)break
+                        offset+=n
+                    }
+                }
+                var text=String(buffer,0,offset,StandardCharsets.UTF_8)
+                    .replace("\u0000", "")
+                    .replace("\r\n","\n")
+                if(name.substringAfterLast('.',"").equals("json",true)){
+                    text=try{JSONObject(text).toString(2)}catch(_:Exception){try{JSONArray(text).toString(2)}catch(_:Exception){text}}
+                }
+                val lines=text.lineSequence().take(9).joinToString("\n")
+                runOnUiThread{
+                    preview.text=if(lines.isBlank())"(пустой файл)" else lines
+                }
+            }catch(e:Exception){
+                runOnUiThread{preview.text="Не удалось прочитать файл. Нажмите «Просмотр»."}
+            }
+        }
+    }
+
+    private fun addCompactImagePreview(parent:LinearLayout,path:String,name:String){
+        val preview=ImageView(this).apply{
+            tag="attachment_local_preview"
+            scaleType=ImageView.ScaleType.CENTER_CROP
+            adjustViewBounds=true
+            background=rounded(Color.rgb(24,26,30),8)
+            setOnClickListener{showImagePreviewFromFile(path,name)}
+        }
+        loadThumbnailAsync(preview,path,720)
+        parent.addView(preview,LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
+    }
+
+    private fun addCompactPdfPreview(parent:LinearLayout,path:String,name:String){
+        val preview=ImageView(this).apply{
+            tag="attachment_local_preview"
+            scaleType=ImageView.ScaleType.FIT_CENTER
+            background=rounded(Color.rgb(24,26,30),8)
+            setOnClickListener{showPdfPreview(path,name)}
+        }
+        parent.addView(preview,LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
+        executor.execute{
+            try{
+                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                PdfRenderer(pfd).use{renderer->
+                    if(renderer.pageCount>0){
+                        renderer.openPage(0).use{page->
+                            val scale=minOf(1.5f,720f/maxOf(page.width,1).toFloat())
+                            val w=maxOf((page.width*scale).toInt(),1)
+                            val h=maxOf((page.height*scale).toInt(),1)
+                            val bmp=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888)
+                            bmp.eraseColor(Color.WHITE)
+                            page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            runOnUiThread{preview.setImageBitmap(bmp)}
+                        }
+                    }
+                }
+                pfd.close()
+            }catch(_:Exception){ }
+        }
+    }
+
+    private fun openPreviewForLocalFile(path:String,name:String,mime:String){
+        when{
+            mime.startsWith("image/") -> showImagePreviewFromFile(path,name)
+            isTextLikeMime(mime,name) -> showTextPreview(path,name)
+            mime.equals("application/pdf",true) -> showPdfPreview(path,name)
+            else -> openLocalFile(path,name,mime)
+        }
+    }
+
+    private fun showPendingLocalPreview(key:String,path:String,name:String,mime:String){
+        uploadCards[key]?.let{v->
+            if(v.actions.childCount>1)v.actions.removeViews(0,v.actions.childCount-1)
+            if(v.root.findViewWithTag<View>("attachment_local_preview")==null){
+                when{
+                    mime.startsWith("image/") -> {
+                        val view=ImageView(this).apply{
+                            tag="attachment_local_preview"
+                            scaleType=ImageView.ScaleType.CENTER_CROP
+                            adjustViewBounds=true
+                            background=rounded(Color.rgb(24,26,30),8)
+                            setOnClickListener{showImagePreviewFromFile(path,name)}
+                        }
+                        v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
+                    }
+                    isTextLikeMime(mime,name) -> {
+                        val view=TextView(this).apply{
+                            tag="attachment_local_preview"
+                            text="Читаю файл…"
+                            textSize=11.5f;setTextColor(Color.rgb(205,210,220));typeface=Typeface.MONOSPACE
+                            setPadding(dp(10),dp(8),dp(10),dp(8));setBackgroundColor(Color.rgb(24,26,30));maxLines=8
+                            ellipsize=TextUtils.TruncateAt.END;setOnClickListener{showTextPreview(path,name)}
+                        }
+                        v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(118)).apply{bottomMargin=dp(6)})
+                        executor.execute{
+                            try{
+                                val maxPreview=36*1024
+                                val bytes=ByteArray(maxPreview)
+                                var offset=0
+                                File(path).inputStream().use{input->while(offset<bytes.size){val n=input.read(bytes,offset,bytes.size-offset);if(n<0)break;offset+=n}}
+                                var text=String(bytes,0,offset,StandardCharsets.UTF_8).replace("\u0000","")
+                                if(name.substringAfterLast(".","").equals("json",true)) text=try{JSONObject(text).toString(2)}catch(_:Exception){try{JSONArray(text).toString(2)}catch(_:Exception){text}}
+                                val first=text.lineSequence().take(8).joinToString("\n")
+                                runOnUiThread{view.text=if(first.isBlank())"(пустой файл)" else first}
+                            }catch(_:Exception){runOnUiThread{view.text="Не удалось прочитать файл. Нажмите «Просмотр»."}}
+                        }
+                    }
+                    mime.equals("application/pdf",true) -> {
+                        val view=ImageView(this).apply{
+                            tag="attachment_local_preview"
+                            scaleType=ImageView.ScaleType.FIT_CENTER
+                            background=rounded(Color.rgb(24,26,30),8)
+                            setOnClickListener{showPdfPreview(path,name)}
+                        }
+                        v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
+                        executor.execute{
+                            try{
+                                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                                PdfRenderer(pfd).use{renderer->
+                                    if(renderer.pageCount>0){
+                                        renderer.openPage(0).use{page->
+                                            val scale=minOf(1.5f,720f/maxOf(page.width,1).toFloat())
+                                            val w=maxOf((page.width*scale).toInt(),1);val h=maxOf((page.height*scale).toInt(),1)
+                                            val bmp=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);bmp.eraseColor(Color.WHITE)
+                                            page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                            runOnUiThread{view.setImageBitmap(bmp)}
+                                        }
+                                    }
+                                }
+                                pfd.close()
+                            }catch(_:Exception){}
+                        }
+                    }
+                }
+            }
+            val label=when{
+                mime.startsWith("image/") -> "Просмотр"
+                isTextLikeMime(mime,name) -> "Просмотр"
+                mime.equals("application/pdf",true) -> "Просмотр"
+                else -> "Открыть"
+            }
+            val button=fileActionButton(label){openPreviewForLocalFile(path,name,mime)}
+            v.actions.addView(button,0)
+            v.details.text="Локальная копия готова · загружаю на сервер…"
+        }
+    }
+
+    private val pendingPreviewBitmaps = ConcurrentHashMap<String, Bitmap>()
+
+    private fun startPendingPreview(uri:Uri,kind:String){
+        if(kind!="image")return
+        val key=attachmentKey(uri,kind)
+        executor.execute{
+            val bmp=decodeThumbnailFromUri(uri,640) ?: return@execute
+            pendingPreviewBitmaps[key]=bmp
+            runOnUiThread{
+                uploadCards[key]?.let{v->
+                    v.preview.setImageBitmap(bmp)
+                    val displayName=v.name.text.toString().removePrefix("🖼 ")
+                    v.preview.setOnClickListener{showImagePreviewFromBitmap(bmp,displayName)}
+                }
+            }
+        }
+    }
+
+    private fun decodeThumbnailFromUri(uri:Uri,maxDim:Int):Bitmap?{
+        return try{
+            val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+            contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,bounds)}
+            if(bounds.outWidth<=0 || bounds.outHeight<=0)return null
+            var sample=1
+            while(bounds.outWidth/sample>maxDim || bounds.outHeight/sample>maxDim)sample*=2
+            val opts=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.RGB_565}
+            contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,opts)}
+        }catch(_:Exception){null}
+    }
+
+    private fun querySize(uri:Uri):Long{
+        return contentResolver.query(uri,arrayOf(OpenableColumns.SIZE),null,null,null)?.use{c->if(c.moveToFirst()&&!c.isNull(0))c.getLong(0) else 0L} ?: 0L
+    }
+
+    private fun reportUploadProgress(key:String,stage:String,written:Long,total:Long){
+        val pct=if(total>0L)(written.coerceAtMost(total)*100L/total).toInt().coerceIn(0,100) else 0
+        val now=SystemClock.uptimeMillis()
+        val last=uploadProgress[key]
+        if(last!=null && last.second==pct && now-last.first<120L)return
+        uploadProgress[key]=now to pct
+        runOnUiThread{
+            uploadCards[key]?.let{v->
+                v.progress.visibility=View.VISIBLE
+                if(total>0){v.progress.isIndeterminate=false;v.progress.progress=pct}
+                v.details.text=if(total>0)"$stage · $pct%" else "$stage…"
+            }
+        }
+    }
+
+    private fun cancelPendingUpload(uri:Uri,kind:String){
+        val key=attachmentKey(uri,kind)
+        cancelledUploads.add(key)
+        uploadCalls.remove(key)?.cancel()
+        uploadProgress.remove(key)
+        pendingUploadUris.removeAll{it.first==uri.toString() && it.second==kind}
+        pendingPreviewBitmaps.remove(key)
+        pendingLocalUploadPaths.remove(key)?.let{try{File(it).delete()}catch(_:Exception){}}
+        persistComposerStateNow()
+        refreshAttachChips()
+        status.text="Вложение удалено"
+    }
+
+    private fun refreshAttachChips(){
+        attachRow.removeAllViews()
+        uploadCards.clear()
+        for((rawUri,kind) in pendingUploadUris.toList()){
+            val uri=try{Uri.parse(rawUri)}catch(_:Exception){continue}
+            addUploadProgressCard(uri,kind)
+        }
+        if(pendingImagePath!=null){
+            val path=pendingImagePath!!
+            val name=pendingImageName?.ifBlank{null} ?: "Изображение"
+            val mime=pendingImageMime?.ifBlank{null} ?: "image/*"
+            val card=createAttachmentCard()
+            val preview=createThumbnailView(null)
+            loadThumbnailAsync(preview,path,640)
+            preview.setOnClickListener{showImagePreviewFromFile(path,name)}
+            card.addView(preview,LinearLayout.LayoutParams(dp(180),dp(120)))
+            card.addView(TextView(this).apply{text="🖼 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))})
+            card.addView(TextView(this).apply{text=formatAttachmentDetails(mime,pendingImageSize.coerceAtLeast(File(path).length()));textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(2),0,dp(4))})
+            val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+            row.addView(fileActionButton("Просмотр"){showImagePreviewFromFile(path,name)})
+            row.addView(fileActionButton("Удалить"){pendingImagePath=null;pendingImageFileId=null;pendingImageName=null;pendingImageMime=null;pendingImageSize=0L;refreshAttachChips();persistComposerStateNow()})
+            card.addView(row)
+            attachRow.addView(card,LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
+        }
+        attachedOpenRouterAttachments.forEach { attachment ->
+            val card = createAttachmentCard()
+            card.addView(TextView(this).apply {
+                text = "📎 " + safeDisplayName(attachment.name)
+                textSize = 13.5f
+                setTextColor(Color.WHITE)
+                setTypeface(null, Typeface.BOLD)
+            })
+            card.addView(TextView(this).apply {
+                text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size)
+                textSize = 11.5f
+                setTextColor(Color.rgb(165,170,180))
+                setPadding(0,dp(3),0,dp(4))
+            })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            when (attachment.kind) {
+                "image" -> row.addView(fileActionButton("Просмотр") { showImagePreviewFromFile(attachment.path, attachment.name) })
+                "text" -> row.addView(fileActionButton("Просмотр") { showTextPreview(attachment.textPath ?: attachment.path, attachment.name) })
+                "pdf" -> row.addView(fileActionButton("Просмотр") { showPdfPreview(attachment.path, attachment.name) })
+            }
+            row.addView(fileActionButton("Удалить") {
+                attachedOpenRouterAttachments.removeAll { it.id == attachment.id }
+                refreshAttachChips()
+                persistComposerStateNow()
+            })
+            card.addView(row)
+            attachRow.addView(card, LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
+        }
+        attachedFileNames.forEachIndexed{i,name->
+            val path=attachedFilePaths.getOrNull(i).orEmpty().takeIf{it.isNotBlank() && File(it).isFile}
+            val mime=attachedFileMimes.getOrNull(i).orEmpty().ifBlank{mimeForFilename(name)}
+            val size=attachedFileSizes.getOrNull(i) ?: path?.let{File(it).length()} ?: 0L
+            val card=createAttachmentCard()
+            val title=TextView(this).apply{text="📄 ${safeDisplayName(name)}";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD)}
+            card.addView(title)
+            card.addView(TextView(this).apply{text=formatAttachmentDetails(mime,size);textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(3),0,dp(4))})
+            val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+            if(path!=null){
+                if(isTextLikeMime(mime,name))row.addView(fileActionButton("Просмотр"){showTextPreview(path,name)})
+                else if(mime.equals("application/pdf",true))row.addView(fileActionButton("Просмотр"){showPdfPreview(path,name)})
+                else row.addView(fileActionButton("Открыть"){openLocalFile(path,name,mime)})
+            }
+            row.addView(fileActionButton("Удалить"){
+                attachedFileIds.removeAt(i);attachedFileNames.removeAt(i);attachedFileSizes.removeAt(i);attachedFilePaths.removeAt(i);attachedFileMimes.removeAt(i)
+                refreshAttachChips();persistComposerStateNow()
+            })
+            card.addView(row)
+            attachRow.addView(card,LinearLayout.LayoutParams(dp(220),-2).apply{rightMargin=dp(6)})
+        }
+        attachScroll.visibility=if(attachRow.childCount>0)View.VISIBLE else View.GONE
+        send.isEnabled = stop.visibility != View.VISIBLE && pendingUploads.get() == 0 && !preparingZipAttachments
+    }
+
+    private fun isNearLatest(): Boolean {
+        if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return true
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return true
+        val lastVisible = lm.findLastVisibleItemPosition()
+        return ChatScrollPolicy.shouldScrollToLatest(
+            itemCount = messageAdapter.itemCount,
+            lastVisiblePosition = lastVisible
+        )
+    }
+
+    private fun scrollToLatest(force: Boolean = false){
+        if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
+        if(!force && !isNearLatest()) return
+        scroll.post{
+            if(messageAdapter.itemCount>0 && (force || isNearLatest())) {
+                scroll.scrollToPosition(messageAdapter.itemCount-1)
+            }
+        }
+    }
+
+    // ---------- utils ----------
+    private fun setBusy(v:Boolean){
+        send.isEnabled=!v && pendingUploads.get()==0 && !preparingZipAttachments
+        stop.visibility=if(v)View.VISIBLE else View.GONE
+    }
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun beginUpload(chatId: String, generation: Long) {
+        if (!isRequestCurrent(chatId, generation)) return
+        pendingUploads.incrementAndGet()
+        runOnUiThread {
+            if (!isRequestCurrent(chatId, generation)) return@runOnUiThread
+            send.isEnabled = false
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun endUpload(chatId: String, generation: Long) {
+        val remaining = pendingUploads.updateAndGet { (it - 1).coerceAtLeast(0) }
+        runOnUiThread {
+            if (!isRequestCurrent(chatId, generation)) return@runOnUiThread
+            if (remaining == 0 && stop.visibility != View.VISIBLE) send.isEnabled = true
+        }
+    }
+    private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
+        orientation=LinearLayout.VERTICAL
+        setPadding(dp(13),dp(10),dp(13),dp(10))
+        background=rounded(Color.rgb(28,29,34),14)
+        layoutParams=RecyclerView.LayoutParams(-1,-2).apply{bottomMargin=dp(8)}
+    }
+
+    private fun renderChatBubbleBody(item:ChatBubbleItem):CharSequence{
+        return if(!item.user && item.message!=null) {
+            RichTextRenderer.render(AstraResponseModel.fromChatJson(item.message))
+        } else {
+            markdown(item.text,item.annotations)
+        }
+    }
+
+    private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
+        card.removeAllViews()
+        card.orientation=LinearLayout.VERTICAL
+        card.setPadding(dp(13),dp(10),dp(13),dp(10))
+        card.background=rounded(if(item.user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+
+        val who=TextView(this).apply{
+            text=item.label
+            textSize=12f
+            setTextColor(if(item.user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
+            setTypeface(null,Typeface.BOLD)
+        }
+        card.addView(who)
+
+        val body=TextView(this).apply{
+            textSize=16f
+            setTextColor(Color.WHITE)
+            setLinkTextColor(Color.rgb(138,180,248))
+            movementMethod=LinkMovementMethod.getInstance()
+            highlightColor=Color.TRANSPARENT
+            setPadding(0,dp(5),0,dp(0))
+        }
+        card.addView(body)
+
+        val message=item.message
+        if(item.user && message!=null){
+            renderUserAttachments(message,card)
+        }
+        if(!item.user){
+            val savedSummary=item.reasoningSummary?.trim().takeIf{!it.isNullOrBlank()}
+                ?: message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            if(savedSummary!=null) attachReasoningSummaryPanel(card,savedSummary,initiallyExpanded=false)
+            if(message!=null){
+                if(hasAssistantAssets(message)) addAssetSectionHeader(card)
+                renderGeneratedImages(message,card)
+                val annotations=message.optJSONArray("annotations") ?: item.annotations
+                if(annotations!=null) renderAnnotations(
+                    annotations,
+                    card,
+                    message,
+                    currentChatId(),
+                    requestGeneration
+                )
+                addFeedbackRow(card,message,currentChatId())
+            }
+        }
+
+        val longPress=View.OnLongClickListener{
+            val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
+            else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
+            AlertDialog.Builder(this).setItems(menu){_,which->
+                when(which){
+                    0->{
+                        val cm=getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()))
+                        status.text="Скопировано"
+                    }
+                    1->{
+                        pendingExportBytes=body.text?.toString().orEmpty().toByteArray()
+                        val i=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type="text/plain"
+                            putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
+                        }
+                        try{launchActivityForResult(i, pickExportTxt)}
+                        catch(e:Exception){status.text="Экспорт недоступен: ${e.message}"}
+                    }
+                    2->if(item.user){
+                        item.chatIndex?.let(::editMessage)
+                    }else{
+                        sendMessage(true)
+                    }
+                }
+            }.show()
+            true
+        }
+        card.setOnLongClickListener(longPress)
+        body.setOnLongClickListener(longPress)
+        who.setOnLongClickListener(longPress)
+        return body
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun addBubble(
+        label:String,
+        text:String,
+        user:Boolean,
+        annotations:JSONArray?=null,
+        message:JSONObject?=null
+    ):String{
+        val chatIndex=message?.let{target->chat.indexOfFirst{it===target}.takeIf{it>=0}}
+        val id=if(chatIndex!=null){
+            "chat-${chatIndex}-${if(user)"user" else "assistant"}"
+        }else{
+            "bubble-${UUID.randomUUID()}"
+        }
+        messageAdapter.addItem(
+            ChatBubbleItem.create(
+                id=id,
+                label=label,
+                text=text,
+                user=user,
+                annotations=annotations,
+                message=message,
+                chatIndex=chatIndex,
+                reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
+            )
+        )
+        scrollToLatest(force = user)
+        return id
+    }
+
+    private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
+        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
+        val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,0)}
+        val current=message.optInt("feedback",0)
+        fun feedbackButton(label:String,value:Int)=TextView(this).apply{
+            text=if(current==value) "$label ✓" else label
+            textSize=12f
+            setTextColor(Color.rgb(150,155,165))
+            setPadding(dp(6),dp(3),dp(10),dp(3))
+            isEnabled=current==0
+            setOnClickListener{
+                if(message.optInt("feedback",0)!=0)return@setOnClickListener
+                message.put("feedback",value)
+                chatDb.recordFeedback(chatId,requestId,value)
+                diagnostics.log("effort_feedback",mapOf("chat_id" to chatId,"request_id" to requestId,"value" to value))
+                text="$label ✓"
+                for(i in 0 until row.childCount) row.getChildAt(i).isEnabled=false
+                status.text="Спасибо за оценку"
+            }
+        }
+        row.addView(feedbackButton("👍",1))
+        row.addView(feedbackButton("👎",-1))
+        card.addView(row)
+    }
+
+    private fun findMessageForAnnotations(annotations:JSONArray):JSONObject?{
+        return chat.lastOrNull{it.optString("role")=="assistant" && it.optJSONArray("annotations")?.toString()==annotations.toString()}
+    }
+
+    private fun markdown(s:String, annotations:JSONArray?=null):CharSequence = RichTextRenderer.render(s,annotations)
+
+    private fun button(t:String,a:()->Unit)=Button(this).apply{
+        text=t;textSize=16f;minWidth=0;minimumWidth=0
+        setPadding(dp(10),dp(6),dp(10),dp(6))
+        setTextColor(Color.rgb(210,214,222))
+        background=rounded(Color.rgb(34,36,42))
+        setOnClickListener{a()}
+    }
+    private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
+    private fun rounded(fill:Int, radiusDp:Int=10): GradientDrawable = GradientDrawable().apply{
+        cornerRadius = dp(radiusDp).toFloat()
+        setColor(fill)
+    }
+
+}
