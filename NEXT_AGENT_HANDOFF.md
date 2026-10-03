@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-02 18:58 +03:00
-**Следующий рабочий срез:** PR H
+**Last updated:** 2026-10-03 09:18 +03:00
+**Следующий рабочий срез:** EXIF image-wire follow-up
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -64,14 +64,14 @@
 
 ## Фактический baseline
 
-- main code baseline: `8bfd85aea222dfd12ac3bd3345c09c1712f28c29` (PR #75 merged foreground upload-gate reconciliation)
+- main code baseline: `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2` (PR #76 merged OpenRouter usage/cache telemetry)
 
-Последний рабочий срез 2026-10-02:
+Последний рабочий срез 2026-10-03:
+- PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
 - PR #75 — merged; push Build `37027054462` and Release `37027053533` both completed Successful. The foreground-resume upload-gate regression passed on real Android instrumentation.
 - PR #74 — merged; lightweight `Verify handoff` workflow for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
 - PR #73 — merged; handoff update (docs-only: `Verify handoff` Successful, full Build/Release Skipped by design).
 - PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful.
-- PR #68 — merged; Build `37024281184` (#491) and Release `37024281948` (#311) both completed Successful, with real Android lifecycle instrumentation green.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -105,6 +105,7 @@
 - [instrumentation] **#68:** блокирующий `AttachmentInputStreamSource` и real-path ActivityScenario тесты picker-copy/ZIP после навигации прошли на эмуляторе. Build `37024281184` (#491), Release `37024281948` (#311).
 - [instrumentation] **#72:** production-владение вложением на main: captured `chatId + generation`, AtomicInteger-счётчик, lifecycle-gated `endUpload()`; регрессия stopped-Activity зелёная. Build `37005211862`, Release `37005211936`.
 - [instrumentation] **#75:** `onStart()` пересчитывает UI вложений/Send после upload, завершившегося в stopped Activity; ActivityScenario: Stop → `endUpload()` → Resume → Send включён. Build `37027054462` (#501), Release `37027053533` (#321).
+- [pure] **#76:** `OpenRouterChatClient` запрашивает provider usage, агрегирует usage по всем HTTP-раундам tool loop и сохраняет вложенные cached/cache-write/reasoning token details в результате. JVM regression покрывает этот client-level contract; runtime MainActivity wiring не считать отдельно доказанным.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -123,7 +124,6 @@
 
 Не подтверждено вообще (нет ни теста, ни наблюдения):
 1. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся.
-2. Предел стоимости ответа: подтверждены лимит 24 раунда и таймауты вызовов; общий лимит времени/токенов на весь цикл и `session_id` — нет.
 3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
 4. Вложения Claude (#57): чтение моделью картинки/PDF/текста, multi-select через `clipData` и EXIF-повёрнутое фото не подтверждены на реальной модели; раздувание EXIF→PNG не решено.
 5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
@@ -149,19 +149,16 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. PR H — **следующий**
-Human-facing documentation for OpenRouter/Claude, attachments, local artifacts, lifecycle cancellation and manual CI after the attachment lifecycle follow-ups are closed.
-Первый шаг: make a documentation-only snapshot from the final merged lifecycle/audit state.
-
-### 2. EXIF image-wire follow-up
+### 1. EXIF image-wire follow-up — **следующий**
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
 Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
 
-### 3. OpenRouter: стоимость и видимость кэша — сначала read-only проверка
-Первый шаг: (без PR) по коду проверить (а) есть ли общий предел времени/токенов на весь цикл `OpenRouterChatClient.complete()` (подтверждены только 24 раунда и таймауты вызовов); (б) передаётся ли `session_id`; (в) разбирается ли `usage` с cached tokens и показывается ли в строке usage. Для каждого отсутствующего — отдельный маленький PR (мягкий предел: при достижении завершить ответ по собранным данным, как для лимита раундов). Если пробелы найдены — перенеси маркер на этот пункт, PR H станет вторым.
+### 2. OpenRouter prompt-cache real-world evidence
+The client now exposes usage/cache telemetry, but a real prompt-cache hit and the concrete cost effect of the 1-hour TTL are still unobserved.
+Первый шаг: perform a small read-only real-request check and record whether cached tokens become non-zero; do not change caching policy from that observation alone.
 
-### 4. Claude через OpenRouter: серверные tools (web search / image generation / files) — ждёт решения пользователя
-Нет в PR #49–#75; чекбоксы Web Search / File Search / Code Interpreter / Image Generation относятся только к OpenAI path. У OpenRouter это beta-серверные tools (аналог code interpreter — только `/api/v1/responses`). Первый шаг: не начинать без подтверждения пользователя; затем один инструмент (web search) отдельным PR.
+### 3. Claude через OpenRouter: серверные tools (web search / image generation / files) — ждёт решения пользователя
+Нет в PR #49–#76; чекбоксы Web Search / File Search / Code Interpreter / Image Generation относятся только к OpenAI path. У OpenRouter это beta-серверные tools (аналог code interpreter — только /api/v1/responses). Первый шаг: не начинать без подтверждения пользователя; затем один инструмент (web search) отдельным PR.
 
 ## Репозиторий / branches
 
@@ -208,11 +205,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#68:** merged; blocking `AttachmentInputStreamSource` harness + OpenRouter picker-copy/ZIP real-path tests; Build `37024281184` and Release `37024281948` both passed.
 - **#72:** merged; production upload lifecycle ownership gate; Build `37005211862` and Release `37005211936` both passed.
 - **#73:** merged; handoff update (docs-only); `Verify handoff` Successful, full CI Skipped by design.
 - **#74:** merged `5887780df908584b61959153c8ac8938bc86cd4c`; lightweight handoff verifier workflow.
-- **#75:** merged `8bfd85aea222dfd12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
+- **#75:** merged `8bfd85aea222df12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
+- **#76:** merged `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2`; OpenRouter usage/cache telemetry; Build `37111989401` and Release `37111989339` both passed, with real Android lifecycle instrumentation and Successful `Verify handoff` `37111992407`.
 
 ## Product radar — идеи с реальной ценностью
 
