@@ -158,7 +158,7 @@ Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression 
 Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
 
 ### 3. OpenRouter: стоимость и видимость кэша — сначала read-only проверка
-Первый шаг (без PR): по коду проверить (а) есть ли общий предел времени/токенов на весь цикл `OpenRouterChatClient.complete()` (подтверждены только 24 раунда и таймауты вызовов); (б) передаётся ли `session_id`; (в) разбирается ли `usage` с cached tokens и показывается ли в строке usage. Для каждого отсутствующего — отдельный маленький PR (мягкий предел: при достижении завершить ответ по собранным данным, как для лимита раундов). Если пробелы найдены — перенеси маркер на этот пункт, PR H станет вторым.
+Первый шаг: (без PR) по коду проверить (а) есть ли общий предел времени/токенов на весь цикл `OpenRouterChatClient.complete()` (подтверждены только 24 раунда и таймауты вызовов); (б) передаётся ли `session_id`; (в) разбирается ли `usage` с cached tokens и показывается ли в строке usage. Для каждого отсутствующего — отдельный маленький PR (мягкий предел: при достижении завершить ответ по собранным данным, как для лимита раундов). Если пробелы найдены — перенеси маркер на этот пункт, PR H станет вторым.
 
 ### 4. Claude через OpenRouter: серверные tools (web search / image generation / files) — ждёт решения пользователя
 Нет в PR #49–#75; чекбоксы Web Search / File Search / Code Interpreter / Image Generation относятся только к OpenAI path. У OpenRouter это beta-серверные tools (аналог code interpreter — только `/api/v1/responses`). Первый шаг: не начинать без подтверждения пользователя; затем один инструмент (web search) отдельным PR.
