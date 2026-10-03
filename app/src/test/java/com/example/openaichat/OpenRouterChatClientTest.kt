@@ -68,6 +68,7 @@ class OpenRouterChatClientTest {
             val firstBody = JSONObject(firstRequestBody.get())
             assertEquals("chat-123", firstBody.getString("session_id"))
             assertTrue(firstBody.getJSONObject("usage").getBoolean("include"))
+            assertEquals("1h", firstBody.getJSONObject("cache_control").getString("ttl"))
 
             val usage = result.usage ?: error("usage missing")
             assertEquals(250L, usage.getLong("prompt_tokens"))
