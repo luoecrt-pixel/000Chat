@@ -1050,10 +1050,12 @@ class MainActivity : ComponentActivity() {
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
                 result.usage?.let { usage ->
                     val inputTokens = usage.optLong("prompt_tokens", 0L)
-                    val cachedTokens = usage.optLong("cached_tokens", 0L)
-                    val cacheWriteTokens = usage.optLong("cache_write_tokens", 0L)
+                    val promptDetails = usage.optJSONObject("prompt_tokens_details")
+                    val completionDetails = usage.optJSONObject("completion_tokens_details")
+                    val cachedTokens = promptDetails?.optLong("cached_tokens", 0L) ?: 0L
+                    val cacheWriteTokens = promptDetails?.optLong("cache_write_tokens", 0L) ?: 0L
                     val outputTokens = usage.optLong("completion_tokens", 0L)
-                    val reasoningTokens = usage.optLong("reasoning_tokens", 0L)
+                    val reasoningTokens = completionDetails?.optLong("reasoning_tokens", 0L) ?: 0L
                     val cost = usage.optDouble("cost", 0.0).coerceAtLeast(0.0)
                     chatDb.recordEffortMetric(
                         requestId = requestId,
@@ -1113,7 +1115,7 @@ class MainActivity : ComponentActivity() {
                         toolLabel.text = result.toolNames.distinct().joinToString("  ")
                         val usageSuffix = result.usage?.let { usage ->
                             val inputTokens = usage.optLong("prompt_tokens", 0L)
-                            val cachedTokens = usage.optLong("cached_tokens", 0L)
+                            val cachedTokens = usage.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens", 0L) ?: 0L
                             val outputTokens = usage.optLong("completion_tokens", 0L)
                             val costText = if (usage.has("cost")) " · $"+("%.4f".format(usage.optDouble("cost", 0.0).coerceAtLeast(0.0))) else ""
                             " · "+fmtTokens(inputTokens)+" in"+(if (cachedTokens > 0) " · cache "+fmtTokens(cachedTokens) else "")+" · "+fmtTokens(outputTokens)+" out"+costText
