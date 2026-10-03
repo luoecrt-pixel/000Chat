@@ -769,7 +769,8 @@ class MainActivity : ComponentActivity() {
         spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
-        val savedMaxOutput = prefs.getString("max_output","")?.trim().orEmpty().takeUnless { it == "128000" }.orEmpty()\n        val max = field("Max output tokens (пусто = ограничение определяет API/модель)", savedMaxOutput); spaced(max)
+        val savedMaxOutput = prefs.getString("max_output","")?.trim().orEmpty().takeUnless { it == "128000" }.orEmpty()
+        val max = field("Max output tokens (пусто = ограничение определяет API/модель)", savedMaxOutput); spaced(max)
         val cache = field("Prompt cache key (optional)", prefs.getString("cache_key","") ?: ""); spaced(cache)
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
