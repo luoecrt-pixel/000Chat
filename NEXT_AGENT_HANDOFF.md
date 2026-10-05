@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-05 13:16 +03:00
-**Следующий рабочий срез:** EXIF image-wire follow-up
+**Last updated:** 2026-10-05 14:41 +03:00
+**Следующий рабочий срез:** OpenAI real long-thinking / very-long response validation
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -64,7 +64,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9` (PR #80 merged removal of artificial per-response caps; PR #79 was docs-only)
+- main code baseline: `b02150a5cc59de02b33742c8a2928184ad8c8caf` (PR #83 merged after full Build/Release + instrumentation verification)
 
 Последний рабочий срез 2026-10-03:
 - PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
@@ -78,9 +78,15 @@
 - **Source audit complete:** OpenAI Responses foreground transport uses `readTimeout(0)` and `callTimeout(0)`; `max_output_tokens` is sent only when the user explicitly configures it; OpenAI File API uploads use the original local file bytes; OpenAI built-in tools do not use the OpenRouter-style local 24-round loop.
 - **Found:** `MainActivity.streamBackgroundResponse()` still had an app-side 30-minute recovery deadline even though `BackgroundResponseWorker` already used 5 hours.
 - **PR #84:** replaces that remaining 30-minute ceiling with the shared 5-hour per-response safety policy and adds a deterministic five-hour boundary test.
-- **Full runtime verification:** not complete yet; the connector produced only `Skipped` Build/Release runs for the PR branch, and `Skipped` is not counted as green. Do not merge #84 until real `(push)` Build and Release are Successful, including instrumentation.
-- **Planned:** obtain the full Build/Release verification for #84, merge it only on the CI gate, then return to EXIF PR #83 and resolve its failed Android instrumentation before calling that slice fully verified.
+- **Full runtime verification of #84:** pending; do not merge until real `(push)` Build and Release are Successful, including instrumentation.
 
+## EXIF JPEG wire policy — fully verified
+
+- **PR #83 merged:** `b02150a5cc59de02b33742c8a2928184ad8c8caf`.
+- Full push **Build** `37303250725` — Successful, including Android lifecycle instrumentation.
+- Full push **Release** `37303250886` — Successful.
+- Runtime contract: JPEG EXIF rotations use strictly lossless jpegtran transforms only when MCU geometry is perfect; mirrored/transpose or non-perfect geometry keeps the original JPEG/EXIF bytes; no lossy compression and no silent downscale.
+- Legacy manifests that previously stored JPEG as PNG wire are refreshed from the original JPEG when read.
 ## Подтверждённые lifecycle/recovery контракты
 
 Единая карта доказанности: подтверждено запуском (теги ниже) → только source-level (тег static) → не подтверждено (список в конце раздела).
@@ -159,18 +165,9 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. EXIF image-wire follow-up — **следующий**
-Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
-Подтверждено: проблема находится в `OpenRouterAttachmentStore.normalizeImageOrientation()` — JPEG с non-normal EXIF orientation превращается в `ARGB_8888` Bitmap и сохраняется как PNG. Android `ExifInterface` корректно читает orientation, но сам по себе не даёт lossless pixel transform. Исследование показало, что `jpegtran` выполняет lossless rotate/flip, а Android-библиотека `io.github.commons-app:ajpegtran:0.1.14` публикуется как Android library с JNI/jpegtran и поддерживает lossless JPEG operations; это основной кандидат. Не добавлять lossy JPEG recompression и не делать silent downscale.
-Первый шаг: проверить безопасный wire-policy на основе строго lossless JPEG transforms: использовать transform только когда он гарантированно perfect; при невозможности — оставлять исходный JPEG/EXIF вместо crop или re-encode.
-
-### 2. OpenRouter prompt-cache real-world evidence
-The client now exposes usage/cache telemetry, but a real prompt-cache hit and the concrete cost effect of the 1-hour TTL are still unobserved.
-Первый шаг: perform a small read-only real-request check and record whether cached tokens become non-zero; do not change caching policy from that observation alone.
-
-### 3. Claude через OpenRouter: серверные tools (web search / image generation / files) — ждёт решения пользователя
-Нет в PR #49–#76; чекбоксы Web Search / File Search / Code Interpreter / Image Generation относятся только к OpenAI path. У OpenRouter это beta-серверные tools (аналог code interpreter — только /api/v1/responses). Первый шаг: не начинать без подтверждения пользователя; затем один инструмент (web search) отдельным PR.
-
+### 1. OpenAI five-hour recovery finalization — **следующий**
+PR #84 removes the remaining app-side 30-minute foreground recovery ceiling and shares one five-hour per-response safety boundary with WorkManager.
+Первый шаг: получить полный push Build + Release на последнем коммите и смержить #84 только после обоих Successful, включая instrumentation.
 ## Репозиторий / branches
 
 Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
@@ -216,13 +213,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#75:** merged `8bfd85aea222df12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
-- **#76:** merged `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2`; OpenRouter usage/cache telemetry; Build `37111989401` and Release `37111989339` both passed, with real Android lifecycle instrumentation and Successful `Verify handoff` `37111992407`.
-- **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful, including Android lifecycle instrumentation.
 - **#79:** merged `639d37cca81a7a790119cf96b771f37649a6c460`; docs-only handoff finalization; `Verify handoff` Successful.
-- **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 tool rounds and >128K OpenRouter `max_tokens`.
-
-
+- **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 OpenRouter tool rounds and >128K `max_tokens`.
+- **#82:** merged `8520a8f3e42616de81bbbf01a63564de3648aea3`; docs-only handoff finalization after #80.
+- **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; Build `37303250725` and Release `37303250886` both Successful, including instrumentation.
+- **#84:** open; OpenAI five-hour foreground recovery policy. Full Build/Release verification pending.
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
