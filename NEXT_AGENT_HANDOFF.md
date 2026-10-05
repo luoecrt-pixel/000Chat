@@ -93,56 +93,44 @@
 
 ## Подтверждённые lifecycle/recovery контракты
 
-Этот раздел отвечает на один вопрос: **какие lifecycle/recovery гарантии реально доказаны и чем именно**. Здесь перечислен сам контракт, граница владения состоянием и сильнейший harness; история PR нужна только как ссылка на доказательство, а не заменяет описание контракта.
+Единая карта доказанности: ниже каждый подтверждённый контракт оформлен как отдельная проверяемая гарантия с **одним** proof tag. Тег показывает самый сильный реально выполненный harness именно для этого утверждения; соседний pure/static контракт не переносит proof на runtime wiring.
 
-### 1. Владелец активного ответа и request identity
+- [pure] **#19:** foreground и resumable SSE соблюдают строгий sequence-gap contract: пропущенная последовательность не принимается как корректное продолжение stream.
+- [static] **#20:** Stop привязан к generation конкретного request; state-level contract `markUserStop()` проверен, но прямой runtime-вызов полного `stopCurrentResponse()` в этом proof отсутствует.
+- [pure] **#23:** `ActiveResponseStateStore.state` — immutable snapshot под `@Volatile`, поэтому читатели получают цельный state, а не частично изменённую структуру.
+- [pure] **#25:** user-stop инвалидирует все поколения до последнего user-stop; повторный Stop не забывает уже инвалидированные поколения.
+- [pure] **#27:** background resume захватывает immutable `chatId + generation + assistantItemId` snapshot и не читает «текущую» generation постфактум.
+- [pure] **#29:** Stop-before-create, stale Worker finalization и ownership проверяются через детерминированные contracts; stale request не должен финализировать чужое persisted state.
+- [pure] **#31:** background recovery запускается только при явной eligibility policy.
+- [robolectric] **#32:** реальные SQLite/Robolectric сценарии проверяют миграции v13→v15, v14→v15, reopen partial response/cursor и stale-request DB protection.
+- [robolectric] **#34:** Delete удаляет effort telemetry вместе с chat в одной транзакции; поздний metric callback не может заново создать telemetry для удалённого chat.
+- [instrumentation] **#35:** реальный Android ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete.
+- [pure] **#36:** `ResponseEventReducer` содержит общую response semantics для created/text/reasoning deltas и terminal states; foreground и background используют один reducer.
+- [static] **#37:** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; request-aware DB реализация сохранена, но отдельный runtime adapter test не закрыт.
+- [pure] **#38:** `ResponseCheckpointPolicy` определяет pure checkpoint decision: interval vs terminal и persisted status/text/responseId/sequence; foreground cadence остаётся 750 ms.
+- [pure] **#39:** `BackgroundResponseUiOwnershipPolicy` разрешает background UI snapshot только для совпадающих `chatId + generation + assistantItemId` и допустимого lifecycle.
+- [static] **#40:** reasoning background callback использует `assistantItemId` из immutable UI snapshot; отдельный runtime wiring proof этого callback ещё отсутствует.
+- [pure] **#41:** file upload completion выбирает DISCARD/CURRENT_COMPOSER/SOURCE_CHAT через `AttachmentUploadCompletionPolicy`.
+- [static] **#42:** image и ZIP completion используют ту же policy, image MIME захватывается до async hop; отдельного runtime-теста wiring через policy нет.
+- [instrumentation] **#43:** persisted SOURCE_CHAT ZIP consume привязан к captured `rawUri + kind`, а failure-state mutation выполняется на main thread; Android regression подтверждает consume и failure path.
+- [instrumentation] **#44:** `renderVectorStoreList(vsId)` безопасен при off-main Executor callback: UI mutation и повторный render проходят через внешний `runOnUiThread` gate; ActivityScenario regression закрыла контракт. PR #44/#45 были verifier-checks, контракт фактически закрыт PR #46.
+- [robolectric] **#57:** миграция ChatDatabase до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки истории; lifecycle DB tests прошли на PR head.
+- [instrumentation] **#59:** pending GitHub confirmation имеет одного владельца (future/dialog); Stop/onStop/onDestroy завершают решение как `false`; ActivityScenario проверяет Stop против подтверждения.
+- [instrumentation] **#60:** ActivityScenario `recreate()` при открытом GitHub-диалоге закрывает старое решение и оставляет новую Activity без pending confirmation.
+- [instrumentation] **#61:** Stop отменяет сохранённый `Call` model-capability preflight; helper сохранения вложения в исходный chat работает после навигации. Executor → copy/ZIP → policy отдельно подтверждён #68.
+- [instrumentation] **#62:** новое OpenRouter-сообщение отменяет предыдущий active Call и pending GitHub confirmation; request-ownership проверяется до/после HTTP и вокруг tool boundaries.
+- [instrumentation] **#67:** stale `onCallCreated` не публикует Call старого request; active Call принадлежит текущему request на Activity boundary.
+- [instrumentation] **#68:** блокирующий `AttachmentInputStreamSource` и real-path ActivityScenario для picker-copy/ZIP после навигации прошли на эмуляторе.
+- [instrumentation] **#72:** production-владение вложением на main использует captured `chatId + generation`, AtomicInteger-счётчик и lifecycle-gated `endUpload()`; stopped-Activity regression зелёная.
+- [instrumentation] **#75:** после upload, завершившегося в stopped Activity, `onStart()` пересчитывает attachment/Send UI; ActivityScenario подтверждает Stop → `endUpload()` → Resume → Send enabled.
+- [pure] **#76:** OpenRouter provider usage агрегируется по всем HTTP-раундам tool loop; JVM regression подтверждает client-level usage/cache/reasoning telemetry aggregation.
+- [static] **#78:** OpenRouter app-side safety envelope равен 5 часам на весь `complete()` cycle и 5,000,000 накопленных `usage.total_tokens`; это не модельный reasoning limit.
+- [static] **#80:** удалены app-side 10-minute HTTP и 24-round OpenRouter caps; Direct OpenAI не навязывает legacy 128K `max_output_tokens` при пустой настройке; background recovery поднят с 30 минут до 5 часов.
+- [pure] **#84:** общий `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; boundary test подтверждает: 5h−1ms ещё не expired, ровно 5h уже expired. Это safety boundary одной response/recovery cycle, не session-wide cap.
 
-- [pure] **Generation ownership (#19, #20, #25, #27, #29):** каждый активный response привязан к своему request generation; foreground/resumable SSE соблюдают sequence-gap contract; Stop инвалидирует поколения до последнего user-stop; повторный Stop не оживляет старые поколения; background callback захватывает immutable `chatId + generation + assistantItemId` и не читает «текущую» generation постфактум.
-- [pure] **Stale-finalization rejection (#29):** stale Worker и Stop-before-create не могут финализировать чужое состояние; ownership решения вынесены в детерминированные contracts.
-- [instrumentation] **Activity-side active Call ownership (#67):** stale `onCallCreated` не публикует и не оставляет Call от старого запроса; Build `36922114233`, Release `36922114294`.
-- [instrumentation] **OpenRouter request ownership (#62, #67):** новое сообщение отменяет предыдущий active Call; ownership проверяется до/после HTTP и на tool boundaries; гонка stale `onCallCreated` была воспроизведена и закрыта #67.
+**Важно про OpenAI long-thinking:** source-level аудит текущего foreground Responses path завершён, но реальный provider-level long-thinking/very-long response пока не наблюдался. `readTimeout(0)`, `callTimeout(0)` и отсутствие implicit 128K `max_output_tokens` доказывают отсутствие найденного client-side cutoff, но не доказывают поведение реального провайдера до terminal event. Это остаётся единственным текущим пробелом active plan.
 
-### 2. Foreground stream → reducer → persisted active response
-
-- [pure] **Shared response semantics (#36):** `ResponseEventReducer` единообразно обрабатывает created/text/reasoning deltas и terminal events; foreground и background response paths используют один reducer.
-- [pure] **Checkpoint contract (#38):** checkpoint принимается либо по interval, либо terminal event и сохраняет status/text/responseId/sequence; foreground cadence остаётся 750 ms.
-- [pure] **Persistence boundary (#37):** `ActiveResponsePersistence` изолирует set/update/get/list/clear active-response state; request-aware DB ownership сохраняется за adapter.
-- [pure] **Sequence continuity (#19):** foreground и resumable SSE не принимают пропущенную последовательность как продолжение корректного stream.
-- [robolectric] **SQLite persistence/recovery (#32, #57):** миграции v13/v14→v15/v16 и reopen partial response/cursor сохраняют active-response ownership/cursor; stale-request DB protection не позволяет устаревшему request перезаписать persisted state. #57 также подтверждает миграцию до schema v16.
-
-### 3. Stop / Delete / Activity lifecycle gates
-
-- [instrumentation] **Stop/Delete callback rejection (#35):** реальный ActivityScenario подтверждает положительный callback path в RESUMED и rejection того же mutation path после Stop и Delete; PR-head Debug/Release зелёные.
-- [instrumentation] **Pending confirmation ownership (#59, #60):** GitHub confirmation имеет одного владельца (future/dialog); Stop/onStop/onDestroy завершают его как `false`; после `recreate()` старое решение закрыто и в новой Activity pending confirmation отсутствует. Cumulative Debug `36865960013`.
-- [instrumentation] **Main-thread attachment lifecycle (#72, #75):** upload completion работает с captured `chatId + generation`, `endUpload()` защищён lifecycle gate; после завершения upload в stopped Activity `onStart()` пересчитывает attachment/Send UI. Build `37005211862` / `37027054462`; Release `37005211936` / `37027053533`.
-- [instrumentation] **Persisted attachment consume (#43):** SOURCE_CHAT ZIP consume использует captured `rawUri + kind`, failure-state mutation выполняется на main thread; Android regression подтверждает persisted consume и failure path.
-- [instrumentation] **Off-main UI callback gate (#44/#46):** `renderVectorStoreList(vsId)` безопасен при Executor callback: UI mutation и rerender проходят через `runOnUiThread`; ActivityScenario regression закрыла этот контракт. #44/#45 были verifier-checks, контракт закрыт #46.
-
-### 4. Background recovery и ownership
-
-- [pure] **Recovery eligibility (#31):** background recovery запускается только при явной eligibility policy, а не по факту наличия любого persisted state.
-- [pure] **Background UI ownership (#39):** применение background snapshot разрешено только для совпадающих `chatId + generation + assistantItemId` и допустимого lifecycle state.
-- [static] **Reasoning callback ownership (#40):** reasoning background callback передаёт `assistantItemId` из immutable snapshot в state mutation; отдельного runtime wiring harness для этого утверждения нет.
-- [robolectric] **Persisted active-response ownership (#32, #57):** Worker/reopen путь опирается на request-aware DB state, cursor и active-response fields; stale request не может завершить чужое persisted состояние.
-- [pure] **OpenAI five-hour recovery boundary (#84):** единый `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; граница тестируется как «5h−1ms ещё допустимо / 5h уже expired». Это **app safety boundary одной response/recovery cycle**, не session-wide token/reasoning cap.
-- [static] **OpenAI foreground transport audit (#80/#84):** Responses foreground stream использует `readTimeout(0)` и `callTimeout(0)`; app не навязывает legacy 128K `max_output_tokens`, если пользователь ничего не настроил. Provider-level long-thinking run пока **не** считается подтверждённым.
-
-### 5. OpenRouter long-running response contract
-
-- [pure] **Usage/telemetry aggregation (#76):** provider usage агрегируется по всем HTTP-раундам tool loop, включая cached/cache-write/reasoning details; JVM regression подтверждает client-level aggregation.
-- [static] **Application safety envelope (#78/#80):** `complete()` ограничен 5 часами и 5,000,000 накопленными `usage.total_tokens`; удалены искусственные 10-minute HTTP и 24-round caps. Это app safety envelope, а не provider/model reasoning limit.
-- [pure] **Tool-loop continuation regression (#80):** JVM regression реально проходит более 24 OpenRouter tool rounds, поэтому старый local round cap не вернулся.
-
-### 6. Что именно ещё не доказано
-
-- **Не доказан provider-level long-thinking / very-long response:** нет реального OpenAI provider request из этого agent environment. Source audit завершён, но отсутствие local cutoff до provider terminal event, фактическая длительность и provider `usage/reasoning` ещё не наблюдались.
-- **Не закрывай этот пробел синтетическим SSE-тестом как заменой provider evidence.** Local tests могут доказать отсутствие локального parser/reducer cap, но не поведение реального provider stream.
-- Source-level gaps, которые остаются в этом lifecycle аудите: #20 wiring до реального `stopCurrentResponse()`, #37 adapter wiring, #40 reasoning callback runtime wiring, #42 image/ZIP completion wiring. Эти пункты не объявлять runtime-proven только потому, что соседняя policy имеет pure-тест.
-
-**Правило доказательства:** тег обозначает самый сильный реально выполненный harness именно для данного утверждения. `[pure]` не доказывает Android wiring; `[static]` не означает runtime execution; `[instrumentation]` означает emulator/device harness, а не обязательно физический телефон.
-
-**Не переоткрывай закрытые контракты без нового доказательства регрессии.**
-
+**Не переоткрывай закрытые lifecycle/recovery контракты без нового доказательства регрессии.**
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
 - `ResponseEventReducer` — response semantics; `ResumableResponseStreamClient` — transport + sequence cursor; `ActiveResponsePersistence` — persisted active-response boundary. `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy` и `AttachmentUploadCompletionPolicy` остаются pure decision seams.
