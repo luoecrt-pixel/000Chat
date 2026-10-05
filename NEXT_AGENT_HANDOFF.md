@@ -87,6 +87,7 @@
 - Full push **Release** `37303250886` — Successful.
 - Runtime contract: JPEG EXIF rotations use strictly lossless jpegtran transforms only when MCU geometry is perfect; mirrored/transpose or non-perfect geometry keeps the original JPEG/EXIF bytes; no lossy compression and no silent downscale.
 - Legacy manifests that previously stored JPEG as PNG wire are refreshed from the original JPEG when read.
+
 ## Подтверждённые lifecycle/recovery контракты
 
 Единая карта доказанности: подтверждено запуском (теги ниже) → только source-level (тег static) → не подтверждено (список в конце раздела).
