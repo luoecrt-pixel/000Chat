@@ -207,8 +207,6 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#73:** merged; handoff update (docs-only); `Verify handoff` Successful, full CI Skipped by design.
-- **#74:** merged `5887780df908584b61959153c8ac8938bc86cd4c`; lightweight handoff verifier workflow.
 - **#75:** merged `8bfd85aea222df12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
 - **#76:** merged `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2`; OpenRouter usage/cache telemetry; Build `37111989401` and Release `37111989339` both passed, with real Android lifecycle instrumentation and Successful `Verify handoff` `37111992407`.
 - **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful, including Android lifecycle instrumentation.
