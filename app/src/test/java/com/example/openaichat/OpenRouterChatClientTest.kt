@@ -57,8 +57,7 @@ class OpenRouterChatClientTest {
                         .put("type", "function")
                         .put("function", JSONObject().put("name", "test_tool").put("parameters", JSONObject()))
                 ),
-                maxTokens = 128,
-                maxRounds = 24,
+                maxTokens = 200_000,
                 reasoningEffort = null,
                 verbosity = null,
                 parallelToolCalls = false,
@@ -67,6 +66,7 @@ class OpenRouterChatClientTest {
 
             val firstBody = JSONObject(firstRequestBody.get())
             assertEquals("chat-123", firstBody.getString("session_id"))
+            assertEquals(200_000, firstBody.getInt("max_tokens"))
             assertTrue(firstBody.getJSONObject("usage").getBoolean("include"))
             assertEquals("1h", firstBody.getJSONObject("cache_control").getString("ttl"))
 
@@ -81,6 +81,57 @@ class OpenRouterChatClientTest {
             assertEquals(300L, usage.getLong("total_tokens"))
             assertEquals("done", result.text)
             assertEquals(2, requestCount.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun toolLoopDoesNotStopAtTwentyFourRounds() {
+        val requestCount = AtomicInteger(0)
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val requestNumber = requestCount.incrementAndGet()
+                val body = if (requestNumber <= 25) {
+                    """{"choices":[{"message":{"content":"","tool_calls":[{"id":"call-$requestNumber","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"total_tokens":1}}"""
+                } else {
+                    """{"choices":[{"message":{"content":"done","tool_calls":[]}}],"usage":{"total_tokens":1}}"""
+                }
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val toolCalls = AtomicInteger(0)
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val result = client.complete(
+                apiKey = "test",
+                model = "test-model",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                tools = JSONArray().put(
+                    JSONObject()
+                        .put("type", "function")
+                        .put("function", JSONObject().put("name", "test_tool").put("parameters", JSONObject()))
+                ),
+                maxTokens = 128,
+                reasoningEffort = null,
+                verbosity = null,
+                parallelToolCalls = false,
+                executeTool = { _, _ ->
+                    toolCalls.incrementAndGet()
+                    "tool-result"
+                }
+            )
+
+            assertEquals("done", result.text)
+            assertEquals(26, requestCount.get())
+            assertEquals(25, toolCalls.get())
         } finally {
             client.close()
         }
@@ -126,7 +177,6 @@ class OpenRouterChatClientTest {
                                 .put("function", JSONObject().put("name", "test_tool").put("parameters", JSONObject()))
                         ),
                         maxTokens = 128,
-                        maxRounds = 24,
                         reasoningEffort = null,
                         verbosity = null,
                         parallelToolCalls = false,
