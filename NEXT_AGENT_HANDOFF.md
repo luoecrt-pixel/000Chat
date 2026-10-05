@@ -224,6 +224,7 @@ Static verifier:
 - **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; full Build/Release successful, including instrumentation.
 - **#84:** merged `4a17af3d967e1d50a93b9739c188df66fbe9396d`; OpenAI five-hour recovery policy; full Build/Release successful.
 - **#85:** merged `c680f7da8bf18d453b17030b1db7ad88ba3b268b`; docs-only handoff update; `Verify handoff` `37309166754` Successful.
+
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
