@@ -131,6 +131,7 @@
 **Важно про OpenAI long-thinking:** source-level аудит текущего foreground Responses path завершён, но реальный provider-level long-thinking/very-long response пока не наблюдался. `readTimeout(0)`, `callTimeout(0)` и отсутствие implicit 128K `max_output_tokens` доказывают отсутствие найденного client-side cutoff, но не доказывают поведение реального провайдера до terminal event. Это остаётся единственным текущим пробелом active plan.
 
 **Не переоткрывай закрытые lifecycle/recovery контракты без нового доказательства регрессии.**
+
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
 - `ResponseEventReducer` — response semantics; `ResumableResponseStreamClient` — transport + sequence cursor; `ActiveResponsePersistence` — persisted active-response boundary. `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy` и `AttachmentUploadCompletionPolicy` остаются pure decision seams.
