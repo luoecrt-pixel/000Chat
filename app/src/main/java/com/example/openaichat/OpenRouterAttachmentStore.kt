@@ -242,6 +242,12 @@ object OpenRouterAttachmentStore {
         "pdf" -> JSONObject().put("type", "file").put("file", JSONObject().put("filename", a.name).put("file_data", toDataUrl(a)))
         else -> throw IOException("Вложение " + a.name + " нельзя отправить напрямую")
     }
+    internal fun shouldRefreshLegacyPngWire(attachment: OpenRouterLocalAttachment): Boolean {
+        if (attachment.kind != "image" || attachment.wireMime != "image/png") return false
+        val source = File(attachment.path)
+        return source.isFile && isJpegFile(source)
+    }
+
     fun toDataUrl(a: OpenRouterLocalAttachment): String {
         val wireFile = File(a.wirePath ?: a.path)
         val wireMime = a.wireMime ?: a.mime
