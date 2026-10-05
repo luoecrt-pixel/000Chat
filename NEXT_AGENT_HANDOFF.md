@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-05 09:33 +03:00
+**Last updated:** 2026-10-05 13:16 +03:00
 **Следующий рабочий срез:** EXIF image-wire follow-up
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -72,6 +72,14 @@
 - PR #74 — merged; lightweight `Verify handoff` workflow for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
 - PR #73 — merged; handoff update (docs-only: `Verify handoff` Successful, full Build/Release Skipped by design).
 - PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful.
+
+## Проверка OpenAI лимитов — 2026-10-05
+
+- **Source audit complete:** OpenAI Responses foreground transport uses `readTimeout(0)` and `callTimeout(0)`; `max_output_tokens` is sent only when the user explicitly configures it; OpenAI File API uploads use the original local file bytes; OpenAI built-in tools do not use the OpenRouter-style local 24-round loop.
+- **Found:** `MainActivity.streamBackgroundResponse()` still had an app-side 30-minute recovery deadline even though `BackgroundResponseWorker` already used 5 hours.
+- **PR #84:** replaces that remaining 30-minute ceiling with the shared 5-hour per-response safety policy and adds a deterministic five-hour boundary test.
+- **Full runtime verification:** not complete yet; the connector produced only `Skipped` Build/Release runs for the PR branch, and `Skipped` is not counted as green. Do not merge #84 until real `(push)` Build and Release are Successful, including instrumentation.
+- **Planned:** obtain the full Build/Release verification for #84, merge it only on the CI gate, then return to EXIF PR #83 and resolve its failed Android instrumentation before calling that slice fully verified.
 
 ## Подтверждённые lifecycle/recovery контракты
 
