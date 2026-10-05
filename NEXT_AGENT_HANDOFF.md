@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-05 14:41 +03:00
-**Следующий рабочий срез:** OpenAI five-hour recovery finalization
+**Last updated:** 2026-10-05 15:02 +03:00
+**Следующий рабочий срез:** OpenAI provider-level long-thinking / very-long response validation
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -76,10 +76,12 @@
 ## Проверка OpenAI лимитов — 2026-10-05
 
 - **Source audit complete:** OpenAI Responses foreground transport uses `readTimeout(0)` and `callTimeout(0)`; `max_output_tokens` is sent only when the user explicitly configures it; OpenAI File API uploads use the original local file bytes; OpenAI built-in tools do not use the OpenRouter-style local 24-round loop.
-- **Found:** `MainActivity.streamBackgroundResponse()` still had an app-side 30-minute recovery deadline even though `BackgroundResponseWorker` already used 5 hours.
-- **PR #84:** replaces that remaining 30-minute ceiling with the shared 5-hour per-response safety policy and adds a deterministic five-hour boundary test.
-- **Full runtime verification of #84:** pending; do not merge until real `(push)` Build and Release are Successful, including instrumentation.
-
+- **Found and fixed:** `MainActivity.streamBackgroundResponse()` had an app-side 30-minute recovery deadline while `BackgroundResponseWorker` already used 5 hours.
+- **PR #84 merged:** `4a17af3d967e1d50a93b9739c188df66fbe9396d`.
+- Full push **Build** `37305367442` — Successful.
+- Full push **Release** `37305367459` — Successful.
+- `Verify handoff` `37305373719` — Successful on the final handoff commit before merge.
+- **Conclusion:** no remaining client-side artificial time/output cap was found in the audited OpenAI path. The 5-hour ceiling is an app safety boundary for one response/recovery cycle, not a session-wide/model-provider reasoning limit.
 ## EXIF JPEG wire policy — fully verified
 
 - **PR #83 merged:** `b02150a5cc59de02b33742c8a2928184ad8c8caf`.
@@ -166,10 +168,9 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. OpenAI five-hour recovery finalization — **следующий**
-PR #84 removes the remaining app-side 30-minute foreground recovery ceiling and shares one five-hour per-response safety boundary with WorkManager.
-Первый шаг: получить полный push Build + Release на последнем коммите и смержить #84 только после обоих Successful, включая instrumentation.
-
+### 1. OpenAI provider-level long-thinking / very-long response validation — **следующий**
+Client-side audit is complete, but a real provider run has not been executed in this agent environment because no OpenAI API key / provider execution connector is available. Do not treat synthetic/local SSE tests as equivalent evidence.
+Первый шаг: run one real OpenAI Responses request with an explicitly long task, no app-imposed `max_output_tokens`, high/maximum available reasoning effort, and verify that the client keeps the stream alive until the provider terminal event without local cutoff; record actual duration and usage/reasoning telemetry.
 ## Репозиторий / branches
 
 Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
@@ -215,12 +216,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful.
 - **#79:** merged `639d37cca81a7a790119cf96b771f37649a6c460`; docs-only handoff finalization; `Verify handoff` Successful.
 - **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 OpenRouter tool rounds and >128K `max_tokens`.
 - **#82:** merged `8520a8f3e42616de81bbbf01a63564de3648aea3`; docs-only handoff finalization after #80.
-- **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; Build `37303250725` and Release `37303250886` both Successful, including instrumentation.
-
+- **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; full Build/Release successful, including instrumentation.
+- **#84:** merged `4a17af3d967e1d50a93b9739c188df66fbe9396d`; OpenAI five-hour recovery policy; full Build/Release successful.
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
