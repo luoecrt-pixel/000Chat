@@ -892,7 +892,7 @@ class MainActivity : ComponentActivity() {
                 if (!File(it.path).isFile) throw IOException("В истории нет локальной копии файла: " + it.name)
                 if (it.kind == "text" && it.textPath.isNullOrBlank()) throw IOException("Текстовое вложение недоступно: " + it.name)
             }
-            if (refreshed.anyIndexed { index, attachment -> attachment != existing[index] }) {
+            if (refreshed != existing) {
                 message.put("attachments", JSONArray().apply { refreshed.forEach { put(it.toJson()) } })
             }
             return refreshed
