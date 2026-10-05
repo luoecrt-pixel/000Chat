@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import fr.free.nrw.commons.ajpegtran.Jpegtran
 import fr.free.nrw.commons.ajpegtran.Properties
 import fr.free.nrw.commons.ajpegtran.rotate.RotationDegree
@@ -300,7 +301,8 @@ object OpenRouterAttachmentStore {
         val rotation = LosslessJpegExifPolicy.rotationDegrees(orientation) ?: return null
 
         return try {
-            val properties = Properties.of(context, Uri.fromFile(file))
+            val propertiesUri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+            val properties = Properties.of(context, propertiesUri)
             if (!LosslessJpegExifPolicy.isPerfectRotation(
                     orientation = orientation,
                     width = properties.width,
