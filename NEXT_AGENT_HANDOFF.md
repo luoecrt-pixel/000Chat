@@ -64,7 +64,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `b02150a5cc59de02b33742c8a2928184ad8c8caf` (PR #83 merged after full Build/Release + instrumentation verification)
+- main code baseline: `4a17af3d967e1d50a93b9739c188df66fbe9396d` (PR #84 runtime merge); current main HEAD is `c680f7da8bf18d453b17030b1db7ad88ba3b268b` with docs-only #85 on top
 
 Последний рабочий срез 2026-10-03:
 - PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
@@ -166,6 +166,7 @@
 4. **ContentProvider в androidTest** падал с `NoClassDefFoundError: kotlin/jvm/internal/Intrinsics`; заменён инжектируемым `AttachmentInputStreamSource` (#68).
 5. **Gate, пропускающий мутацию в stopped Activity, требует реконсиляции при возврате** (`onStart()` → `refreshAttachChips()`, #75).
 6. **Отчёт ≠ факт:** merge при красном CI и неверное описание PR (#70), «зелёный» счётчик из одних Skipped (#73), «нового прогона не было» при красном `[ci]`-прогоне (#68). Сверяй PR и run ID со страницей GitHub.
+7. **Закрытый #81 ≠ merged:** PR #81 был закрыт без merge из-за handoff-verifier; комментарий с причиной добавлен ретроспективно 2026-10-05. Не считать `merge_commit_sha` у closed PR доказательством merge — проверять `merged` и `merged_at`.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
@@ -218,11 +219,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#79:** merged `639d37cca81a7a790119cf96b771f37649a6c460`; docs-only handoff finalization; `Verify handoff` Successful.
 - **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 OpenRouter tool rounds and >128K `max_tokens`.
 - **#82:** merged `8520a8f3e42616de81bbbf01a63564de3648aea3`; docs-only handoff finalization after #80.
 - **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; full Build/Release successful, including instrumentation.
 - **#84:** merged `4a17af3d967e1d50a93b9739c188df66fbe9396d`; OpenAI five-hour recovery policy; full Build/Release successful.
+- **#85:** merged `c680f7da8bf18d453b17030b1db7ad88ba3b268b`; docs-only handoff update; `Verify handoff` `37309166754` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
