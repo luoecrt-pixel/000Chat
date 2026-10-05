@@ -14,7 +14,8 @@ class OpenRouterAttachmentExifInstrumentationTest {
     @Test
     fun perfectRotatedJpegStaysJpegAndResetsOrientation() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val source = File(context.cacheDir, "exif_source.jpg")
+        val attachmentsDir = File(context.filesDir, "attachments").apply { mkdirs() }
+        val source = File(attachmentsDir, "exif_source.jpg")
         try {
             val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
             for (y in 0 until 32) {
@@ -64,6 +65,7 @@ class OpenRouterAttachmentExifInstrumentationTest {
             decoded.recycle()
         } finally {
             source.delete()
+            attachmentsDir.listFiles()?.filter { it.name.startsWith("wire_") }?.forEach { it.delete() }
         }
     }
 
