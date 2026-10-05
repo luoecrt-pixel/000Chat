@@ -154,6 +154,7 @@
 ### 1. EXIF image-wire follow-up — **следующий**
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
 Подтверждено: проблема находится в `OpenRouterAttachmentStore.normalizeImageOrientation()` — JPEG с non-normal EXIF orientation превращается в `ARGB_8888` Bitmap и сохраняется как PNG. Android `ExifInterface` корректно читает orientation, но сам по себе не даёт lossless pixel transform. Исследование показало, что `jpegtran` выполняет lossless rotate/flip, а Android-библиотека `io.github.commons-app:ajpegtran:0.1.14` публикуется как Android library с JNI/jpegtran и поддерживает lossless JPEG operations; это основной кандидат. Не добавлять lossy JPEG recompression и не делать silent downscale.
+Первый шаг: проверить безопасный wire-policy на основе строго lossless JPEG transforms: использовать transform только когда он гарантированно perfect; при невозможности — оставлять исходный JPEG/EXIF вместо crop или re-encode.
 
 ### 2. OpenRouter prompt-cache real-world evidence
 The client now exposes usage/cache telemetry, but a real prompt-cache hit and the concrete cost effect of the 1-hour TTL are still unobserved.
