@@ -169,6 +169,7 @@
 ### 1. OpenAI five-hour recovery finalization — **следующий**
 PR #84 removes the remaining app-side 30-minute foreground recovery ceiling and shares one five-hour per-response safety boundary with WorkManager.
 Первый шаг: получить полный push Build + Release на последнем коммите и смержить #84 только после обоих Successful, включая instrumentation.
+
 ## Репозиторий / branches
 
 Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
