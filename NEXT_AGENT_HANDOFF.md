@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-05 14:41 +03:00
-**Следующий рабочий срез:** OpenAI real long-thinking / very-long response validation
+**Следующий рабочий срез:** OpenAI five-hour recovery finalization
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -214,11 +214,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
+- **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful.
 - **#79:** merged `639d37cca81a7a790119cf96b771f37649a6c460`; docs-only handoff finalization; `Verify handoff` Successful.
 - **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 OpenRouter tool rounds and >128K `max_tokens`.
 - **#82:** merged `8520a8f3e42616de81bbbf01a63564de3648aea3`; docs-only handoff finalization after #80.
 - **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; Build `37303250725` and Release `37303250886` both Successful, including instrumentation.
-- **#84:** open; OpenAI five-hour foreground recovery policy. Full Build/Release verification pending.
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
