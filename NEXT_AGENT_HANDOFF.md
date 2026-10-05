@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-03 12:52 +03:00
-**Следующий рабочий срез:** EXIF image-wire follow-up
+**Last updated:** 2026-10-05 09:33 +03:00
+**Следующий рабочий срез:** EXIF image-wire follow-up (после PR #80)
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -54,7 +54,7 @@
 
 **Архитектура:** `MainActivity.kt` ~4.5k строк. Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
 
-**OpenRouter/Claude (#47–#57):** отдельный Chat Completions client с синхронным tool loop: лимит 24 раунда, partial output при ошибке; репозиторий и ветки GitHub добавляются в system prompt; `tool_trace` сохраняется в историю; `reasoning.effort` нормализуется на границе. GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
+**OpenRouter/Claude (#47–#57):** отдельный Chat Completions client с синхронным tool loop; после PR #80 нет фиксированного лимита раундов, partial output при ошибке; репозиторий и ветки GitHub добавляются в system prompt; `tool_trace` сохраняется в историю; `reasoning.effort` нормализуется на границе. GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
 
 **Вложения (#57):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8).
 
@@ -64,7 +64,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `fdc151d4c271c1fed54eb8039203fb87e8d0a648` (PR #78 merged OpenRouter safety limits; PR #77 was docs-only)
+- main code baseline: `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9` (PR #80 merged removal of artificial per-response caps; PR #79 was docs-only)
 
 Последний рабочий срез 2026-10-03:
 - PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
@@ -106,7 +106,8 @@
 - [instrumentation] **#72:** production-владение вложением на main: captured `chatId + generation`, AtomicInteger-счётчик, lifecycle-gated `endUpload()`; регрессия stopped-Activity зелёная. Build `37005211862`, Release `37005211936`.
 - [instrumentation] **#75:** `onStart()` пересчитывает UI вложений/Send после upload, завершившегося в stopped Activity; ActivityScenario: Stop → `endUpload()` → Resume → Send включён. Build `37027054462` (#501), Release `37027053533` (#321).
 - [pure] **#76:** `OpenRouterChatClient` запрашивает provider usage, агрегирует usage по всем HTTP-раундам tool loop и сохраняет вложенные cached/cache-write/reasoning token details в результате. JVM regression покрывает этот client-level contract; runtime MainActivity wiring не считать отдельно доказанным.
-- [static] **#78:** `OpenRouterChatClient` имеет app-side safety ceilings: 5 часов на весь `complete()` cycle и 5 000 000 накопленных `usage.total_tokens`; это не модельный лимит. Отдельный HTTP-вызов по-прежнему ограничен 10 минутами, а tool loop — 24 раундами. Build `37113754488` и Release `37113754543` прошли Successful на последнем коммите PR.
+- [static] **#78:** `OpenRouterChatClient` имеет app-side safety ceilings: 5 часов на весь `complete()` cycle и 5 000 000 накопленных `usage.total_tokens`; это не модельный лимит.
+- [static] **#80:** OpenRouter больше не имеет app-side 10-минутного HTTP cap и 24-round cap; один `complete()` может продолжаться до общих 5 часов/5 млн токенов. Direct OpenAI больше не навязывает 128K `max_output_tokens` при пустой настройке; legacy `128000` трактуется как прежний default. Background response recovery поднят с 30 минут до 5 часов. PR `#80` merged SHA `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`.
 
 Не переоткрывай эти задачи без нового доказательства регрессии.
 
@@ -126,7 +127,7 @@
 Не подтверждено вообще (нет ни теста, ни наблюдения):
 1. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся.
 3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
-4. Вложения Claude (#57): чтение моделью картинки/PDF/текста, multi-select через `clipData` и EXIF-повёрнутое фото не подтверждены на реальной модели; раздувание EXIF→PNG не решено.
+4. Вложения Claude (#57): чтение моделью картинки/PDF/текста, multi-select через `clipData` и EXIF-повёрнутое фото не подтверждены на реальной модели. Технический источник EXIF→PNG inflation подтверждён source-level: `OpenRouterAttachmentStore.normalizeImageOrientation()` декодирует non-normal EXIF image в `Bitmap` и сохраняет его как PNG; для JPEG это может существенно увеличить wire bytes. Решение пока не менять поведением вслепую.
 5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
 6. Остальные async-границы `MainActivity` вне четырёх аудированных (подтверждение при Stop и rotation, фоновые пути PR G, tool loop OpenRouter) не аудировались: аудит не называть завершённым.
 
@@ -152,7 +153,7 @@
 
 ### 1. EXIF image-wire follow-up — **следующий**
 Resolve the non-normal EXIF JPEG→PNG inflation risk without lossy compression or silent downscale.
-Первый шаг: evaluate a true lossless JPEG orientation transform or provider-aware wire policy before changing attachment behavior.
+Подтверждено: проблема находится в `OpenRouterAttachmentStore.normalizeImageOrientation()` — JPEG с non-normal EXIF orientation превращается в `ARGB_8888` Bitmap и сохраняется как PNG. Android `ExifInterface` корректно читает orientation, но сам по себе не даёт lossless pixel transform. Исследование показало, что `jpegtran` выполняет lossless rotate/flip, а Android-библиотека `io.github.commons-app:ajpegtran:0.1.14` публикуется как Android library с JNI/jpegtran и поддерживает lossless JPEG operations; это основной кандидат. Не добавлять lossy JPEG recompression и не делать silent downscale.
 
 ### 2. OpenRouter prompt-cache real-world evidence
 The client now exposes usage/cache telemetry, but a real prompt-cache hit and the concrete cost effect of the 1-hour TTL are still unobserved.
@@ -211,6 +212,9 @@ Static verifier:
 - **#75:** merged `8bfd85aea222df12ac3bd3345c09c1712f28c29`; foreground upload-gate reconciliation; Build `37027054462` and Release `37027053533` both passed.
 - **#76:** merged `01de3dfbbe3ddb270fd93ba77dbbee371769ebd2`; OpenRouter usage/cache telemetry; Build `37111989401` and Release `37111989339` both passed, with real Android lifecycle instrumentation and Successful `Verify handoff` `37111992407`.
 - **#78:** merged `fdc151d4c271c1fed54eb8039203fb87e8d0a648`; raised OpenRouter app-side safety ceilings to 5 hours and 5M cumulative tokens; Build `37113754488` and Release `37113754543` both Successful, including Android lifecycle instrumentation.
+- **#79:** merged `639d37cca81a7a790119cf96b771f37649a6c460`; docs-only handoff finalization; `Verify handoff` Successful.
+- **#80:** merged `feead2b7ccaa1a1f398605ffd0311f3b8802f0b9`; removed artificial per-response caps for OpenRouter/OpenAI/background recovery; JVM regression added for >24 tool rounds and >128K OpenRouter `max_tokens`.
+
 
 ## Product radar — идеи с реальной ценностью
 
