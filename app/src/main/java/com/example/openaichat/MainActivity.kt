@@ -876,11 +876,26 @@ class MainActivity : ComponentActivity() {
         val manifest = message.optJSONArray("attachments")
         if (manifest != null && manifest.length() > 0) {
             val existing = (0 until manifest.length()).mapNotNull { i -> manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) } }
-            existing.forEach {
+            val refreshed = existing.map { attachment ->
+                if (OpenRouterAttachmentStore.shouldRefreshLegacyPngWire(attachment)) {
+                    OpenRouterAttachmentStore.classifyLocalFile(
+                        this,
+                        File(attachment.path),
+                        attachment.name,
+                        attachment.mime
+                    )
+                } else {
+                    attachment
+                }
+            }
+            refreshed.forEach {
                 if (!File(it.path).isFile) throw IOException("В истории нет локальной копии файла: " + it.name)
                 if (it.kind == "text" && it.textPath.isNullOrBlank()) throw IOException("Текстовое вложение недоступно: " + it.name)
             }
-            return existing
+            if (refreshed != existing) {
+                message.put("attachments", JSONArray().apply { refreshed.forEach { put(it.toJson()) } })
+            }
+            return refreshed
         }
         val out = mutableListOf<OpenRouterLocalAttachment>()
         val paths = message.optJSONArray("file_paths")
@@ -892,13 +907,13 @@ class MainActivity : ComponentActivity() {
             if (path.isBlank()) continue
             val file = File(path)
             if (!file.isFile) throw IOException("В истории нет локальной копии файла: " + names?.optString(i, "attachment"))
-            out += OpenRouterAttachmentStore.classifyLocalFile(file, names?.optString(i, file.name) ?: file.name, mimes?.optString(i, "") ?: "")
+            out += OpenRouterAttachmentStore.classifyLocalFile(this, file, names?.optString(i, file.name) ?: file.name, mimes?.optString(i, "") ?: "")
         }
         val imagePath = message.optString("image_path").takeIf { it.isNotBlank() }
         if (imagePath != null) {
             val file = File(imagePath)
             if (!file.isFile) throw IOException("В истории нет локальной копии изображения: " + message.optString("image_name", "image"))
-            out += OpenRouterAttachmentStore.classifyLocalFile(file, message.optString("image_name", file.name), message.optString("image_mime", "image/*"))
+            out += OpenRouterAttachmentStore.classifyLocalFile(this, file, message.optString("image_name", file.name), message.optString("image_mime", "image/*"))
         }
         if (out.isNotEmpty()) message.put("attachments", JSONArray().apply { out.forEach { put(it.toJson()) } })
         return out
@@ -1421,10 +1436,10 @@ class MainActivity : ComponentActivity() {
                 if (path.isBlank()) continue
                 val file = File(path)
                 if (!file.isFile) throw IOException("Локальная копия вложения недоступна")
-                out += OpenRouterAttachmentStore.classifyLocalFile(file, attachedFileNames.getOrNull(i).orEmpty().ifBlank { file.name }, attachedFileMimes.getOrNull(i).orEmpty())
+                out += OpenRouterAttachmentStore.classifyLocalFile(this, file, attachedFileNames.getOrNull(i).orEmpty().ifBlank { file.name }, attachedFileMimes.getOrNull(i).orEmpty())
             }
             pendingImagePath?.takeIf { File(it).isFile }?.let { path ->
-                out += OpenRouterAttachmentStore.classifyLocalFile(File(path), pendingImageName ?: File(path).name, pendingImageMime ?: "image/*")
+                out += OpenRouterAttachmentStore.classifyLocalFile(this, File(path), pendingImageName ?: File(path).name, pendingImageMime ?: "image/*")
             }
         }
         if (out.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) throw IOException("Слишком много вложений за одно сообщение: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS)
@@ -4368,7 +4383,10 @@ class MainActivity : ComponentActivity() {
                 for(i in 0 until a.length()) a.optJSONObject(i)?.let { item ->
                     try {
                         val attachment=OpenRouterLocalAttachment.fromJson(item)
-                        if (attachment.path.isNotBlank() && File(attachment.path).isFile) attachedOpenRouterAttachments.add(attachment)
+                        val refreshed = if (OpenRouterAttachmentStore.shouldRefreshLegacyPngWire(attachment)) {
+                            OpenRouterAttachmentStore.classifyLocalFile(this, File(attachment.path), attachment.name, attachment.mime)
+                        } else attachment
+                        if (refreshed.path.isNotBlank() && File(refreshed.path).isFile) attachedOpenRouterAttachments.add(refreshed)
                     } catch (_:Exception) {}
                 }
             }

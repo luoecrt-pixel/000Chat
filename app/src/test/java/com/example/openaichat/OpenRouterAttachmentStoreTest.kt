@@ -50,6 +50,25 @@ class OpenRouterAttachmentStoreTest {
     }
 
     @Test
+    fun legacyPngWireIsDetectedOnlyWhenOriginalIsJpeg() {
+        val dir = createTempDir()
+        val jpeg = File(dir, "camera.jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) }
+        val png = File(dir, "camera.png").apply { writeBytes(byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4E.toByte(), 0x47.toByte())) }
+
+        val legacy = OpenRouterLocalAttachment(
+            "legacy", "camera.jpg", "image", jpeg.absolutePath, "image/jpeg", jpeg.length(), "sha",
+            wirePath = File(dir, "wire.png").absolutePath, wireMime = "image/png"
+        )
+        val actualPng = OpenRouterLocalAttachment(
+            "png", "camera.png", "image", png.absolutePath, "image/png", png.length(), "sha",
+            wirePath = File(dir, "wire.png").absolutePath, wireMime = "image/png"
+        )
+
+        assertTrue(OpenRouterAttachmentStore.shouldRefreshLegacyPngWire(legacy))
+        assertTrue(!OpenRouterAttachmentStore.shouldRefreshLegacyPngWire(actualPng))
+    }
+
+    @Test
     fun largeTextIsNotTruncated() {
         val dir = createTempDir()
         val expected = "абвгд".repeat(30000)
