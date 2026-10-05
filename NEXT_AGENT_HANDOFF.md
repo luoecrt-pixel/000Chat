@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-05 09:33 +03:00
-**Следующий рабочий срез:** EXIF image-wire follow-up (после PR #80)
+**Следующий рабочий срез:** EXIF image-wire follow-up
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
