@@ -298,6 +298,8 @@ object OpenRouterAttachmentStore {
         }
         if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == ExifInterface.ORIENTATION_UNDEFINED) return null
 
+        // Mirrored/transpose EXIF values stay as original JPEG/EXIF rather than being re-encoded.
+        // That keeps wire bytes JPEG and avoids silently losing pixels when no strict lossless API is exposed.
         val rotation = LosslessJpegExifPolicy.rotationDegrees(orientation) ?: return null
 
         return try {
