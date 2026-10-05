@@ -892,13 +892,13 @@ class MainActivity : ComponentActivity() {
             if (path.isBlank()) continue
             val file = File(path)
             if (!file.isFile) throw IOException("В истории нет локальной копии файла: " + names?.optString(i, "attachment"))
-            out += OpenRouterAttachmentStore.classifyLocalFile(file, names?.optString(i, file.name) ?: file.name, mimes?.optString(i, "") ?: "")
+            out += OpenRouterAttachmentStore.classifyLocalFile(this, file, names?.optString(i, file.name) ?: file.name, mimes?.optString(i, "") ?: "")
         }
         val imagePath = message.optString("image_path").takeIf { it.isNotBlank() }
         if (imagePath != null) {
             val file = File(imagePath)
             if (!file.isFile) throw IOException("В истории нет локальной копии изображения: " + message.optString("image_name", "image"))
-            out += OpenRouterAttachmentStore.classifyLocalFile(file, message.optString("image_name", file.name), message.optString("image_mime", "image/*"))
+            out += OpenRouterAttachmentStore.classifyLocalFile(this, file, message.optString("image_name", file.name), message.optString("image_mime", "image/*"))
         }
         if (out.isNotEmpty()) message.put("attachments", JSONArray().apply { out.forEach { put(it.toJson()) } })
         return out
@@ -1421,10 +1421,10 @@ class MainActivity : ComponentActivity() {
                 if (path.isBlank()) continue
                 val file = File(path)
                 if (!file.isFile) throw IOException("Локальная копия вложения недоступна")
-                out += OpenRouterAttachmentStore.classifyLocalFile(file, attachedFileNames.getOrNull(i).orEmpty().ifBlank { file.name }, attachedFileMimes.getOrNull(i).orEmpty())
+                out += OpenRouterAttachmentStore.classifyLocalFile(this, file, attachedFileNames.getOrNull(i).orEmpty().ifBlank { file.name }, attachedFileMimes.getOrNull(i).orEmpty())
             }
             pendingImagePath?.takeIf { File(it).isFile }?.let { path ->
-                out += OpenRouterAttachmentStore.classifyLocalFile(File(path), pendingImageName ?: File(path).name, pendingImageMime ?: "image/*")
+                out += OpenRouterAttachmentStore.classifyLocalFile(this, File(path), pendingImageName ?: File(path).name, pendingImageMime ?: "image/*")
             }
         }
         if (out.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) throw IOException("Слишком много вложений за одно сообщение: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS)
