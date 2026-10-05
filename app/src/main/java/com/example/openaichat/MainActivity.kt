@@ -2292,7 +2292,7 @@ class MainActivity : ComponentActivity() {
         if (chatId.isBlank() || responseId.isBlank()) return
 
         val started = SystemClock.elapsedRealtime()
-        val deadline = started + 30L * 60L * 1000L
+        val deadline = started + BackgroundRecoveryPolicy.MAX_RECOVERY_MS
         var retryDelayMs = 1_500L
 
         while (!executor.isShutdown) {

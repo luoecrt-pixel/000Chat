@@ -24,6 +24,15 @@ class BackgroundRecoveryPolicyTest {
     }
 
     @Test
+    fun recoveryWindowIsFiveHoursPerResponse() {
+        val started = 10_000L
+        val fiveHours = 5L * 60L * 60L * 1000L
+        assertFalse(BackgroundRecoveryPolicy.isExpired(started, started + fiveHours - 1L))
+        assertTrue(BackgroundRecoveryPolicy.isExpired(started, started + fiveHours))
+        assertEquals(fiveHours, BackgroundRecoveryPolicy.MAX_RECOVERY_MS)
+    }
+
+    @Test
     fun classifiesPermanentAndRetryableHttpStatuses() {
         assertEquals(BackgroundRecoveryAction.AUTH_FAILURE, BackgroundRecoveryPolicy.actionForHttpStatus(401))
         assertEquals(BackgroundRecoveryAction.AUTH_FAILURE, BackgroundRecoveryPolicy.actionForHttpStatus(403))

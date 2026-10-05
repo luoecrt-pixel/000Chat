@@ -10,6 +10,12 @@ enum class BackgroundRecoveryAction {
 }
 
 object BackgroundRecoveryPolicy {
+    // One-response recovery window; this is not a session-wide chat limit.
+    const val MAX_RECOVERY_MS = 5L * 60L * 60L * 1000L
+
+    fun isExpired(startedAtElapsedMs: Long, nowElapsedMs: Long): Boolean =
+        nowElapsedMs - startedAtElapsedMs >= MAX_RECOVERY_MS
+
     fun isEligibleForResume(active: JSONObject): Boolean =
         active.optBoolean("background_enabled", true) &&
             active.optString("chat_id").isNotBlank() &&
