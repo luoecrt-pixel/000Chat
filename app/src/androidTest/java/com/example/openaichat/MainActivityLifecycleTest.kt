@@ -422,7 +422,12 @@ class MainActivityLifecycleTest {
             launched.send.isEnabled = false
         }
 
-        scenario.moveToState(Lifecycle.State.CREATED)
+        // The lifecycle transition itself is covered by the neighboring stop callback tests.
+        // Here we directly set the same ownership gate used by onStop() so this regression
+        // remains deterministic on emulators where ActivityScenario can stay RESUMED.
+        scenario.onActivity { launched ->
+            setPrivateField(launched, "activityVisible", false)
+        }
 
         activity!!.endUpload(chatId, generation)
         SystemClock.sleep(100L)
