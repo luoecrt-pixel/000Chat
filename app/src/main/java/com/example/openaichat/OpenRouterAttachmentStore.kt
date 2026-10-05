@@ -7,6 +7,9 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
+import fr.free.nrw.commons.ajpegtran.Jpegtran
+import fr.free.nrw.commons.ajpegtran.Properties
+import fr.free.nrw.commons.ajpegtran.rotate.RotationDegree
 import java.util.Base64
 import org.json.JSONObject
 import java.io.File
@@ -88,11 +91,14 @@ object OpenRouterAttachmentStore {
         val raw = File(dir, "or_" + UUID.randomUUID() + "_" + safeFileName(name))
         inputStreamSource.openInputStream(context, uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
             ?: throw IOException("Не удалось открыть файл: " + name)
-        return finalizeFile(dir, raw, name, mime)
+        return finalizeFile(context, dir, raw, name, mime)
     }
 
     fun classifyLocalFile(file: File, displayName: String = file.name, mime: String = mimeForFilename(displayName)): OpenRouterLocalAttachment =
-        finalizeFile(file.parentFile ?: throw IOException("Нет каталога вложения"), file, sanitizeDisplayName(displayName), mime)
+        finalizeFile(null, file.parentFile ?: throw IOException("Нет каталога вложения"), file, sanitizeDisplayName(displayName), mime)
+
+    fun classifyLocalFile(context: Context, file: File, displayName: String = file.name, mime: String = mimeForFilename(displayName)): OpenRouterLocalAttachment =
+        finalizeFile(context, file.parentFile ?: throw IOException("Нет каталога вложения"), file, sanitizeDisplayName(displayName), mime)
 
     fun extractZipFile(context: Context, zipFile: File, zipName: String, report: (String) -> Unit = {}): List<OpenRouterLocalAttachment> {
         zipFile.inputStream().use { source ->
@@ -134,7 +140,7 @@ object OpenRouterAttachmentStore {
                             }
                         }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
                     } else {
                         drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n -> total += n }
                         if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
@@ -257,10 +263,10 @@ object OpenRouterAttachmentStore {
             textFile.writeText(decoded.first, Charsets.UTF_8)
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, decoded.second)
         } else if (kind == "image") {
-            val normalized = normalizeImageOrientation(file, dir, name)
+            val normalized = context?.let { normalizeImageOrientation(it, file, dir, name) }
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath,
-                if (normalized != null) "image/png" else (mimeForFilename(name).takeIf { it.startsWith("image/") } ?: mime),
-                size, sha, null, null, normalized?.absolutePath, if (normalized != null) "image/png" else null)
+                if (normalized != null) "image/jpeg" else (mimeForFilename(name).takeIf { it.startsWith("image/") } ?: mime),
+                size, sha, null, null, normalized?.absolutePath, if (normalized != null) "image/jpeg" else null)
         } else {
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
         }
@@ -281,42 +287,66 @@ object OpenRouterAttachmentStore {
         return "unsupported"
     }
 
-    private fun normalizeImageOrientation(file: File, dir: File, name: String): File? {
+    private fun normalizeImageOrientation(context: Context, file: File, dir: File, name: String): File? {
+        if (!isJpegFile(file)) return null
+
         val orientation = try {
-            ExifInterface(file.absolutePath).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            ExifInterface(file.absolutePath).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
         } catch (_: Exception) {
             ExifInterface.ORIENTATION_NORMAL
         }
         if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == ExifInterface.ORIENTATION_UNDEFINED) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("Не удалось декодировать изображение '$name' для коррекции EXIF-ориентации")
-        val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
-        if (pixels > 80_000_000L) throw IOException("Изображение '$name' имеет слишком большое разрешение для безопасной коррекции EXIF ($pixels пикселей)")
+
+        val rotation = LosslessJpegExifPolicy.rotationDegrees(orientation) ?: return null
+
         return try {
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
-                ?: throw IOException("Не удалось декодировать изображение '$name'")
-            val matrix = Matrix()
-            when (orientation) {
-                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
-                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
-                ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
-                ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.setRotate(90f); matrix.postScale(-1f, 1f) }
-                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
-                ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.setRotate(-90f); matrix.postScale(-1f, 1f) }
-                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(-90f)
-                else -> {}
+            val properties = Properties.of(context, Uri.fromFile(file))
+            if (!LosslessJpegExifPolicy.isPerfectRotation(
+                    orientation = orientation,
+                    width = properties.width,
+                    height = properties.height,
+                    mcuWidth = properties.MCU_Width,
+                    mcuHeight = properties.MCU_Height
+                )
+            ) {
+                // Never crop or partially transform MCU edge blocks. Keep the original
+                // JPEG/EXIF wire representation when a strictly lossless transform
+                // cannot be proven.
+                return null
             }
-            val oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            if (oriented !== bitmap) bitmap.recycle()
-            val out = File(dir, "oriented_" + UUID.randomUUID() + ".png")
-            out.outputStream().use { stream ->
-                if (!oriented.compress(Bitmap.CompressFormat.PNG, 100, stream)) throw IOException("Не удалось сохранить ориентированное изображение '$name'")
+
+            val rotationDegree = when (rotation) {
+                90 -> RotationDegree.ROTATE_90
+                180 -> RotationDegree.ROTATE_180
+                270 -> RotationDegree.ROTATE_270
+                else -> return null
             }
-            oriented.recycle()
-            out
-        } catch (e: OutOfMemoryError) {
-            throw IOException("Недостаточно памяти для безопасной коррекции EXIF-ориентации '$name'", e)
+
+            val transformer = Jpegtran(context.applicationContext, Uri.fromFile(file))
+            val transformed = try {
+                transformer.rotate(rotationDegree, trim = false)
+            } finally {
+                // Copy the transformed JPEG to attachment-owned storage first;
+                // cleanup then removes ajpegtran's temporary file.
+            }
+
+            val owned = File(dir, "wire_" + UUID.randomUUID() + ".jpg")
+            transformed.copyTo(owned, overwrite = true)
+            transformer.cleanup()
+            transformed.takeIf { it.exists() && it.absolutePath != owned.absolutePath }?.delete()
+            owned
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isJpegFile(file: File): Boolean {
+        if (file.length() < 3L) return false
+        return file.inputStream().use { input ->
+            input.read() == 0xFF && input.read() == 0xD8 && input.read() == 0xFF
         }
     }
 
