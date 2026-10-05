@@ -1,9 +1,6 @@
 package com.example.openaichat
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -218,7 +215,7 @@ object OpenRouterAttachmentStore {
                             }
                         }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
                     } else {
                         val buffer = ByteArray(64 * 1024); var entryBytes = 0L
                         while (true) {
@@ -252,7 +249,7 @@ object OpenRouterAttachmentStore {
 
     fun textContent(a: OpenRouterLocalAttachment): String = File(a.textPath ?: a.path).readText(Charsets.UTF_8)
 
-    private fun finalizeFile(dir: File, file: File, name: String, mime: String): OpenRouterLocalAttachment {
+    private fun finalizeFile(context: Context?, dir: File, file: File, name: String, mime: String): OpenRouterLocalAttachment {
         val kind = classifyKind(file, name)
         if (kind == "unsupported") { file.delete(); throw IOException("Формат '" + name + "' не поддерживается для OpenRouter. Поддерживаются: " + supportedFormatsText()) }
         if (kind == "binary") { file.delete(); throw IOException("Файл '" + name + "' определён как бинарный и не входит в поддерживаемые форматы") }
@@ -326,18 +323,16 @@ object OpenRouterAttachmentStore {
             }
 
             val transformer = Jpegtran(context.applicationContext, Uri.fromFile(file))
-            val transformed = try {
-                transformer.rotate(rotationDegree, trim = false)
+            var transformed: File? = null
+            try {
+                transformed = transformer.rotate(rotationDegree, trim = false)
+                val owned = File(dir, "wire_" + UUID.randomUUID() + ".jpg")
+                transformed.copyTo(owned, overwrite = true)
+                return owned
             } finally {
-                // Copy the transformed JPEG to attachment-owned storage first;
-                // cleanup then removes ajpegtran's temporary file.
+                transformer.cleanup()
+                transformed?.takeIf { it.exists() }?.delete()
             }
-
-            val owned = File(dir, "wire_" + UUID.randomUUID() + ".jpg")
-            transformed.copyTo(owned, overwrite = true)
-            transformer.cleanup()
-            transformed.takeIf { it.exists() && it.absolutePath != owned.absolutePath }?.delete()
-            owned
         } catch (_: Exception) {
             null
         }
