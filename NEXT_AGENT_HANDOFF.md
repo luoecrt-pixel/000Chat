@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-05 15:20 +03:00
-**Следующий рабочий срез:** OpenAI provider-level long-thinking / very-long response validation
+**Следующий рабочий срез:** OpenRouter: стриминг для длинных ответов
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -12,36 +12,33 @@
 3. Для lifecycle/recovery смотри границу **Activity ↔ Executor ↔ Worker ↔ DB**, а не только один метод.
 4. Используй узкие чтения файлов. Не загружай весь README, весь `MainActivity` или полные CI-логи без причины.
 5. CI: queued/in_progress/Skipped/Cancelled ≠ green. Static verifier и Gradle CI — отдельные проверки. Правила — в разделе «CI и merge-правила».
-6. После merge push-runs Build/Release на main будут Skipped (в merge-коммите нет `[ci]`) — это не проверка и не провал; опирайся на реальные Successful run'ы ветки PR.
+6. Пользователь не программист: объясняй просто и коротко; ветки, PR, `[ci]` и merge по гейту делай сам, проси только то, чего коннектор не умеет (настройки GitHub, repository variable, установка и проверка APK на телефоне). Чужие оценки, в том числе другой модели, — гипотезы: проверяй по коду и логам; «зелёным» называй только Successful run.
 7. После завершения задачи: план → история; устаревшее удалить, а не оставлять вечным backlog.
 8. Архитектурный/продуктовый обзор делай **каждые 5 merged PR или раньше, если активный план опустел/сменил слой**. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
 9. **Не теряй общую картину:** Compose, controller extraction, thread-safety и fork chat — это разные уровни одной дорожной карты, а не взаимозаменяемые TODO.
-10. **Изменения в main только через PR:** прямые коммиты/push в `main` запрещены, включая CI, docs и handoff. Любое изменение, даже одной строки, сначала делается в ветке и идёт через PR. Единственное исключение — если пользователь прямо написал «коммить в main». Формулировка «без код-ревью» сама по себе PR не отменяет; она может означать, например, изменение repository variable в настройках без коммита.
+10. **Изменения в main только через PR** (включая CI, docs и handoff, даже одной строки). Исключение — если пользователь прямо написал «коммить в main».
 
 ## CI и merge-правила
 
-- Полный прогон (Build с эмулятором ≈ 9–13 мин, Release ≈ 4–5 мин) идёт только по метке: `[ci]` в сообщении head-коммита push, `CI_AUTO_RUN=true` или ручной `workflow_dispatch`; иначе run = **Skipped** (минуты не тратятся). Точное условие — в `build.yml`/`release.yml`.
-- Коннектор не умеет `workflow_dispatch` и repository variables, поэтому рычаг агента — `[ci]` в коммите ветки PR: ставь, когда прогон нужен, и перед повтором назови причину прошлого падения строкой из лога. Пользователь может запустить вручную: Actions → Run workflow → ветка.
-- На странице PR смотри `(push)` у Build и Release; `(pull_request)` Skipped — норма, а счётчик «4/4» с галочкой может значить «всё пропущено». Новый push в ветку отменяет идущий прогон — не пушь, пока он идёт.
-- После merge push-runs на main Skipped по дизайну. Свежий APK оттуда не собирается: для APK или проверки main — ветка от main + пустой коммит `[ci]`, назови run, откуда скачать artifact.
-- `Verify handoff` — дешёвый workflow (без Android) на PR, меняющие `NEXT_AGENT_HANDOFF.md` или `tools/**`.
+**CI.** Полный прогон (Build с эмулятором и Release, суммарно ≈ 15 мин) идёт только по метке: `[ci]` в сообщении head-коммита push, `CI_AUTO_RUN=true` или ручной `workflow_dispatch`; иначе run = **Skipped**. Точное условие — в `build.yml`/`release.yml`.
+- Коннектор не умеет `workflow_dispatch` и repository variables: рычаг агента — `[ci]` в коммите ветки PR. Ставь, когда прогон нужен; перед повтором назови причину прошлого падения строкой из лога. Пользователь может запустить вручную: Actions → Run workflow → ветка.
+- Смотри строки `(push)` у Build и Release. `(pull_request)` Skipped — норма; счётчик «4/4» с галочкой может значить «всё пропущено». Skipped, Cancelled, queued, in_progress ≠ green.
+- Concurrency group включает имя workflow, ref и событие (иначе Build и Release с одним `[ci]` отменяют друг друга); новый push в ветку отменяет идущий прогон — не пушь, пока он идёт.
+- После merge push-runs на main Skipped по дизайну. Для APK или проверки main — ветка от main + пустой коммит `[ci]`; назови run, откуда скачать artifact.
+- `Verify handoff` — дешёвый workflow (без Android) на PR, меняющие `NEXT_AGENT_HANDOFF.md` или `tools/**`; docs-коммиты без `[ci]`.
 
 **Merge-гейт.**
-1. Код или workflow: оба `(push)` — Build и Release — на последнем коммите ветки Successful, включая instrumentation. Docs-only (handoff/README): достаточно Successful `Verify handoff`, `[ci]` не нужен.
-2. Описание PR точно перечисляет изменённые файлы — сверь с Files changed (#70 влит с «No runtime code changes» при правках `MainActivity.kt`).
-3. Не мержи при красном/Cancelled/Skipped обязательном run, даже при «Able to merge» (#70 влит с красным Build). Force-push после старта проверок — только с сообщением пользователю и перезапуском проверок.
-4. В отчёте: PR, merge SHA, run ID и результат каждого обязательного run; отдельно — что не проверено.
-
-## Пользователь и стиль работы
-
-- Не программист: объясняй просто и коротко; ветки, PR, `[ci]` и merge по гейту делай сам. Проси только то, чего коннектор не умеет: настройки GitHub, repository variable, установку и проверку APK на телефоне.
-- Решения пользователя: картинки уходят в оригинале, без lossy-сжатия и тихого downscale; предупреждения о размере вложений не нужны (при отказе провайдера — понятная ошибка с размером).
-- Стоимость важна: один ответ Opus (6 раундов, 7 файлов, среди них `MainActivity.kt` ~4.5k строк) стоил ≈ $10 по оценке пользователя — каждый раунд заново отправляет историю. Читай файлы узко.
-- Пользователь сверяет работу с другим ассистентом и скриншотами GitHub. Чужие оценки — гипотезы: проверяй по коду и логам, не соглашайся рефлекторно; «зелёным» называй только Successful run.
+1. Код или workflow: оба `(push)` — Build и Release — Successful на последнем коммите, меняющем код/workflow (включая instrumentation); после него допустимы docs-коммиты без `[ci]`, но `Verify handoff` на финальном head должен быть Successful. Docs-only PR: достаточно Successful `Verify handoff`.
+2. Описание PR точно перечисляет изменённые файлы, а размер diff соответствует задаче: неожиданно большой diff у большого файла (`MainActivity.kt`) — признак его полной перезаписи.
+3. Не мержи, если обязательный run красный, Cancelled или не запускался (Skipped), даже при «Able to merge». Force-push после старта проверок — только с сообщением пользователю и перезапуском проверок.
+4. Статус PR — по `merged`/`merged_at`; `merge_commit_sha` у closed PR ничего не доказывает.
+5. В отчёте: PR, merge SHA, run ID и результат каждого обязательного run (сверены со страницей GitHub); отдельно — что не проверено.
 
 ## 30-секундная карта проекта
 
 **Продукт:** локальный multi-chat Android-клиент. Основной путь — OpenAI Responses API; отдельный путь — OpenRouter Chat Completions для Claude (#47). GitHub-инструменты исполняет само приложение; включаются чекбоксом в настройках (#48).
+
+**OpenAI (основной путь):** foreground Responses без app-side таймаутов (`readTimeout(0)`, `callTimeout(0)`); `max_output_tokens` отправляется только при явной настройке; background recovery — общий потолок 5 ч для Activity и WorkManager (#84).
 
 **Надёжность:** основная lifecycle-модель:
 `generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
@@ -54,46 +51,19 @@
 
 **Архитектура:** `MainActivity.kt` ~4.5k строк. Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
 
-**OpenRouter/Claude (#47–#57):** отдельный Chat Completions client с синхронным tool loop; после PR #80 нет фиксированного лимита раундов, partial output при ошибке; репозиторий и ветки GitHub добавляются в system prompt; `tool_trace` сохраняется в историю; `reasoning.effort` нормализуется на границе. GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
+**OpenRouter/Claude (#47–#57, #76, #78, #80):** отдельный Chat Completions client с синхронным tool loop; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); репозиторий и ветки GitHub добавляются в system prompt; `tool_trace` сохраняется в историю; `reasoning.effort` нормализуется на границе. GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
 
-**Вложения (#57):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8).
-
-**Размер изображений:** Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model. EXIF→PNG для non-normal orientation может многократно раздуть байты. Lossy-сжатие не добавлять до отдельного решения пользователя.
-
-**Продуктовый радар:** см. отдельный раздел; это идеи-кандидаты, а не backlog.
+**Вложения (#57, #83):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8). Картинки уходят без lossy-сжатия и downscale: EXIF-поворот 3/6/8 — только strict lossless (`ajpegtran:0.1.14`) при идеальной MCU-геометрии, иначе исходные байты; старые manifests с PNG-wire обновляются при чтении. Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model.
 
 ## Фактический baseline
 
-- main code baseline: `4a17af3d967e1d50a93b9739c188df66fbe9396d` (PR #84 runtime merge); current main HEAD is `93d61b851c88fdaf19be38d4cbd3b132bdf44d69` with docs-only #85 and #86 on top
-
-Последний рабочий срез 2026-10-03:
-- PR #76 — merged; push Build `37111989401` and Release `37111989339` both completed Successful. Build included Android lifecycle instrumentation; `Verify handoff` #37111992407 also completed Successful.
-- PR #75 — merged; push Build `37027054462` and Release `37027053533` both completed Successful. The foreground-resume upload-gate regression passed on real Android instrumentation.
-- PR #74 — merged; lightweight `Verify handoff` workflow for `NEXT_AGENT_HANDOFF.md` and `tools/**`, without Android.
-- PR #73 — merged; handoff update (docs-only: `Verify handoff` Successful, full Build/Release Skipped by design).
-- PR #72 — merged; final push Build `37005211862` and Release `37005211936` both completed Successful.
-
-## Проверка OpenAI лимитов — 2026-10-05
-
-- **Source audit complete:** OpenAI Responses foreground transport uses `readTimeout(0)` and `callTimeout(0)`; `max_output_tokens` is sent only when the user explicitly configures it; OpenAI File API uploads use the original local file bytes; OpenAI built-in tools do not use the OpenRouter-style local 24-round loop.
-- **Found and fixed:** `MainActivity.streamBackgroundResponse()` had an app-side 30-minute recovery deadline while `BackgroundResponseWorker` already used 5 hours.
-- **PR #84 merged:** `4a17af3d967e1d50a93b9739c188df66fbe9396d`.
-- Full push **Build** `37305367442` — Successful.
-- Full push **Release** `37305367459` — Successful.
-- `Verify handoff` `37305373719` — Successful on the final handoff commit before merge.
-- **Conclusion:** no remaining client-side artificial time/output cap was found in the audited OpenAI path. The 5-hour ceiling is an app safety boundary for one response/recovery cycle, not a session-wide/model-provider reasoning limit.
-
-## EXIF JPEG wire policy — fully verified
-
-- **PR #83 merged:** `b02150a5cc59de02b33742c8a2928184ad8c8caf`.
-- Full push **Build** `37303250725` — Successful, including Android lifecycle instrumentation.
-- Full push **Release** `37303250886` — Successful.
-- Runtime contract: JPEG EXIF rotations use strictly lossless jpegtran transforms only when MCU geometry is perfect; mirrored/transpose or non-perfect geometry keeps the original JPEG/EXIF bytes; no lossy compression and no silent downscale.
-- Legacy manifests that previously stored JPEG as PNG wire are refreshed from the original JPEG when read.
+- main code baseline: `4a17af3d967e1d50a93b9739c188df66fbe9396d` (PR #84 runtime merge); после него только docs-only PR
 
 ## Подтверждённые lifecycle/recovery контракты
 
-Единая карта доказанности: ниже каждый подтверждённый контракт оформлен как отдельная проверяемая гарантия с **одним** proof tag. Тег показывает самый сильный реально выполненный harness именно для этого утверждения; соседний pure/static контракт не переносит proof на runtime wiring.
+Единая карта доказанности: подтверждено запуском (контракты ниже) → только source-level → не подтверждено (список в конце раздела). Тег — самый сильный реально выполненный harness именно для этого утверждения; соседний pure/static контракт не переносит proof на runtime wiring.
+
+Теги: instrumentation — эмулятор/ActivityScenario; robolectric — Android/SQLite без эмулятора; pure — JVM-тест без Android runtime; static — только source-level/verifier, runtime-теста этого утверждения нет.
 
 - [pure] **#19:** foreground и resumable SSE соблюдают строгий sequence-gap contract: пропущенная последовательность не принимается как корректное продолжение stream.
 - [static] **#20:** Stop привязан к generation конкретного request; state-level contract `markUserStop()` проверен, но прямой runtime-вызов полного `stopCurrentResponse()` в этом proof отсутствует.
@@ -125,10 +95,21 @@
 - [instrumentation] **#75:** после upload, завершившегося в stopped Activity, `onStart()` пересчитывает attachment/Send UI; ActivityScenario подтверждает Stop → `endUpload()` → Resume → Send enabled.
 - [pure] **#76:** OpenRouter provider usage агрегируется по всем HTTP-раундам tool loop; JVM regression подтверждает client-level usage/cache/reasoning telemetry aggregation.
 - [static] **#78:** OpenRouter app-side safety envelope равен 5 часам на весь `complete()` cycle и 5,000,000 накопленных `usage.total_tokens`; это не модельный reasoning limit.
-- [static] **#80:** удалены app-side 10-minute HTTP и 24-round OpenRouter caps; Direct OpenAI не навязывает legacy 128K `max_output_tokens` при пустой настройке; background recovery поднят с 30 минут до 5 часов.
+- [pure] **#80:** OpenRouter tool loop не обрывается на 24 раундах и передаёт явный `max_tokens` > 128000 (JVM regression); снятие 10-минутных таймаутов OpenRouter и implicit 128K `max_output_tokens` у direct OpenAI подтверждено только на уровне source.
+- [instrumentation] **#83:** EXIF-повёрнутый JPEG (ориентации 3/6/8) при идеальной MCU-геометрии поворачивается строго lossless (`ajpegtran`); mirrored/transpose и неидеальная геометрия уходят исходными байтами; Android instrumentation-тест на реальном EXIF-JPEG + unit-тест политики; старые PNG-wire manifests обновляются из исходного JPEG при чтении.
 - [pure] **#84:** общий `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; boundary test подтверждает: 5h−1ms ещё не expired, ровно 5h уже expired. Это safety boundary одной response/recovery cycle, не session-wide cap.
 
-**Важно про OpenAI long-thinking:** source-level аудит текущего foreground Responses path завершён, но реальный provider-level long-thinking/very-long response пока не наблюдался. `readTimeout(0)`, `callTimeout(0)` и отсутствие implicit 128K `max_output_tokens` доказывают отсутствие найденного client-side cutoff, но не доказывают поведение реального провайдера до terminal event. Это остаётся единственным текущим пробелом active plan.
+**Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
+
+Только source-level: #20 — тест проверяет state-контракт `markUserStop()`, но не вызывает `stopCurrentResponse()`; #37 — нет теста wiring adapter; #40 — runtime wiring reasoning callback не гоняется; #42 — нет runtime-теста image/ZIP completion wiring через policy; #78 — потолок 5 ч / 5M токенов; #80 — снятие 10-минутных таймаутов и implicit 128K.
+
+Не подтверждено вообще (нет ни теста, ни наблюдения):
+1. Очень длинный ответ (> 10 мин) на реальном провайдере не наблюдался. OpenAI: source-аудит без таймаутов, реального прогона не было. OpenRouter: по предварительному чтению кода запрос не потоковый (не подтверждено); документация Anthropic рекомендует streaming для запросов дольше 10 минут — idle-соединения могут обрываться.
+2. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся. OpenRouter usage/cache telemetry доказана на уровне client (#76); показ в UI не подтверждён.
+3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
+4. Вложения Claude (#57, #83): чтение моделью картинки/PDF/текста и multi-select через `clipData` не подтверждены на реальной модели; JPEG с неидеальной геометрией или mirrored/transpose-ориентацией уходит как есть — трактовка EXIF-orientation провайдерами не проверена; память/время lossless-поворота на больших фото не измерялись; лицензия и поддержка зависимости `ajpegtran:0.1.14` в PR не зафиксированы.
+5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
+6. Остальные async-границы `MainActivity` вне четырёх аудированных (подтверждение при Stop и rotation, фоновые пути PR G, tool loop OpenRouter) не аудировались: аудит не называть завершённым.
 
 **Не переоткрывай закрытые lifecycle/recovery контракты без нового доказательства регрессии.**
 
@@ -138,33 +119,27 @@
 - Async callbacks должны сначала захватывать immutable ownership data; UI mutation выполняется через main-thread lifecycle gate.
 - `chatId + generation` недостаточны там, где callback меняет конкретный assistant item; для этого нужен immutable `chatId + generation + assistantItemId` snapshot. Tool label — отдельный global Activity state.
 - Composer/upload mutable lists и flags сейчас преимущественно UI-thread-owned. Не добавлять synchronized/Concurrent коллекции без доказанного cross-thread access.
+- Gate, отбрасывающий UI-мутацию в stopped Activity, требует реконсиляции состояния при возврате (`onStart()`), иначе мутация теряется (пример: #75, `refreshAttachChips()`).
+- Не добавлять искусственные app-side лимиты на длину/время одного ответа (раунды tool loop, read/call timeout, default `max_output_tokens`): единственные потолки — аварийные, 5 ч на ответ/цикл восстановления и 5M токенов на цикл OpenRouter (#78, #80, #84).
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
-## Уроки этого захода
-
-1. **Тесты не должны лезть в MainActivity рефлексией:** `by lazy`, `internal` и Kotlin name mangling меняют runtime-имя/видимость методов и полей. Для новых lifecycle tests нужен прямой test-visible API.
-2. **Concurrency group всегда включает имя workflow:** иначе Build и Release с одним `[ci]` push отменяют друг друга.
-3. **Тест должен дойти до проверяемого пути:** без непустого API key «новое сообщение отменяет цикл» не доходил до `nextGeneration()` (#62 → #67); предусловие создавай реальным вызовом (`beginUpload`), а не выставляй счётчик напрямую (#72).
-4. **ContentProvider в androidTest** падал с `NoClassDefFoundError: kotlin/jvm/internal/Intrinsics`; заменён инжектируемым `AttachmentInputStreamSource` (#68).
-5. **Gate, пропускающий мутацию в stopped Activity, требует реконсиляции при возврате** (`onStart()` → `refreshAttachChips()`, #75).
-6. **Отчёт ≠ факт:** merge при красном CI и неверное описание PR (#70), «зелёный» счётчик из одних Skipped (#73), «нового прогона не было» при красном `[ci]`-прогоне (#68). Сверяй PR и run ID со страницей GitHub.
-7. **Закрытый #81 ≠ merged:** PR #81 был закрыт без merge из-за handoff-verifier; комментарий с причиной добавлен ретроспективно 2026-10-05. Не считать `merge_commit_sha` у closed PR доказательством merge — проверять `merged` и `merged_at`.
-
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. OpenAI provider-level long-thinking / very-long response validation — **следующий**
-Client-side audit is complete, but a real provider run has not been executed in this agent environment because no OpenAI API key / provider execution connector is available. Do not treat synthetic/local SSE tests as equivalent evidence.
-Первый шаг: run one real OpenAI Responses request with an explicitly long task, no app-imposed `max_output_tokens`, high/maximum available reasoning effort, and verify that the client keeps the stream alive until the provider terminal event without local cutoff; record actual duration and usage/reasoning telemetry.
+### 1. OpenRouter: стриминг для длинных ответов — **следующий**
+Цель: длинный ответ Claude не обрывается транспортом. После #80 приложение не ограничивает время запроса, но по предварительному чтению кода OpenRouter-запрос не потоковый, а Anthropic рекомендует streaming для запросов дольше 10 минут (idle-соединения могут обрываться, особенно в мобильных сетях).
+Первый шаг: по коду (без PR) проверить, идёт ли запрос `OpenRouterChatClient` с `stream: true`. Если нет — отдельный PR со стримингом (partial output при обрыве уже есть); если да — вычеркнуть пункт.
+
+### 2. Реальные прогоны провайдеров — ждёт пользователя
+Агент не может выполнить: нет ключей. Пользователь запускает в приложении: (а) длинный запрос OpenAI (без `max_output_tokens`, высокий reasoning); (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — смотреть cached tokens (строка usage, если wiring #76 её показывает, иначе openrouter.ai/activity).
+Первый шаг: когда пользователь готов — попросить прогоны (а)–(в); результат (длительность, usage, обрыв или нет) записать в контракты. Нули в cached tokens — проверить размер префикса (минимум для Opus 5.5 не выяснен) и `session_id` для sticky-routing.
+
+### 3. Thread-safety: оставшиеся async-границы
+Первый шаг: таблица ownership оставшихся Executor/Worker → UI callbacks вне уже аудированных четырёх; выбрать одно доказуемое нарушение; без него PR не делать.
 
 ## Репозиторий / branches
 
 Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
-
-## Контекстный режим для агента
-
-- Читай этот файл, а не весь README; код — узко (конкретные файлы/символы); CI-логи — только для конкретного failing run/step; старые PR — точечно.
-- Не тащи завершённые задачи как активные. Краткий ответ пользователю не означает сокращённого инженерного анализа.
 
 ## Как проверять новую работу
 
@@ -179,12 +154,13 @@ Client-side audit is complete, but a real provider run has not been executed in 
 После изменения:
 - поискать старые symbols/helpers;
 - реально запустить static verifier и любой новый/изменённый verifier-скрипт, дождаться фактического вывода команды; чтение кода вместо запуска не считается проверкой;
-- если менялся сам NEXT_AGENT_HANDOFF.md — отдельно прогнать `python3 tools/verify_handoff.py`, даже если сам скрипт не менялся;
+- если менялся `NEXT_AGENT_HANDOFF.md` — `python3 tools/verify_handoff.py` (если среда позволяет) и обязательно Successful `Verify handoff` на PR; правки handoff без `[ci]`;
 - если PR меняет сам verifier/lint-скрипт — дополнительно намеренно воспроизвести целевую поломку и убедиться, что скрипт её ловит, затем вернуть корректное состояние и снова получить PASS (позитивный и негативный кейс обязательны оба);
 - для нового verifier/lint-инварианта негативная проверка — это **намеренная mutation matrix именно этого правила**: как минимум три целевых поломки (например, убрать gate, вынести защищаемую mutation за gate, вернуть прежний баг) должны быть отклонены verifier-ом; случайная syntax error/build failure не считается доказательством. Mutation harness хранится в репозитории и запускается в CI вместе с позитивным кейсом;
 - при падении CI/проверки приводить одну дословную строку из реального failing log (или явное `AssertionError:`/step output), а не только пересказ места остановки;
-- дождаться реального CI результата по правилам «CI и merge-правила» (Successful `(push)` Build и Release на последнем коммите; Skipped не считается);
-- после merge push-runs на main Skipped по дизайну; зафиксируй, на какой реальный прогон ты опираешься;
+- дождаться реального CI результата по «CI и merge-правила»;
+- тесты не лезут в `MainActivity` рефлексией (`by lazy`, `internal`, name mangling меняют имена) — нужен test-visible API; ContentProvider в androidTest не использовать (`NoClassDefFoundError: kotlin/jvm/internal/Intrinsics`) — инжектируемый источник, как `AttachmentInputStreamSource`;
+- тест обязан дойти до проверяемого пути: реальные предусловия (непустой API key, `beginUpload(...)` вместо прямой записи счётчика), иначе он ничего не доказывает;
 - обновить план и историю.
 
 ### Командная шпаргалка
@@ -202,11 +178,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#82:** merged `8520a8f3e42616de81bbbf01a63564de3648aea3`; docs-only handoff finalization after #80.
-- **#83:** merged `b02150a5cc59de02b33742c8a2928184ad8c8caf`; lossless EXIF JPEG wire policy + legacy PNG-wire migration; full Build/Release successful, including instrumentation.
-- **#84:** merged `4a17af3d967e1d50a93b9739c188df66fbe9396d`; OpenAI five-hour recovery policy; full Build/Release successful.
-- **#85:** merged `c680f7da8bf18d453b17030b1db7ad88ba3b268b`; docs-only handoff update; `Verify handoff` `37309166754` Successful.
-- **#86:** merged `93d61b851c88fdaf19be38d4cbd3b132bdf44d69`; docs-only handoff history clarity; `Verify handoff` `37311559775` Successful.
+- **#83:** merged; lossless EXIF JPEG wire policy (`ajpegtran`) + миграция старых PNG-wire manifests; full Build/Release Successful, включая instrumentation.
+- **#84:** merged; общий 5-часовой потолок OpenAI recovery (foreground + Worker); full Build/Release Successful.
+- **#85:** merged; docs-only handoff update; `Verify handoff` Successful.
+- **#86:** merged; docs-only уточнение истории (закрытый #81 не был merged); `Verify handoff` Successful.
+- **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
