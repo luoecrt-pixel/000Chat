@@ -24,6 +24,13 @@ class OpenRouterCompletionException(
     cause: Throwable? = null
 ) : IOException(message, cause)
 
+private data class OpenRouterStreamToolCall(
+    var id: String = "",
+    var type: String = "function",
+    var name: String = "",
+    val arguments: StringBuilder = StringBuilder()
+)
+
 class OpenRouterChatClient(
     private val baseUrl: String = "https://openrouter.ai/api/v1",
     httpClientOverride: OkHttpClient? = null
@@ -129,7 +136,8 @@ class OpenRouterChatClient(
             val body = JSONObject()
                 .put("model", model)
                 .put("messages", history)
-                .put("stream", false)
+                .put("stream", true)
+                .put("stream_options", JSONObject().put("include_usage", true))
                 .put("parallel_tool_calls", parallelToolCalls)
                 .put("usage", JSONObject().put("include", true))
             maxTokens?.takeIf { it > 0 }?.let { body.put("max_tokens", it) }
@@ -157,6 +165,7 @@ class OpenRouterChatClient(
                 .url(baseUrl.trimEnd('/') + "/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
                 .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "text/event-stream")
                 .addHeader("HTTP-Referer", "com.example.openaichat")
                 .addHeader("X-Title", "OpenAIApiChat")
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -175,25 +184,102 @@ class OpenRouterChatClient(
                 throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             call.timeout().timeout(remainingMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
-            call.execute().use { httpResponse ->
-                ensureActive()
-                val raw = httpResponse.body?.string().orEmpty()
-                if (!httpResponse.isSuccessful) {
-                    throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
+
+            var role = "assistant"
+            val contentParts = StringBuilder()
+            val reasoningDetails = JSONArray()
+            val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
+
+            fun consume(data: String) {
+                if (data == "[DONE]") return
+                val json = try {
+                    JSONObject(data)
+                } catch (e: Exception) {
+                    throw IOException("Invalid OpenRouter SSE event", e)
                 }
-                val json = JSONObject(raw)
+                json.optJSONObject("error")?.let { error ->
+                    val message = error.optString("message").ifBlank { error.toString() }
+                    throw IOException("OpenRouter streaming error: $message")
+                }
                 json.optJSONObject("usage")?.let { usage ->
                     accumulateUsage(usage)
                     usage.optLong("total_tokens", 0L).takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
                 }
-                val choice = json.optJSONArray("choices")?.optJSONObject(0)
-                    ?: throw IOException("OpenRouter response has no choice")
-                val message = choice.optJSONObject("message")
-                    ?: throw IOException("OpenRouter response has no message")
-                return json to JSONObject(message.toString())
-            }
-        }
+                val choices = json.optJSONArray("choices")
+                if (choices == null || choices.length() == 0) return
+                val choice = choices.optJSONObject(0) ?: return
+                val delta = choice.optJSONObject("delta") ?: return
 
+                delta.optString("role").takeIf { it.isNotBlank() }?.let { role = it }
+                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { contentParts.append(it) }
+
+                delta.optJSONArray("reasoning_details")?.let { details ->
+                    for (i in 0 until details.length()) {
+                        details.opt(i)?.let { reasoningDetails.put(it) }
+                    }
+                }
+
+                delta.optJSONArray("tool_calls")?.let { calls ->
+                    for (i in 0 until calls.length()) {
+                        val call = calls.optJSONObject(i) ?: continue
+                        val index = call.optInt("index", i)
+                        val target = toolCallsByIndex.getOrPut(index) { OpenRouterStreamToolCall() }
+                        call.optString("id").takeIf { it.isNotBlank() }?.let { target.id = it }
+                        call.optString("type").takeIf { it.isNotBlank() }?.let { target.type = it }
+                        call.optJSONObject("function")?.let { function ->
+                            function.optString("name").takeIf { it.isNotBlank() }?.let { target.name += it }
+                            function.optString("arguments", "").takeIf { it.isNotEmpty() }?.let { target.arguments.append(it) }
+                        }
+                    }
+                }
+            }
+
+            call.execute().use { httpResponse ->
+                ensureActive()
+                if (!httpResponse.isSuccessful) {
+                    val raw = httpResponse.body?.string().orEmpty()
+                    throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
+                }
+                val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
+                val parser = SseEventParser()
+                bodyResponse.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                    reader.forEachLine { line ->
+                        ensureWithinBudget()
+                        parser.acceptLine(line)?.let { event -> consume(event.data) }
+                    }
+                }
+                parser.finish()?.let { event -> consume(event.data) }
+            }
+
+            ensureActive()
+            val message = JSONObject()
+                .put("role", role)
+                .put("content", contentParts.toString())
+            if (reasoningDetails.length() > 0) {
+                message.put("reasoning_details", reasoningDetails)
+            }
+            if (toolCallsByIndex.isNotEmpty()) {
+                val toolCalls = JSONArray()
+                toolCallsByIndex.forEach { (_, call) ->
+                    if (call.id.isBlank() || call.name.isBlank()) {
+                        throw IOException("Malformed streamed tool call")
+                    }
+                    toolCalls.put(
+                        JSONObject()
+                            .put("id", call.id)
+                            .put("type", call.type)
+                            .put(
+                                "function",
+                                JSONObject()
+                                    .put("name", call.name)
+                                    .put("arguments", call.arguments.toString())
+                            )
+                    )
+                }
+                message.put("tool_calls", toolCalls)
+            }
+            return JSONObject().put("stream", true) to message
+        }
         try {
             while (true) {
                 ensureWithinBudget()
