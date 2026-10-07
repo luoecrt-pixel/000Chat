@@ -1236,7 +1236,8 @@ class MainActivity : ComponentActivity() {
                         estimatedCostUsd = cost,
                         latencyMs = SystemClock.elapsedRealtime() - startedAt,
                         toolSummary = result.toolNames.distinct().joinToString(",")
-                    )                }
+                    )
+                }
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
                     .put("text", finalText)
