@@ -663,6 +663,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Session telemetry UI: keep the card compact; CI also compiles this path on Android.
     private fun buildRequestTelemetryCard(): LinearLayout {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
