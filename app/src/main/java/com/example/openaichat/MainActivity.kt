@@ -53,6 +53,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CancellationException
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
@@ -602,7 +603,7 @@ class MainActivity : ComponentActivity() {
         drawer.addView(
             ScrollView(this).apply {
                 isFillViewport = true
-                addView(drawerList, ScrollView.LayoutParams(-1, -2))
+                addView(drawerList, LinearLayout.LayoutParams(-1, -2))
             },
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
@@ -672,7 +673,7 @@ class MainActivity : ComponentActivity() {
             textSize = 12f
             setTextColor(Color.rgb(170,175,185))
             setPadding(dp(2), dp(2), dp(2), dp(2))
-            isTextSelectable = true
+            setTextIsSelectable(true)
             setOnClickListener {
                 requestTelemetryExpanded = !requestTelemetryExpanded
                 renderRequestTelemetry()
@@ -747,7 +748,7 @@ class MainActivity : ComponentActivity() {
             text = RequestEventFormatter.summary(event)
             textSize = 11.5f
             setTextColor(requestEventColor(RequestEventFormatter.match(event)))
-            isTextSelectable = true
+            setTextIsSelectable(true)
             setOnClickListener { details?.visibility = if (details?.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
         }
         wrapper.addView(summary)
@@ -756,7 +757,7 @@ class MainActivity : ComponentActivity() {
             textSize = 11f
             setTextColor(Color.rgb(190,194,202))
             setPadding(0, dp(6), 0, 0)
-            isTextSelectable = true
+            setTextIsSelectable(true)
             setTypeface(Typeface.MONOSPACE)
             visibility = View.GONE
         }
