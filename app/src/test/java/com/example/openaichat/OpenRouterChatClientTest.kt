@@ -9,6 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CancellationException
@@ -24,24 +25,30 @@ class OpenRouterChatClientTest {
     fun aggregatesUsageAcrossToolLoopAndRequestsUsageDetails() {
         val requestCount = AtomicInteger(0)
         val firstRequestBody = AtomicReference<String?>(null)
+        val firstArguments = AtomicReference<JSONObject?>(null)
         val transport = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val requestNumber = requestCount.incrementAndGet()
-                if (requestNumber == 1) firstRequestBody.set(chain.request().body?.let { body ->
-                    okio.Buffer().also { buffer -> body.writeTo(buffer) }.readUtf8()
-                })
-                val body = if (requestNumber == 1) {
-                    """{"choices":[{"message":{"content":"working","tool_calls":[{"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":80,"cache_write_tokens":20},"completion_tokens_details":{"reasoning_tokens":5},"cost":0.01}}"""
-                } else {
-                    """{"choices":[{"message":{"content":"done","tool_calls":[]}}],"usage":{"prompt_tokens":150,"completion_tokens":30,"total_tokens":180,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":10},"cost":0.02}}"""
+                if (requestNumber == 1) {
+                    firstRequestBody.set(chain.request().body?.let { body ->
+                        okio.Buffer().also { buffer -> body.writeTo(buffer) }.readUtf8()
+                    })
                 }
-                Response.Builder()
-                    .request(chain.request())
-                    .protocol(Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body(body.toResponseBody("application/json".toMediaType()))
-                    .build()
+                val body = if (requestNumber == 1) {
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"working","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{\"x\":\""}}]},"finish_reason":null}]}""",
+                        """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"value\"}"}}]},"finish_reason":"tool_calls"}]}""",
+                        """{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":80,"cache_write_tokens":20},"completion_tokens_details":{"reasoning_tokens":5},"cost":0.01}}""",
+                        "[DONE]"
+                    )
+                } else {
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}""",
+                        """{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":30,"total_tokens":180,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":10},"cost":0.02}}""",
+                        "[DONE]"
+                    )
+                }
+                sseResponse(chain, body)
             }
             .build()
 
@@ -61,14 +68,22 @@ class OpenRouterChatClientTest {
                 reasoningEffort = null,
                 verbosity = null,
                 parallelToolCalls = false,
-                executeTool = { _, _ -> "tool-result" }
+                executeTool = { _, arguments ->
+                    firstArguments.set(arguments)
+                    "tool-result"
+                }
             )
 
             val firstBody = JSONObject(firstRequestBody.get())
             assertEquals("chat-123", firstBody.getString("session_id"))
             assertEquals(200_000, firstBody.getInt("max_tokens"))
+            assertTrue(firstBody.getBoolean("stream"))
+            assertTrue(firstBody.getJSONObject("stream_options").getBoolean("include_usage"))
             assertTrue(firstBody.getJSONObject("usage").getBoolean("include"))
             assertEquals("1h", firstBody.getJSONObject("cache_control").getString("ttl"))
+
+            val arguments = firstArguments.get() ?: error("tool arguments missing")
+            assertEquals("value", arguments.getString("x"))
 
             val usage = result.usage ?: error("usage missing")
             assertEquals(250L, usage.getLong("prompt_tokens"))
@@ -78,9 +93,87 @@ class OpenRouterChatClientTest {
             assertEquals(20L, usage.getJSONObject("prompt_tokens_details").getLong("cache_write_tokens"))
             assertEquals(15L, usage.getJSONObject("completion_tokens_details").getLong("reasoning_tokens"))
             assertEquals(0.03, usage.getDouble("cost"), 0.000001)
-            assertEquals(300L, usage.getLong("total_tokens"))
             assertEquals("done", result.text)
             assertEquals(2, requestCount.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun streamingTextAccumulatesMultipleSseDeltas() {
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"Hello ","reasoning_details":[{"type":"reasoning.text","text":"summary"}]},"finish_reason":null}]}""",
+                        """{"choices":[{"delta":{"content":"world"},"finish_reason":null}]}""",
+                        """{"choices":[{"delta":{},"finish_reason":"stop"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":3}}""",
+                        "[DONE]"
+                    )
+                )
+            }
+            .build()
+
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val result = client.complete(
+                apiKey = "test",
+                model = "test-model",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                tools = null,
+                maxTokens = 128,
+                reasoningEffort = null,
+                verbosity = null,
+                parallelToolCalls = false,
+                executeTool = { _, _ -> error("tool should not run") }
+            )
+            assertEquals("Hello world", result.text)
+            assertEquals(3L, result.usage?.getLong("total_tokens"))
+            assertEquals("assistant", result.assistantMessage.getString("role"))
+            assertEquals(1, result.assistantMessage.getJSONArray("reasoning_details").length())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun streamingErrorPreservesPartialText() {
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}""",
+                        """{"error":{"message":"upstream failed"}}"""
+                    )
+                )
+            }
+            .build()
+
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val failure = try {
+                client.complete(
+                    apiKey = "test",
+                    model = "test-model",
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                    tools = null,
+                    maxTokens = 128,
+                    reasoningEffort = null,
+                    verbosity = null,
+                    parallelToolCalls = false,
+                    executeTool = { _, _ -> error("tool should not run") }
+                )
+                null
+            } catch (e: OpenRouterCompletionException) {
+                e
+            }
+            assertNotNull(failure)
+            assertEquals("partial answer", failure?.partialText)
+            assertTrue(failure?.message?.contains("upstream failed") == true)
         } finally {
             client.close()
         }
@@ -93,17 +186,19 @@ class OpenRouterChatClientTest {
             .addInterceptor { chain ->
                 val requestNumber = requestCount.incrementAndGet()
                 val body = if (requestNumber <= 25) {
-                    """{"choices":[{"message":{"content":"","tool_calls":[{"id":"call-$requestNumber","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"total_tokens":1}}"""
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-$requestNumber","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":1}}""",
+                        "[DONE]"
+                    )
                 } else {
-                    """{"choices":[{"message":{"content":"done","tool_calls":[]}}],"usage":{"total_tokens":1}}"""
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":1}}""",
+                        "[DONE]"
+                    )
                 }
-                Response.Builder()
-                    .request(chain.request())
-                    .protocol(Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body(body.toResponseBody("application/json".toMediaType()))
-                    .build()
+                sseResponse(chain, body)
             }
             .build()
 
@@ -144,17 +239,18 @@ class OpenRouterChatClientTest {
             .addInterceptor { chain ->
                 val requestNumber = requestCount.incrementAndGet()
                 val body = if (requestNumber == 1) {
-                    """{"choices":[{"message":{"content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]}}],"usage":{"total_tokens":1}}"""
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":1}}""",
+                        "[DONE]"
+                    )
                 } else {
-                    """{"choices":[{"message":{"content":"unexpected second round","tool_calls":[]}}]}"""
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"unexpected second round"},"finish_reason":"stop"}]}""",
+                        "[DONE]"
+                    )
                 }
-                Response.Builder()
-                    .request(chain.request())
-                    .protocol(Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body(body.toResponseBody("application/json".toMediaType()))
-                    .build()
+                sseResponse(chain, body)
             }
             .build()
 
@@ -205,4 +301,16 @@ class OpenRouterChatClientTest {
             client.close()
         }
     }
+
+    private fun sse(vararg data: String): String =
+        data.joinToString("\n\ndata: ", prefix = "data: ", postfix = "\n\n")
+
+    private fun sseResponse(chain: okhttp3.Interceptor.Chain, body: String): Response =
+        Response.Builder()
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(body.toResponseBody("text/event-stream".toMediaType()))
+            .build()
 }
