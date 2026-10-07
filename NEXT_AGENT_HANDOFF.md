@@ -127,7 +127,7 @@
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
 ### 1. OpenRouter: стриминг для длинных ответов — **следующий**
-Цель: долгие Claude/OpenRouter Chat Completions работают через SSE, не возвращая artificial timeout/round caps и сохраняя текущий result/tool-loop/usage semantics. OpenRouter поддерживает `stream: true` через SSE; Anthropic рекомендует streaming для long-running requests и предупреждает о variable idle-connection drops при non-streaming. Первый implementation boundary: внутри одного HTTP round накапливать text + fragmented tool calls + reasoning_details + final usage, а локальный tool loop запускать только после завершения SSE round; при mid-stream error сохранять уже полученный partial text.
+Цель: долгие Claude/OpenRouter Chat Completions работают через SSE, не возвращая artificial timeout/round caps и сохраняя текущий result/tool-loop/usage semantics. OpenRouter поддерживает `stream: true` через SSE; Anthropic рекомендует streaming для long-running requests и предупреждает о variable idle-connection drops при non-streaming. Первый шаг: внутри одного HTTP round накапливать text + fragmented tool calls + reasoning_details + final usage, а локальный tool loop запускать только после завершения SSE round; при mid-stream error сохранять уже полученный partial text.
 
 ### 2. Реальные прогоны провайдеров — ждёт пользователя
 Агент не может выполнить: нет ключей. Пользователь запускает в приложении: (а) длинный запрос OpenAI (без `max_output_tokens`, высокий reasoning); (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — смотреть cached tokens (строка usage, если wiring #76 её показывает, иначе openrouter.ai/activity).
