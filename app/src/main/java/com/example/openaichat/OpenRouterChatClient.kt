@@ -252,6 +252,18 @@ class OpenRouterChatClient(
                     parser.finish()?.let { event -> consume(event.data) }
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (e is OpenRouterCompletionException) {
+                    val partial = buildList {
+                        addAll(accumulatedText)
+                        if (contentParts.isNotEmpty()) add(contentParts.toString())
+                    }.joinToString("\n\n").trim()
+                    throw OpenRouterCompletionException(
+                        message = e.message ?: e.javaClass.simpleName,
+                        partialText = partial,
+                        cause = e.cause ?: e
+                    )
+                }
                 if (contentParts.isNotEmpty()) {
                     accumulatedText += contentParts.toString()
                 }
