@@ -603,7 +603,7 @@ class MainActivity : ComponentActivity() {
         drawer.addView(
             ScrollView(this).apply {
                 isFillViewport = true
-                addView(drawerList, LinearLayout.LayoutParams(-1, -2))
+                addView(drawerList, FrameLayout.LayoutParams(-1, -2))
             },
             LinearLayout.LayoutParams(-1, 0, 1f)
         )
@@ -663,7 +663,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Session telemetry UI: keep the card compact; CI also compiles this path on Android.
+    // Compact user-facing session telemetry card.
     private fun buildRequestTelemetryCard(): LinearLayout {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
