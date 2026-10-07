@@ -1524,6 +1524,7 @@ class MainActivity : ComponentActivity() {
                             " · "+fmtTokens(inputTokens)+" in"+(if (cachedTokens > 0) " · cache "+fmtTokens(cachedTokens) else "")+" · "+fmtTokens(outputTokens)+" out"+costText
                         }.orEmpty()
                         status.text = "Готово • OpenRouter$usageSuffix"
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId = null
                         diagnostics.log("openrouter_completed", mapOf(
@@ -1548,10 +1549,24 @@ class MainActivity : ComponentActivity() {
                 } else {
                     "Ошибка OpenRouter: $errorMessage"
                 }
+                chatDb.recordRequestEvent(
+                    chatId = chatId,
+                    eventType = "request_failed",
+                    requestId = requestId,
+                    provider = "openrouter",
+                    requestedModel = model,
+                    responseModel = null,
+                    modelMatch = ModelCatalog.Match.UNKNOWN,
+                    status = if (e is CancellationException) "cancelled" else "failed",
+                    latencyMs = SystemClock.elapsedRealtime() - startedAt,
+                    toolSummary = "",
+                    error = errorMessage
+                )
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         messageAdapter.updateText(assistantItemId, displayedError)
                         status.text = "Ошибка OpenRouter"
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId = null
                     }
@@ -2456,6 +2471,7 @@ class MainActivity : ComponentActivity() {
                             "$donePrefix · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out$reasoningPart · ≈\$%.4f".format(cost)
                         } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId=null
                         currentCall=null
@@ -2472,6 +2488,24 @@ class MainActivity : ComponentActivity() {
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
+                }
+                if(!canContinueInBackground || userStopped){
+                    chatDb.recordRequestEvent(
+                        chatId = requestChatId,
+                        eventType = "request_failed",
+                        requestId = requestId ?: localRequestId,
+                        provider = "openai",
+                        requestedModel = model,
+                        responseModel = null,
+                        modelMatch = ModelCatalog.Match.UNKNOWN,
+                        status = when {
+                            userStopped -> "cancelled"
+                            cancelled -> "disconnected"
+                            else -> "failed"
+                        },
+                        latencyMs = latency,
+                        error = (e.message ?: e.toString()).take(1200)
+                    )
                 }
                 diagnostics.log(
                     when {
@@ -2520,9 +2554,13 @@ class MainActivity : ComponentActivity() {
                     return@execute
                 }
                 runOnUiThread{
-                    if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
+                    if(!isRequestCurrent(requestChatId,requestGeneration)) {
+                        renderRequestTelemetry()
+                        return@runOnUiThread
+                    }
                     setBusy(false)
                     activeAssistantItemId=null
+                    renderRequestTelemetry()
                     currentCall=null
                     if(!cancelled && completionState=="incomplete" && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
                         val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status","incomplete")
