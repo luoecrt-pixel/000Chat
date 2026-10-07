@@ -163,6 +163,57 @@ class ChatDatabaseLifecycleTest {
     }
 
     @Test
+    fun requestEventsAreScopedToChatAndPersistAcrossReopen() {
+        database = ChatDatabase(context)
+        database!!.ensureChat("chat-a", "Чат A")
+        database!!.ensureChat("chat-b", "Чат B")
+
+        database!!.recordRequestEvent(
+            chatId = "chat-a",
+            eventType = "request_completed",
+            requestId = "req-a",
+            provider = "openrouter",
+            requestedModel = "anthropic/claude-opus-5.5",
+            responseModel = "anthropic/claude-opus-5.5",
+            modelMatch = ModelCatalog.Match.EXACT,
+            status = "completed",
+            inputTokens = 100,
+            outputTokens = 25,
+            estimatedCostUsd = 0.01,
+            latencyMs = 1200
+        )
+        database!!.recordRequestEvent(
+            chatId = "chat-b",
+            eventType = "request_completed",
+            requestId = "req-b",
+            provider = "openai",
+            requestedModel = "gpt-6.1-sol",
+            responseModel = "gpt-6-astra",
+            modelMatch = ModelCatalog.Match.MISMATCH,
+            status = "completed",
+            inputTokens = 200,
+            outputTokens = 50,
+            estimatedCostUsd = 0.02,
+            latencyMs = 2400
+        )
+
+        assertEquals(1, database!!.listRequestEvents("chat-a", 50).size)
+        assertEquals("req-a", database!!.listRequestEvents("chat-a", 50).first().optString("request_id"))
+        assertEquals(
+            "mismatch",
+            database!!.listRequestEvents("chat-b", 50).first().optString("model_match")
+        )
+
+        database!!.close()
+        database = ChatDatabase(context)
+
+        assertEquals(1, database!!.listRequestEvents("chat-a", 50).size)
+        database!!.deleteChat("chat-a")
+        assertEquals(0, database!!.listRequestEvents("chat-a", 50).size)
+        assertEquals(1, database!!.listRequestEvents("chat-b", 50).size)
+    }
+
+    @Test
     fun staleRequestCannotOverwritePartialResponseAfterNewRequestOwnsChat() {
         database = ChatDatabase(context)
         database!!.ensureChat("chat-a", "Чат")
