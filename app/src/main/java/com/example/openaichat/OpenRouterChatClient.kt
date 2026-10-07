@@ -188,7 +188,6 @@ class OpenRouterChatClient(
             call.timeout().timeout(remainingMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
 
             var role = "assistant"
-            var roundResponseModel: String? = null
             val contentParts = StringBuilder()
             val reasoningDetails = JSONArray()
             val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
@@ -204,7 +203,6 @@ class OpenRouterChatClient(
                     val message = error.optString("message").ifBlank { error.toString() }
                     throw IOException("OpenRouter streaming error: $message")
                 }
-                json.optString("model").takeIf { it.isNotBlank() }?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
                     accumulateUsage(usage)
                     usage.optLong("total_tokens", 0L).takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
@@ -301,9 +299,7 @@ class OpenRouterChatClient(
                 }
                 message.put("tool_calls", toolCalls)
             }
-            return JSONObject()
-                .put("stream", true)
-                .put("model", roundResponseModel ?: JSONObject.NULL) to message
+            return JSONObject().put("stream", true) to message
         }
         try {
             while (true) {
