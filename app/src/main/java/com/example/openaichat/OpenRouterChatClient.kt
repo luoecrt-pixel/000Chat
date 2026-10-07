@@ -234,21 +234,28 @@ class OpenRouterChatClient(
                 }
             }
 
-            call.execute().use { httpResponse ->
-                ensureActive()
-                if (!httpResponse.isSuccessful) {
-                    val raw = httpResponse.body?.string().orEmpty()
-                    throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
-                }
-                val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
-                val parser = SseEventParser()
-                bodyResponse.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                    reader.forEachLine { line ->
-                        ensureWithinBudget()
-                        parser.acceptLine(line)?.let { event -> consume(event.data) }
+            try {
+                call.execute().use { httpResponse ->
+                    ensureActive()
+                    if (!httpResponse.isSuccessful) {
+                        val raw = httpResponse.body?.string().orEmpty()
+                        throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
                     }
+                    val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
+                    val parser = SseEventParser()
+                    bodyResponse.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                        reader.forEachLine { line ->
+                            ensureWithinBudget()
+                            parser.acceptLine(line)?.let { event -> consume(event.data) }
+                        }
+                    }
+                    parser.finish()?.let { event -> consume(event.data) }
                 }
-                parser.finish()?.let { event -> consume(event.data) }
+            } catch (e: Exception) {
+                if (contentParts.isNotEmpty()) {
+                    accumulatedText += contentParts.toString()
+                }
+                throw e
             }
 
             ensureActive()
