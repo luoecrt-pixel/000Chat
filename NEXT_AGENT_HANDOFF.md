@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-07 22:55 +03:00
+**Last updated:** 2026-10-07 23:00 +03:00
 **Следующий рабочий срез:** OpenRouter server-side tools
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -100,6 +100,7 @@
 - [pure] **#84:** общий `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; boundary test подтверждает: 5h−1ms ещё не expired, ровно 5h уже expired. Это safety boundary одной response/recovery cycle, не session-wide cap.
 - [pure] **#89:** OpenRouter SSE transport на JVM накапливает fragmented text, reasoning_details и tool-call arguments по index; local tool loop стартует только после завершения SSE round; partial text сохраняется при mid-stream error; существующие >24-round и ownership-loss regressions перенесены на streamed transport.
 - [robolectric] **#90:** request_events сохраняются в SQLite, изолированы по chat_id, переживают reopen и удаляются вместе с chat; runtime truth фактической модели у реального провайдера этими тестами не доказана.
+- [pure] **#91:** regression test на OpenRouter SSE подтверждает накопление `responseModel` из поля `model` stream-чанка; UI telemetry/Drawer runtime на реальном устройстве этим PR не подтверждены.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -188,7 +189,7 @@ Static verifier:
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
 - **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
 - **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
-- **#91:** code complete; session telemetry card + Drawer + formatter regressions; merge ожидает только подтверждённый green push CI и финальный `Verify handoff`.
+- **#91:** code complete; session telemetry card + Drawer + formatter regressions; дополнительно восстановлен OpenRouter streamed `responseModel` capture; merge ожидает подтверждённый green push CI и финальный `Verify handoff`.
 
 ## Product radar — идеи с реальной ценностью
 
