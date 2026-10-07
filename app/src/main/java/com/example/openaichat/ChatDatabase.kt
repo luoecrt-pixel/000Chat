@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 17
+        private const val DB_VERSION = 16
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -24,6 +24,39 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
         db.setForeignKeyConstraintsEnabled(true)
+    }
+
+    private fun ensureRequestEventsTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $REQUEST_EVENT_TABLE (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                requested_model TEXT,
+                response_model TEXT,
+                model_match TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                tool_summary TEXT,
+                error TEXT,
+                FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        ensureRequestEventsTable(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -207,33 +240,6 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         if (oldVersion < 16) {
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
-        }
-        if (oldVersion < 17) {
-            db.execSQL("""
-                CREATE TABLE $REQUEST_EVENT_TABLE (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    request_id TEXT,
-                    provider TEXT NOT NULL,
-                    requested_model TEXT,
-                    response_model TEXT,
-                    model_match TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    input_tokens INTEGER NOT NULL DEFAULT 0,
-                    cached_tokens INTEGER NOT NULL DEFAULT 0,
-                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                    output_tokens INTEGER NOT NULL DEFAULT 0,
-                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-                    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                    latency_ms INTEGER NOT NULL DEFAULT 0,
-                    tool_summary TEXT,
-                    error TEXT,
-                    FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
-                )
-            """.trimIndent())
-            db.execSQL("CREATE INDEX idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
         }
     }
 
