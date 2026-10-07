@@ -106,7 +106,7 @@ class OpenRouterChatClientTest {
                 sseResponse(
                     chain,
                     sse(
-                        """{"choices":[{"delta":{"role":"assistant","content":"Hello "},"finish_reason":null}]}""",
+                        """{"choices":[{"delta":{"role":"assistant","content":"Hello ","reasoning_details":[{"type":"reasoning.text","text":"summary"}]},"finish_reason":null}]}""",
                         """{"choices":[{"delta":{"content":"world"},"finish_reason":null}]}""",
                         """{"choices":[{"delta":{},"finish_reason":"stop"}]}""",
                         """{"choices":[],"usage":{"total_tokens":3}}""",
@@ -132,6 +132,7 @@ class OpenRouterChatClientTest {
             assertEquals("Hello world", result.text)
             assertEquals(3L, result.usage?.getLong("total_tokens"))
             assertEquals("assistant", result.assistantMessage.getString("role"))
+            assertEquals(1, result.assistantMessage.getJSONArray("reasoning_details").length())
         } finally {
             client.close()
         }
