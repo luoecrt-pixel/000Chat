@@ -7,6 +7,7 @@ import org.json.JSONObject
 data class AstraResponseModel(
     val id: String?,
     val requestId: String?,
+    val model: String? = null,
     val text: String,
     val annotations: JSONArray = JSONArray(),
     val tools: List<String> = emptyList(),
@@ -29,6 +30,7 @@ data class AstraResponseModel(
         .put("text", text)
         .put("response_id", id ?: JSONObject.NULL)
         .put("request_id", requestId ?: JSONObject.NULL)
+        .put("response_model", model ?: JSONObject.NULL)
         .put("annotations", JSONArray(annotations.toString()))
         .put("tools", JSONArray(tools))
         .put("status", status)
@@ -105,6 +107,7 @@ data class AstraResponseModel(
             return AstraResponseModel(
                 id = r.optString("id").takeIf { it.isNotBlank() },
                 requestId = requestId,
+                model = r.optString("model").takeIf { it.isNotBlank() },
                 text = fallbackText,
                 annotations = annotations,
                 tools = tools.distinct(),
@@ -120,6 +123,7 @@ data class AstraResponseModel(
             return AstraResponseModel(
                 id = obj.optString("response_id").takeIf { it.isNotBlank() && it != "null" },
                 requestId = obj.optString("request_id").takeIf { it.isNotBlank() && it != "null" },
+                model = obj.optString("response_model").takeIf { it.isNotBlank() && it != "null" },
                 text = obj.optString("text"),
                 annotations = JSONArray(obj.optJSONArray("annotations")?.toString() ?: "[]"),
                 tools = buildList {

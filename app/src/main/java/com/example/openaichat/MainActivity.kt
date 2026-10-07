@@ -159,6 +159,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
     private lateinit var githubBadge: TextView
+    private lateinit var modelBadge: TextView
     private val localArtifactToolExecutor by lazy { LocalArtifactToolExecutor(this) }
 
     private var currentCall: Call? = null
@@ -451,12 +452,16 @@ class MainActivity : ComponentActivity() {
         val space = Space(this)
         row.addView(space, LinearLayout.LayoutParams(0,1,1f))
 
-        val modelBadge = TextView(this).apply {
+        modelBadge = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.GRAY)
-            text = prefs.getString("model","gpt-6-astra")
+            setTextColor(Color.rgb(170,175,185))
+            setPadding(dp(8), dp(6), dp(4), dp(6))
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            setOnClickListener { showModelPicker() }
         }
         row.addView(modelBadge)
+        updateModelBadge()
         root.addView(row)
 
         attachRow = LinearLayout(this).apply {
@@ -623,6 +628,100 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun normalizedProviderId(): String =
+        prefs.getString("provider", "openai")?.trim().takeUnless { it.isNullOrBlank() } ?: "openai"
+
+    private fun normalizedModelId(): String =
+        prefs.getString("model", ModelCatalog.source(normalizedProviderId()).models.first().id)
+            ?.trim()?.removePrefix("~").takeUnless { it.isNullOrBlank() }
+            ?: ModelCatalog.source(normalizedProviderId()).models.first().id
+
+    private fun updateModelBadge() {
+        if (!::modelBadge.isInitialized) return
+        val source = ModelCatalog.source(normalizedProviderId())
+        val modelLabel = ModelCatalog.displayName(source.id, normalizedModelId())
+        modelBadge.text = "${source.label} · ${modelLabel}"
+        modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}"
+    }
+
+    private fun showModelPicker() {
+        val sources = ModelCatalog.sources
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(4), dp(18), dp(6))
+        }
+        val provider = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                sources.map { it.label }
+            )
+            setSelection(sources.indexOfFirst { it.id == normalizedProviderId() }.coerceAtLeast(0))
+        }
+        val model = Spinner(this)
+        val modelIds = mutableListOf<String>()
+
+        fun refreshModels(providerId: String, preferredModel: String?, preserveUnknown: Boolean) {
+            val source = ModelCatalog.source(providerId)
+            val normalized = preferredModel?.trim()?.removePrefix("~").orEmpty()
+            val choices = source.models.toMutableList()
+            if (preserveUnknown && normalized.isNotBlank() && choices.none { it.id == normalized }) {
+                choices.add(0, ModelOption(normalized, "Текущая: $normalized"))
+            }
+            modelIds.clear()
+            modelIds.addAll(choices.map { it.id })
+            model.adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                choices.map { it.label }
+            )
+            val selected = choices.indexOfFirst { it.id == normalized }.takeIf { it >= 0 } ?: 0
+            model.setSelection(selected)
+        }
+
+        refreshModels(normalizedProviderId(), normalizedModelId(), preserveUnknown = true)
+        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val source = sources[position]
+                refreshModels(source.id, null, preserveUnknown = false)
+            }
+        }
+
+        box.addView(TextView(this).apply {
+            text = "Источник API"
+            textSize = 12f
+            setTextColor(Color.rgb(150,155,165))
+            setPadding(0, dp(4), 0, dp(4))
+        })
+        box.addView(provider)
+        box.addView(TextView(this).apply {
+            text = "Модель"
+            textSize = 12f
+            setTextColor(Color.rgb(150,155,165))
+            setPadding(0, dp(14), 0, dp(4))
+        })
+        box.addView(model)
+
+        AlertDialog.Builder(this)
+            .setTitle("Источник и модель")
+            .setView(box)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Применить") { _, _ ->
+                val source = sources[provider.selectedItemPosition.coerceAtLeast(0)]
+                val selectedModel = modelIds.getOrNull(model.selectedItemPosition)
+                    ?: source.models.first().id
+                prefs.edit()
+                    .putString("provider", source.id)
+                    .putString("provider_label", source.label)
+                    .putString("model", selectedModel)
+                    .apply()
+                updateModelBadge()
+                status.text = "${source.label} · ${ModelCatalog.displayName(source.id, selectedModel)}"
+            }
+            .show()
+    }
+
     // ---------- Settings ----------
     private fun showQuickEffortPicker(){
         val efforts=arrayOf("auto","low","medium","high","xhigh","max")
@@ -679,13 +778,46 @@ class MainActivity : ComponentActivity() {
         }
 
         section("Подключение")
-        val providerOptions = arrayOf("OpenAI Responses API", "OpenRouter / Claude")
-        val provider = spinner(providerOptions, "provider_label", "OpenAI Responses API")
-        labeled("Backend", provider)
-
         val currentProvider = prefs.getString("provider", "openai") ?: "openai"
-        val modelDefault = if (currentProvider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
-        val model = field("Model ID", prefs.getString("model", modelDefault) ?: modelDefault); spaced(model)
+        val currentModel = prefs.getString(
+            "model",
+            ModelCatalog.source(currentProvider).models.first().id
+        ) ?: ModelCatalog.source(currentProvider).models.first().id
+
+        val provider = Spinner(this)
+        provider.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            ModelCatalog.sources.map { it.label }
+        )
+        provider.setSelection(
+            ModelCatalog.sources.indexOfFirst { it.id == currentProvider }.coerceAtLeast(0)
+        )
+        labeled("Источник API", provider)
+
+        val model = Spinner(this)
+        val modelIds = mutableListOf<String>()
+        fun refreshSettingsModels(providerId: String, preferredModel: String?, preserveUnknown: Boolean) {
+            val source = ModelCatalog.source(providerId)
+            val normalized = preferredModel?.trim()?.removePrefix("~").orEmpty()
+            val choices = source.models.toMutableList()
+            if (preserveUnknown && normalized.isNotBlank() && choices.none { it.id == normalized }) {
+                choices.add(0, ModelOption(normalized, "Текущая: $normalized"))
+            }
+            modelIds.clear()
+            modelIds.addAll(choices.map { it.id })
+            model.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, choices.map { it.label })
+            model.setSelection(choices.indexOfFirst { it.id == normalized }.takeIf { it >= 0 } ?: 0)
+        }
+        refreshSettingsModels(currentProvider, currentModel, preserveUnknown = true)
+        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                refreshSettingsModels(ModelCatalog.sources[position].id, null, preserveUnknown = false)
+            }
+        }
+        labeled("Модель", model)
+
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
 
@@ -809,20 +941,16 @@ class MainActivity : ComponentActivity() {
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
-                val selectedProvider = if(provider.selectedItemPosition == 1) "openrouter" else "openai"
-                val enteredModel = model.text.toString().trim()
-                val savedModel = when {
-                    selectedProvider == "openrouter" && (enteredModel.isBlank() || enteredModel == "gpt-6-astra") -> "anthropic/claude-opus-5.5"
-                    selectedProvider == "openai" && enteredModel == "anthropic/claude-opus-5.5" -> "gpt-6-astra"
-                    enteredModel.isBlank() -> if (selectedProvider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
-                    else -> enteredModel
-                }
+                val selectedSource = ModelCatalog.sources[provider.selectedItemPosition.coerceAtLeast(0)]
+                val selectedProvider = selectedSource.id
+                val savedModel = modelIds.getOrNull(model.selectedItemPosition)
+                    ?: selectedSource.models.first().id
                 secure.setApiKey(key.text.toString().trim())
                 secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
                 secure.setGitHubToken(githubToken.text.toString().trim())
                 prefs.edit()
                     .putString("provider", selectedProvider)
-                    .putString("provider_label", provider.selectedItem.toString())
+                    .putString("provider_label", selectedSource.label)
                     .putString("model", savedModel)
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
@@ -846,6 +974,7 @@ class MainActivity : ComponentActivity() {
                     .apply()
                 effortBadge.text="⚡ "+efforts[reasoning.selectedItemPosition]
                 updateGithubBadge(githubTools.isChecked)
+                updateModelBadge()
                 status.text="Настройки сохранены"
             }.show()
     }
@@ -1089,6 +1218,25 @@ class MainActivity : ComponentActivity() {
                         errorType = null,
                         estimatedCostUsd = cost
                     )
+
+                    chatDb.recordRequestEvent(
+                        chatId = chatId,
+                        eventType = "request_completed",
+                        requestId = requestId,
+                        provider = "openrouter",
+                        requestedModel = model,
+                        responseModel = result.responseModel,
+                        modelMatch = ModelCatalog.match(model, result.responseModel),
+                        status = "completed",
+                        inputTokens = inputTokens,
+                        cachedTokens = cachedTokens,
+                        cacheWriteTokens = cacheWriteTokens,
+                        outputTokens = outputTokens,
+                        reasoningTokens = reasoningTokens,
+                        estimatedCostUsd = cost,
+                        latencyMs = SystemClock.elapsedRealtime() - startedAt,
+                        toolSummary = result.toolNames.distinct().joinToString(",")
+                    )
                 }
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
@@ -1096,6 +1244,8 @@ class MainActivity : ComponentActivity() {
                     .put("request_id", requestId)
                     .put("provider", "openrouter")
                     .put("model", model)
+                    .put("requested_model", model)
+                    .put("response_model", result.responseModel ?: JSONObject.NULL)
                     .apply {
                         val toolArray = JSONArray()
                         result.toolNames.distinct().forEach { toolArray.put(it) }
@@ -1140,6 +1290,9 @@ class MainActivity : ComponentActivity() {
                             "chat_id" to chatId,
                             "request_id" to requestId,
                             "model" to model,
+                            "requested_model" to model,
+                            "response_model" to result.responseModel,
+                            "model_match" to ModelCatalog.match(model, result.responseModel).name.lowercase(),
                             "tools" to result.toolNames.distinct().joinToString(","),
                             "latency_ms" to (SystemClock.elapsedRealtime() - startedAt)
                         ))
@@ -1675,6 +1828,7 @@ class MainActivity : ComponentActivity() {
             "attachments" to if (provider == "openrouter") requestOpenRouterAttachments.size else requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
             "prompt_chars" to text.length,
             "model" to model,
+            "requested_model" to model,
             "provider" to provider
         ))
 
@@ -1990,6 +2144,8 @@ class MainActivity : ComponentActivity() {
                         reasoningSummary = responseSummary
                     )
                     val assistantMessage=responseModel.toChatJson()
+                        .put("requested_model", model)
+                        .put("provider", "openai")
                     val savedGeneratedImages = saveGeneratedImages(responseModel.generatedImageResults)
                     if (savedGeneratedImages.length() > 0) assistantMessage.put("generated_images", savedGeneratedImages)
 
@@ -2002,6 +2158,25 @@ class MainActivity : ComponentActivity() {
                     val reasoningTok=usageObj?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
                     chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
+
+                    chatDb.recordRequestEvent(
+                        chatId = requestChatId,
+                        eventType = "request_completed",
+                        requestId = requestId ?: localRequestId,
+                        provider = "openai",
+                        requestedModel = model,
+                        responseModel = responseModel.model,
+                        modelMatch = ModelCatalog.match(model, responseModel.model),
+                        status = completionState,
+                        inputTokens = inTok,
+                        cachedTokens = cachedTok,
+                        cacheWriteTokens = cacheWriteTok,
+                        outputTokens = outTok,
+                        reasoningTokens = reasoningTok,
+                        estimatedCostUsd = estimatedCost,
+                        latencyMs = latency,
+                        toolSummary = responseModel.tools.distinct().joinToString(",")
+                    )
 
                     runOnUiThread{
                         if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread

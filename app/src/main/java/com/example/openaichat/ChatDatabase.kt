@@ -18,11 +18,45 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
+        private const val REQUEST_EVENT_TABLE = "request_events"
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
         db.setForeignKeyConstraintsEnabled(true)
+    }
+
+    private fun ensureRequestEventsTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $REQUEST_EVENT_TABLE (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                requested_model TEXT,
+                response_model TEXT,
+                model_match TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                tool_summary TEXT,
+                error TEXT,
+                FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        ensureRequestEventsTable(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -105,6 +139,31 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX idx_effort_metrics_created ON $METRICS_TABLE(created_at)")
         db.execSQL("CREATE INDEX idx_effort_metrics_task ON $METRICS_TABLE(task_class, effective_effort, feedback)")
         db.execSQL("CREATE UNIQUE INDEX idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
+        db.execSQL("""
+            CREATE TABLE $REQUEST_EVENT_TABLE (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                request_id TEXT,
+                provider TEXT NOT NULL,
+                requested_model TEXT,
+                response_model TEXT,
+                model_match TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                tool_summary TEXT,
+                error TEXT,
+                FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -495,6 +554,106 @@ data class ExistingMessageRow(
             }
             db.insert(METRICS_TABLE, null, v)
         }
+    }
+
+    fun recordRequestEvent(
+        chatId: String,
+        eventType: String,
+        requestId: String?,
+        provider: String,
+        requestedModel: String?,
+        responseModel: String?,
+        modelMatch: ModelCatalog.Match,
+        status: String,
+        inputTokens: Long = 0L,
+        cachedTokens: Long = 0L,
+        cacheWriteTokens: Long = 0L,
+        outputTokens: Long = 0L,
+        reasoningTokens: Long = 0L,
+        estimatedCostUsd: Double = 0.0,
+        latencyMs: Long = 0L,
+        toolSummary: String? = null,
+        error: String? = null
+    ) {
+        if (chatId.isBlank()) return
+        writableDatabase.transaction { db ->
+            val chatExists = db.query(
+                CHAT_TABLE,
+                arrayOf("id"),
+                "id=?",
+                arrayOf(chatId),
+                null, null, null, "1"
+            ).use { it.moveToFirst() }
+            if (!chatExists) return@transaction
+
+            val values = ContentValues().apply {
+                put("chat_id", chatId)
+                put("created_at", System.currentTimeMillis())
+                put("event_type", eventType.ifBlank { "request" })
+                putStringOrNull("request_id", requestId)
+                put("provider", provider.ifBlank { "unknown" })
+                putStringOrNull("requested_model", requestedModel)
+                putStringOrNull("response_model", responseModel)
+                put("model_match", modelMatch.name.lowercase())
+                put("status", status.ifBlank { "unknown" })
+                put("input_tokens", inputTokens.coerceAtLeast(0L))
+                put("cached_tokens", cachedTokens.coerceAtLeast(0L))
+                put("cache_write_tokens", cacheWriteTokens.coerceAtLeast(0L))
+                put("output_tokens", outputTokens.coerceAtLeast(0L))
+                put("reasoning_tokens", reasoningTokens.coerceAtLeast(0L))
+                put("estimated_cost_usd", estimatedCostUsd.coerceAtLeast(0.0))
+                put("latency_ms", latencyMs.coerceAtLeast(0L))
+                putStringOrNull("tool_summary", toolSummary)
+                putStringOrNull("error", error?.take(1200))
+            }
+            db.insert(REQUEST_EVENT_TABLE, null, values)
+        }
+    }
+
+    fun listRequestEvents(chatId: String, limit: Int = 50): List<JSONObject> {
+        if (chatId.isBlank()) return emptyList()
+        val safeLimit = limit.coerceIn(1, 100)
+        val out = mutableListOf<JSONObject>()
+        readableDatabase.query(
+            REQUEST_EVENT_TABLE,
+            null,
+            "chat_id=?",
+            arrayOf(chatId),
+            null,
+            null,
+            "created_at DESC, id DESC",
+            safeLimit.toString()
+        ).use { c ->
+            while (c.moveToNext()) {
+                val event = JSONObject()
+                    .put("id", c.getLong(c.getColumnIndexOrThrow("id")))
+                    .put("chat_id", c.getString(c.getColumnIndexOrThrow("chat_id")))
+                    .put("created_at", c.getLong(c.getColumnIndexOrThrow("created_at")))
+                    .put("event_type", c.getString(c.getColumnIndexOrThrow("event_type")))
+                    .put("provider", c.getString(c.getColumnIndexOrThrow("provider")))
+                    .put("model_match", c.getString(c.getColumnIndexOrThrow("model_match")))
+                    .put("status", c.getString(c.getColumnIndexOrThrow("status")))
+                    .put("input_tokens", c.getLong(c.getColumnIndexOrThrow("input_tokens")))
+                    .put("cached_tokens", c.getLong(c.getColumnIndexOrThrow("cached_tokens")))
+                    .put("cache_write_tokens", c.getLong(c.getColumnIndexOrThrow("cache_write_tokens")))
+                    .put("output_tokens", c.getLong(c.getColumnIndexOrThrow("output_tokens")))
+                    .put("reasoning_tokens", c.getLong(c.getColumnIndexOrThrow("reasoning_tokens")))
+                    .put("estimated_cost_usd", c.getDouble(c.getColumnIndexOrThrow("estimated_cost_usd")))
+                    .put("latency_ms", c.getLong(c.getColumnIndexOrThrow("latency_ms")))
+                c.getString(c.getColumnIndexOrThrow("request_id"))?.let { event.put("request_id", it) }
+                c.getString(c.getColumnIndexOrThrow("requested_model"))?.let { event.put("requested_model", it) }
+                c.getString(c.getColumnIndexOrThrow("response_model"))?.let { event.put("response_model", it) }
+                c.getString(c.getColumnIndexOrThrow("tool_summary"))?.let { event.put("tool_summary", it) }
+                c.getString(c.getColumnIndexOrThrow("error"))?.let { event.put("error", it) }
+                out += event
+            }
+        }
+        return out
+    }
+
+    fun clearRequestEvents(chatId: String): Int {
+        if (chatId.isBlank()) return 0
+        return writableDatabase.delete(REQUEST_EVENT_TABLE, "chat_id=?", arrayOf(chatId))
     }
 
     fun recordFeedback(chatId: String, requestId: String, value: Int) {

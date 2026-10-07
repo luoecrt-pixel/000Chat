@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-07 17:14 +03:00
-**Следующий рабочий срез:** OpenRouter: стриминг для длинных ответов
+**Last updated:** 2026-10-07 19:12 +03:00
+**Следующий рабочий срез:** UI: persistent session telemetry + Drawer
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -51,13 +51,13 @@
 
 **Архитектура:** `MainActivity.kt` ~4.5k строк. Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
 
-**OpenRouter/Claude (#47–#57, #76, #78, #80):** отдельный Chat Completions client с синхронным tool loop; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); репозиторий и ветки GitHub добавляются в system prompt (#50); `tool_trace` сохраняется в историю (#54); `reasoning.effort` нормализуется на границе (#53); запись файла в GitHub принимает обычный UTF-8 `content`, base64 оставлен для совместимости (#52); composer не уходит под клавиатуру (#51). GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
+**OpenRouter/Claude (#47–#57, #76, #78, #80, #89, #90):** отдельный Chat Completions client с синхронным tool loop; с #89 transport-level SSE streaming для одного round; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); #90 добавляет отдельный каталог source/model и сохраняет requested/response model telemetry + session-scoped request events; репозиторий и ветки GitHub добавляются в system prompt (#50); `tool_trace` сохраняется в историю (#54); `reasoning.effort` нормализуется на границе (#53); запись файла в GitHub принимает обычный UTF-8 `content`, base64 оставлен для совместимости (#52); composer не уходит под клавиатуру (#51). GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
 
 **Вложения (#57, #83):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8). Картинки уходят без lossy-сжатия и downscale: EXIF-поворот 3/6/8 — только strict lossless (`ajpegtran:0.1.14`) при идеальной MCU-геометрии, иначе исходные байты; старые manifests с PNG-wire обновляются при чтении. Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model.
 
 ## Фактический baseline
 
-- main code baseline: `4a17af3d967e1d50a93b9739c188df66fbe9396d` (PR #84 runtime merge); после него только docs-only PR
+- main code baseline: `acaadea00ac89187c1365673a13d4a9e438a82da` (PR #89 runtime merge); текущий PR #90 содержит provider/model telemetry и ещё не merged на момент записи этого handoff
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -98,13 +98,15 @@
 - [pure] **#80:** OpenRouter tool loop не обрывается на 24 раундах и передаёт явный `max_tokens` > 128000 (JVM regression); снятие 10-минутных таймаутов OpenRouter и implicit 128K `max_output_tokens` у direct OpenAI подтверждено только на уровне source.
 - [instrumentation] **#83:** EXIF-повёрнутый JPEG (ориентации 3/6/8) при идеальной MCU-геометрии поворачивается строго lossless (`ajpegtran`); mirrored/transpose и неидеальная геометрия уходят исходными байтами; Android instrumentation-тест на реальном EXIF-JPEG + unit-тест политики; старые PNG-wire manifests обновляются из исходного JPEG при чтении.
 - [pure] **#84:** общий `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; boundary test подтверждает: 5h−1ms ещё не expired, ровно 5h уже expired. Это safety boundary одной response/recovery cycle, не session-wide cap.
+- [pure] **#89:** OpenRouter SSE transport на JVM накапливает fragmented text, reasoning_details и tool-call arguments по index; local tool loop стартует только после завершения SSE round; partial text сохраняется при mid-stream error; существующие >24-round и ownership-loss regressions перенесены на streamed transport.
+- [robolectric] **#90:** request_events сохраняются в SQLite, изолированы по chat_id, переживают reopen и удаляются вместе с chat; runtime truth фактической модели у реального провайдера этими тестами не доказана.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
 Только source-level: #20 — тест проверяет state-контракт `markUserStop()`, но не вызывает `stopCurrentResponse()`; #37 — нет теста wiring adapter; #40 — runtime wiring reasoning callback не гоняется; #42 — нет runtime-теста image/ZIP completion wiring через policy; #78 — потолок 5 ч / 5M токенов; #80 — снятие 10-минутных таймаутов и implicit 128K.
 
 Не подтверждено вообще (нет ни теста, ни наблюдения):
-1. Очень длинный ответ на реальном провайдере не наблюдался. OpenAI: source-аудит без app-side timeout, реального прогона не было. OpenRouter: до текущего PR запрос был non-streaming; Anthropic рекомендует streaming для long-running запросов, особенно при больших `max_tokens`, поскольку некоторые сети могут разрывать idle-соединения; «10 минут» — ориентир/ограничение SDK для non-streaming, а не универсальный лимит модели.
+1. Очень длинный ответ на реальном провайдере не наблюдался. OpenAI: source-аудит без app-side timeout, реального прогона не было. OpenRouter: #89 теперь покрывает transport-level SSE на JVM, но реальный long-running provider/mobile run всё ещё не наблюдался; Anthropic рекомендует streaming для long-running запросов, особенно при больших `max_tokens`, поскольку некоторые сети могут разрывать idle-соединения; «10 минут» — ориентир/ограничение SDK для non-streaming, а не универсальный лимит модели.
 2. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся. OpenRouter usage/cache telemetry доказана на уровне client (#76); показ в UI не подтверждён.
 3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
 4. Вложения Claude (#57, #83): чтение моделью картинки/PDF/текста и multi-select через `clipData` не подтверждены на реальной модели; JPEG с неидеальной геометрией или mirrored/transpose-ориентацией уходит как есть — трактовка EXIF-orientation провайдерами не проверена; память/время lossless-поворота на больших фото не измерялись. Для `ajpegtran:0.1.14` отдельно проверены published license metadata и IJG attribution requirements; release APK/AAB overhead измерен, но project-side notice/attribution ещё не зафиксирован как отдельный compliance contract.
@@ -126,15 +128,17 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. OpenRouter: стриминг для длинных ответов — **следующий**
-Цель: долгие Claude/OpenRouter Chat Completions работают через SSE, не возвращая artificial timeout/round caps и сохраняя текущий result/tool-loop/usage semantics. OpenRouter поддерживает `stream: true` через SSE; Anthropic рекомендует streaming для long-running requests и предупреждает о variable idle-connection drops при non-streaming. Первый шаг: внутри одного HTTP round накапливать text + fragmented tool calls + reasoning_details + final usage, а локальный tool loop запускать только после завершения SSE round; при mid-stream error сохранять уже полученный partial text.
+### 1. UI: persistent session telemetry + Drawer — **следующий**
+Цель: вместо сырого общего `AstraDiagnostics` дать пользователю компактную, понятную карточку последнего запроса и раскрываемую историю последних 30–50 событий текущего chatId; история должна переживать перезапуск и не смешиваться между сессиями. Состояние модели показывать без стрелки: `GPT-6.1 Sol · 18.4k in · 4.3k out …`. Цвет: зелёный = exact, красный = доказанный mismatch, жёлтый = unknown/фактическую модель API проверить не удалось. Текст событий selectable и копируемый. В том же PR заменить AlertDialog-список чатов на левый Drawer; удержание по чату — переименовать/удалить; добавить аккуратный ripple/touch feedback без Compose migration.
+Первый шаг: сделать одну immutable presentation-модель события из `request_events` и компактную status-card для текущей сессии; затем подключить раскрытие последних 50 событий и только после этого переносить меню сессий в Drawer.
 
-### 2. Реальные прогоны провайдеров — ждёт пользователя
-Агент не может выполнить: нет ключей. Пользователь запускает в приложении: (а) длинный запрос OpenAI (без `max_output_tokens`, высокий reasoning); (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — смотреть cached tokens (строка usage, если wiring #76 её показывает, иначе openrouter.ai/activity).
-Первый шаг: когда пользователь готов — попросить прогоны (а)–(в); результат (длительность, usage, обрыв или нет) записать в контракты. Нули в cached tokens — проверить размер префикса (минимум для Opus 5.5 не выяснен) и `session_id` для sticky-routing.
+### 2. OpenRouter server-side tools — **после UI**
+Цель: проверить реальную ценность server-side `openrouter:web_search` и `openrouter:web_fetch` без нового client-side tool loop; image search/shell и остальные tools пока не обещать.
+Первый шаг: проверить текущий Chat Completions path для Claude, доступные схемы tool declaration/response и минимальный пользовательский сценарий, который заметно лучше текущих local tools.
 
-### 3. Thread-safety: оставшиеся async-границы
-Первый шаг: таблица ownership оставшихся Executor/Worker → UI callbacks вне уже аудированных четырёх; выбрать одно доказуемое нарушение; без него PR не делать.
+### 3. Реальные прогоны провайдеров — ждут пользователя
+Агент не может выполнить: нет ключей. Пользователь запускает в приложении только после готовности UI/telemetry: (а) длинный запрос OpenAI; (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — затем фиксируем длительность, usage, cache и обрыв/завершение.
+Первый шаг: когда пользователь готов — попросить эти три прогона и записать результат в подтверждённые/неподтверждённые контракты.
 
 ## Репозиторий / branches
 
@@ -184,11 +188,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#84:** merged; общий 5-часовой потолок OpenAI recovery (foreground + Worker); full Build/Release Successful.
 - **#85:** merged; docs-only handoff update; `Verify handoff` Successful.
 - **#86:** merged; docs-only уточнение истории (закрытый #81 не был merged); `Verify handoff` Successful.
 - **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
+- **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
 
 ## Product radar — идеи с реальной ценностью
 
