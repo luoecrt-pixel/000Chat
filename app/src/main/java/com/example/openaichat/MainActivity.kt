@@ -661,11 +661,11 @@ class MainActivity : ComponentActivity() {
         val model = Spinner(this)
         val modelIds = mutableListOf<String>()
 
-        fun refreshModels(providerId: String, preferredModel: String?) {
+        fun refreshModels(providerId: String, preferredModel: String?, preserveUnknown: Boolean) {
             val source = ModelCatalog.source(providerId)
             val normalized = preferredModel?.trim()?.removePrefix("~").orEmpty()
             val choices = source.models.toMutableList()
-            if (normalized.isNotBlank() && choices.none { it.id == normalized }) {
+            if (preserveUnknown && normalized.isNotBlank() && choices.none { it.id == normalized }) {
                 choices.add(0, ModelOption(normalized, "Текущая: $normalized"))
             }
             modelIds.clear()
@@ -679,12 +679,12 @@ class MainActivity : ComponentActivity() {
             model.setSelection(selected)
         }
 
-        refreshModels(normalizedProviderId(), normalizedModelId())
+        refreshModels(normalizedProviderId(), normalizedModelId(), preserveUnknown = true)
         provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val source = sources[position]
-                refreshModels(source.id, prefs.getString("model", null))
+                refreshModels(source.id, null, preserveUnknown = false)
             }
         }
 
@@ -797,11 +797,11 @@ class MainActivity : ComponentActivity() {
 
         val model = Spinner(this)
         val modelIds = mutableListOf<String>()
-        fun refreshSettingsModels(providerId: String, preferredModel: String?) {
+        fun refreshSettingsModels(providerId: String, preferredModel: String?, preserveUnknown: Boolean) {
             val source = ModelCatalog.source(providerId)
             val normalized = preferredModel?.trim()?.removePrefix("~").orEmpty()
             val choices = source.models.toMutableList()
-            if (normalized.isNotBlank() && choices.none { it.id == normalized }) {
+            if (preserveUnknown && normalized.isNotBlank() && choices.none { it.id == normalized }) {
                 choices.add(0, ModelOption(normalized, "Текущая: $normalized"))
             }
             modelIds.clear()
@@ -809,11 +809,11 @@ class MainActivity : ComponentActivity() {
             model.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, choices.map { it.label })
             model.setSelection(choices.indexOfFirst { it.id == normalized }.takeIf { it >= 0 } ?: 0)
         }
-        refreshSettingsModels(currentProvider, currentModel)
+        refreshSettingsModels(currentProvider, currentModel, preserveUnknown = true)
         provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                refreshSettingsModels(ModelCatalog.sources[position].id, prefs.getString("model", null))
+                refreshSettingsModels(ModelCatalog.sources[position].id, null, preserveUnknown = false)
             }
         }
         labeled("Модель", model)
