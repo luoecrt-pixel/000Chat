@@ -14,6 +14,7 @@ import java.util.concurrent.CancellationException
 data class OpenRouterCompletionResult(
     val text: String,
     val usage: JSONObject?,
+    val responseModel: String?,
     val assistantMessage: JSONObject,
     val toolNames: List<String>
 )
@@ -75,6 +76,7 @@ class OpenRouterChatClient(
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
         val accumulatedUsage = JSONObject()
+        var responseModel: String? = null
         var accumulatedTotalTokens = 0L
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
@@ -302,12 +304,14 @@ class OpenRouterChatClient(
         try {
             while (true) {
                 ensureWithinBudget()
-                val (_, message) = requestMessage("auto")
+                val (responseJson, message) = requestMessage("auto")
+                responseJson.optString("model").takeIf { it.isNotBlank() }?.let { responseModel = it }
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
                         text = message.optString("content").trim(),
                         usage = if (accumulatedUsage.length() > 0) JSONObject(accumulatedUsage.toString()) else null,
+                        responseModel = responseModel,
                         assistantMessage = JSONObject(message.toString()),
                         toolNames = toolNames.distinct()
                     )
