@@ -47,7 +47,7 @@ object BackgroundRequestFailureRecorder {
         val previousResponseId = chat.optString("response_id")
             .takeIf { it.isNotBlank() && it != "null" }
         // Atomic chat/ownership check. No new message is committed after Stop.
-        if (!db.upsertCurrentChatIfActiveRequest(
+        if (!db.finalizeCurrentChatIfActiveRequest(
                 chatId, chat.optString("title", "Новый чат"), previousResponseId,
                 chat.optString("baseline_effort").takeIf { it.isNotBlank() && it != "null" },
                 items, localRequestId
