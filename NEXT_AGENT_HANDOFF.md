@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 10:05 +03:00
-**Следующий рабочий срез:** Merge PR #92
+**Last updated:** 2026-10-08 10:15 +03:00
+**Следующий рабочий срез:** Реальные прогоны провайдеров
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,7 +57,8 @@
 
 ## Фактический baseline
 
-- main code baseline: `67705cec629c67fe341d6fb4fbb3c029d5d901cb` (merge #91); PR #92 is a standalone server-tools change on top of that main. Code-validation head: `47cbf872ac91c6937fdb175aff7c4d58666da9f3` (tree `56d1caabb16447f0dd066450bbbb4272d7b967d7`). Push Build `37739052818` Successful; push Release `37739052909` Successful; final code head still needs a docs-only `Verify handoff` before merge.
+- main code baseline: `dc687591a642a48b87572197c673fad2a2951858` (merge #92); #91 and #92 are merged. Current implementation contains session telemetry + Drawer and OpenRouter server-side Web Search / Web Fetch with local-executor guard and IJG NOTICE.
+- #92 code gate: push Build `37739052818` Successful; push Release `37739052909` Successful; final Verify handoff `37740237478` Successful on docs-only head `81b5106af35ff01cd1eb8226a3dd97fd893f060a`.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -129,22 +130,18 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Merge PR #92 — **следующий**
-Цель: закрыть server-side Web Search / Web Fetch и IJG notice только после подтверждённых push Build + Release и финального Verify handoff; Skipped/unknown не считать green.
-Первый шаг: code-gate уже закрыт на `47cbf872ac91c6937fdb175aff7c4d58666da9f3`; теперь после этого docs-only update получить Successful Verify handoff на финальном head и только затем merge.
+### 1. Реальные прогоны провайдеров — **следующий**
+Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
+Первый шаг: после получения APK пользователь запускает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств.
 
-### 2. Реальные прогоны провайдеров
-Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать только фактические наблюдения.
-Первый шаг: после получения APK пользователь делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude.
-
-### 3. UI/device smoke
+### 2. UI/device smoke
 Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
 Первый шаг: переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат и отдельно проверить OpenRouter server-tool сценарий.
 
 ## Репозиторий / branches
 
 Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR.
-PR #92 был stacked поверх старого snapshot #91; после merge #91 ветка была перепривязана к новому main и лишняя история #91 удалена из diff. Коннектор не умеет DELETE ref, `workflow_dispatch` и repository variables; можно читать runs/логи и перезапускать существующие runs.
+PR #92 был stacked поверх старого snapshot #91; после merge #91 ветка была перепривязана к новому main и лишняя история #91 удалена из diff. #92 затем merged в `main` как `dc687591a642a48b87572197c673fad2a2951858`. Коннектор не умеет DELETE ref, `workflow_dispatch` и repository variables; можно читать runs/логи и перезапускать существующие runs.
 
 ## Контекстный режим для агента
 
@@ -190,13 +187,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
 - **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
 - **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
-- **#91:** merged; session telemetry card + Drawer + formatter regressions; дополнительно восстановлен OpenRouter streamed `responseModel` capture; Build/Release/Verify handoff gate закрыт.
-
-**Текущий открытый PR:** #92 — server-side Web Search / Web Fetch.
+- **#91:** merged; session telemetry card + Drawer + formatter regressions; Build/Release/Verify gate закрыт.
+- **#92:** merged; OpenRouter server-side Web Search / Web Fetch + local-executor guard + IJG NOTICE; Build/Release/Verify gate закрыт.
 
 ## Product radar — идеи с реальной ценностью
 
