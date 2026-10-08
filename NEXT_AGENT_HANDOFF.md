@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 18:48 +03:00
-**Следующий рабочий срез:** История сообщений и метаданные ответа
+**Last updated:** 2026-10-08 19:56 +03:00
+**Следующий рабочий срез:** Защита GitHub-команд
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `c31fa1e760f4b9cf2dc89f390782c142f3cbfda5` (merge #103, after #101 and docs-only #102). #101 preserves referenced normalized JPEG wires, all inactive composer drafts and attachments-only SQLite updates. #103 sends only automatic top-level 1h Claude cache control, removing explicit conflicting 5m marker. #98 system prompt remains.
+- main code baseline: `ff42e988ab74fcdc34a3908908193b2c3a9283ab` (merge #105; #101 wire paths/drafts/fingerprint and #103 one-hour-only Claude cache policy remain). #105 adds SQLite DB schema v17 preserving per-message `provider`, `model`, requested/response model, `tool_trace`, reasoning summary, error and usage; version migration preserves existing history but cannot reconstruct metadata lost before upgrade. **Это не UI label change:** old «Astra» bubble label всё ещё отображается.
 - Actual main at audit start: `b5dfbfd187074a12775570c6b272ea1c5821f198` (docs merge #99; code unchanged from #98). User provided live Android screenshots with OpenRouter TTL error and cancel telemetry; no APK SHA check on the device.
 - #98 code gate at `766916260ea2216360787ba6a47e1e70abfe5f54`: push Build `37787993221` Successful, push Release `37787993134` Successful. This head tree equals merged main tree `54c063316892fdff8e663ab9a787abfb2ea72745`. Previous head `966508f2...` Build `37786216846` failed due ActivityScenario state transition (expected CREATED, stayed RESUMED); its Release `37786216793` was Successful. Final full gate is green; actual UI/provider effects remain unverified.
 
@@ -109,6 +109,7 @@
 - [pure] **#98:** `GenerationInstructions` сохраняет legacy developer-only текст для OpenAI, при заполненном system prompt отдаёт JSON instruction items с отдельными `system` и `developer` ролями; для OpenRouter проверено сохранение app GitHub/attachment/tool контекста и порядок частей. Production wiring в MainActivity есть на source-level, но реальная работа Settings/провайдера не доказана.
 - [robolectric] **#101:** `ChatDatabaseAttachmentOwnershipTest` подтверждает DB `wire_path` enumeration по всем/одному чату после reopen и `attachments`-only upsert; JVM `LocalAttachmentReferencesTest` проверяет старый referenced wire, другой сохранённый composer, malformed prefs и aged orphan. Production cleanup wiring проверено на source, но реальный 7-дневный device cleanup не гоняли.
 - [pure] **#103:** `OpenRouterCachePolicyTest` и JVM `OpenRouterChatClientTest` проверяют 1h top-level marker без nested 5m system marker, в том числе при растущей истории двух tool rounds. Реальный OpenRouter error показан на телефоне **до** фикса, что не доказывает успешный повтор **после**.
+- [robolectric] **#105:** `ChatDatabaseMessageMetadataTest` покрывает DB v16→v17 migration, write/reopen, metadata-only update и импорт LegacyPrefs; pure `ChatMessageFingerprintTest` отслеживает изменения всех optional metadata. Production wiring/source подтверждено, но длительный Claude/GitHub диалог на устройстве после фикса не гоняли. CI Build `37810616575` / Release `37810616596` Successful на exact code head `ca06cec760407c0e8aa84895dce044f7e290efe4`; static verifier + 3 intentional negative mutations PASS.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -137,25 +138,21 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-**Аудит и UX:** `docs/audits/2026-10-08-live-and-independent-triage.md`. **Ответ другому агенту (полное обоснование исправлено/отложено):** `docs/audits/2026-10-08-external-auditor-response.md`. README до отдельного требования не трогать.
+**Аудит и UX:** `docs/audits/2026-10-08-live-and-independent-triage.md`. Внутренний прошлый аудит: `docs/audits/2026-10-08-external-auditor-response.md`. **Для внешнего аудитора пользователь запросил отдельный файл без PR, только по исходным замечаниям аудитора** — не добавлять новые пользовательские фото/UX-находки в пересылаемый отчёт. README до отдельного требования не трогать.
 
-### 1. История сообщений и метаданные ответа — **следующий**
-Цель: сохранять фактические `tool_trace`, `response_model`, `reasoning_summary`, `provider`/`requested_model` и нужный `error` после SQLite reopen. Source-level дефект подтверждён: MainActivity формирует часть полей, но `ChatDatabase` schema v16 их пропускает; часть данных есть в отдельном `request_events`, что не заменяет пер-message историю. Не смешивать с ephemeral UI flags.
-Первый шаг: **красные Robolectric DB round-trip tests** для каждого нужного поля, открыть/reopen старую v16 БД и применить маленькую v17 миграцию; validate `getChat()`, `upsertCurrentChat` и legacy `upsertChatObject`. После green CI — использовать сохранённый model label в UI, а не переписывать старые bubbles текущей моделью.
-
-### 2. Защита GitHub-команд
+### 1. Защита GitHub-команд — **следующий**
 Цель: показывать реальное тело comment/review в подтверждении, безопасно проверять `merge_pull_request` head SHA/required push Build+Release, блокировать пустой/неразрешённый `ref` при read и не обходить user allow-list. Внешняя branch protection отсутствует (`main protected:false`), rulesets endpoint у GitHub вернул 403/upgrade; требуются права/тариф владельца, не считать серверные правила установленными.
 Первый шаг: pure GitHub confirmation/gate contract tests для declined/pending/skipped/stale SHA; Android UI-dialog smoke. CI/tools через приложение не считать автоматическим правом на merge.
 
-### 3. Живые прогоны провайдеров
+### 2. Живые прогоны провайдеров
 На телефоне уже наблюдались старый OpenRouter ответ `cachecontrol 1h after 5m`, Stop/cancel OpenAI `response_created` с HTTP 200 на cancel без usage, завышенная шапка, тесный composer. Пользователь сверил биллинг и сообщил `$0.20` реальных списаний после отмены; эту сумму нельзя привязать к конкретному запросу без provider usage ID. **#103 устранил source-конфликт TTL**, но реальный повтор Claude **не подтверждён**.
 Первый шаг: подготовить APK из code-identical к main после #103 и проверить на Android короткий/длинный Claude/OpenRouter, серверные web tools и OpenAI Stop/retrieve usage; проверить фактические `response_model`, cache hit, стоимость, terminal status. Для cancelled/failed без usage показывать `неизвестно`, не $0.0000; reconciled provider cost там, где API возвращает факт.
 
-### 4. UI/device smoke
+### 3. UI/device smoke
 Цель: компактная видимая цветная строка событий **без рамки**, отдельное закрытие expanded history, меньше верхнего отступа с учётом status bar safe area; свайп-открытие/закрытие Drawer (у DrawerLayout штатно предусмотрено, сначала доказать проблему на устройстве); зазоры между вложениями, убрать повторённый badge модели и надпись GitHub, перенести effort и model-scoped `standard/pro` к composer; переделать Settings по группам, не потеряв инструментальные параметры. Подпись в bubble — persisted модель конкретного ответа после пункта 1.
 Первый шаг: pure view-state/capability contract и Android small-screen/IME layout test. Никакого раннего Compose rewrite и автоматического FLAG_FULLSCREEN без device доказательств.
 
-### 5. Отложенные аудиторские проверки
+### 4. Отложенные аудиторские проверки
 Цель: проверить source-risk общего 5h recovery deadline (сброс между Activity и Worker), preflight mutable-chat race, peak heap при PDF/JPEG → base64, а также ветки/default ref; на сегодня не называть их runtime-ошибками.
 Первый шаг: boundary test нескольких recovery handoffs, immutability test при переключении чатов и memory instrumentation. README/Gradle Wrapper/.gitignore/чистка веток отложены по указанию пользователя, не маскировать это выполнением.
 
@@ -208,11 +205,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#99:** merged as `b5dfbfd187074a12775570c6b272ea1c5821f198`; docs-only #98 proof + APK, Verify `37790262866` Successful.
-- **#100:** merged as `b76501e175152a3ed705915afa4f341ce32cb5a9`; docs-only audit, mobile screenshots triage and UI plans, Verify `37797106241` Successful.
-- **#101:** merged as `5cb13281a50e1368964c975b3343a13e4599301d`; local attachment ownership + fingerprint; Build `37800833138` / Release `37800833134` Successful.
-- **#102:** merged as `dfe92077407de4c5a21fa5813c482d7c54988d52`; docs-only $0.20 billing, compact borderless telemetry, Drawer swipe/settings IA, README deferred; Verify `37800741964` Successful.
-- **#103:** merged as `c31fa1e760f4b9cf2dc89f390782c142f3cbfda5`; OpenRouter Claude mixed 5m/1h marker fix; Build `37801304588` / Release `37801304407` Successful.
+- **#101:** merged as `5cb13281a50e1368964c975b3343a13e4599301d`; attachment ownership + fingerprint; Build `37800833138` / Release `37800833134` Successful.
+- **#102:** merged as `dfe92077407de4c5a21fa5813c482d7c54988d52`; docs-only user $0.20 billing, compact telemetry, Drawer/settings IA, README deferred; Verify `37800741964` Successful.
+- **#103:** merged as `c31fa1e760f4b9cf2dc89f390782c142f3cbfda5`; fix conflicting OpenRouter Claude cache TTL; Build `37801304588` / Release `37801304407` Successful.
+- **#104:** merged as `eb46551e1bce3323b6db41dc583366a229e3fd9e`; docs-only internal audit status and handoff; Verify `37803625645` Successful. Owner later clarified the external-agent report should be a separate non-PR file and only include that agent's own audit.
+- **#105:** merged as `ff42e988ab74fcdc34a3908908193b2c3a9283ab`; SQLite v17 metadata/trace persistence and regression matrix; Build `37810616575` / Release `37810616596` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
@@ -247,6 +244,8 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 
 ### 9. Мобильный интерфейс и расходы — уточнённое ТЗ пользователя
 **Не скрывать строку событий**: вернуть компактную цветную нажимаемую строку **без рамки/card background**, раскрытую историю закрывать отдельной кнопкой «Закрыть». Уменьшить высоту шапки, но сначала учитывать status/navigation bars через Insets; fullscreen без Android status bar не включать автоматически — только после device UX-проверки. Drawer должен открываться свайпом от левого края и закрываться обратным жестом: AndroidX `DrawerLayout` уже умеет это по умолчанию; **сначала проверить на телефоне**, нет ли фактического конфликта gesture navigation. В composer — зазоры между `📎`/`🖼`, убрать повторяющийся badge модели и надпись GitHub (настройки оставить); effort у поля ввода по мотивам UI Claude, `standard/pro` показывать лишь если поддерживает source+model. В ответных пузырях хранить и отображать model на момент ответа, не текущую глобальную; основу даст DB metadata PR. **Settings IA:** вместо длинного общего диалога сделать компактные логические разделы подключения, мышления, инструментов, файлов и Advanced; перенести частые действия к composer без дублирования, предусмотреть доступность всех старых опций. **Billing:** пользователь сообщил, что после отменённых запросов провайдер списал суммарно **$0.20**; нули в telemetry не отражали стоимость. При возможности запрашивать реальный usage/cost отменённого response и связывать с конкретным request; если provider не отдаёт данные, честно показывать неизвестный расход, не `$0.0000`. **Первый шаг:** после P0/P1 pure policy для status/expense source + instrumented UI/IME/edge swipe smoke; подробности в `docs/audits/2026-10-08-live-and-independent-triage.md` раздел 5.
+
+**Точное уточнение от 19:29:** обе отдельные кнопки `📎` и `🖼` убрать из основного ряда и заменить **одной кнопкой `+`** рядом с полем ввода. `+` раскрывает аккуратную нижнюю панель (*bottom sheet*) по предоставленному примеру Claude: **Камера**, **Фото**, **Файлы**. Нельзя слепо копировать функции Claude «Добавить в проект / Интернет / Коннекторы», которых нет в текущем приложении; существующие `chooseImage()` и `chooseAny()` переиспользовать с проверкой сохранения вложений, разрешений и IME/insets. Для «Камеры» сначала отдельно доказать безопасный capture flow через FileProvider/ActivityResult, без внезапного требования постоянного разрешения. Клик вне панели и жест вниз закрывают её. Отдельных 📎/🖼 на поверхности быть не должно. Первый шаг: pure menu action mapping + Android ActivityScenario тест вызова и отмены, затем небольшая UI-замена без переделки всей composer логики.
 
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
