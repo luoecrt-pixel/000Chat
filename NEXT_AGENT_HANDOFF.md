@@ -208,11 +208,11 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#94:** merged; docs-only provider-validation APK preparation and capability-aware settings idea; Verify `37769615494` Successful.
 - **#95:** merged as `950923c9f2087ae595d018841d603834b8d373d5`; OpenRouter completion event without usage; Build `37780620420` / Release `37780620439` Successful.
 - **#96:** merged as `e154e436213d292e9f894d1764f149f0e62b9b3c`; OpenRouter SSE `[DONE]` guard; Build `37781045311` / Release `37781045408` Successful.
 - **#97:** merged as `ee06389d14dd1bd4305e3a54517be7e3889896c4`; docs-only handoff and post-96 artifact proof; Verify `37784603937` Successful.
 - **#98:** merged as `8287abfee5f64d799764737021a9c47628528053`; configurable system prompt with source-specific payload; Build `37787993221` / Release `37787993134` Successful, provider/device proof outstanding.
+- **#99:** merged as `b5dfbfd187074a12775570c6b272ea1c5821f198`; docs-only system prompt proof/device APK artifact notes; Verify `37790262866` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
