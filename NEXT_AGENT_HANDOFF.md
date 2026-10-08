@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 09:29 +03:00
-**Следующий рабочий срез:** Merge PR #91, затем довести #92 до merge-gate
+**Last updated:** 2026-10-08 09:40 +03:00
+**Следующий рабочий срез:** Merge PR #92
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Failed background recovery paths now also emit one session-scoped `request_failed` event before clearing active response, with provider/requested-model metadata when available. Open PR #92 is stacked on snapshot branch `stack/base-91-e660` and adds OpenRouter server-side web tools + IJG NOTICE. Current PR #91 validation head: `18954d4a9530aa66856e92d4e9fc8fcb3e2451fe` (tree-identical `[ci]` commit). Push Build `37737194094` Successful; push Release `37737194084` Successful; PR `Verify handoff` `37737199761` Successful. PR-triggered Build/Release were Skipped and are intentionally not counted as green.
+- main code baseline: `67705cec629c67fe341d6fb4fbb3c029d5d901cb` (merge #91); PR #92 is now a standalone server-tools change on top of that main and no longer carries the stacked #91 snapshot. It adds OpenRouter server-side Web Search / Web Fetch, a defensive local-executor guard, mixed-tool regression coverage, and IJG NOTICE.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -129,21 +129,22 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Merge PR #91, затем довести #92 до merge-gate — **следующий**
-Цель: смержить #91 только после подтверждённых push Build + Release и финального Verify handoff; затем retarget #92 на фактический main, перепроверить его diff и выполнить тот же gate.
-Первый шаг: после финального docs-only handoff commit получить Successful Verify handoff на актуальном head #91 и только затем merge; после merge не переносить stacked assumptions из #92 — проверить его заново относительно main.
+### 1. Merge PR #92 — **следующий**
+Цель: закрыть server-side Web Search / Web Fetch и IJG notice только после подтверждённых push Build + Release и финального Verify handoff; Skipped/unknown не считать green.
+Первый шаг: получить Successful push Build + Release на последнем code-changing head #92, затем сделать финальный handoff docs-only update и получить Successful Verify handoff на финальном head перед merge.
 
 ### 2. Реальные прогоны провайдеров
-Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; зафиксировать длительность, usage, cache, server-tool поведение, обрыв/завершение и фактическую response model.
-Первый шаг: после появления возможности запустить APK пользователь делает три прогона: длинный OpenAI, длинный Claude/OpenRouter с server-side web search или fetch, затем длинный GitHub-диалог с Claude; агент записывает только фактические наблюдения.
+Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать только фактические наблюдения.
+Первый шаг: после получения APK пользователь делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude.
 
-### 3. UI/device smoke для PR #91–#92
+### 3. UI/device smoke
 Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
-Первый шаг: после получения APK переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат, открыть OpenRouter settings и отдельным запросом проверить web search/fetch.
+Первый шаг: переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат и отдельно проверить OpenRouter server-tool сценарий.
 
 ## Репозиторий / branches
 
-Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR. Ограничения коннектора: нет DELETE ref, нет `workflow_dispatch`, нельзя создавать/менять repository variables; можно читать runs/логи и перезапускать существующие runs (перезапуск Skipped-run job не включит). Чего коннектор не умеет — проси у пользователя конкретным шагом.
+Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR.
+PR #92 был stacked поверх старого snapshot #91; после merge #91 ветка была перепривязана к новому main и лишняя история #91 удалена из diff. Коннектор не умеет DELETE ref, `workflow_dispatch` и repository variables; можно читать runs/логи и перезапускать существующие runs.
 
 ## Контекстный режим для агента
 
@@ -189,15 +190,16 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#86:** merged; docs-only уточнение истории (закрытый #81 не был merged); `Verify handoff` Successful.
 - **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
 - **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
 - **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
+- **#91:** merged; session telemetry card + Drawer + formatter regressions; дополнительно восстановлен OpenRouter streamed `responseModel` capture; Build/Release/Verify handoff gate закрыт.
 
-**Текущие открытые PR:** #91 — telemetry + Drawer, code gate подтверждён; #92 — server-side web tools, stacked поверх snapshot #91 и требует повторной проверки после merge #91.
+**Текущий открытый PR:** #92 — server-side Web Search / Web Fetch.
 
 ## Product radar — идеи с реальной ценностью
+
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
