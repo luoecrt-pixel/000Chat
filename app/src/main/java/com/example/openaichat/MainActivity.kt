@@ -4867,6 +4867,16 @@ class MainActivity : ComponentActivity() {
         }catch(_:Exception){}
     }
 
+    private fun listComposerLocalFilePaths(chatId:String):List<String>{
+        if (chatId.isBlank()) return emptyList()
+        val raw = prefs.getString(composerPrefsKey(chatId), null) ?: return emptyList()
+        return try {
+            LocalAttachmentReferences.composerPaths(JSONObject(raw)).toList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     private fun deleteOwnedLocalFile(path:String){
         if(path.isBlank())return
         try{
