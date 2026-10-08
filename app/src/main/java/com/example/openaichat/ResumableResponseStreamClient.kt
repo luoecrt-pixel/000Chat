@@ -99,7 +99,13 @@ class ResumableResponseStreamClient(
             body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
                 val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
                 if (outcome.errorMessage != null) {
-                    throw IOException("Responses SSE server error: ${outcome.errorMessage}")
+                    // A semantic SSE error is a terminal failure, not a transient
+                    // disconnect to retry. Preserve the owned response identity.
+                    terminalEventType = "response.failed"
+                    terminalResponse = JSONObject()
+                        .put("id", responseId)
+                        .put("status", "failed")
+                        .put("error", JSONObject().put("message", outcome.errorMessage))
                 }
             }
         }

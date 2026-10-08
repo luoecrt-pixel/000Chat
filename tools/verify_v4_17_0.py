@@ -305,7 +305,15 @@ assert 'worker_sequence_gap' in (ROOT / 'app/src/main/java/com/example/openaicha
 assert 'systemWindowInsetLeft' not in main
 assert 'consumeSystemWindowInsets()' not in main
 assert 'pollingClient' in main
-assert 'SseEventParser' in main
+# Responses SSE framing moved into a shared foreground/recovery reader in STREAM-01.
+reader = (ROOT / 'app/src/main/java/com/example/openaichat/OpenAiSseStreamReader.kt').read_text()
+resumable = (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
+assert 'SseEventParser()' in reader
+assert 'OpenAiSseStreamReader.read(reader)' in main
+assert 'OpenAiSseStreamReader.read(reader)' in resumable
+assert 'if (consume(frame.data)) break' in reader
+assert 'OpenAiStreamEnd.DISCONNECTED' in reader
+assert 'terminalOutputText(completedResponse)' in main
 assert 'pollingClient.newCall(req)' in main
 assert 'ApiHttpException' in main or (ROOT / 'app/src/main/java/com/example/openaichat/ApiHttpException.kt').exists()
 assert 'sse_event_sequence_gap' in main
