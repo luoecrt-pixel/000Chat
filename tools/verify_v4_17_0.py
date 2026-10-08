@@ -73,7 +73,7 @@ assert 'generated_images' in db
 assert 'DB_VERSION = 18' in db
 assert 'if (oldVersion < 17)' in db
 assert 'if (oldVersion < 18)' in db
-assert 'ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT \\'unknown\\'' in db
+assert "ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'" in db
 assert 'ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT' in db
 assert 'MessageMetadataCodec.allKeys.forEach' in db
 assert 'MessageMetadataCodec.decodeInto' in db
