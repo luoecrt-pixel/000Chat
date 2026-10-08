@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
 import android.database.Cursor
 import android.provider.OpenableColumns
+import android.provider.MediaStore
 import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
@@ -219,6 +220,10 @@ class MainActivity : ComponentActivity() {
     private var lastUserText: String = ""
     private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
     private var pendingActivityResultCode: Int? = null
+    private var pendingCameraPath: String? = null
+    private var pendingCameraChatId: String? = null
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    var attachmentSheetDialog: Dialog? = null
 
     private val secure by lazy { SecureStore(this) }
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -227,6 +232,7 @@ class MainActivity : ComponentActivity() {
     val pickAny = 5100
     private val pickImage = 5101
     private val pickVoice = 5102
+    private val pickCamera = 5106
     private val pickVectorStoreFile = 5103
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
@@ -237,10 +243,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingActivityResultCode = savedInstanceState?.getInt("pending_result_code", -1)?.takeIf { it >= 0 }
+        pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
+        pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
-             if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
+             if (requestCode == pickCamera) {
+                 val capturedPath = pendingCameraPath
+                 val sourceChatId = pendingCameraChatId
+                 pendingCameraPath = null
+                 pendingCameraChatId = null
+                 val file = capturedPath?.let(::File)
+                 if (result.resultCode == RESULT_OK && file?.isFile == true && file.length() > 0L &&
+                     sourceChatId == currentChatId()) {
+                     val capturedUri = FileProvider.getUriForFile(
+                         this, BuildConfig.APPLICATION_ID + ".fileprovider", file
+                     )
+                     handleActivityResult(pickImage, RESULT_OK, Intent().setData(capturedUri))
+                 } else {
+                     file?.delete()
+                     if (result.resultCode == RESULT_OK) status.text = "Фото не получено или чат изменился"
+                 }
+             } else if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
          }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
@@ -252,6 +277,13 @@ class MainActivity : ComponentActivity() {
         restoreCurrentChat()
         executor.execute { cleanupOrphanOpenRouterAttachments() }
         diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        pendingActivityResultCode?.let { outState.putInt("pending_result_code", it) }
+        pendingCameraPath?.let { outState.putString("pending_camera_path", it) }
+        pendingCameraChatId?.let { outState.putString("pending_camera_chat_id", it) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onStart() {
@@ -290,6 +322,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        attachmentSheetDialog?.dismiss()
+        attachmentSheetDialog = null
         cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
