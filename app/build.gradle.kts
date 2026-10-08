@@ -75,5 +75,6 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.drawerlayout:drawerlayout:1.2.0")
     implementation("io.github.commons-app:ajpegtran:0.1.14")
 }

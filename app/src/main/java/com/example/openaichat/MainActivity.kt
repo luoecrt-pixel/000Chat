@@ -14,14 +14,17 @@ import android.os.Handler
 import android.os.Looper
 import android.text.method.LinkMovementMethod
 import androidx.core.content.FileProvider
+import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.drawerlayout.widget.DrawerLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.pdf.PdfRenderer
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -50,6 +53,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CancellationException
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
@@ -160,6 +164,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var effortBadge: TextView
     private lateinit var githubBadge: TextView
     private lateinit var modelBadge: TextView
+    private lateinit var drawerLayout: DrawerLayout
+    private lateinit var drawerList: LinearLayout
+    private lateinit var requestTelemetryCard: LinearLayout
+    private lateinit var requestTelemetrySummary: TextView
+    private lateinit var requestTelemetryHistory: LinearLayout
+    private var requestTelemetryExpanded = false
     private val localArtifactToolExecutor by lazy { LocalArtifactToolExecutor(this) }
 
     private var currentCall: Call? = null
@@ -399,6 +409,9 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(status)
 
+        requestTelemetryCard = buildRequestTelemetryCard()
+        root.addView(requestTelemetryCard)
+
         messageAdapter = ChatMessageAdapter(
             createCard = { createChatBubbleCard() },
             bindCard = { card, item -> bindChatBubbleCard(card, item) },
@@ -454,10 +467,11 @@ class MainActivity : ComponentActivity() {
 
         modelBadge = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.rgb(170,175,185))
-            setPadding(dp(8), dp(6), dp(4), dp(6))
+            setTextColor(Color.rgb(185,190,200))
+            setPadding(dp(9), dp(6), dp(6), dp(6))
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
+            background = rippleRounded(Color.rgb(31,32,38), 9)
             setOnClickListener { showModelPicker() }
         }
         row.addView(modelBadge)
@@ -526,7 +540,20 @@ class MainActivity : ComponentActivity() {
         }
         ViewCompat.requestApplyInsets(root)
 
-        setContentView(root)
+        drawerLayout = DrawerLayout(this).apply {
+            setBackgroundColor(Color.rgb(17,18,21))
+            setScrimColor(Color.argb(180, 0, 0, 0))
+        }
+        drawerLayout.addView(root, DrawerLayout.LayoutParams(-1, -1))
+        drawerLayout.addView(
+            buildChatDrawer(),
+            DrawerLayout.LayoutParams(dp(320), -1).apply {
+                gravity = GravityCompat.START
+            }
+        )
+        setContentView(drawerLayout)
+        renderRequestTelemetry()
+        refreshChatDrawer()
 
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -538,17 +565,228 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showChats() {
-        val all = loadAllChats()
-        val names = all.map { it.optString("title","Новый чат") }.toMutableList()
-        names.add("＋ Новый чат")
-        AlertDialog.Builder(this)
-            .setTitle("Чаты")
-            .setItems(names.toTypedArray()) { _, which ->
-                if (which == names.lastIndex) newChat()
-                else switchChat(all[which].optString("id"))
+        refreshChatDrawer()
+        drawerLayout.openDrawer(GravityCompat.START)
+    }
+
+    private fun buildChatDrawer(): LinearLayout {
+        val drawer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(24,25,30))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(4), 0, dp(10))
+        }
+        header.addView(TextView(this).apply {
+            text = "Чаты"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(button("×") { drawerLayout.closeDrawer(GravityCompat.START) })
+        drawer.addView(header)
+        drawer.addView(button("＋ Новый чат") {
+            newChat()
+            drawerLayout.closeDrawer(GravityCompat.START)
+        }.apply {
+            textSize = 14f
+            setTextColor(Color.rgb(190,215,255))
+            background = rippleRounded(Color.rgb(36,44,58), 10)
+            gravity = Gravity.LEFT or Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
+        drawerList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        drawer.addView(
+            ScrollView(this).apply {
+                isFillViewport = true
+                addView(drawerList, FrameLayout.LayoutParams(-1, -2))
+            },
+            LinearLayout.LayoutParams(-1, 0, 1f)
+        )
+        drawer.addView(button("⚙ Настройки") {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            showSettings()
+        }.apply {
+            textSize = 14f
+            setTextColor(Color.rgb(165,170,180))
+            background = rippleRounded(Color.rgb(31,32,38), 10)
+            gravity = Gravity.LEFT or Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        return drawer
+    }
+
+    private fun refreshChatDrawer() {
+        if (!::drawerList.isInitialized) return
+        drawerList.removeAllViews()
+        val currentId = currentChatId()
+        val chats = loadAllChats()
+        if (chats.isEmpty()) {
+            drawerList.addView(TextView(this).apply {
+                text = "Нет сохранённых чатов"
+                textSize = 13f
+                setTextColor(Color.rgb(135,140,150))
+                setPadding(dp(8), dp(14), dp(8), dp(14))
+            })
+            return
+        }
+        chats.forEach { chatItem ->
+            val id = chatItem.optString("id")
+            val row = TextView(this).apply {
+                text = chatItem.optString("title", "Новый чат")
+                textSize = 14.5f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), 0, dp(10), 0)
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                background = rippleRounded(
+                    if (id == currentId) Color.rgb(43,48,60) else Color.TRANSPARENT,
+                    10
+                )
+                setOnClickListener {
+                    switchChat(id)
+                    drawerLayout.closeDrawer(GravityCompat.START)
+                }
+                setOnLongClickListener {
+                    showChatActions(chatItem)
+                    true
+                }
+                contentDescription = "Чат: " + chatItem.optString("title", "Новый чат")
             }
-            .setNeutralButton("Управление") { _, _ -> manageChats(all) }
-            .show()
+            drawerList.addView(row, LinearLayout.LayoutParams(-1, dp(52)).apply {
+                bottomMargin = dp(3)
+            })
+        }
+    }
+
+    // Compact user-facing session telemetry card.
+    private fun buildRequestTelemetryCard(): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = rounded(Color.rgb(27,29,34), 11)
+        }
+        requestTelemetrySummary = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(170,175,185))
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            setTextIsSelectable(true)
+            setOnClickListener {
+                requestTelemetryExpanded = !requestTelemetryExpanded
+                renderRequestTelemetry()
+            }
+            setOnLongClickListener {
+                copyText("Диагностика сессии", text.toString())
+                true
+            }
+        }
+        card.addView(requestTelemetrySummary)
+        requestTelemetryHistory = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        card.addView(requestTelemetryHistory)
+        return card.apply {
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+                leftMargin = dp(10)
+                rightMargin = dp(10)
+                bottomMargin = dp(6)
+            }
+        }
+    }
+
+    private fun renderRequestTelemetry() {
+        if (!::requestTelemetrySummary.isInitialized) return
+        val events = try { chatDb.listRequestEvents(currentChatId(), 50) } catch (_: Exception) { emptyList() }
+        requestTelemetryHistory.removeAllViews()
+        if (events.isEmpty()) {
+            requestTelemetrySummary.text = "● Нет запросов для этой сессии"
+            requestTelemetrySummary.setTextColor(Color.rgb(130,135,145))
+            requestTelemetryHistory.visibility = View.GONE
+            return
+        }
+        val latest = events.first()
+        requestTelemetrySummary.text = RequestEventFormatter.summary(latest)
+        requestTelemetrySummary.setTextColor(requestEventColor(RequestEventFormatter.match(latest)))
+        requestTelemetrySummary.background = rippleRounded(Color.TRANSPARENT, 9)
+        requestTelemetryHistory.visibility = if (requestTelemetryExpanded) View.VISIBLE else View.GONE
+        if (!requestTelemetryExpanded) return
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(5))
+        }
+        actions.addView(TextView(this).apply {
+            text = "Последние " + events.size + " событий"
+            textSize = 11.5f
+            setTextColor(Color.rgb(145,150,160))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        actions.addView(TextView(this).apply {
+            text = "Копировать всё"
+            textSize = 11.5f
+            setTextColor(Color.rgb(150,195,245))
+            setPadding(dp(8), dp(4), dp(4), dp(4))
+            setOnClickListener { copyText("История запросов", events.joinToString("\n\n") { RequestEventFormatter.details(it) }) }
+        })
+        requestTelemetryHistory.addView(actions)
+        events.forEach { event ->
+            requestTelemetryHistory.addView(buildRequestEventView(event), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
+        }
+    }
+
+    private fun buildRequestEventView(event: JSONObject): View {
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            background = rounded(Color.rgb(33,35,41), 9)
+        }
+        var details: TextView? = null
+        val summary = TextView(this).apply {
+            text = RequestEventFormatter.summary(event)
+            textSize = 11.5f
+            setTextColor(requestEventColor(RequestEventFormatter.match(event)))
+            setTextIsSelectable(true)
+            setOnClickListener { details?.visibility = if (details?.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
+        }
+        wrapper.addView(summary)
+        details = TextView(this).apply {
+            text = RequestEventFormatter.details(event)
+            textSize = 11f
+            setTextColor(Color.rgb(190,194,202))
+            setPadding(0, dp(6), 0, 0)
+            setTextIsSelectable(true)
+            setTypeface(Typeface.MONOSPACE)
+            visibility = View.GONE
+        }
+        wrapper.addView(details)
+        wrapper.addView(TextView(this).apply {
+            text = "Копировать"
+            textSize = 11f
+            setTextColor(Color.rgb(150,195,245))
+            setPadding(dp(2), dp(5), dp(2), 0)
+            setOnClickListener { copyText("Событие запроса", RequestEventFormatter.details(event)) }
+        })
+        wrapper.setOnLongClickListener {
+            copyText("Событие запроса", RequestEventFormatter.details(event))
+            true
+        }
+        return wrapper
+    }
+
+    private fun requestEventColor(match: ModelCatalog.Match): Int = when (match) {
+        ModelCatalog.Match.EXACT -> Color.rgb(126,205,150)
+        ModelCatalog.Match.MISMATCH -> Color.rgb(235,108,108)
+        ModelCatalog.Match.UNKNOWN -> Color.rgb(239,195,102)
+    }
+
+    private fun copyText(label: String, value: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+        status.text = "Скопировано"
     }
 
     private fun manageChats(all: List<JSONObject>) {
@@ -587,6 +825,7 @@ class MainActivity : ComponentActivity() {
                 found.put("title", edit.text.toString().trim().ifBlank { "Чат" })
                 chatDb.renameChat(id, found.optString("title"))
                 if (currentChatId()==id) title.text = found.optString("title")
+                refreshChatDrawer()
             }.show()
     }
 
@@ -625,7 +864,10 @@ class MainActivity : ComponentActivity() {
             title.text="Новый чат"
             ensureChatEntry(newId,"Новый чат")
             status.text="Новый чат"
+            requestTelemetryExpanded = false
         }
+        renderRequestTelemetry()
+        refreshChatDrawer()
     }
 
     private fun normalizedProviderId(): String =
@@ -1284,6 +1526,7 @@ class MainActivity : ComponentActivity() {
                             " · "+fmtTokens(inputTokens)+" in"+(if (cachedTokens > 0) " · cache "+fmtTokens(cachedTokens) else "")+" · "+fmtTokens(outputTokens)+" out"+costText
                         }.orEmpty()
                         status.text = "Готово • OpenRouter$usageSuffix"
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId = null
                         diagnostics.log("openrouter_completed", mapOf(
@@ -1308,10 +1551,24 @@ class MainActivity : ComponentActivity() {
                 } else {
                     "Ошибка OpenRouter: $errorMessage"
                 }
+                chatDb.recordRequestEvent(
+                    chatId = chatId,
+                    eventType = "request_failed",
+                    requestId = requestId,
+                    provider = "openrouter",
+                    requestedModel = model,
+                    responseModel = null,
+                    modelMatch = ModelCatalog.Match.UNKNOWN,
+                    status = if (e is CancellationException) "cancelled" else "failed",
+                    latencyMs = SystemClock.elapsedRealtime() - startedAt,
+                    toolSummary = "",
+                    error = errorMessage
+                )
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         messageAdapter.updateText(assistantItemId, displayedError)
                         status.text = "Ошибка OpenRouter"
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId = null
                     }
@@ -1452,6 +1709,9 @@ class MainActivity : ComponentActivity() {
         toolStates.clear(); renderToolActivity()
         setBusy(false)
         status.text="Новый чат"
+        requestTelemetryExpanded = false
+        renderRequestTelemetry()
+        refreshChatDrawer()
     }
 
     private fun switchChat(id:String) {
@@ -1464,6 +1724,10 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putString("current_chat",id).apply()
         restoreCurrentChat()
         resumeBackgroundResponses()
+        requestTelemetryExpanded = false
+        renderRequestTelemetry()
+        refreshChatDrawer()
+        drawerLayout.closeDrawers()
     }
 
     private fun classifyTask(text:String, hasAttachments:Boolean):String{
@@ -1770,6 +2034,8 @@ class MainActivity : ComponentActivity() {
         val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
 
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
+            put("provider", provider)
+            put("requested_model", model)
             val fileIds=JSONArray(); requestFileIds.forEach{fileIds.put(it)}
             val fileNames=JSONArray(); requestFileNames.forEach{fileNames.put(it)}
             val fileSizes=JSONArray(); requestFileSizes.forEach{fileSizes.put(it)}
@@ -2209,6 +2475,7 @@ class MainActivity : ComponentActivity() {
                             "$donePrefix · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out$reasoningPart · ≈\$%.4f".format(cost)
                         } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
+                        renderRequestTelemetry()
                         setBusy(false)
                         activeAssistantItemId=null
                         currentCall=null
@@ -2225,6 +2492,24 @@ class MainActivity : ComponentActivity() {
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
+                }
+                if(!canContinueInBackground || userStopped){
+                    chatDb.recordRequestEvent(
+                        chatId = requestChatId,
+                        eventType = "request_failed",
+                        requestId = requestId ?: localRequestId,
+                        provider = "openai",
+                        requestedModel = model,
+                        responseModel = null,
+                        modelMatch = ModelCatalog.Match.UNKNOWN,
+                        status = when {
+                            userStopped -> "cancelled"
+                            cancelled -> "disconnected"
+                            else -> "failed"
+                        },
+                        latencyMs = latency,
+                        error = (e.message ?: e.toString()).take(1200)
+                    )
                 }
                 diagnostics.log(
                     when {
@@ -2273,9 +2558,13 @@ class MainActivity : ComponentActivity() {
                     return@execute
                 }
                 runOnUiThread{
-                    if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
+                    if(!isRequestCurrent(requestChatId,requestGeneration)) {
+                        renderRequestTelemetry()
+                        return@runOnUiThread
+                    }
                     setBusy(false)
                     activeAssistantItemId=null
+                    renderRequestTelemetry()
                     currentCall=null
                     if(!cancelled && completionState=="incomplete" && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
                         val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status","incomplete")
@@ -2730,6 +3019,35 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
+        val active = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_:Exception) { null }
+        val matchingRequest = requestId?.takeIf { it.isNotBlank() && it != "null" }
+        if (active != null && matchingRequest != null && active.optString("request_id") == matchingRequest) {
+            val chatObj = try { chatDb.getChat(chatId) } catch (_:Exception) { null }
+            val messages = chatObj?.optJSONArray("messages")
+            val requestMeta = messages?.let { arr ->
+                (0 until arr.length())
+                    .mapNotNull { arr.optJSONObject(it) }
+                    .firstOrNull { it.optString("request_id") == matchingRequest }
+            }
+            val provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" }
+            val requestedModel = requestMeta?.optString("requested_model").orEmpty()
+                .ifBlank { requestMeta?.optString("model").orEmpty() }
+                .takeIf { it.isNotBlank() }
+            val startedAt = active.optLong("started_at", System.currentTimeMillis())
+            val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            chatDb.recordRequestEvent(
+                chatId = chatId,
+                eventType = "request_failed",
+                requestId = matchingRequest,
+                provider = provider,
+                requestedModel = requestedModel,
+                responseModel = null,
+                modelMatch = ModelCatalog.Match.UNKNOWN,
+                status = "failed",
+                latencyMs = latency,
+                error = message.take(1200)
+            )
+        }
         activeResponsePersistence.clearActiveResponse(chatId,expectedRequestId=requestId)
         if(currentChatId()!=chatId) return
         runOnUiThread{
@@ -2791,6 +3109,10 @@ class MainActivity : ComponentActivity() {
         val reasoningTok=usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
         val success=state=="completed"
         val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+        val requestMeta = msgs.firstOrNull { it.optString("request_id") == requestId }
+        val requestedModel = requestMeta?.optString("requested_model").orEmpty().ifBlank {
+            requestMeta?.optString("model").orEmpty()
+        }.ifBlank { null }
         val committed = chatDb.upsertCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
@@ -2813,6 +3135,24 @@ class MainActivity : ComponentActivity() {
             active.optInt("prompt_chars",0),active.optInt("attachments",0),
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
+        )
+        chatDb.recordRequestEvent(
+            chatId = chatId,
+            eventType = "request_completed",
+            requestId = requestId,
+            provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" },
+            requestedModel = requestedModel,
+            responseModel = model.model,
+            modelMatch = ModelCatalog.match(requestedModel, model.model),
+            status = state,
+            inputTokens = inTok,
+            cachedTokens = cachedTok,
+            cacheWriteTokens = cacheWriteTok,
+            outputTokens = outTok,
+            reasoningTokens = reasoningTok,
+            estimatedCostUsd = cost,
+            latencyMs = latency,
+            toolSummary = model.tools.distinct().joinToString(",")
         )
         activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
@@ -5769,9 +6109,15 @@ class MainActivity : ComponentActivity() {
         text=t;textSize=16f;minWidth=0;minimumWidth=0
         setPadding(dp(10),dp(6),dp(10),dp(6))
         setTextColor(Color.rgb(210,214,222))
-        background=rounded(Color.rgb(34,36,42))
+        background=rippleRounded(Color.rgb(34,36,42),10)
         setOnClickListener{a()}
     }
+    private fun rippleRounded(fill:Int, radiusDp:Int=10): RippleDrawable =
+        RippleDrawable(
+            ColorStateList.valueOf(Color.argb(55,255,255,255)),
+            rounded(fill, radiusDp),
+            null
+        )
     private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
     private fun rounded(fill:Int, radiusDp:Int=10): GradientDrawable = GradientDrawable().apply{
         cornerRadius = dp(radiusDp).toFloat()

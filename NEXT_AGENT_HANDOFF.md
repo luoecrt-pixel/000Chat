@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-07 19:12 +03:00
-**Следующий рабочий срез:** UI: persistent session telemetry + Drawer
+**Last updated:** 2026-10-08 09:29 +03:00
+**Следующий рабочий срез:** Merge PR #91, затем довести #92 до merge-gate
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -51,13 +51,13 @@
 
 **Архитектура:** `MainActivity.kt` ~4.5k строк. Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
 
-**OpenRouter/Claude (#47–#57, #76, #78, #80, #89, #90):** отдельный Chat Completions client с синхронным tool loop; с #89 transport-level SSE streaming для одного round; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); #90 добавляет отдельный каталог source/model и сохраняет requested/response model telemetry + session-scoped request events; репозиторий и ветки GitHub добавляются в system prompt (#50); `tool_trace` сохраняется в историю (#54); `reasoning.effort` нормализуется на границе (#53); запись файла в GitHub принимает обычный UTF-8 `content`, base64 оставлен для совместимости (#52); composer не уходит под клавиатуру (#51). GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно).
+**OpenRouter/Claude (#47–#57, #76, #78, #80, #89, #90, #91):** отдельный Chat Completions client с синхронным tool loop; с #89 transport-level SSE streaming для одного round; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); #90 добавляет отдельный каталог source/model и сохраняет requested/response model telemetry + session-scoped request events; репозиторий и ветки GitHub добавляются в system prompt (#50); `tool_trace` сохраняется в историю (#54); `reasoning.effort` нормализуется на границе (#53); запись файла в GitHub принимает обычный UTF-8 `content`, base64 оставлен для совместимости (#52); composer не уходит под клавиатуру (#51). GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: system как text block + top-level `cache_control`, TTL 1 час (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно). #91 добавляет user-facing session telemetry и Drawer поверх уже сохранённых request_events; UI runtime на реальном устройстве отдельно не подтверждён.
 
 **Вложения (#57, #83):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8). Картинки уходят без lossy-сжатия и downscale: EXIF-поворот 3/6/8 — только strict lossless (`ajpegtran:0.1.14`) при идеальной MCU-геометрии, иначе исходные байты; старые manifests с PNG-wire обновляются при чтении. Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model.
 
 ## Фактический baseline
 
-- main code baseline: `acaadea00ac89187c1365673a13d4a9e438a82da` (PR #89 runtime merge); текущий PR #90 содержит provider/model telemetry и ещё не merged на момент записи этого handoff
+- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Failed background recovery paths now also emit one session-scoped `request_failed` event before clearing active response, with provider/requested-model metadata when available. Open PR #92 is stacked on snapshot branch `stack/base-91-e660` and adds OpenRouter server-side web tools + IJG NOTICE. Current PR #91 validation head: `18954d4a9530aa66856e92d4e9fc8fcb3e2451fe` (tree-identical `[ci]` commit). Push Build `37737194094` Successful; push Release `37737194084` Successful; PR `Verify handoff` `37737199761` Successful. PR-triggered Build/Release were Skipped and are intentionally not counted as green.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -100,6 +100,7 @@
 - [pure] **#84:** общий `BackgroundRecoveryPolicy.MAX_RECOVERY_MS = 5h`; boundary test подтверждает: 5h−1ms ещё не expired, ровно 5h уже expired. Это safety boundary одной response/recovery cycle, не session-wide cap.
 - [pure] **#89:** OpenRouter SSE transport на JVM накапливает fragmented text, reasoning_details и tool-call arguments по index; local tool loop стартует только после завершения SSE round; partial text сохраняется при mid-stream error; существующие >24-round и ownership-loss regressions перенесены на streamed transport.
 - [robolectric] **#90:** request_events сохраняются в SQLite, изолированы по chat_id, переживают reopen и удаляются вместе с chat; runtime truth фактической модели у реального провайдера этими тестами не доказана.
+- [pure] **#91:** regression test на OpenRouter SSE подтверждает накопление `responseModel` из поля `model` stream-чанка; UI telemetry/Drawer runtime на реальном устройстве этим PR не подтверждены.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -128,17 +129,17 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. UI: persistent session telemetry + Drawer — **следующий**
-Цель: вместо сырого общего `AstraDiagnostics` дать пользователю компактную, понятную карточку последнего запроса и раскрываемую историю последних 30–50 событий текущего chatId; история должна переживать перезапуск и не смешиваться между сессиями. Состояние модели показывать без стрелки: `GPT-6.1 Sol · 18.4k in · 4.3k out …`. Цвет: зелёный = exact, красный = доказанный mismatch, жёлтый = unknown/фактическую модель API проверить не удалось. Текст событий selectable и копируемый. В том же PR заменить AlertDialog-список чатов на левый Drawer; удержание по чату — переименовать/удалить; добавить аккуратный ripple/touch feedback без Compose migration.
-Первый шаг: сделать одну immutable presentation-модель события из `request_events` и компактную status-card для текущей сессии; затем подключить раскрытие последних 50 событий и только после этого переносить меню сессий в Drawer.
+### 1. Merge PR #91, затем довести #92 до merge-gate — **следующий**
+Цель: смержить #91 только после подтверждённых push Build + Release и финального Verify handoff; затем retarget #92 на фактический main, перепроверить его diff и выполнить тот же gate.
+Первый шаг: после финального docs-only handoff commit получить Successful Verify handoff на актуальном head #91 и только затем merge; после merge не переносить stacked assumptions из #92 — проверить его заново относительно main.
 
-### 2. OpenRouter server-side tools — **после UI**
-Цель: проверить реальную ценность server-side `openrouter:web_search` и `openrouter:web_fetch` без нового client-side tool loop; image search/shell и остальные tools пока не обещать.
-Первый шаг: проверить текущий Chat Completions path для Claude, доступные схемы tool declaration/response и минимальный пользовательский сценарий, который заметно лучше текущих local tools.
+### 2. Реальные прогоны провайдеров
+Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; зафиксировать длительность, usage, cache, server-tool поведение, обрыв/завершение и фактическую response model.
+Первый шаг: после появления возможности запустить APK пользователь делает три прогона: длинный OpenAI, длинный Claude/OpenRouter с server-side web search или fetch, затем длинный GitHub-диалог с Claude; агент записывает только фактические наблюдения.
 
-### 3. Реальные прогоны провайдеров — ждут пользователя
-Агент не может выполнить: нет ключей. Пользователь запускает в приложении только после готовности UI/telemetry: (а) длинный запрос OpenAI; (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — затем фиксируем длительность, usage, cache и обрыв/завершение.
-Первый шаг: когда пользователь готов — попросить эти три прогона и записать результат в подтверждённые/неподтверждённые контракты.
+### 3. UI/device smoke для PR #91–#92
+Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
+Первый шаг: после получения APK переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат, открыть OpenRouter settings и отдельным запросом проверить web search/fetch.
 
 ## Репозиторий / branches
 
@@ -188,11 +189,13 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#85:** merged; docs-only handoff update; `Verify handoff` Successful.
 - **#86:** merged; docs-only уточнение истории (закрытый #81 не был merged); `Verify handoff` Successful.
 - **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
 - **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
+- **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
+
+**Текущие открытые PR:** #91 — telemetry + Drawer, code gate подтверждён; #92 — server-side web tools, stacked поверх snapshot #91 и требует повторной проверки после merge #91.
 
 ## Product radar — идеи с реальной ценностью
 
