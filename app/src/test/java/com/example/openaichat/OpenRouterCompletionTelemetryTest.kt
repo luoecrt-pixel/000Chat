@@ -70,5 +70,6 @@ class OpenRouterCompletionTelemetryTest {
         val missing = OpenRouterUsageSnapshot.from(JSONObject().put("prompt_tokens", 12))
         assertEquals(0.0, confirmed.reportedCostUsd!!, 0.0)
         assertNull(missing.reportedCostUsd)
+        assertNull(OpenRouterUsageSnapshot.from(JSONObject().put("cost", -1)).reportedCostUsd)
     }
 }
