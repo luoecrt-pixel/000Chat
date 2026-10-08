@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-09 02:34 +03:00
-**Следующий рабочий срез:** BILL-03 — OpenAI cancellation response parsing / bounded retrieve; BILL-02 settings/preflight hardening remains separate.
+**Следующий рабочий срез:** Достоверные расходы и завершение запросов — BILL-03 OpenAI cancel-body / bounded retrieve. Оставшееся BILL-02 settings/preflight hardening — отдельное задание.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
