@@ -2,8 +2,6 @@ package com.example.openaichat
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenRouterCompletionTelemetryTest {
@@ -49,7 +47,7 @@ class OpenRouterCompletionTelemetryTest {
     fun emptyUsageStillRecordsBothEventsAndInvalidCostIsNeverPersisted() {
         val calls = mutableListOf<String>()
         OpenRouterCompletionTelemetry.record(
-            usage = JSONObject().put("cost", Double.NaN).put("prompt_tokens", -99),
+            usage = JSONObject().put("cost", "NaN").put("prompt_tokens", -99),
             recordMetric = {
                 calls += "metric"
                 assertEquals(0.0, it.costUsd, 0.0)
