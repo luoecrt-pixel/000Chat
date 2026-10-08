@@ -65,13 +65,13 @@ class ResumableResponseStreamClient(
         var terminalResponse: JSONObject? = null
         var terminalEventType: String? = null
         var requestId: String? = null
-        fun consume(event: JSONObject) {
+        fun consume(event: JSONObject): Boolean {
             requestId = event.optString("request_id").takeIf { it.isNotBlank() }
                 ?: requestId
 
             val sequence = event.optLong("sequence_number", -1L)
             if (sequence >= 0L) {
-                if (sequenceCursor.observe(sequence) == ResponseStreamSequenceObservation.DUPLICATE) return
+                if (sequenceCursor.observe(sequence) == ResponseStreamSequenceObservation.DUPLICATE) return false
             }
 
             val type = event.optString("type")
@@ -86,6 +86,7 @@ class ResumableResponseStreamClient(
             }
 
             onEvent(event)
+            return true
         }
 
         call.execute().use { response ->

@@ -21,6 +21,7 @@ class OpenAiSseStreamReaderTest {
         var state = ResponseEventState()
         val result = OpenAiSseStreamReader.read(BufferedReader(StringReader(source))) {
             state = ResponseEventReducer.reduce(state, it).state
+            true
         }
         return result to state
     }
@@ -93,7 +94,7 @@ class OpenAiSseStreamReaderTest {
                 return lines[reads++]
             }
         }
-        val result = OpenAiSseStreamReader.read(reader) {}
+        val result = OpenAiSseStreamReader.read(reader) { true }
         assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
         assertEquals(2, reader.reads)
     }
@@ -122,7 +123,7 @@ class OpenAiSseStreamReaderTest {
                 response.use {
                     val result = OpenAiSseStreamReader.read(
                         it.body!!.byteStream().bufferedReader(Charsets.UTF_8)
-                    ) {}
+                    ) { true }
                     assertEquals("case $index", OpenAiStreamEnd.DISCONNECTED, result.end)
                 }
             }
@@ -130,6 +131,28 @@ class OpenAiSseStreamReaderTest {
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test fun ignoredDuplicateTerminalDoesNotEndTheStream() {
+        val cursor = ResponseStreamSequenceCursor()
+        val accepted = mutableListOf<String>()
+        val result = OpenAiSseStreamReader.read(BufferedReader(StringReader(frames(
+            """{"type":"response.created","sequence_number":1,"response":{"id":"resp"}}""",
+            """{"type":"response.completed","sequence_number":1,"response":{"id":"wrong"}}""",
+            """{"type":"response.completed","sequence_number":2,"response":{"id":"resp"}}"""
+        )))) { event ->
+            val sequence = event.optLong("sequence_number", -1)
+            val observed = cursor.observe(sequence)
+            if (observed == ResponseStreamSequenceObservation.DUPLICATE) {
+                false
+            } else {
+                accepted += event.optString("type")
+                true
+            }
+        }
+        assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
+        assertEquals(listOf("response.created", "response.completed"), accepted)
+        assertEquals(2L, cursor.lastSequenceNumber)
     }
 
     @Test fun repeatedTerminalAndTrailingEventsAreNotConsumed() {
@@ -142,7 +165,7 @@ class OpenAiSseStreamReaderTest {
         OpenAiSseStreamReader.read(BufferedReader(StringReader(frames(
             """{"type":"response.completed","response":{"id":"first"}}""",
             """{"type":"response.failed","response":{"id":"second"}}"""
-        )))) { callbacks++ }
+        )))) { callbacks++; true }
         assertEquals(1, callbacks)
     }
 }

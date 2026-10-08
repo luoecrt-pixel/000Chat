@@ -2315,7 +2315,7 @@ class MainActivity : ComponentActivity() {
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
                     val sequenceCursor = ResponseStreamSequenceCursor()
 
-                    fun handleSseEvent(ev:JSONObject) {
+                    fun handleSseEvent(ev:JSONObject): Boolean {
                         try {
                             val sequenceNumber=ev.optLong("sequence_number",-1L)
                             if(sequenceNumber>=0L){
@@ -2327,7 +2327,7 @@ class MainActivity : ComponentActivity() {
                                             "sequence_number" to sequenceNumber,
                                             "last_sequence_number" to sequenceCursor.lastSequenceNumber
                                         ))
-                                        return
+                                        return false
                                     }
                                 }
                             }
@@ -2433,6 +2433,7 @@ class MainActivity : ComponentActivity() {
                             diagnostics.log("sse_event_processing_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
                             throw parseError
                         }
+                        return true
                     }
 
                     val streamEnd = OpenAiSseStreamReader.read(reader) { ev -> handleSseEvent(ev) }

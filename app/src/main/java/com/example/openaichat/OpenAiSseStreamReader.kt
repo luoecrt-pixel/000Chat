@@ -24,7 +24,7 @@ data class OpenAiSseReadResult(
  * Callers own response state, event sequencing and UI/persistence ownership.
  */
 object OpenAiSseStreamReader {
-    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Unit): OpenAiSseReadResult {
+    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult {
         val parser = SseEventParser()
         var terminal: OpenAiStreamEnd? = null
         var semanticError: String? = null
@@ -38,7 +38,9 @@ object OpenAiSseStreamReader {
             }
             val type = event.optString("type")
             if (type.isBlank()) throw IOException("Responses SSE event has no type")
-            onEvent(event)
+            // Duplicated/out-of-order frames rejected by the sequence owner must
+            // not supply a terminal event or close the transport prematurely.
+            if (!onEvent(event)) return false
             terminal = when (type) {
                 "response.completed" -> OpenAiStreamEnd.COMPLETED
                 "response.incomplete" -> OpenAiStreamEnd.INCOMPLETE
