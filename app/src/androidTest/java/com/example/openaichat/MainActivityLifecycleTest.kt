@@ -61,8 +61,7 @@ class MainActivityLifecycleTest {
             val close = byDescription(sheetRoot, "Закрыть меню вложений")
                 ?: throw AssertionError("Missing sheet close action")
             close.performClick()
-            assertTrue("Sheet must dismiss without launching external activity",
-                activity.attachmentSheetDialog == null)
+            assertFalse("Sheet must dismiss without launching external activity", sheet.isShowing)
         }
         scenario.close()
     }
