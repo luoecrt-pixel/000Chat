@@ -101,6 +101,173 @@ class OpenRouterChatClientTest {
     }
 
     @Test
+    fun serverToolDefinitionsAreForwardedWithoutLocalExecution() {
+        val requestBody = AtomicReference<String?>(null)
+        val localExecutions = AtomicInteger(0)
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                requestBody.set(chain.request().body?.let { body ->
+                    okio.Buffer().also { buffer -> body.writeTo(buffer) }.readUtf8()
+                })
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"id":"gen-server-tool","model":"test-model","choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":1}}""",
+                        "[DONE]"
+                    )
+                )
+            }
+            .build()
+
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            client.complete(
+                apiKey = "test",
+                model = "test-model",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "search the web")),
+                tools = JSONArray()
+                    .put(JSONObject().put("type", "openrouter:web_search"))
+                    .put(JSONObject().put("type", "openrouter:web_fetch")),
+                maxTokens = 128,
+                reasoningEffort = null,
+                verbosity = null,
+                parallelToolCalls = false,
+                executeTool = { _, _ ->
+                    localExecutions.incrementAndGet()
+                    error("server tools must not reach the local tool executor")
+                }
+            )
+
+            val body = JSONObject(requestBody.get() ?: error("request body missing"))
+            val tools = body.getJSONArray("tools")
+            assertEquals(2, tools.length())
+            assertEquals("openrouter:web_search", tools.getJSONObject(0).getString("type"))
+            assertEquals("openrouter:web_fetch", tools.getJSONObject(1).getString("type"))
+            assertEquals("auto", body.getString("tool_choice"))
+            assertEquals(0, localExecutions.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun serverToolCallCannotFallThroughToLocalExecutor() {
+        val localExecutions = AtomicInteger(0)
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-server","type":"function","function":{"name":"openrouter:web_search","arguments":"{\"query\":\"test\"}"}}]},"finish_reason":"tool_calls"}]}""",
+                        """{"choices":[],"usage":{"total_tokens":1}}""",
+                        "[DONE]"
+                    )
+                )
+            }
+            .build()
+
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val failure = try {
+                client.complete(
+                    apiKey = "test",
+                    model = "test-model",
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "search")),
+                    tools = JSONArray().put(JSONObject().put("type", "openrouter:web_search")),
+                    maxTokens = 128,
+                    reasoningEffort = null,
+                    verbosity = null,
+                    parallelToolCalls = false,
+                    executeTool = { _, _ ->
+                        localExecutions.incrementAndGet()
+                        error("server tool must never reach local executor")
+                    }
+                )
+                null
+            } catch (e: OpenRouterCompletionException) {
+                e
+            }
+
+            assertNotNull(failure)
+            assertTrue(failure?.message?.contains("Unexpected OpenRouter server-side tool call") == true)
+            assertEquals(0, localExecutions.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun serverAndLocalToolsCanShareOneRequest() {
+        val requestCount = AtomicInteger(0)
+        val localExecutions = AtomicInteger(0)
+        val requestBody = AtomicReference<String?>(null)
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val requestNumber = requestCount.incrementAndGet()
+                if (requestNumber == 1) {
+                    requestBody.set(chain.request().body?.let { body ->
+                        okio.Buffer().also { buffer -> body.writeTo(buffer) }.readUtf8()
+                    })
+                    sseResponse(
+                        chain,
+                        sse(
+                            """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"local-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+                            """{"choices":[],"usage":{"total_tokens":1}}""",
+                            "[DONE]"
+                        )
+                    )
+                } else {
+                    sseResponse(
+                        chain,
+                        sse(
+                            """{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}""",
+                            """{"choices":[],"usage":{"total_tokens":1}}""",
+                            "[DONE]"
+                        )
+                    )
+                }
+            }
+            .build()
+
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val result = client.complete(
+                apiKey = "test",
+                model = "test-model",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "use tools")),
+                tools = JSONArray()
+                    .put(JSONObject().put("type", "openrouter:web_search"))
+                    .put(
+                        JSONObject()
+                            .put("type", "function")
+                            .put("function", JSONObject().put("name", "test_tool").put("parameters", JSONObject()))
+                    ),
+                maxTokens = 128,
+                reasoningEffort = null,
+                verbosity = null,
+                parallelToolCalls = false,
+                executeTool = { name, _ ->
+                    assertEquals("test_tool", name)
+                    localExecutions.incrementAndGet()
+                    "local-result"
+                }
+            )
+
+            val body = JSONObject(requestBody.get() ?: error("request body missing"))
+            val tools = body.getJSONArray("tools")
+            assertEquals(2, tools.length())
+            assertEquals("openrouter:web_search", tools.getJSONObject(0).getString("type"))
+            assertEquals("function", tools.getJSONObject(1).getString("type"))
+            assertEquals("done", result.text)
+            assertEquals(2, requestCount.get())
+            assertEquals(1, localExecutions.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun streamingTextAccumulatesMultipleSseDeltas() {
         val transport = OkHttpClient.Builder()
             .addInterceptor { chain ->
