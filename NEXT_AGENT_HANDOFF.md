@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 09:40 +03:00
+**Last updated:** 2026-10-08 10:05 +03:00
 **Следующий рабочий срез:** Merge PR #92
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `67705cec629c67fe341d6fb4fbb3c029d5d901cb` (merge #91); PR #92 is now a standalone server-tools change on top of that main and no longer carries the stacked #91 snapshot. It adds OpenRouter server-side Web Search / Web Fetch, a defensive local-executor guard, mixed-tool regression coverage, and IJG NOTICE.
+- main code baseline: `67705cec629c67fe341d6fb4fbb3c029d5d901cb` (merge #91); PR #92 is a standalone server-tools change on top of that main. Code-validation head: `47cbf872ac91c6937fdb175aff7c4d58666da9f3` (tree `56d1caabb16447f0dd066450bbbb4272d7b967d7`). Push Build `37739052818` Successful; push Release `37739052909` Successful; final code head still needs a docs-only `Verify handoff` before merge.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -131,7 +131,7 @@
 
 ### 1. Merge PR #92 — **следующий**
 Цель: закрыть server-side Web Search / Web Fetch и IJG notice только после подтверждённых push Build + Release и финального Verify handoff; Skipped/unknown не считать green.
-Первый шаг: получить Successful push Build + Release на последнем code-changing head #92, затем сделать финальный handoff docs-only update и получить Successful Verify handoff на финальном head перед merge.
+Первый шаг: code-gate уже закрыт на `47cbf872ac91c6937fdb175aff7c4d58666da9f3`; теперь после этого docs-only update получить Successful Verify handoff на финальном head и только затем merge.
 
 ### 2. Реальные прогоны провайдеров
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать только фактические наблюдения.
