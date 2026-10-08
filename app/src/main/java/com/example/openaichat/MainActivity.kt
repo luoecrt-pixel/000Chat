@@ -1525,6 +1525,13 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     recordEvent = { totals ->
+                        chatDb.recordRequestAccounting(
+                            chatId = chatId,
+                            localRequestId = requestId,
+                            status = "completed",
+                            usage = result.usage,
+                            reportedCostUsd = totals.reportedCostUsd
+                        )
                         chatDb.recordRequestEvent(
                             chatId = chatId,
                             eventType = "request_completed",
@@ -1617,6 +1624,11 @@ class MainActivity : ComponentActivity() {
                 } else {
                     "Ошибка OpenRouter: $errorMessage"
                 }
+                chatDb.recordRequestAccounting(
+                    chatId = chatId, localRequestId = requestId,
+                    status = if (e is CancellationException) "cancelled" else "failed",
+                    error = errorMessage
+                )
                 chatDb.recordRequestEvent(
                     chatId = chatId,
                     eventType = "request_failed",
@@ -1866,6 +1878,7 @@ class MainActivity : ComponentActivity() {
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
+        activeRequestId?.let { chatDb.markRequestAccountingStopped(chatId, it) }
         activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
         if(responseId!=null){
@@ -2139,6 +2152,11 @@ class MainActivity : ComponentActivity() {
             promptChars = text.length,
             attachments = if (provider == "openrouter") requestOpenRouterAttachments.size else requestFileIds.size + if(requestImageFileId!=null) 1 else 0,
             backgroundEnabled = backgroundEnabled
+        )
+        chatDb.startRequestAccounting(
+            chatId = requestChatId, localRequestId = localRequestId,
+            provider = provider, requestedModel = model,
+            credentialSource = if (provider == "openrouter") "openrouter_api_key" else "openai_api_key"
         )
         setBusy(true)
         status.text=if(preflightWarning.isNullOrBlank()) "Astra думает…" else "⚠ $preflightWarning\nAstra думает…"
@@ -2498,6 +2516,14 @@ class MainActivity : ComponentActivity() {
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
                     chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
 
+                    chatDb.recordRequestAccounting(
+                        chatId = requestChatId,
+                        localRequestId = localRequestId,
+                        status = completionState,
+                        responseId = newId,
+                        httpRequestId = requestId,
+                        usage = usage
+                    )
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
                         eventType = if (completionState == "completed") "request_completed" else "request_${completionState}",
@@ -2571,6 +2597,15 @@ class MainActivity : ComponentActivity() {
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
                 }
                 if(!canContinueInBackground || userStopped){
+                    chatDb.recordRequestAccounting(
+                        chatId = requestChatId,
+                        localRequestId = localRequestId,
+                        status = if (userStopped) "cancelled" else if (completionState == "disconnected") "disconnected" else "failed",
+                        responseId = newId,
+                        httpRequestId = requestId,
+                        usage = responseState.usage,
+                        error = (e.message ?: e.toString()).take(1200)
+                    )
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
                         eventType = "request_failed",
@@ -3113,6 +3148,12 @@ class MainActivity : ComponentActivity() {
                 .takeIf { it.isNotBlank() }
             val startedAt = active.optLong("started_at", System.currentTimeMillis())
             val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            chatDb.recordRequestAccounting(
+                chatId = chatId,
+                localRequestId = matchingRequest,
+                status = "failed",
+                error = message
+            )
             chatDb.recordRequestEvent(
                 chatId = chatId,
                 eventType = "request_failed",
@@ -3216,9 +3257,13 @@ class MainActivity : ComponentActivity() {
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
         )
+        chatDb.recordRequestAccounting(
+            chatId = chatId, localRequestId = requestId,
+            status = state, responseId = responseId, usage = usage
+        )
         chatDb.recordRequestEvent(
             chatId = chatId,
-            eventType = "request_completed",
+            eventType = if (success) "request_completed" else "request_${state}",
             requestId = requestId,
             provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" },
             requestedModel = requestedModel,
@@ -3799,7 +3844,23 @@ class MainActivity : ComponentActivity() {
                 val today=chatDb.usageTotals(cal.timeInMillis)
                 val seven=chatDb.usageTotals(now-7L*86_400_000L)
                 val all=chatDb.usageTotals(0L)
-                val message=formatUsageStats(today,seven,all)
+                val financialToday = chatDb.requestAccountingTotals(cal.timeInMillis)
+                val financialSeven = chatDb.requestAccountingTotals(now-7L*86_400_000L)
+                val financialAll = chatDb.requestAccountingTotals(0L)
+                val message=formatUsageStats(today,seven,all) +
+                    "\n\nПодтверждённые провайдером расходы (новые запросы после обновления):\n" +
+                    listOf("Сегодня" to financialToday, "Последние 7 дней" to financialSeven, "За всё время" to financialAll)
+                        .joinToString("\n") { (label, totals) ->
+                            val known = totals.optLong("known_cost_requests")
+                            val unknown = totals.optLong("unknown_cost_requests")
+                            val sum = totals.optDouble("provider_reported_cost_usd")
+                            val shown = if (sum > 0.0 && sum < 0.000001) {
+                                "< $0.000001"
+                            } else {
+                                "$" + "%.6f".format(java.util.Locale.US, sum)
+                            }
+                            "$label: подтверждено $known, неизвестно $unknown, сумма подтверждённых $shown"
+                        }
                 runOnUiThread{
                     AlertDialog.Builder(this)
                         .setTitle("Расход и токены")
@@ -3833,7 +3894,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         return block("Сегодня",today)+"\\n"+block("Последние 7 дней",seven)+"\\n"+block("За всё время",all)+
-            "\nИтоги списаний по всем провайдерам станут доступны после внедрения журнала расходов."
+            "\nИсторические оценки до журнала не входят в подтверждённые суммы. Неизвестные расходы не равны нулю."
     }
 
     private fun showLocalFiles(){

@@ -63,6 +63,15 @@ class BackgroundResponseWorker(
             val activeAtStart = db.getActiveResponse(chatId)
             if (activeAtStart?.optString("request_id") != requestId) return Result.success()
             if (!activeAtStart.optBoolean("background_enabled", true)) return Result.success()
+            // Recovered in-flight v18 requests can predate the v19 ledger.
+            val requestMeta = db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
+                (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
+                    .firstOrNull { it.optString("request_id") == requestId }
+            }
+            val requestedModel = requestMeta?.optString("requested_model").orEmpty()
+                .ifBlank { requestMeta?.optString("model").orEmpty() }
+                .takeIf { it.isNotBlank() }
+            db.startRequestAccounting(chatId, requestId, "openai", requestedModel, "openai_api_key")
 
             setForeground(createForegroundInfo(db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }))
             val startedAt = SystemClock.elapsedRealtime()
@@ -76,6 +85,8 @@ class BackgroundResponseWorker(
                         "response_id" to responseId,
                         "request_id" to requestId
                     ))
+                    BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                        "failed", "recovery_timeout")
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
@@ -193,6 +204,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "failed", "recovery_auth_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -202,6 +215,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "unknown", "response_gone_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
@@ -223,6 +238,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "failed", "recovery_http_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -276,7 +293,17 @@ class BackgroundResponseWorker(
                 ?: response.optJSONObject("incomplete_details")?.optString("reason")
         )
         val savedImages = saveGeneratedImages(model.generatedImageResults, diagnostics)
+        val requestMeta = db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
+            (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
+                .firstOrNull { it.optString("request_id") == requestId }
+        }
+        val requestedModel = requestMeta?.optString("requested_model").orEmpty()
+            .ifBlank { requestMeta?.optString("model").orEmpty() }.takeIf { it.isNotBlank() }
         val assistant = model.toChatJson().apply {
+            put("provider", "openai")
+            requestedModel?.let { put("requested_model", it) }
+            model.model?.let { put("response_model", it) }
+            model.usage?.let { put("usage", JSONObject(it.toString())) }
             if (savedImages.length() > 0) put("generated_images", savedImages)
         }
 
@@ -309,6 +336,25 @@ class BackgroundResponseWorker(
             diagnostics.log("worker_stale_finalization_ignored", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
             return
         }
+        db.recordRequestAccounting(
+            chatId = chatId, localRequestId = requestId, status = state,
+            responseId = responseId, usage = usage
+        )
+        db.recordRequestEvent(
+            chatId = chatId,
+            eventType = if (state == "completed") "request_completed" else "request_${state}",
+            requestId = requestId,
+            provider = "openai",
+            requestedModel = requestedModel,
+            responseModel = model.model,
+            modelMatch = ModelCatalog.match(requestedModel, model.model),
+            status = state,
+            inputTokens = inTok, cachedTokens = cachedTok,
+            cacheWriteTokens = cacheWriteTok, outputTokens = outTok,
+            reasoningTokens = reasoningTok,
+            estimatedCostUsd = cost, latencyMs = latency,
+            toolSummary = model.tools.distinct().joinToString(",")
+        )
         db.recordEffortMetric(
             requestId, chatId, "resumed", effortPref, effectiveEffort, active.optBoolean("auto_selected", false),
             active.optInt("prompt_chars", 0), active.optInt("attachments", 0), latency,
