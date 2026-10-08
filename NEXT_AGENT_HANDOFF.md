@@ -135,11 +135,6 @@
 Первый шаг: после получения APK пользователь запускает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств.
 
 ### 2. UI/device smoke
-
-Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать только фактические наблюдения.
-Первый шаг: после получения APK пользователь делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude.
-
-### 3. UI/device smoke
 Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
 Первый шаг: переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат и отдельно проверить OpenRouter server-tool сценарий.
 
