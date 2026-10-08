@@ -103,6 +103,16 @@ object ResponseEventReducer {
                 terminalState = ResponseTerminalState.CANCELLED
             )
 
+            "error", "response.error" -> ResponseEventDecision(
+                current.copy(
+                    terminalState = ResponseTerminalState.FAILED,
+                    completionError = event.optJSONObject("error")?.optString("message")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: event.optString("message").takeIf { it.isNotBlank() }
+                        ?: "Responses streaming error"
+                )
+            )
+
             else -> ResponseEventDecision(current)
         }
     }

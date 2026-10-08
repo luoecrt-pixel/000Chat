@@ -65,16 +65,7 @@ class ResumableResponseStreamClient(
         var terminalResponse: JSONObject? = null
         var terminalEventType: String? = null
         var requestId: String? = null
-        val parser = SseEventParser()
-
-        fun consume(data: String) {
-            if (data == "[DONE]") return
-            val event = try {
-                JSONObject(data)
-            } catch (e: Exception) {
-                throw IOException("Invalid Responses SSE event", e)
-            }
-
+        fun consume(event: JSONObject) {
             requestId = event.optString("request_id").takeIf { it.isNotBlank() }
                 ?: requestId
 
@@ -106,11 +97,11 @@ class ResumableResponseStreamClient(
             }
             val body = response.body ?: throw IOException("Empty Responses SSE body")
             body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                reader.forEachLine { line ->
-                    parser.acceptLine(line)?.let { consume(it.data) }
+                val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
+                if (outcome.errorMessage != null) {
+                    throw IOException("Responses SSE server error: ${outcome.errorMessage}")
                 }
             }
-            parser.finish()?.let { consume(it.data) }
         }
 
         return ResumableStreamResult(
