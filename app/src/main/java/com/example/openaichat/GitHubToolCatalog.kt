@@ -55,10 +55,10 @@ object GitHubToolCatalog {
             commonRepoProperties().put("run_id", intProp("Workflow run id")), required("owner", "repo", "run_id")))
         out.put(schema("get_file", "Read one repository file as UTF-8 text.",
             commonRepoProperties().put("path", stringProp("Repository-relative file path"))
-                .put("ref", stringProp("Allowed branch/ref; optional")), required("owner", "repo", "path")))
+                .put("ref", stringProp("Explicit allowed branch/ref required")), required("owner", "repo", "path", "ref")))
         out.put(schema("list_directory", "List files/directories at a repository path.",
             commonRepoProperties().put("path", stringProp("Repository-relative directory path; empty for root"))
-                .put("ref", stringProp("Allowed branch/ref; optional")), required("owner", "repo", "path")))
+                .put("ref", stringProp("Explicit allowed branch/ref required")), required("owner", "repo", "path", "ref")))
         out.put(schema("create_issue_comment", "Create a comment on an issue or pull request. Requires confirmation.",
             commonRepoProperties().put("issue_number", intProp("Issue or pull request number"))
                 .put("body", stringProp("Comment body")), required("owner", "repo", "issue_number", "body")))

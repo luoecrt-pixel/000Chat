@@ -133,9 +133,8 @@ class GitHubToolExecutor(
         val (owner, repo) = repo(a)
         val path = a.getString("path").trim()
         if (path.isBlank() || path.contains("..")) throw IOException("Invalid path")
-        val ref = a.optString("ref").trim()
-        if (ref.isNotBlank()) branch(ref)
-        val suffix = if (ref.isBlank()) "" else "?ref=${Uri.encode(ref)}"
+        val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
+        val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
         val obj = JSONObject(raw)
         val encoded = obj.optString("content").replace("\\n", "").replace("\n", "")
@@ -148,9 +147,8 @@ class GitHubToolExecutor(
         val (owner, repo) = repo(a)
         val path = a.getString("path").trim().removePrefix("/")
         if (path.contains("..")) throw IOException("Invalid path")
-        val ref = a.optString("ref").trim()
-        if (ref.isNotBlank()) branch(ref)
-        val suffix = if (ref.isBlank()) "" else "?ref=${Uri.encode(ref)}"
+        val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
+        val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
         val entries = try { JSONArray(raw) } catch (_: Exception) { JSONArray().put(JSONObject(raw)) }
         return JSONObject().put("ok", true).put("entries", entries).toString()
@@ -180,13 +178,46 @@ class GitHubToolExecutor(
     private fun mergePullRequest(a: JSONObject): String {
         val (owner, repo) = repo(a)
         val number = a.getInt("pull_number")
-        val pr = JSONObject(ok(call(request(url(owner, repo, "pulls/$number")).get().build())))
-        val base = pr.optJSONObject("base")?.optString("ref").orEmpty()
-        branch(base)
-        requireConfirmation("merge_pull_request", a)
-        auditWrite("merge_pull_request", sanitized(a).put("base_branch", base))
+        fun fetchPr() = JSONObject(ok(call(request(url(owner, repo, "pulls/$number")).get().build())))
+        val pr = fetchPr()
+        val headSha = GitHubAllowedRefPolicy.approvedMergeHead(pr, allowedBranches())
+        val base = pr.getJSONObject("base").getString("ref")
+        val fileReply = JSONArray(ok(call(request(url(owner, repo, "pulls/$number/files?per_page=100")).get().build())))
+        val changedFiles = pr.optInt("changed_files", -1)
+        require(changedFiles > 0 && changedFiles == fileReply.length()) {
+            "Full PR file list is required before a safe merge"
+        }
+        val paths = (0 until fileReply.length()).map { fileReply.getJSONObject(it).getString("filename") }
+        val required = GitHubMergeCheckPolicy.required(paths)
+        fun verifiedChecks(): String {
+            val urlPath = "actions/runs?head_sha=${Uri.encode(headSha)}&per_page=100"
+            val result = JSONObject(ok(call(request(url(owner, repo, urlPath)).get().build())))
+            require(result.optInt("total_count", 101) <= 100) {
+                "Workflow list is truncated; cannot verify required checks"
+            }
+            return GitHubMergeCheckPolicy.check(headSha, required, result.getJSONArray("workflow_runs"))
+        }
+        val checks = verifiedChecks()
+        val preview = JSONObject(a.toString())
+            .put("_verified_title", pr.optString("title"))
+            .put("_verified_base_ref", base)
+            .put("_verified_head_ref", pr.getJSONObject("head").optString("ref"))
+            .put("_verified_head_sha", headSha)
+            .put("_verified_workflows", checks)
+        requireConfirmation("merge_pull_request", preview)
+        // Check again directly before writing; an approval belongs to one exact PR head/base.
+        val current = fetchPr()
+        val currentHeadSha = GitHubAllowedRefPolicy.approvedMergeHead(current, allowedBranches())
+        require(currentHeadSha == headSha &&
+            current.getJSONObject("base").optString("ref") == base) {
+            "PR head or base changed after confirmation; merge cancelled"
+        }
+        verifiedChecks()
+        auditWrite("merge_pull_request", sanitized(a)
+            .put("base_branch", base).put("head_sha", headSha).put("verified_checks", checks))
+        val body = JSONObject().put("merge_method", a.getString("merge_method")).put("sha", headSha)
         val raw = ok(call(request(url(owner, repo, "pulls/$number/merge")).put(
-            JSONObject().put("merge_method", a.getString("merge_method")).toString().toRequestBody(JSON)
+            body.toString().toRequestBody(JSON)
         ).build()))
         return json(raw)
     }
