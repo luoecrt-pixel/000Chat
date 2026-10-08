@@ -259,8 +259,20 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             }
         }
         if (oldVersion < 18) {
-            db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'")
-            db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT")
+            // Pre-v17 databases can have no request_events table.
+            ensureRequestEventsTable(db)
+            val columns = db.rawQuery("PRAGMA table_info($REQUEST_EVENT_TABLE)", null).use { cursor ->
+                val names = mutableSetOf<String>()
+                val nameColumn = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) names.add(cursor.getString(nameColumn))
+                names
+            }
+            if ("cost_kind" !in columns) {
+                db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'")
+            }
+            if ("cost_usd" !in columns) {
+                db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT")
+            }
         }
     }
 

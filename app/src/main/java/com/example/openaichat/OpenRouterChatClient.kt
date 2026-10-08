@@ -76,6 +76,8 @@ class OpenRouterChatClient(
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
         val accumulatedUsage = JSONObject()
+        // Cost is complete only if every generation reported its cost.
+        var everyRoundCostKnown = true
         var responseModel: String? = null
         var accumulatedTotalTokens = 0L
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
@@ -85,17 +87,11 @@ class OpenRouterChatClient(
             target.put(key, target.optLong(key, 0L) + value)
         }
 
-        fun addUsageDouble(key: String, value: Double) {
-            if (!value.isFinite() || value <= 0.0) return
-            accumulatedUsage.put(key, accumulatedUsage.optDouble(key, 0.0) + value)
-        }
-
         fun accumulateUsage(source: JSONObject?) {
             if (source == null) return
             addUsageLong(accumulatedUsage, "prompt_tokens", source.optLong("prompt_tokens", 0L))
             addUsageLong(accumulatedUsage, "completion_tokens", source.optLong("completion_tokens", 0L))
             addUsageLong(accumulatedUsage, "total_tokens", source.optLong("total_tokens", 0L))
-            addUsageDouble("cost", source.optDouble("cost", 0.0))
             source.optJSONObject("prompt_tokens_details")?.let { details ->
                 val target = accumulatedUsage.optJSONObject("prompt_tokens_details") ?: JSONObject().also {
                     accumulatedUsage.put("prompt_tokens_details", it)
@@ -183,6 +179,7 @@ class OpenRouterChatClient(
             var role = "assistant"
             var sawDone = false
             var roundResponseModel: String? = null
+            var roundReportedCost: Double? = null
             val contentParts = StringBuilder()
             val reasoningDetails = JSONArray()
             val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
@@ -204,6 +201,11 @@ class OpenRouterChatClient(
                 json.optString("model").takeIf { it.isNotBlank() }?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
                     accumulateUsage(usage)
+                    // Cost may arrive after finish_reason, just before [DONE].
+                    // Explicit zero is known; missing/invalid values are not.
+                    if (usage.has("cost")) {
+                        roundReportedCost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
+                    }
                     usage.optLong("total_tokens", 0L).takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
                 }
                 val choices = json.optJSONArray("choices")
@@ -275,6 +277,11 @@ class OpenRouterChatClient(
             }
 
             ensureActive()
+            if (roundReportedCost == null) {
+                everyRoundCostKnown = false
+            } else {
+                accumulatedUsage.put("cost", accumulatedUsage.optDouble("cost", 0.0) + roundReportedCost)
+            }
             val message = JSONObject()
                 .put("role", role)
                 .put("content", contentParts.toString())
@@ -314,7 +321,10 @@ class OpenRouterChatClient(
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
                         text = message.optString("content").trim(),
-                        usage = if (accumulatedUsage.length() > 0) JSONObject(accumulatedUsage.toString()) else null,
+                        usage = JSONObject(accumulatedUsage.toString()).apply {
+                            // Never present a tool-loop subtotal as a complete charge.
+                            if (!everyRoundCostKnown) remove("cost")
+                        }.takeIf { it.length() > 0 },
                         responseModel = responseModel,
                         assistantMessage = JSONObject(message.toString()),
                         toolNames = toolNames.distinct()
