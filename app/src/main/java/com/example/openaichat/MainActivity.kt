@@ -477,12 +477,6 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), 0, dp(10), dp(4))
         }
-        row.addView(button("+") { showAttachmentSheet() }.apply {
-            textSize = 22f
-            contentDescription = "Добавить в чат"
-            minHeight = dp(48)
-        })
-
         effortBadge = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.rgb(138,180,248))
@@ -544,6 +538,11 @@ class MainActivity : ComponentActivity() {
                     android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                     android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         }
+        composer.addView(button("+") { showAttachmentSheet() }.apply {
+            textSize = 22f
+            contentDescription = "Добавить в чат"
+            minHeight = dp(48)
+        }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(6) })
         composer.addView(input, LinearLayout.LayoutParams(0,-2,1f))
 
         composer.addView(button("🎙") { chooseVoice() }, LinearLayout.LayoutParams(dp(46),-2).apply{leftMargin=dp(6)})
