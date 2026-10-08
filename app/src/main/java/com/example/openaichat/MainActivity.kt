@@ -2313,18 +2313,10 @@ class MainActivity : ComponentActivity() {
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.body?.string().orEmpty()}")
                     val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
-                    val sseParser = SseEventParser()
-                    var streamDone = false
                     val sequenceCursor = ResponseStreamSequenceCursor()
 
-                    fun handleSseEvent(data:String) {
-                        if(streamDone) return
-                        if(data=="[DONE]"){
-                            streamDone=true
-                            return
-                        }
+                    fun handleSseEvent(ev:JSONObject): Boolean {
                         try {
-                            val ev=JSONObject(data)
                             val sequenceNumber=ev.optLong("sequence_number",-1L)
                             if(sequenceNumber>=0L){
                                 when(sequenceCursor.observe(sequenceNumber)){
@@ -2335,7 +2327,7 @@ class MainActivity : ComponentActivity() {
                                             "sequence_number" to sequenceNumber,
                                             "last_sequence_number" to sequenceCursor.lastSequenceNumber
                                         ))
-                                        return
+                                        return false
                                     }
                                 }
                             }
@@ -2438,20 +2430,36 @@ class MainActivity : ComponentActivity() {
                                 ))
                                 throw parseError
                             }
-                            diagnostics.log("sse_event_parse_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
+                            diagnostics.log("sse_event_processing_error", mapOf("message" to (parseError.message ?: "unknown"), "request_id" to requestId))
+                            throw parseError
+                        }
+                        return true
+                    }
+
+                    val streamEnd = OpenAiSseStreamReader.read(reader) { ev -> handleSseEvent(ev) }
+                    completionState = streamEnd.end.wireStatus
+                    streamEnd.errorMessage?.let { completionError = it }
+                    // EOF / [DONE] without a Responses terminal is not completion.
+                    // Only an owned, already-created background response may resume.
+                    if (streamEnd.end == OpenAiStreamEnd.DISCONNECTED && backgroundEnabled && newId != null) {
+                        activeResponsePersistence.updateActiveResponse(
+                            requestChatId, responseId = newId, text = responseState.text,
+                            status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                            expectedRequestId = localRequestId
+                        )
+                        throw IOException("Responses SSE disconnected before terminal event")
+                    }
+                    val finalText = responseState.text.ifBlank {
+                        OpenAiSseStreamReader.terminalOutputText(completedResponse).ifBlank {
+                            when (completionState) {
+                                "completed" -> "Готово. Ответ не содержит текста."
+                                "incomplete" -> "Ответ завершён не полностью."
+                                "cancelled" -> "Ответ отменён."
+                                "failed" -> "Ответ завершился ошибкой."
+                                else -> "Соединение прервалось до окончания ответа."
+                            }
                         }
                     }
-
-                    reader.forEachLine { line ->
-                        if(streamDone) return@forEachLine
-                        sseParser.acceptLine(line)?.let { handleSseEvent(it.data) }
-                    }
-                    sseParser.finish()?.let { handleSseEvent(it.data) }
-
-                    if(completionState=="failed") {
-                        throw IOException("Ответ Astra не завершился: ${completionError?.take(500) ?: "неизвестная ошибка"}")
-                    }
-                    val finalText=responseState.text.ifBlank{if(completionState=="incomplete") "Ответ завершён не полностью." else "Готово. Ответ не содержит текста."}
                     val answerAnnotations=JSONArray()
                     fileCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
                     urlCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
@@ -2492,7 +2500,7 @@ class MainActivity : ComponentActivity() {
 
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
-                        eventType = "request_completed",
+                        eventType = if (completionState == "completed") "request_completed" else "request_${completionState}",
                         requestId = requestId ?: localRequestId,
                         provider = "openai",
                         requestedModel = model,
@@ -2511,7 +2519,7 @@ class MainActivity : ComponentActivity() {
 
                     runOnUiThread{
                         if(!isRequestCurrent(requestChatId,requestGeneration)) return@runOnUiThread
-                        currentResponseId=newId ?: currentResponseId
+                        if (completionState == "completed") currentResponseId = newId ?: currentResponseId
                         baselineEffort=actualEffort
                         chat.add(assistantMessage)
                         activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
@@ -2533,12 +2541,15 @@ class MainActivity : ComponentActivity() {
                         )
                         activeAssistantItemId = finalItemId
                         scrollToLatest()
-                        status.text=if(usageObj!=null){
-                            // The displayed expense is unknown until model-specific pricing is verified.
-                            val reasoningPart=if(reasoningTok>0)" (${fmtTokens(reasoningTok)} думал)" else ""
-                            val donePrefix=if(completionState=="incomplete") "Неполный ответ" else "Готово"
-                            "$donePrefix · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out$reasoningPart · Расход неизвестен"
-                        } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
+                        status.text = when (completionState) {
+                            "completed" -> if (usageObj != null)
+                                "Готово · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out · Расход неизвестен"
+                                else "Готово · Расход неизвестен"
+                            "incomplete" -> "Ответ завершён не полностью · Расход неизвестен"
+                            "cancelled" -> "Ответ отменён · Расход неизвестен"
+                            "failed" -> "Ошибка ответа · Расход неизвестен"
+                            else -> "Соединение прервалось — ответ неполный · Расход неизвестен"
+                        }
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
                         renderRequestTelemetry()
                         setBusy(false)
@@ -2553,7 +2564,8 @@ class MainActivity : ComponentActivity() {
                 // stopCurrentResponse() invalidates this request generation and already restores
                 // the composer/chat UI. The worker must not replay those mutations after the stop.
                 val userStopped = activeResponseState.state.wasUserStopped(requestGeneration)
-                val canContinueInBackground = backgroundEnabled && newId != null && completionState == "in_progress" && !userStopped
+                val canContinueInBackground = backgroundEnabled && newId != null &&
+                    (completionState == "in_progress" || completionState == "disconnected") && !userStopped
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
@@ -2569,7 +2581,7 @@ class MainActivity : ComponentActivity() {
                         modelMatch = ModelCatalog.Match.UNKNOWN,
                         status = when {
                             userStopped -> "cancelled"
-                            cancelled -> "disconnected"
+                            cancelled || completionState == "disconnected" -> "disconnected"
                             else -> "failed"
                         },
                         latencyMs = latency,
@@ -2631,8 +2643,9 @@ class MainActivity : ComponentActivity() {
                     activeAssistantItemId=null
                     renderRequestTelemetry()
                     currentCall=null
-                    if(!cancelled && completionState=="incomplete" && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
-                        val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status","incomplete")
+                    if(!userStopped && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
+                        val partialStatus = if (completionState == "disconnected") "disconnected" else "failed"
+                        val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status",partialStatus).put("error", (e.message ?: "").take(1200))
                         newId?.let{partial.put("response_id",it)}
                         requestId?.let{partial.put("request_id",it)}
                         chat.add(partial)

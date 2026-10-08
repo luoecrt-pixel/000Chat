@@ -123,6 +123,18 @@ class ResponseEventReducerTest {
     }
 
     @Test
+    fun semanticSseErrorPreservesPartialButMarksFailure() {
+        val current = ResponseEventState(responseId = "resp_x", text = "partial")
+        val result = ResponseEventReducer.reduce(
+            current, JSONObject().put("type", "error")
+                .put("error", JSONObject().put("message", "provider fault"))
+        )
+        assertEquals(ResponseTerminalState.FAILED, result.state.terminalState)
+        assertEquals("partial", result.state.text)
+        assertEquals("provider fault", result.state.completionError)
+    }
+
+    @Test
     fun cancellationIsTerminalWithoutInventingText() {
         val initial = ResponseEventState(text = "partial")
 

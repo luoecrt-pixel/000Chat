@@ -65,22 +65,13 @@ class ResumableResponseStreamClient(
         var terminalResponse: JSONObject? = null
         var terminalEventType: String? = null
         var requestId: String? = null
-        val parser = SseEventParser()
-
-        fun consume(data: String) {
-            if (data == "[DONE]") return
-            val event = try {
-                JSONObject(data)
-            } catch (e: Exception) {
-                throw IOException("Invalid Responses SSE event", e)
-            }
-
+        fun consume(event: JSONObject): Boolean {
             requestId = event.optString("request_id").takeIf { it.isNotBlank() }
                 ?: requestId
 
             val sequence = event.optLong("sequence_number", -1L)
             if (sequence >= 0L) {
-                if (sequenceCursor.observe(sequence) == ResponseStreamSequenceObservation.DUPLICATE) return
+                if (sequenceCursor.observe(sequence) == ResponseStreamSequenceObservation.DUPLICATE) return false
             }
 
             val type = event.optString("type")
@@ -95,6 +86,7 @@ class ResumableResponseStreamClient(
             }
 
             onEvent(event)
+            return true
         }
 
         call.execute().use { response ->
@@ -106,11 +98,17 @@ class ResumableResponseStreamClient(
             }
             val body = response.body ?: throw IOException("Empty Responses SSE body")
             body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                reader.forEachLine { line ->
-                    parser.acceptLine(line)?.let { consume(it.data) }
+                val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
+                if (outcome.errorMessage != null) {
+                    // A semantic SSE error is a terminal failure, not a transient
+                    // disconnect to retry. Preserve the owned response identity.
+                    terminalEventType = "response.failed"
+                    terminalResponse = JSONObject()
+                        .put("id", responseId)
+                        .put("status", "failed")
+                        .put("error", JSONObject().put("message", outcome.errorMessage))
                 }
             }
-            parser.finish()?.let { consume(it.data) }
         }
 
         return ResumableStreamResult(
