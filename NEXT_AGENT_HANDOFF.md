@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 16:28 +03:00
+**Last updated:** 2026-10-08 17:10 +03:00
 **Следующий рабочий срез:** Реальные прогоны провайдеров
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,8 +57,8 @@
 
 ## Фактический baseline
 
-- main code baseline: `e154e436213d292e9f894d1764f149f0e62b9b3c` (merge #96, after #95). Current implementation includes session telemetry/Drawer, server-side OpenRouter web tools, unconditional successful completion events when usage is missing, and an SSE `[DONE]` guard before success/local tool execution.
-- #95 code gate: push Build `37780620420` Successful; push Release `37780620439` Successful. #96 code gate: push Build `37781045311` Successful; push Release `37781045408` Successful. These are JVM/Android/emulator evidence, not live provider evidence.
+- main code baseline: `8287abfee5f64d799764737021a9c47628528053` (merge #98), retaining #95/#96 OpenRouter fixes. #98 adds a global multiline user system prompt while keeping existing developer instructions: OpenAI Responses receives role-distinct system/developer entries (legacy developer-only string kept), OpenRouter appends user text to the existing cacheable system/context message.
+- #98 code gate at `766916260ea2216360787ba6a47e1e70abfe5f54`: push Build `37787993221` Successful, push Release `37787993134` Successful. This head tree equals merged main tree `54c063316892fdff8e663ab9a787abfb2ea72745`. Previous head `966508f2...` Build `37786216846` failed due ActivityScenario state transition (expected CREATED, stayed RESUMED); its Release `37786216793` was Successful. Final full gate is green; actual UI/provider effects remain unverified.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -105,6 +105,7 @@
 - [pure] **#92:** OpenRouter server tool catalog формирует точные типы `openrouter:web_search`/`openrouter:web_fetch`; mixed server/local tool path и запрет передавать server tool в local executor подтверждены на JVM, не живым провайдером.
 - [pure] **#95:** recorder для успешного OpenRouter завершения вызывает запись session request event и при отсутствующем provider usage; metric callback остаётся условным по наличию usage. Production wiring в MainActivity проверено по source; JVM callback regressions не заменяют реальный UI/provider run. Текущая DB схема сохраняет отсутствующие счётчики как нули, а не как отдельное состояние unknown.
 - [pure] **#96:** OpenRouter SSE round требует `[DONE]` перед successful result и local tool execution; JVM transport tests отвергают EOF без маркера даже после `finish_reason=stop`/tool_calls, сохраняют partial text и принимают терминальный фрейм без финальной пустой строки.
+- [pure] **#98:** `GenerationInstructions` сохраняет legacy developer-only текст для OpenAI, при заполненном system prompt отдаёт JSON instruction items с отдельными `system` и `developer` ролями; для OpenRouter проверено сохранение app GitHub/attachment/tool контекста и порядок частей. Production wiring в MainActivity есть на source-level, но реальная работа Settings/провайдера не доказана.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -135,12 +136,12 @@
 
 ### 1. Реальные прогоны провайдеров — **следующий**
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
-Старый debug APK из `37746579120` не содержит fixes #95/#96. Новый code-identical `[ci]` head `e7f5c9c61e738740386a08b9b13f16c4ea0c8a4f` от merge #96: post-96 APK Build `37782891878` Successful и Release `37782891772` Successful; debug artifact `11553317424` (ZIP SHA-256 `5805d204fc69823f5b3bc42f6cb4b0e31385119c063e62b781717bf6345467db`), извлечённый `app-debug.apk` SHA-256 `a933b68a3a8d86c9f6440ca87763bf08bb9a53997fb5067eccbb74f9a3e5376c`. Это всё ещё не live provider/device proof.
+APK с #98 включает #95/#96 и новое поле системного промпта: Build `37787993221` Successful, Release `37787993134` Successful, artifact `11555328276`, ZIP SHA-256 `b1f989c5dbf5253dd2e261c414ce5d05c7c3e7a8a2af97806bd42d575a4b3ccf`, `app-debug.apk` SHA-256 `30bb03895feccb299dfbe970112b905c0a85a7dabe585f7171513f57d7f1dce3`. Артефакт собран из кодового дерева, совпадающего с main merge #98; это всё ещё не live provider/device proof.
 Первый шаг: пользователь устанавливает post-96 APK на реальном Android-девайсе и делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств. Эти запуски остаются отдельным proof level и не заменяются CI/instrumentation.
 
 ### 2. UI/device smoke
-Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
-Первый шаг: переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат и отдельно проверить OpenRouter server-tool сценарий.
+Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets, OpenRouter server-tool toggles и новое multiline поле системного промпта (#98).
+Первый шаг: переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат; сохранить/повторно открыть системный промпт и проверить влияние на запросы обоих API; отдельно проверить OpenRouter server-tool сценарий.
 
 ## Репозиторий / branches
 
@@ -191,18 +192,18 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#92:** merged; OpenRouter server-side Web Search / Web Fetch + local-executor guard + IJG NOTICE; Build/Release/Verify gate закрыт.
-- **#93:** merged; docs-only post-92 provider validation handoff; Verify handoff Successful.
-- **#94:** merged; docs-only post-92 APK run and capability-aware settings idea; Verify handoff `37769615494` Successful.
+- **#94:** merged; docs-only provider-validation APK preparation and capability-aware settings idea; Verify `37769615494` Successful.
 - **#95:** merged as `950923c9f2087ae595d018841d603834b8d373d5`; OpenRouter completion event without usage; Build `37780620420` / Release `37780620439` Successful.
 - **#96:** merged as `e154e436213d292e9f894d1764f149f0e62b9b3c`; OpenRouter SSE `[DONE]` guard; Build `37781045311` / Release `37781045408` Successful.
+- **#97:** merged as `ee06389d14dd1bd4305e3a54517be7e3889896c4`; docs-only handoff and post-96 artifact proof; Verify `37784603937` Successful.
+- **#98:** merged as `8287abfee5f64d799764737021a9c47628528053`; configurable system prompt with source-specific payload; Build `37787993221` / Release `37787993134` Successful, provider/device proof outstanding.
 
 ## Product radar — идеи с реальной ценностью
 
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
-**Ревизия после пяти merged PR #92–#96:** новые pure contracts закрыли пробелы в учёте завершений и распознавании обрыва OpenRouter SSE; architectural layer остаётся прежним. Следующий доказательный слой — живое устройство/провайдер, а не новый массовый рефакторинг. Существующий developer-instructions UI уже передаёт пользовательские инструкции, но не является полноценной source/model-aware настройкой системного промпта.
+**Ревизия после пяти merged PR #92–#96:** новые pure contracts закрыли пробелы в учёте завершений и распознавании обрыва OpenRouter SSE; architectural layer остаётся прежним. Следующий доказательный слой — живое устройство/провайдер, а не новый массовый рефакторинг. #98 затем добавил отдельно редактируемый системный промпт без изменения политики runtime tool authorization; модели/провайдеры вживую ещё не проверены.
 
 ### 1. Версии ответа + обратимость
 Сейчас regenerate/edit — точечные действия над линейным чатом. Следующий уровень — сохранять альтернативы и уметь вернуть чат к состоянию «до этого ответа». Это естественное продолжение fork: пользователь не должен бояться попробовать другой prompt/effort. Первый шаг: pure domain contract для snapshot/branch point + DB test, без UI.
@@ -226,7 +227,7 @@ Static verifier:
 MVP: «Ветвить отсюда» на выбранном сообщении создаёт независимый local snapshot до этой точки. Первый шаг: pure DB/domain contract + tests. Обязательно: новый `chatId`, новые local records, не переносить active response / Worker / temporary UI state, и сначала подтвердить актуальную семантику Responses API для продолжения ровно от fork point.
 
 ### 8. Настройки генерации, зависящие от источника и модели
-Нужен пользовательский слой «как модель должна отвечать», но без ложной универсальности: **системный промпт/instructions**, reasoning effort («градус»), verbosity/формат ответа и sampling-настройки (`temperature`, `top_p` и аналоги) должны быть capability-aware для конкретного API source + model. OpenAI Responses уже имеет model-dependent `reasoning.effort`; OpenRouter exposes a richer but model-dependent parameter surface, поэтому один общий набор полей нельзя безусловно отправлять во все запросы. Фактический аудит: в настройках уже есть глобальный `Developer instructions`, `reasoning`, `reasoning_mode` и `verbosity`; OpenAI request содержит `instructions`/`reasoning`/`text.verbosity`, OpenRouter строит `system` message и передаёт `reasoning.effort`/`verbosity`. OpenRouter сейчас нормализует `xhigh/max` в `high` и `auto` в `medium`; `temperature`/`top_p` не экспонируются. Некоторые новые Claude через OpenRouter игнорируют sampling-поля; каталог моделей API возвращает `supported_parameters` и требует проверки по конкретной модели. Первый шаг: описать pure `ModelCapabilities`/`GenerationSettings` contract для двух request builders и regression matrix на unsupported/omitted parameters и отсутствие silent downgrade; UI и per-chat profiles делать только после этого.
+**Системный промпт реализован в #98 (v1)**: глобальное поле, отделённое от существующего Developer instructions; OpenAI получает типизированные system/developer instructions, OpenRouter — отдельную пользовательскую часть в system text вместе с app контекстом. Не подтверждено живым API/UI. **«Градус» = temperature (sampling/randomness), а не reasoning effort**: это два независимых рычага; `top_p`, `top_k`, reasoning effort/summary, verbosity, tool-choice и structured output тоже зависят от API source + model, универсального набора нет. Сейчас `temperature`/`top_p` не экспонируются; OpenRouter молча нормализует `xhigh/max` в `high` и `auto` в `medium`, что требует явной политики вместо silent downgrade. OpenRouter model endpoint отдаёт `supported_parameters`, но реальная совместимость также зависит от upstream provider. Первый шаг: описать pure `ModelCapabilities`/`GenerationSettings` contract для обоих request builders, затем regression matrix для unsupported/omitted parameters, invalid ranges и неявной смены effort. Дальнейшие ползунки UI — только после этого; per-chat profiles — отдельная задача.
 
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
