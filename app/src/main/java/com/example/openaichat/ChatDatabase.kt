@@ -1079,8 +1079,7 @@ data class ExistingMessageRow(
                 val attachments = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
                 for (i in 0 until attachments.length()) {
                     val a = attachments.optJSONObject(i) ?: continue
-                    a.optString("path").takeIf { it.isNotBlank() }?.let(out::add)
-                    a.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add)
+                    out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray().put(a)))
                 }
 
                 val annotations = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
@@ -1109,7 +1108,7 @@ data class ExistingMessageRow(
             while (c.moveToNext()) {
                 try { JSONArray(c.getString(0).orEmpty()).let { a -> for (i in 0 until a.length()) a.optString(i).takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
                 c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
-                try { JSONArray(c.getString(2).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o -> o.optString("path").takeIf { it.isNotBlank() }?.let(out::add); o.optString("text_path").takeIf { it.isNotBlank() }?.let(out::add) } } } catch (_:Exception) {}
+                try { out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray(c.getString(2).orEmpty()))) } catch (_: Exception) {}
                 try { JSONArray(c.getString(3).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
                 try { JSONArray(c.getString(4).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
             }
