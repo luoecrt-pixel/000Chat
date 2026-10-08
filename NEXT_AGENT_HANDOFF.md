@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 16:17 +03:00
+**Last updated:** 2026-10-08 16:28 +03:00
 **Следующий рабочий срез:** Реальные прогоны провайдеров
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -135,7 +135,7 @@
 
 ### 1. Реальные прогоны провайдеров — **следующий**
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
-Старый debug APK из `37746579120` не содержит fixes #95/#96. Подготовлена code-identical `[ci]` ветка от merge #96: post-96 APK Build `37782891878`, Release `37782891772` (дождаться обоих Successful и выбрать артефакт именно этого прогона).
+Старый debug APK из `37746579120` не содержит fixes #95/#96. Новый code-identical `[ci]` head `e7f5c9c61e738740386a08b9b13f16c4ea0c8a4f` от merge #96: post-96 APK Build `37782891878` Successful и Release `37782891772` Successful; debug artifact `11553317424` (ZIP SHA-256 `5805d204fc69823f5b3bc42f6cb4b0e31385119c063e62b781717bf6345467db`), извлечённый `app-debug.apk` SHA-256 `a933b68a3a8d86c9f6440ca87763bf08bb9a53997fb5067eccbb74f9a3e5376c`. Это всё ещё не live provider/device proof.
 Первый шаг: пользователь устанавливает post-96 APK на реальном Android-девайсе и делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств. Эти запуски остаются отдельным proof level и не заменяются CI/instrumentation.
 
 ### 2. UI/device smoke
