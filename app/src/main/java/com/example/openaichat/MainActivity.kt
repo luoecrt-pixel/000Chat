@@ -3854,8 +3854,12 @@ class MainActivity : ComponentActivity() {
                             val known = totals.optLong("known_cost_requests")
                             val unknown = totals.optLong("unknown_cost_requests")
                             val sum = totals.optDouble("provider_reported_cost_usd")
-                            "$label: подтверждено $known, неизвестно $unknown, сумма подтверждённых $" +
-                                "%.6f".format(java.util.Locale.US, sum)
+                            val shown = if (sum > 0.0 && sum < 0.000001) {
+                                "< $0.000001"
+                            } else {
+                                "$" + "%.6f".format(java.util.Locale.US, sum)
+                            }
+                            "$label: подтверждено $known, неизвестно $unknown, сумма подтверждённых $shown"
                         }
                 runOnUiThread{
                     AlertDialog.Builder(this)

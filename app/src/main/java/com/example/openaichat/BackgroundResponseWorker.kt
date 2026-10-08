@@ -85,8 +85,8 @@ class BackgroundResponseWorker(
                         "response_id" to responseId,
                         "request_id" to requestId
                     ))
-                    db.recordRequestAccounting(chatId, requestId, status = "failed",
-                        responseId = responseId, error = "recovery_timeout")
+                    BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                        "failed", "recovery_timeout")
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
@@ -204,8 +204,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
-                            db.recordRequestAccounting(chatId, requestId, status = "failed",
-                                responseId = responseId, error = "recovery_auth_${e.statusCode}")
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "failed", "recovery_auth_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -215,8 +215,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
-                            db.recordRequestAccounting(chatId, requestId, status = "unknown",
-                                responseId = responseId, error = "response_gone_${e.statusCode}")
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "unknown", "response_gone_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
@@ -238,8 +238,8 @@ class BackgroundResponseWorker(
                                 "response_id" to responseId,
                                 "status" to e.statusCode
                             ))
-                            db.recordRequestAccounting(chatId, requestId, status = "failed",
-                                responseId = responseId, error = "recovery_http_${e.statusCode}")
+                            BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                                "failed", "recovery_http_${e.statusCode}")
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }

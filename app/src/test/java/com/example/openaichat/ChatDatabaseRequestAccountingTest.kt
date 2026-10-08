@@ -150,6 +150,24 @@ class ChatDatabaseRequestAccountingTest {
         }
     }
 
+    @Test fun capturedProviderControlsNullableUsageEvenForHybridFields() {
+        ChatDatabase(context).use { db ->
+            db.ensureChat("multi")
+            assertTrue(begin(db, "multi", "local_openai", "openai"))
+            assertTrue(begin(db, "multi", "local_router", "openrouter"))
+            val hybrid = JSONObject()
+                .put("input_tokens", 17).put("output_tokens", 4)
+                .put("prompt_tokens", 300).put("completion_tokens", 200)
+            assertTrue(db.recordRequestAccounting("multi", "local_openai", "completed", usage = hybrid))
+            assertTrue(db.recordRequestAccounting("multi", "local_router", "completed", usage = hybrid))
+            val rows = db.listRequestAccounting("multi").associateBy { it.getString("local_request_id") }
+            assertEquals(17L, rows.getValue("local_openai").getLong("input_tokens"))
+            assertEquals(4L, rows.getValue("local_openai").getLong("output_tokens"))
+            assertEquals(300L, rows.getValue("local_router").getLong("input_tokens"))
+            assertEquals(200L, rows.getValue("local_router").getLong("output_tokens"))
+        }
+    }
+
     @Test fun invalidCostsNeverBecomeVerified() {
         ChatDatabase(context).use { db ->
             db.ensureChat("invalid")

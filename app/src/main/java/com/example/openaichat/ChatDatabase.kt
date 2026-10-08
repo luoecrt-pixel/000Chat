@@ -699,29 +699,33 @@ data class ExistingMessageRow(
         var written = false
         writableDatabase.transaction { db ->
             val existing = db.query(REQUEST_ACCOUNTING_TABLE,
-                arrayOf("local_status", "cost_kind"),
+                arrayOf("local_status", "cost_kind", "provider", "provider_status"),
                 "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId),
                 null, null, null, "1").use { c ->
-                if (!c.moveToFirst()) null else c.getString(0) to c.getString(1)
+                if (!c.moveToFirst()) null else listOf(c.getString(0), c.getString(1), c.getString(2), c.getString(3))
             } ?: return@transaction
-            val (localStatus, knownCost) = existing
+            val localStatus = existing[0]
+            val knownCost = existing[1]
+            val capturedProvider = existing[2]
+            val existingProviderStatus = existing[3]
             val values = ContentValues().apply {
                 put("updated_at", System.currentTimeMillis())
                 if (localStatus == "running") put("local_status", status.ifBlank { "unknown" })
-                put("provider_status", status.ifBlank { "unknown" })
+                if (existingProviderStatus.isNullOrBlank() || existingProviderStatus == "in_progress") {
+                    put("provider_status", status.ifBlank { "unknown" })
+                }
                 responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
                 httpRequestId?.takeIf { it.isNotBlank() }?.let { put("http_request_id", it) }
                 error?.takeIf { it.isNotBlank() }?.let { put("error", it.take(1200)) }
                 // No optLong defaults: omitted counters remain SQL NULL.
-                val prefix = if (usage?.has("prompt_tokens") == true || usage?.has("completion_tokens") == true)
-                    "openrouter" else "openai"
-                val inputKey = if (prefix == "openrouter") "prompt_tokens" else "input_tokens"
-                val outputKey = if (prefix == "openrouter") "completion_tokens" else "output_tokens"
+                val openRouter = capturedProvider == "openrouter"
+                val inputKey = if (openRouter) "prompt_tokens" else "input_tokens"
+                val outputKey = if (openRouter) "completion_tokens" else "output_tokens"
                 fun knownNonnegative(source: JSONObject?, key: String): Long? =
                     source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
                 knownNonnegative(usage, inputKey)?.let { put("input_tokens", it) }
                 knownNonnegative(usage, outputKey)?.let { put("output_tokens", it) }
-                val cached = if (prefix == "openrouter")
+                val cached = if (openRouter)
                     usage?.optJSONObject("prompt_tokens_details")?.let {
                         knownNonnegative(it, "cached_tokens")
                     }
@@ -729,7 +733,7 @@ data class ExistingMessageRow(
                     knownNonnegative(it, "cached_tokens")
                 }
                 cached?.let { put("cached_tokens", it) }
-                val reasoning = if (prefix == "openrouter")
+                val reasoning = if (openRouter)
                     usage?.optJSONObject("completion_tokens_details")?.let {
                         knownNonnegative(it, "reasoning_tokens")
                     }
