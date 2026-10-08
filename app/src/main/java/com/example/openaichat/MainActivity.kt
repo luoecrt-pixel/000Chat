@@ -1540,6 +1540,7 @@ class MainActivity : ComponentActivity() {
                             outputTokens = totals.outputTokens,
                             reasoningTokens = totals.reasoningTokens,
                             estimatedCostUsd = totals.costUsd,
+                            reportedCostUsd = totals.reportedCostUsd,
                             latencyMs = SystemClock.elapsedRealtime() - startedAt,
                             toolSummary = result.toolNames.distinct().joinToString(",")
                         )
