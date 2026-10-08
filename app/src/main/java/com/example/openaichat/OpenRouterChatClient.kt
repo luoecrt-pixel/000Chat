@@ -330,6 +330,9 @@ class OpenRouterChatClient(
                     val name = function.optString("name").trim()
                     val id = callObject.optString("id").trim()
                     if (name.isBlank() || id.isBlank()) throw IOException("Malformed tool call id/name")
+                    if (name.startsWith("openrouter:")) {
+                        throw IOException("Unexpected OpenRouter server-side tool call: $name")
+                    }
                     val arguments = try {
                         JSONObject(function.optString("arguments", "{}"))
                     } catch (e: Exception) {
