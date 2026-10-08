@@ -9,6 +9,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "tools/verify_v4_17_0.py"
 MAIN = ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt"
+DB = ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt"
 
 METHOD_START = "private fun renderVectorStoreList(vsId:String)"
 NEXT_METHOD = "    private fun pickFileForVectorStore()"
@@ -19,6 +20,8 @@ MUTATIONS = [
     "remove_outer_ui_gate",
     "move_initial_ui_mutation_before_gate",
     "inject_post_gate_ui_mutation",
+    "remove_v18_table_creation_before_upgrade",
+    "remove_v18_cost_column_guard",
 ]
 
 
@@ -55,6 +58,18 @@ def mutate(source: str, name: str) -> str:
     raise AssertionError(f"unknown mutation: {name}")
 
 
+def mutate_db(source: str, name: str) -> str:
+    if name == "remove_v18_table_creation_before_upgrade":
+        old = "            ensureRequestEventsTable(db)\n            val columns"
+        assert old in source
+        return source.replace(old, "            val columns", 1)
+    if name == "remove_v18_cost_column_guard":
+        old = '            if ("cost_usd" !in columns) {'
+        assert old in source
+        return source.replace(old, "            if (false) {", 1)
+    return source
+
+
 def run_verifier(temp_root: Path) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["ASTRA_VERIFY_ROOT"] = str(temp_root)
@@ -70,6 +85,7 @@ def run_verifier(temp_root: Path) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     source = MAIN.read_text()
+    db_source = DB.read_text()
     cases = [("positive_baseline", None, True)] + [
         (name, name, False) for name in MUTATIONS
     ]
@@ -82,10 +98,13 @@ def main() -> int:
             ignore=shutil.ignore_patterns(".git", ".gradle", "build"),
         )
         temp_main = temp_root / "app/src/main/java/com/example/openaichat/MainActivity.kt"
+        temp_db = temp_root / "app/src/main/java/com/example/openaichat/ChatDatabase.kt"
 
         for case_name, mutation, expected_pass in cases:
-            mutated_source = source if mutation is None else mutate(source, mutation)
+            db_case = mutation and mutation.startswith(("remove_v18_",))
+            mutated_source = source if mutation is None or db_case else mutate(source, mutation)
             temp_main.write_text(mutated_source)
+            temp_db.write_text(db_source if mutation is None else mutate_db(db_source, mutation))
             result = run_verifier(temp_root)
             passed = result.returncode == 0
 
@@ -102,7 +121,7 @@ def main() -> int:
                 reason = output.splitlines()[-1] if output else "no diagnostic"
                 print(f"PASS {case_name}: verifier rejects mutation ({reason})")
 
-    print("Verifier mutation matrix: PASS (3 targeted negative mutations + positive control)")
+    print("Verifier mutation matrix: PASS (5 targeted negative mutations + positive control)")
     return 0
 
 

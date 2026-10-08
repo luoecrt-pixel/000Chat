@@ -25,6 +25,7 @@ class RequestEventFormatterTest {
         assertEquals(false, summary.contains(" -> "))
         assertEquals(true, summary.contains("18.4K in"))
         assertEquals(true, summary.contains("4.3K out"))
+        assertEquals(true, summary.contains("Расход неизвестен"))
     }
 
     @Test
@@ -49,5 +50,16 @@ class RequestEventFormatterTest {
         assertEquals(true, details.contains("requested_model=a"))
         assertEquals(true, details.contains("response_model=b"))
         assertEquals(true, details.contains("model_match=mismatch"))
+    }
+    @Test
+    fun providerCostMustBeExplicitToDisplayZero() {
+        val unknown = JSONObject().put("estimated_cost_usd", 0.0)
+        assertEquals(true, RequestEventFormatter.summary(unknown).contains("Расход неизвестен"))
+        val actual = JSONObject().put("cost_kind", "provider_reported").put("cost_usd", "0")
+        assertEquals(true, RequestEventFormatter.summary(actual).contains("Расход $0.0000"))
+        actual.put("cost_usd", "0.00000001")
+        assertEquals(true, RequestEventFormatter.summary(actual).contains("Расход < $0.0001"))
+        actual.put("cost_usd", "NaN")
+        assertEquals(true, RequestEventFormatter.summary(actual).contains("Расход неизвестен"))
     }
 }

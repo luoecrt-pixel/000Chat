@@ -1540,6 +1540,7 @@ class MainActivity : ComponentActivity() {
                             outputTokens = totals.outputTokens,
                             reasoningTokens = totals.reasoningTokens,
                             estimatedCostUsd = totals.costUsd,
+                            reportedCostUsd = totals.reportedCostUsd,
                             latencyMs = SystemClock.elapsedRealtime() - startedAt,
                             toolSummary = result.toolNames.distinct().joinToString(",")
                         )
@@ -2533,10 +2534,10 @@ class MainActivity : ComponentActivity() {
                         activeAssistantItemId = finalItemId
                         scrollToLatest()
                         status.text=if(usageObj!=null){
-                            val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+                            // The displayed expense is unknown until model-specific pricing is verified.
                             val reasoningPart=if(reasoningTok>0)" (${fmtTokens(reasoningTok)} думал)" else ""
                             val donePrefix=if(completionState=="incomplete") "Неполный ответ" else "Готово"
-                            "$donePrefix · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out$reasoningPart · ≈\$%.4f".format(cost)
+                            "$donePrefix · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out$reasoningPart · Расход неизвестен"
                         } else if(completionState=="incomplete") "Ответ завершён не полностью" else "Готово"
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
                         renderRequestTelemetry()
@@ -3237,7 +3238,7 @@ class MainActivity : ComponentActivity() {
                 restoreCurrentChat()
                 setBusy(false)
                 status.text=when{
-                    state=="completed" && usage!=null -> "Готово · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out · ≈$%.4f".format(cost)
+                    state=="completed" && usage!=null -> "Готово · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out · Расход неизвестен"
                     state=="incomplete" -> "Ответ завершён не полностью"
                     state=="cancelled" -> "Ответ отменён"
                     else -> "Ошибка фонового ответа"
@@ -3808,18 +3809,18 @@ class MainActivity : ComponentActivity() {
             val writes=o.optLong("cache_write_tokens")
             val output=o.optLong("output_tokens")
             val reasoning=o.optLong("reasoning_tokens")
-            val cost=o.optDouble("estimated_cost_usd",0.0)
+            // Historical aggregate estimates are not verified provider charges.
             return buildString{
                 append("$title\\n")
                 append("Запросов: $requests (успешных $success)\\n")
                 append("Input: ${fmtTokens(input)} · cache: ${fmtTokens(cached)}\\n")
                 append("Cache write: ${fmtTokens(writes)}\\n")
                 append("Output: ${fmtTokens(output)} · reasoning: ${fmtTokens(reasoning)}\\n")
-                append("Оценка стоимости: $%.4f\\n".format(cost))
+                append("Расход: неизвестен (исторические оценки не подтверждены)\n")
             }
         }
         return block("Сегодня",today)+"\\n"+block("Последние 7 дней",seven)+"\\n"+block("За всё время",all)+
-            "\\nСтоимость приблизительная: учитывает текстовые token rates Astra и cache, но не отдельные tool-call сборы."
+            "\nИтоги списаний по всем провайдерам станут доступны после внедрения журнала расходов."
     }
 
     private fun showLocalFiles(){

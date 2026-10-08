@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 17
+        private const val DB_VERSION = 18
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -45,6 +45,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                 estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                cost_kind TEXT NOT NULL DEFAULT 'unknown',
+                cost_usd TEXT,
                 latency_ms INTEGER NOT NULL DEFAULT 0,
                 tool_summary TEXT,
                 error TEXT,
@@ -165,6 +167,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                 estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                cost_kind TEXT NOT NULL DEFAULT 'unknown',
+                cost_usd TEXT,
                 latency_ms INTEGER NOT NULL DEFAULT 0,
                 tool_summary TEXT,
                 error TEXT,
@@ -252,6 +256,22 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (oldVersion < 17) {
             MessageMetadataCodec.allKeys.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
+            }
+        }
+        if (oldVersion < 18) {
+            // Pre-v17 databases can have no request_events table.
+            ensureRequestEventsTable(db)
+            val columns = db.rawQuery("PRAGMA table_info($REQUEST_EVENT_TABLE)", null).use { cursor ->
+                val names = mutableSetOf<String>()
+                val nameColumn = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) names.add(cursor.getString(nameColumn))
+                names
+            }
+            if ("cost_kind" !in columns) {
+                db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'")
+            }
+            if ("cost_usd" !in columns) {
+                db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT")
             }
         }
     }
@@ -587,6 +607,7 @@ data class ExistingMessageRow(
         outputTokens: Long = 0L,
         reasoningTokens: Long = 0L,
         estimatedCostUsd: Double = 0.0,
+        reportedCostUsd: Double? = null,
         latencyMs: Long = 0L,
         toolSummary: String? = null,
         error: String? = null
@@ -617,7 +638,11 @@ data class ExistingMessageRow(
                 put("cache_write_tokens", cacheWriteTokens.coerceAtLeast(0L))
                 put("output_tokens", outputTokens.coerceAtLeast(0L))
                 put("reasoning_tokens", reasoningTokens.coerceAtLeast(0L))
-                put("estimated_cost_usd", estimatedCostUsd.coerceAtLeast(0.0))
+                // The legacy numeric estimate is not proof of a provider charge.
+                put("estimated_cost_usd", estimatedCostUsd.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0)
+                val verifiedCost = reportedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
+                put("cost_kind", if (verifiedCost == null) "unknown" else "provider_reported")
+                if (verifiedCost == null) putNull("cost_usd") else put("cost_usd", verifiedCost.toString())
                 put("latency_ms", latencyMs.coerceAtLeast(0L))
                 putStringOrNull("tool_summary", toolSummary)
                 putStringOrNull("error", error?.take(1200))
@@ -655,7 +680,9 @@ data class ExistingMessageRow(
                     .put("output_tokens", c.getLong(c.getColumnIndexOrThrow("output_tokens")))
                     .put("reasoning_tokens", c.getLong(c.getColumnIndexOrThrow("reasoning_tokens")))
                     .put("estimated_cost_usd", c.getDouble(c.getColumnIndexOrThrow("estimated_cost_usd")))
+                    .put("cost_kind", c.getString(c.getColumnIndexOrThrow("cost_kind")) ?: "unknown")
                     .put("latency_ms", c.getLong(c.getColumnIndexOrThrow("latency_ms")))
+                c.getString(c.getColumnIndexOrThrow("cost_usd"))?.let { event.put("cost_usd", it) }
                 c.getString(c.getColumnIndexOrThrow("request_id"))?.let { event.put("request_id", it) }
                 c.getString(c.getColumnIndexOrThrow("requested_model"))?.let { event.put("requested_model", it) }
                 c.getString(c.getColumnIndexOrThrow("response_model"))?.let { event.put("response_model", it) }

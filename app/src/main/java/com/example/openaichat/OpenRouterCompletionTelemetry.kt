@@ -12,20 +12,23 @@ data class OpenRouterUsageSnapshot(
     val cacheWriteTokens: Long,
     val outputTokens: Long,
     val reasoningTokens: Long,
-    val costUsd: Double
+    val costUsd: Double,
+    val reportedCostUsd: Double? = null
 ) {
     companion object {
         fun from(usage: JSONObject?): OpenRouterUsageSnapshot {
             val promptDetails = usage?.optJSONObject("prompt_tokens_details")
             val completionDetails = usage?.optJSONObject("completion_tokens_details")
-            val rawCost = usage?.optDouble("cost", 0.0) ?: 0.0
+            val reportedCost = usage?.takeIf { it.has("cost") && !it.isNull("cost") }
+                ?.opt("cost")?.toString()?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
             return OpenRouterUsageSnapshot(
                 inputTokens = usage?.optLong("prompt_tokens", 0L)?.coerceAtLeast(0L) ?: 0L,
                 cachedTokens = promptDetails?.optLong("cached_tokens", 0L)?.coerceAtLeast(0L) ?: 0L,
                 cacheWriteTokens = promptDetails?.optLong("cache_write_tokens", 0L)?.coerceAtLeast(0L) ?: 0L,
                 outputTokens = usage?.optLong("completion_tokens", 0L)?.coerceAtLeast(0L) ?: 0L,
                 reasoningTokens = completionDetails?.optLong("reasoning_tokens", 0L)?.coerceAtLeast(0L) ?: 0L,
-                costUsd = rawCost.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+                costUsd = reportedCost ?: 0.0,
+                reportedCostUsd = reportedCost
             )
         }
     }

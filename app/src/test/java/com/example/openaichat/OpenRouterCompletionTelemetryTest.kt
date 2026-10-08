@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class OpenRouterCompletionTelemetryTest {
@@ -19,6 +20,7 @@ class OpenRouterCompletionTelemetryTest {
         assertEquals(0L, recordedEvents.single().inputTokens)
         assertEquals(0L, recordedEvents.single().outputTokens)
         assertEquals(0.0, recordedEvents.single().costUsd, 0.0)
+        assertNull(recordedEvents.single().reportedCostUsd)
     }
 
     @Test
@@ -41,6 +43,7 @@ class OpenRouterCompletionTelemetryTest {
         assertEquals(55L, events.single().outputTokens)
         assertEquals(21L, events.single().reasoningTokens)
         assertEquals(0.014, events.single().costUsd, 0.00000001)
+        assertEquals(0.014, events.single().reportedCostUsd!!, 0.00000001)
     }
 
     @Test
@@ -56,8 +59,17 @@ class OpenRouterCompletionTelemetryTest {
             recordEvent = {
                 calls += "event"
                 assertEquals(0.0, it.costUsd, 0.0)
+                assertNull(it.reportedCostUsd)
             }
         )
         assertEquals(listOf("metric", "event"), calls)
+    }
+    @Test
+    fun confirmedZeroAndMissingCostAreDifferent() {
+        val confirmed = OpenRouterUsageSnapshot.from(JSONObject().put("cost", 0))
+        val missing = OpenRouterUsageSnapshot.from(JSONObject().put("prompt_tokens", 12))
+        assertEquals(0.0, confirmed.reportedCostUsd!!, 0.0)
+        assertNull(missing.reportedCostUsd)
+        assertNull(OpenRouterUsageSnapshot.from(JSONObject().put("cost", -1)).reportedCostUsd)
     }
 }

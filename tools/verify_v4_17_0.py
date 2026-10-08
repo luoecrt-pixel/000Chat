@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import re
 import sqlite3
 import xml.etree.ElementTree as ET
 
@@ -68,8 +69,19 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 17' in db
+# The verifier preserves the v17 metadata migration contract while accepting v18's
+# additive request-cost migration. Do not require a frozen current DB version.
+db_version = re.search(r'private const val DB_VERSION = ([0-9]+)', db)
+assert db_version and int(db_version.group(1)) >= 18, 'cost migration requires schema v18 or newer'
 assert 'if (oldVersion < 17)' in db
+assert 'if (oldVersion < 18)' in db
+assert "ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'" in db
+assert 'ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT' in db
+upgrade_v18 = db.split("if (oldVersion < 18) {", 1)[1]
+assert "ensureRequestEventsTable(db)" in upgrade_v18
+assert "PRAGMA table_info($REQUEST_EVENT_TABLE)" in upgrade_v18
+assert 'if ("cost_kind" !in columns)' in upgrade_v18
+assert 'if ("cost_usd" !in columns)' in upgrade_v18
 assert 'MessageMetadataCodec.allKeys.forEach' in db
 assert 'MessageMetadataCodec.decodeInto' in db
 codec = (ROOT / 'app/src/main/java/com/example/openaichat/MessageMetadataCodec.kt').read_text()
