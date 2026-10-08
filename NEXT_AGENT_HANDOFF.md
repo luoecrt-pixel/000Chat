@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-07 23:00 +03:00
+**Last updated:** 2026-10-08 09:20 +03:00
 **Следующий рабочий срез:** OpenRouter server-side tools
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer
+- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Open PR #92 is stacked on #91 and adds OpenRouter server-side web tools + IJG NOTICE.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -129,13 +129,17 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. OpenRouter server-side tools — **следующий**
-Цель: проверить реальную ценность server-side `openrouter:web_search` и `openrouter:web_fetch` без нового client-side tool loop; image search/shell и остальные tools пока не обещать.
-Первый шаг: проверить актуальный Chat Completions path для Claude, точную схему server-side tool declaration/response и минимальный пользовательский сценарий, который заметно лучше текущих local tools.
+### 1. Завершить PR #91/#92 и провести merge-gates — **следующий**
+Цель: закрыть session telemetry + Drawer, OpenRouter server-side web tools и IJG notice только после подтверждённого code CI и финального handoff verification; не объявлять Skipped/unknown как green.
+Первый шаг: дождаться подтверждаемого Successful push Build + Release для последнего code-changing head PR #91, затем выполнить тот же gate для #92/стековой интеграции; текущий connector не даёт workflow_dispatch и показывает для commit только PR-triggered runs, поэтому push-runs нельзя выдумывать или считать по косвенным признакам.
 
-### 2. Реальные прогоны провайдеров — ждут пользователя
-Агент не может выполнить: нет ключей. Пользователь запускает в приложении только после готовности UI/telemetry: (а) длинный запрос OpenAI; (б) длинный запрос Claude; (в) один длинный GitHub-диалог с Claude — затем фиксируем длительность, usage, cache и обрыв/завершение.
-Первый шаг: когда пользователь готов — попросить эти три прогона и записать результат в подтверждённые/неподтверждённые контракты.
+### 2. Реальные прогоны провайдеров
+Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; зафиксировать длительность, usage, cache, server-tool поведение, обрыв/завершение и фактическую response model.
+Первый шаг: после появления возможности запустить APK пользователь делает три прогона: длинный OpenAI, длинный Claude/OpenRouter с server-side web search или fetch, затем длинный GitHub-диалог с Claude; агент записывает только фактические наблюдения.
+
+### 3. UI/device smoke для PR #91–#92
+Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
+Первый шаг: после получения APK переключить 2–3 сессии, раскрыть history, скопировать event, переименовать/удалить чат, открыть OpenRouter settings и отдельным запросом проверить web search/fetch.
 
 ## Репозиторий / branches
 
