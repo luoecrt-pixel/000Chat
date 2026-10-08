@@ -49,5 +49,7 @@ object LocalAttachmentReferences {
         nowMs: Long,
         referencedPaths: Set<String>,
         retentionMs: Long = 7L * 24 * 60 * 60 * 1000
-    ): Boolean = path !in referencedPaths && nowMs - lastModifiedMs >= retentionMs
+    ): Boolean =
+        lastModifiedMs > 0L && nowMs >= lastModifiedMs &&
+            path !in referencedPaths && nowMs - lastModifiedMs >= retentionMs
 }
