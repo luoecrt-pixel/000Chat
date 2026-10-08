@@ -1313,7 +1313,7 @@ class MainActivity : ComponentActivity() {
         if (out.isNotEmpty()) message.put("attachments", JSONArray().apply { out.forEach { put(it.toJson()) } })
         return out
     }
-    private fun buildOpenRouterMessagesSnapshot(cacheAnthropic: Boolean): JSONArray {
+    private fun buildOpenRouterMessagesSnapshot(): JSONArray {
         val result = JSONArray()
         val instructions = GenerationInstructions(
             systemPrompt = prefs.getString("system_prompt", ""),
@@ -1334,11 +1334,9 @@ class MainActivity : ComponentActivity() {
             localFileToolContext = localFileToolContext
         )
         if (systemContent != null) {
-            val systemMessage = JSONObject().put("role", "system")
-            if (cacheAnthropic) {
-                systemMessage.put("content", JSONArray().put(JSONObject().put("type", "text").put("text", systemContent).put("cache_control", JSONObject().put("type", "ephemeral"))))
-            } else systemMessage.put("content", systemContent)
-            result.put(systemMessage)
+            // A single one-hour automatic cache control is set on the request body.
+            // Avoid inserting a conflicting five-minute breakpoint in the system message.
+            result.put(OpenRouterCachePolicy.systemMessage(systemContent))
         }
         chat.forEach { message ->
             val role = message.optString("role")
@@ -2134,8 +2132,7 @@ class MainActivity : ComponentActivity() {
             clearAttachedSelection()
             toolLabel.text = ""
             refreshAttachChips()
-            val cacheAnthropic = model.trim().removePrefix("~").startsWith("anthropic/")
-            val messagesSnapshot = buildOpenRouterMessagesSnapshot(cacheAnthropic)
+            val messagesSnapshot = buildOpenRouterMessagesSnapshot()
             sendOpenRouterMessage(
                 chatId = requestChatId,
                 generation = requestGeneration,

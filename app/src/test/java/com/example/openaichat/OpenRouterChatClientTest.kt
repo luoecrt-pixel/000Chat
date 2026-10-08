@@ -25,11 +25,16 @@ class OpenRouterChatClientTest {
     @Test
     fun aggregatesUsageAcrossToolLoopAndRequestsUsageDetails() {
         val requestCount = AtomicInteger(0)
+        val capturedBodies = mutableListOf<JSONObject>()
         val firstRequestBody = AtomicReference<String?>(null)
         val firstArguments = AtomicReference<JSONObject?>(null)
         val transport = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val requestNumber = requestCount.incrementAndGet()
+                val capturedJson = okio.Buffer().also { buffer ->
+                    chain.request().body?.writeTo(buffer)
+                }.readUtf8()
+                capturedBodies += JSONObject(capturedJson)
                 if (requestNumber == 1) {
                     firstRequestBody.set(chain.request().body?.let { body ->
                         okio.Buffer().also { buffer -> body.writeTo(buffer) }.readUtf8()
@@ -58,7 +63,9 @@ class OpenRouterChatClientTest {
             val result = client.complete(
                 apiKey = "test",
                 model = "anthropic/claude-opus-5.5",
-                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                messages = JSONArray()
+                    .put(OpenRouterCachePolicy.systemMessage("System context must remain cacheable"))
+                    .put(JSONObject().put("role", "user").put("content", "hello")),
                 sessionId = "chat-123",
                 tools = JSONArray().put(
                     JSONObject()
@@ -82,6 +89,16 @@ class OpenRouterChatClientTest {
             assertTrue(firstBody.getJSONObject("stream_options").getBoolean("include_usage"))
             assertTrue(firstBody.getJSONObject("usage").getBoolean("include"))
             assertEquals("1h", firstBody.getJSONObject("cache_control").getString("ttl"))
+            assertEquals(2, capturedBodies.size)
+            capturedBodies.forEach { round ->
+                assertEquals("1h", round.getJSONObject("cache_control").getString("ttl"))
+                val messages = round.getJSONArray("messages")
+                val system = messages.getJSONObject(0)
+                assertEquals("system", system.getString("role"))
+                assertTrue(system.get("content") is String)
+                assertFalse(system.has("cache_control"))
+            }
+            assertTrue(capturedBodies[1].getJSONArray("messages").length() > capturedBodies[0].getJSONArray("messages").length())
 
             val arguments = firstArguments.get() ?: error("tool arguments missing")
             assertEquals("value", arguments.getString("x"))
