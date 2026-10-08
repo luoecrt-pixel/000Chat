@@ -86,7 +86,7 @@ class ChatDatabaseRequestAccountingTest {
     @Test fun stoppedRequestCanAcquireLateProviderCostButNeverResurrectsLocalState() {
         ChatDatabase(context).use { db ->
             db.ensureChat("chat-1")
-            assertTrue(begin(db, "chat-1", "local_stopped"))
+            assertTrue(begin(db, "chat-1", "local_stopped", "openai"))
             db.markRequestAccountingStopped("chat-1", "local_stopped")
         }
         ChatDatabase(context).use { db ->
