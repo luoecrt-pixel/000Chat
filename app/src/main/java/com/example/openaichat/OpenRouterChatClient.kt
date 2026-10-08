@@ -277,10 +277,11 @@ class OpenRouterChatClient(
             }
 
             ensureActive()
-            if (roundReportedCost == null) {
+            val completedRoundCost = roundReportedCost
+            if (completedRoundCost == null) {
                 everyRoundCostKnown = false
             } else {
-                accumulatedUsage.put("cost", accumulatedUsage.optDouble("cost", 0.0) + roundReportedCost)
+                accumulatedUsage.put("cost", accumulatedUsage.optDouble("cost", 0.0) + completedRoundCost)
             }
             val message = JSONObject()
                 .put("role", role)
