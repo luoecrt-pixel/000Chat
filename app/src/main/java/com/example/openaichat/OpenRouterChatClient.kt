@@ -188,13 +188,17 @@ class OpenRouterChatClient(
             call.timeout().timeout(remainingMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
 
             var role = "assistant"
+            var sawDone = false
             var roundResponseModel: String? = null
             val contentParts = StringBuilder()
             val reasoningDetails = JSONArray()
             val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
 
             fun consume(data: String) {
-                if (data == "[DONE]") return
+                if (data == "[DONE]") {
+                    sawDone = true
+                    return
+                }
                 val json = try {
                     JSONObject(data)
                 } catch (e: Exception) {
@@ -248,12 +252,15 @@ class OpenRouterChatClient(
                     val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
                     val parser = SseEventParser()
                     bodyResponse.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                        reader.forEachLine { line ->
+                        while (true) {
+                            val line = reader.readLine() ?: break
                             ensureWithinBudget()
                             parser.acceptLine(line)?.let { event -> consume(event.data) }
+                            if (sawDone) break
                         }
                     }
-                    parser.finish()?.let { event -> consume(event.data) }
+                    if (!sawDone) parser.finish()?.let { event -> consume(event.data) }
+                    if (!sawDone) throw IOException("OpenRouter SSE ended before [DONE]")
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
