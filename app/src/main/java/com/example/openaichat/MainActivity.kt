@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ClipboardManager
 import android.database.Cursor
 import android.provider.OpenableColumns
+import android.provider.MediaStore
 import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
@@ -219,6 +220,10 @@ class MainActivity : ComponentActivity() {
     private var lastUserText: String = ""
     private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
     private var pendingActivityResultCode: Int? = null
+    private var pendingCameraPath: String? = null
+    private var pendingCameraChatId: String? = null
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    var attachmentSheetDialog: Dialog? = null
 
     private val secure by lazy { SecureStore(this) }
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -227,6 +232,7 @@ class MainActivity : ComponentActivity() {
     val pickAny = 5100
     private val pickImage = 5101
     private val pickVoice = 5102
+    private val pickCamera = 5106
     private val pickVectorStoreFile = 5103
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
@@ -237,10 +243,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingActivityResultCode = savedInstanceState?.getInt("pending_result_code", -1)?.takeIf { it >= 0 }
+        pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
+        pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
-             if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
+             if (requestCode == pickCamera) {
+                 val capturedPath = pendingCameraPath
+                 val sourceChatId = pendingCameraChatId
+                 pendingCameraPath = null
+                 pendingCameraChatId = null
+                 val file = capturedPath?.let(::File)
+                 if (result.resultCode == RESULT_OK && file?.isFile == true && file.length() > 0L &&
+                     sourceChatId == currentChatId()) {
+                     val capturedUri = FileProvider.getUriForFile(
+                         this, BuildConfig.APPLICATION_ID + ".fileprovider", file
+                     )
+                     handleActivityResult(pickImage, RESULT_OK, Intent().setData(capturedUri))
+                 } else {
+                     file?.delete()
+                     if (result.resultCode == RESULT_OK) status.text = "Фото не получено или чат изменился"
+                 }
+             } else if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
          }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
@@ -252,6 +277,13 @@ class MainActivity : ComponentActivity() {
         restoreCurrentChat()
         executor.execute { cleanupOrphanOpenRouterAttachments() }
         diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        pendingActivityResultCode?.let { outState.putInt("pending_result_code", it) }
+        pendingCameraPath?.let { outState.putString("pending_camera_path", it) }
+        pendingCameraChatId?.let { outState.putString("pending_camera_chat_id", it) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onStart() {
@@ -290,6 +322,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        attachmentSheetDialog?.dismiss()
+        attachmentSheetDialog = null
         cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
@@ -443,8 +477,11 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), 0, dp(10), dp(4))
         }
-        row.addView(button("📎") { chooseAny() })
-        row.addView(button("🖼") { chooseImage() })
+        row.addView(button("+") { showAttachmentSheet() }.apply {
+            textSize = 22f
+            contentDescription = "Добавить в чат"
+            minHeight = dp(48)
+        })
 
         effortBadge = TextView(this).apply {
             textSize = 12f
@@ -3849,6 +3886,119 @@ class MainActivity : ComponentActivity() {
     }
 
     // ---------- attachments ----------
+    private fun showAttachmentSheet() {
+        if (attachmentSheetDialog?.isShowing == true) return
+        val dialog = Dialog(this)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(18), dp(14), dp(30))
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(24, 25, 30))
+                val r = dp(25).toFloat()
+                cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+            }
+        }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        heading.addView(TextView(this).apply {
+            text = "Добавить в чат"
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            textSize = 18f
+            setPadding(dp(10), dp(6), 0, dp(12))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(TextView(this).apply {
+            text = "✕"
+            contentDescription = "Закрыть меню вложений"
+            gravity = Gravity.CENTER
+            textSize = 21f
+            setTextColor(Color.rgb(205, 208, 215))
+            setOnClickListener { dialog.dismiss() }
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        panel.addView(heading)
+
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        AttachmentMenuPolicy.actions.forEach { action ->
+            val tile = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                background = rippleRounded(Color.rgb(39, 41, 49), 17)
+                contentDescription = action.title
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dialog.dismiss()
+                    when (action) {
+                        AttachmentMenuAction.CAMERA -> chooseCamera()
+                        AttachmentMenuAction.PHOTO -> chooseImage()
+                        AttachmentMenuAction.FILES -> chooseAny()
+                    }
+                }
+            }
+            tile.addView(TextView(this).apply {
+                text = action.icon
+                textSize = 27f
+                gravity = Gravity.CENTER
+            })
+            tile.addView(TextView(this).apply {
+                text = action.title
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setPadding(0, dp(10), 0, 0)
+            })
+            actions.addView(tile, LinearLayout.LayoutParams(0, dp(120), 1f).apply {
+                leftMargin = dp(4)
+                rightMargin = dp(4)
+            })
+        }
+        panel.addView(actions)
+        dialog.setContentView(panel)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnDismissListener {
+            if (attachmentSheetDialog === dialog) attachmentSheetDialog = null
+        }
+        attachmentSheetDialog = dialog
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            setGravity(Gravity.BOTTOM)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.6f)
+        }
+    }
+
+    private fun chooseCamera() {
+        val captured = File(filesDir, "attachments/camera_${UUID.randomUUID()}.jpg")
+        try {
+            captured.parentFile?.mkdirs()
+            val uri = FileProvider.getUriForFile(
+                this, BuildConfig.APPLICATION_ID + ".fileprovider", captured
+            )
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                clipData = ClipData.newRawUri("Camera photo", uri)
+            }
+            pendingCameraPath = captured.absolutePath
+            pendingCameraChatId = currentChatId()
+            launchActivityForResult(intent, pickCamera)
+            if (pendingActivityResultCode != pickCamera) {
+                pendingCameraPath = null
+                pendingCameraChatId = null
+                captured.delete()
+            }
+        } catch (e: Exception) {
+            pendingCameraPath = null
+            pendingCameraChatId = null
+            captured.delete()
+            status.text = "Камера недоступна: ${e.message}"
+        }
+    }
+
     private fun chooseAny() {
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
             type="*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
