@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-08 09:29 +03:00
-**Следующий рабочий срез:** Merge #91, затем rebase/retarget и gate для #92
+**Следующий рабочий срез:** Merge PR #91, затем довести #92 до merge-gate
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
