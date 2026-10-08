@@ -1052,12 +1052,6 @@ class MainActivity : ComponentActivity() {
             model.setSelection(choices.indexOfFirst { it.id == normalized }.takeIf { it >= 0 } ?: 0)
         }
         refreshSettingsModels(currentProvider, currentModel, preserveUnknown = true)
-        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                refreshSettingsModels(ModelCatalog.sources[position].id, null, preserveUnknown = false)
-            }
-        }
         labeled("Модель", model)
 
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
@@ -1095,6 +1089,22 @@ class MainActivity : ComponentActivity() {
         val code=chk("Code Interpreter","code_interpreter")
         val img=chk("Image Generation","image_generation")
         val parallel=chk("Parallel tool calls","parallel_tools")
+        val openRouterWebSearch = chk("OpenRouter: Web Search","openrouter_web_search").apply {
+            isEnabled = currentProvider == "openrouter"
+        }
+        val openRouterWebFetch = chk("OpenRouter: Web Fetch","openrouter_web_fetch").apply {
+            isEnabled = currentProvider == "openrouter"
+        }
+        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val providerId = ModelCatalog.sources[position].id
+                refreshSettingsModels(providerId, null, preserveUnknown = false)
+                val enabled = providerId == "openrouter"
+                openRouterWebSearch.isEnabled = enabled
+                openRouterWebFetch.isEnabled = enabled
+            }
+        }
         val backgroundResponses=chk("Продолжать ответ, если Astra закрыта","background_responses").apply {
             isChecked = prefs.getBoolean("background_responses", true)
             isEnabled = currentProvider == "openai"
@@ -1104,7 +1114,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(10),dp(4),dp(10),dp(4))
             background=rounded(cardBg)
         }
-        listOf(web,file,code,img,parallel,backgroundResponses).forEach { toolsCard.addView(it) }
+        listOf(web,file,code,img,parallel,openRouterWebSearch,openRouterWebFetch,backgroundResponses).forEach { toolsCard.addView(it) }
         spaced(toolsCard)
 
         lateinit var advancedToggle: TextView
@@ -1211,6 +1221,8 @@ class MainActivity : ComponentActivity() {
                     .putBoolean("code_interpreter",code.isChecked)
                     .putBoolean("image_generation",img.isChecked)
                     .putBoolean("parallel_tools",parallel.isChecked)
+                    .putBoolean("openrouter_web_search",openRouterWebSearch.isChecked)
+                    .putBoolean("openrouter_web_fetch",openRouterWebFetch.isChecked)
                     .putBoolean("background_responses",backgroundResponses.isChecked)
                     .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
@@ -1400,6 +1412,11 @@ class MainActivity : ComponentActivity() {
                 }
                 val appTools = OpenRouterAppToolCatalog.tools()
                 for (i in 0 until appTools.length()) toolCatalog.put(appTools.get(i))
+                val serverTools = OpenRouterServerToolCatalog.tools(
+                    webSearch = prefs.getBoolean("openrouter_web_search", false),
+                    webFetch = prefs.getBoolean("openrouter_web_fetch", false)
+                )
+                for (i in 0 until serverTools.length()) toolCatalog.put(serverTools.get(i))
                 val result = openRouterClient.complete(
                     apiKey = secure.getOpenRouterApiKey(),
                     model = model,
