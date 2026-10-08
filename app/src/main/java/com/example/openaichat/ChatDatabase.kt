@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 16
+        private const val DB_VERSION = 17
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -107,6 +107,14 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 status TEXT,
                 feedback INTEGER,
                 content_hash TEXT,
+                provider TEXT,
+                model TEXT,
+                requested_model TEXT,
+                response_model TEXT,
+                reasoning_summary TEXT,
+                error TEXT,
+                tool_trace TEXT,
+                usage TEXT,
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
         """.trimIndent())
@@ -240,6 +248,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         if (oldVersion < 16) {
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
+        }
+        if (oldVersion < 17) {
+            MessageMetadataCodec.allKeys.forEach { key ->
+                db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
+            }
         }
     }
 
@@ -498,6 +511,9 @@ data class ExistingMessageRow(
         putStringOrNull("generated_images", message.optJSONArray("generated_images")?.toString())
         putStringOrNull("tools", message.optJSONArray("tools")?.toString())
         putStringOrNull("status", message.optString("status").takeIf { it.isNotBlank() && it != "null" })
+        MessageMetadataCodec.allKeys.forEach { key ->
+            putStringOrNull(key, MessageMetadataCodec.serialized(message, key))
+        }
         if (message.has("feedback") && !message.isNull("feedback")) put("feedback", message.optInt("feedback")) else putNull("feedback")
         put("content_hash", contentHash)
     }
@@ -1222,6 +1238,9 @@ data class ExistingMessageRow(
                 parseArrayColumn(c.getString(c.getColumnIndexOrThrow("tools")))?.let { m.put("tools", it) }
                 c.getString(c.getColumnIndexOrThrow("status"))?.let { if (it.isNotBlank()) m.put("status", it) }
                 if (!c.isNull(c.getColumnIndexOrThrow("feedback"))) m.put("feedback", c.getInt(c.getColumnIndexOrThrow("feedback")))
+                MessageMetadataCodec.allKeys.forEach { key ->
+                    MessageMetadataCodec.decodeInto(m, key, c.getString(c.getColumnIndexOrThrow(key)))
+                }
                 arr.put(m)
             }
         }
@@ -1268,6 +1287,9 @@ data class ExistingMessageRow(
                 putStringOrNull("generated_images", m.optJSONArray("generated_images")?.toString())
                 putStringOrNull("tools", m.optJSONArray("tools")?.toString())
                 putStringOrNull("status", m.optString("status").takeIf { it.isNotBlank() && it != "null" })
+                MessageMetadataCodec.allKeys.forEach { key ->
+                    putStringOrNull(key, MessageMetadataCodec.serialized(m, key))
+                }
                 if (m.has("feedback") && !m.isNull("feedback")) put("feedback", m.optInt("feedback")) else putNull("feedback")
             }
             db.insertOrThrow(MESSAGE_TABLE, null, mv)
