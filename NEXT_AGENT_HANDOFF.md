@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 14:20 +03:00
+**Last updated:** 2026-10-08 16:28 +03:00
 **Следующий рабочий срез:** Реальные прогоны провайдеров
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,8 +57,8 @@
 
 ## Фактический baseline
 
-- main code baseline: `35d0df7a7db181765c61bdd95bfa939434a634a7` (docs merge #93 on top of #92); #91 and #92 are merged and #93 advances this handoff. Current implementation contains session telemetry + Drawer and OpenRouter server-side Web Search / Web Fetch with local-executor guard and IJG NOTICE.
-- #92 code gate: push Build `37739052818` Successful; push Release `37739052909` Successful; final Verify handoff `37740237478` Successful on docs-only head `81b5106af35ff01cd1eb8226a3dd97fd893f060a`.
+- main code baseline: `e154e436213d292e9f894d1764f149f0e62b9b3c` (merge #96, after #95). Current implementation includes session telemetry/Drawer, server-side OpenRouter web tools, unconditional successful completion events when usage is missing, and an SSE `[DONE]` guard before success/local tool execution.
+- #95 code gate: push Build `37780620420` Successful; push Release `37780620439` Successful. #96 code gate: push Build `37781045311` Successful; push Release `37781045408` Successful. These are JVM/Android/emulator evidence, not live provider evidence.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -102,6 +102,9 @@
 - [pure] **#89:** OpenRouter SSE transport на JVM накапливает fragmented text, reasoning_details и tool-call arguments по index; local tool loop стартует только после завершения SSE round; partial text сохраняется при mid-stream error; существующие >24-round и ownership-loss regressions перенесены на streamed transport.
 - [robolectric] **#90:** request_events сохраняются в SQLite, изолированы по chat_id, переживают reopen и удаляются вместе с chat; runtime truth фактической модели у реального провайдера этими тестами не доказана.
 - [pure] **#91:** regression test на OpenRouter SSE подтверждает накопление `responseModel` из поля `model` stream-чанка; UI telemetry/Drawer runtime на реальном устройстве этим PR не подтверждены.
+- [pure] **#92:** OpenRouter server tool catalog формирует точные типы `openrouter:web_search`/`openrouter:web_fetch`; mixed server/local tool path и запрет передавать server tool в local executor подтверждены на JVM, не живым провайдером.
+- [pure] **#95:** recorder для успешного OpenRouter завершения вызывает запись session request event и при отсутствующем provider usage; metric callback остаётся условным по наличию usage. Production wiring в MainActivity проверено по source; JVM callback regressions не заменяют реальный UI/provider run. Текущая DB схема сохраняет отсутствующие счётчики как нули, а не как отдельное состояние unknown.
+- [pure] **#96:** OpenRouter SSE round требует `[DONE]` перед successful result и local tool execution; JVM transport tests отвергают EOF без маркера даже после `finish_reason=stop`/tool_calls, сохраняют partial text и принимают терминальный фрейм без финальной пустой строки.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -111,7 +114,7 @@
 1. Очень длинный ответ на реальном провайдере не наблюдался. OpenAI: source-аудит без app-side timeout, реального прогона не было. OpenRouter: #89 теперь покрывает transport-level SSE на JVM, но реальный long-running provider/mobile run всё ещё не наблюдался; Anthropic рекомендует streaming для long-running запросов, особенно при больших `max_tokens`, поскольку некоторые сети могут разрывать idle-соединения; «10 минут» — ориентир/ограничение SDK для non-streaming, а не универсальный лимит модели.
 2. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся. OpenRouter usage/cache telemetry доказана на уровне client (#76); показ в UI не подтверждён.
 3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
-4. Вложения Claude (#57, #83): чтение моделью картинки/PDF/текста и multi-select через `clipData` не подтверждены на реальной модели; JPEG с неидеальной геометрией или mirrored/transpose-ориентацией уходит как есть — трактовка EXIF-orientation провайдерами не проверена; память/время lossless-поворота на больших фото не измерялись. Для `ajpegtran:0.1.14` отдельно проверены published license metadata и IJG attribution requirements; release APK/AAB overhead измерен, но project-side notice/attribution ещё не зафиксирован как отдельный compliance contract.
+4. Вложения Claude (#57, #83): чтение моделью картинки/PDF/текста и multi-select через `clipData` не подтверждены на реальной модели; JPEG с неидеальной геометрией или mirrored/transpose-ориентацией уходит как есть — трактовка EXIF-orientation провайдерами не проверена; память/время lossless-поворота на больших фото не измерялись. Для `ajpegtran:0.1.14` опубликованные license metadata и IJG attribution requirements проверены; `NOTICE.md` добавлен в #92, но отдельного runtime/публикационного аудита видимости notice внутри APK не проводилось.
 5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
 6. Остальные async-границы `MainActivity` вне четырёх аудированных (подтверждение при Stop и rotation, фоновые пути PR G, tool loop OpenRouter) не аудировались: аудит не называть завершённым.
 
@@ -132,8 +135,8 @@
 
 ### 1. Реальные прогоны провайдеров — **следующий**
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
-Подготовка APK завершена: Build Android APK `37746579120` Successful, Release `37746579163` Successful; debug artifact `11536536715`, ZIP SHA-256 `39a960c74b3b10a6b2bb936872f85c80d401f7652df14b2982576fd170ee7a04`.
-Первый шаг: пользователь запускает этот APK на реальном Android-девайсе и делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств. Эти запуски остаются отдельным proof level и не заменяются CI/instrumentation.
+Старый debug APK из `37746579120` не содержит fixes #95/#96. Новый code-identical `[ci]` head `e7f5c9c61e738740386a08b9b13f16c4ea0c8a4f` от merge #96: post-96 APK Build `37782891878` Successful и Release `37782891772` Successful; debug artifact `11553317424` (ZIP SHA-256 `5805d204fc69823f5b3bc42f6cb4b0e31385119c063e62b781717bf6345467db`), извлечённый `app-debug.apk` SHA-256 `a933b68a3a8d86c9f6440ca87763bf08bb9a53997fb5067eccbb74f9a3e5376c`. Это всё ещё не live provider/device proof.
+Первый шаг: пользователь устанавливает post-96 APK на реальном Android-девайсе и делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств. Эти запуски остаются отдельным proof level и не заменяются CI/instrumentation.
 
 ### 2. UI/device smoke
 Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
@@ -188,16 +191,18 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
-- **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
-- **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
-- **#91:** merged; session telemetry card + Drawer + formatter regressions; Build/Release/Verify gate закрыт.
 - **#92:** merged; OpenRouter server-side Web Search / Web Fetch + local-executor guard + IJG NOTICE; Build/Release/Verify gate закрыт.
+- **#93:** merged; docs-only post-92 provider validation handoff; Verify handoff Successful.
+- **#94:** merged; docs-only post-92 APK run and capability-aware settings idea; Verify handoff `37769615494` Successful.
+- **#95:** merged as `950923c9f2087ae595d018841d603834b8d373d5`; OpenRouter completion event without usage; Build `37780620420` / Release `37780620439` Successful.
+- **#96:** merged as `e154e436213d292e9f894d1764f149f0e62b9b3c`; OpenRouter SSE `[DONE]` guard; Build `37781045311` / Release `37781045408` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
+
+**Ревизия после пяти merged PR #92–#96:** новые pure contracts закрыли пробелы в учёте завершений и распознавании обрыва OpenRouter SSE; architectural layer остаётся прежним. Следующий доказательный слой — живое устройство/провайдер, а не новый массовый рефакторинг. Существующий developer-instructions UI уже передаёт пользовательские инструкции, но не является полноценной source/model-aware настройкой системного промпта.
 
 ### 1. Версии ответа + обратимость
 Сейчас regenerate/edit — точечные действия над линейным чатом. Следующий уровень — сохранять альтернативы и уметь вернуть чат к состоянию «до этого ответа». Это естественное продолжение fork: пользователь не должен бояться попробовать другой prompt/effort. Первый шаг: pure domain contract для snapshot/branch point + DB test, без UI.
@@ -221,7 +226,7 @@ Static verifier:
 MVP: «Ветвить отсюда» на выбранном сообщении создаёт независимый local snapshot до этой точки. Первый шаг: pure DB/domain contract + tests. Обязательно: новый `chatId`, новые local records, не переносить active response / Worker / temporary UI state, и сначала подтвердить актуальную семантику Responses API для продолжения ровно от fork point.
 
 ### 8. Настройки генерации, зависящие от источника и модели
-Нужен пользовательский слой «как модель должна отвечать», но без ложной универсальности: **системный промпт/instructions**, reasoning effort («градус»), verbosity/формат ответа и sampling-настройки (`temperature`, `top_p` и аналоги) должны быть capability-aware для конкретного API source + model. OpenAI Responses уже имеет model-dependent `reasoning.effort`; OpenRouter exposes a richer but model-dependent parameter surface, поэтому один общий набор полей нельзя безусловно отправлять во все запросы. Первый шаг: audit request builders для OpenAI Responses и OpenRouter Chat Completions, описать pure `ModelCapabilities`/`GenerationSettings` contract и regression matrix на unsupported/omitted parameters; UI и per-chat profiles делать только после этого.
+Нужен пользовательский слой «как модель должна отвечать», но без ложной универсальности: **системный промпт/instructions**, reasoning effort («градус»), verbosity/формат ответа и sampling-настройки (`temperature`, `top_p` и аналоги) должны быть capability-aware для конкретного API source + model. OpenAI Responses уже имеет model-dependent `reasoning.effort`; OpenRouter exposes a richer but model-dependent parameter surface, поэтому один общий набор полей нельзя безусловно отправлять во все запросы. Фактический аудит: в настройках уже есть глобальный `Developer instructions`, `reasoning`, `reasoning_mode` и `verbosity`; OpenAI request содержит `instructions`/`reasoning`/`text.verbosity`, OpenRouter строит `system` message и передаёт `reasoning.effort`/`verbosity`. OpenRouter сейчас нормализует `xhigh/max` в `high` и `auto` в `medium`; `temperature`/`top_p` не экспонируются. Некоторые новые Claude через OpenRouter игнорируют sampling-поля; каталог моделей API возвращает `supported_parameters` и требует проверки по конкретной модели. Первый шаг: описать pure `ModelCapabilities`/`GenerationSettings` contract для двух request builders и regression matrix на unsupported/omitted parameters и отсутствие silent downgrade; UI и per-chat profiles делать только после этого.
 
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
