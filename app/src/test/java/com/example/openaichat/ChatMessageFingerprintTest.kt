@@ -31,6 +31,15 @@ class ChatMessageFingerprintTest {
     }
 
     @Test
+    fun onlyAttachmentManifestChangingMustInvalidatePersistedRow() {
+        val original = JSONObject().put("role", "user").put("text", "photo")
+            .put("attachments", JSONArray().put(JSONObject().put("path", "/photo").put("wire_path", "/wire-A")))
+        val changed = JSONObject(original.toString())
+            .put("attachments", JSONArray().put(JSONObject().put("path", "/photo").put("wire_path", "/wire-B")))
+        assertNotEquals(ChatMessageFingerprint.of(original), ChatMessageFingerprint.of(changed))
+    }
+
+    @Test
     fun omittedOptionalFieldAndEmptyArrayAreDistinct() {
         val a = JSONObject().put("role", "assistant")
         val b = JSONObject().put("role", "assistant").put("tools", JSONArray())

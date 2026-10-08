@@ -11,7 +11,7 @@ import org.json.JSONObject
 object ChatMessageFingerprint {
     private val persistedKeys = listOf(
         "role", "text", "response_id", "request_id",
-        "file_ids", "file_names", "file_sizes", "file_paths", "file_mimes",
+        "file_ids", "file_names", "file_sizes", "file_paths", "file_mimes", "attachments",
         "image_path", "image_file_id", "image_name", "image_mime", "image_size",
         "annotations", "generated_images", "tools", "status", "feedback"
     )
