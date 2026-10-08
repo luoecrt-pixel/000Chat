@@ -349,6 +349,119 @@ class OpenRouterChatClientTest {
     }
 
     @Test
+    fun unexpectedEofAfterStopReasonIsNotACompletedResponse() {
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"answer cut short"},"finish_reason":"stop"}]}"""
+                    )
+                )
+            }
+            .build()
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val failure = try {
+                client.complete(
+                    apiKey = "test",
+                    model = "test-model",
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                    tools = null,
+                    maxTokens = null,
+                    reasoningEffort = null,
+                    verbosity = null,
+                    parallelToolCalls = false,
+                    executeTool = { _, _ -> error("tool should not run") }
+                )
+                null
+            } catch (e: OpenRouterCompletionException) {
+                e
+            }
+            assertNotNull(failure)
+            assertEquals("answer cut short", failure?.partialText)
+            assertTrue(failure?.message?.contains("[DONE]") == true)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun unexpectedEofWithToolCallMustNotExecuteLocalTool() {
+        val localExecutions = AtomicInteger(0)
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse(
+                        """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"""
+                    )
+                )
+            }
+            .build()
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val failure = try {
+                client.complete(
+                    apiKey = "test",
+                    model = "test-model",
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                    tools = JSONArray().put(
+                        JSONObject().put("type", "function")
+                            .put("function", JSONObject().put("name", "test_tool").put("parameters", JSONObject()))
+                    ),
+                    maxTokens = null,
+                    reasoningEffort = null,
+                    verbosity = null,
+                    parallelToolCalls = false,
+                    executeTool = { _, _ ->
+                        localExecutions.incrementAndGet()
+                        "not allowed"
+                    }
+                )
+                null
+            } catch (e: IOException) {
+                e
+            }
+            assertNotNull(failure)
+            assertTrue(failure?.message?.contains("[DONE]") == true)
+            assertEquals(0, localExecutions.get())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun finalDoneMarkerWithoutTrailingBlankLineIsAccepted() {
+        val transport = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                sseResponse(
+                    chain,
+                    sse("""{"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}""") +
+                        "data: [DONE]"
+                )
+            }
+            .build()
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            val result = client.complete(
+                apiKey = "test",
+                model = "test-model",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                tools = null,
+                maxTokens = null,
+                reasoningEffort = null,
+                verbosity = null,
+                parallelToolCalls = false,
+                executeTool = { _, _ -> error("tool should not run") }
+            )
+            assertEquals("complete", result.text)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun toolLoopDoesNotStopAtTwentyFourRounds() {
         val requestCount = AtomicInteger(0)
         val transport = OkHttpClient.Builder()
