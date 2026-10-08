@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
 **Last updated:** 2026-10-08 09:20 +03:00
-**Следующий рабочий срез:** OpenRouter server-side tools
+**Следующий рабочий срез:** Завершить PR #91/#92 и провести merge-gates
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
