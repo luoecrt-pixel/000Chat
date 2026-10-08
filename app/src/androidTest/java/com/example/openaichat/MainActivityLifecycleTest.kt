@@ -35,6 +35,39 @@ import java.util.zip.ZipOutputStream
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
     @Test
+    fun plusOpensThreeAttachmentActionsAndClosesWithoutLaunchingPicker() {
+        fun byDescription(v: android.view.View, description: String): android.view.View? {
+            if (v.contentDescription?.toString() == description) return v
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) {
+                    byDescription(v.getChildAt(i), description)?.let { return it }
+                }
+            }
+            return null
+        }
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val root = activity.window.decorView
+            val plus = byDescription(root, "Добавить в чат")
+                ?: throw AssertionError("Missing plus button")
+            plus.performClick()
+            val sheet = activity.attachmentSheetDialog
+            assertTrue("Plus sheet must be visible", sheet?.isShowing == true)
+            val sheetRoot = sheet!!.window!!.decorView
+            for (action in AttachmentMenuPolicy.actions) {
+                assertTrue("Missing attachment action: ${action.title}",
+                    byDescription(sheetRoot, action.title) != null)
+            }
+            val close = byDescription(sheetRoot, "Закрыть меню вложений")
+                ?: throw AssertionError("Missing sheet close action")
+            close.performClick()
+            assertTrue("Sheet must dismiss without launching external activity",
+                activity.attachmentSheetDialog == null)
+        }
+        scenario.close()
+    }
+
+    @Test
     fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
