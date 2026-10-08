@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 09:20 +03:00
+**Last updated:** 2026-10-08 09:45 +03:00
 **Следующий рабочий срез:** Завершить PR #91/#92 и провести merge-gates
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Open PR #92 is stacked on #91 and adds OpenRouter server-side web tools + IJG NOTICE.
+- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Open PR #92 is stacked on snapshot branch `stack/base-91-e660` and adds OpenRouter server-side web tools + IJG NOTICE. Current PR #91 head: `d4e4539fc1b681206078caf861dabdc503d0b32c`; `Verify handoff` Successful: run `37734534592`.
 
 ## Подтверждённые lifecycle/recovery контракты
 
