@@ -14,11 +14,12 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 18
+        private const val DB_VERSION = 19
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
         private const val REQUEST_EVENT_TABLE = "request_events"
+        private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -56,9 +57,38 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
     }
 
+    private fun ensureRequestAccountingTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $REQUEST_ACCOUNTING_TABLE (
+                chat_id TEXT NOT NULL,
+                local_request_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                requested_model TEXT,
+                credential_source TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                local_status TEXT NOT NULL DEFAULT 'running',
+                provider_status TEXT,
+                response_id TEXT,
+                http_request_id TEXT,
+                input_tokens INTEGER,
+                cached_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cost_kind TEXT NOT NULL DEFAULT 'unknown',
+                cost_usd TEXT,
+                error TEXT,
+                PRIMARY KEY(chat_id, local_request_id),
+                FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_accounting_created ON $REQUEST_ACCOUNTING_TABLE(created_at)")
+    }
+
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
         ensureRequestEventsTable(db)
+        ensureRequestAccountingTable(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -176,6 +206,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             )
         """.trimIndent())
         db.execSQL("CREATE INDEX idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
+        ensureRequestAccountingTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -273,6 +304,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if ("cost_usd" !in columns) {
                 db.execSQL("ALTER TABLE $REQUEST_EVENT_TABLE ADD COLUMN cost_usd TEXT")
             }
+        }
+        if (oldVersion < 19) {
+            // There is no trustworthy legacy local_request_id/cost coverage;
+            // never fabricate ledger entries by assigning older event zeros.
+            ensureRequestAccountingTable(db)
         }
     }
 
@@ -384,6 +420,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.transaction { db ->
             db.delete(MESSAGE_TABLE, "chat_id=?", arrayOf(id))
             db.delete(METRICS_TABLE, "chat_id=?", arrayOf(id))
+            // request_events and request_accounting are removed by FK CASCADE.
             db.delete(CHAT_TABLE, "id=?", arrayOf(id))
         }
     }
@@ -592,6 +629,167 @@ data class ExistingMessageRow(
         }
     }
 
+
+    /**
+     * Snapshot identity at send time. No API key is retained: credentialSource is
+     * only a non-secret provider slot identifier, never credentials or a hash.
+     * INSERT OR IGNORE makes retries and process restarts idempotent.
+     */
+    fun startRequestAccounting(
+        chatId: String,
+        localRequestId: String,
+        provider: String,
+        requestedModel: String?,
+        credentialSource: String
+    ): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank()) return false
+        var inserted = false
+        writableDatabase.transaction { db ->
+            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(chatId), null, null, null, "1")
+                .use { it.moveToFirst() }
+            if (!exists) return@transaction
+            val now = System.currentTimeMillis()
+            val values = ContentValues().apply {
+                put("chat_id", chatId)
+                put("local_request_id", localRequestId)
+                put("provider", provider.ifBlank { "unknown" })
+                putStringOrNull("requested_model", requestedModel)
+                put("credential_source", credentialSource.ifBlank { "unknown" })
+                put("created_at", now)
+                put("updated_at", now)
+                put("local_status", "running")
+                put("cost_kind", "unknown")
+            }
+            inserted = db.insertWithOnConflict(REQUEST_ACCOUNTING_TABLE, null, values,
+                SQLiteDatabase.CONFLICT_IGNORE) != -1L
+        }
+        return inserted
+    }
+
+    /** Stop updates the local outcome without erasing the request's accounting identity. */
+    fun markRequestAccountingStopped(chatId: String, localRequestId: String) {
+        if (chatId.isBlank() || localRequestId.isBlank()) return
+        writableDatabase.update(
+            REQUEST_ACCOUNTING_TABLE,
+            ContentValues().apply {
+                put("local_status", "stopped")
+                put("updated_at", System.currentTimeMillis())
+            },
+            "chat_id=? AND local_request_id=? AND local_status='running'",
+            arrayOf(chatId, localRequestId)
+        )
+    }
+
+    /**
+     * Updates only a previously captured request. A stale callback cannot recreate a
+     * deleted chat/request. Known zero is different from missing provider cost.
+     * A later provider report may enrich a stopped request, never change its local stop.
+     */
+    fun recordRequestAccounting(
+        chatId: String,
+        localRequestId: String,
+        status: String,
+        responseId: String? = null,
+        httpRequestId: String? = null,
+        usage: JSONObject? = null,
+        reportedCostUsd: Double? = null,
+        error: String? = null
+    ): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank()) return false
+        var written = false
+        writableDatabase.transaction { db ->
+            val existing = db.query(REQUEST_ACCOUNTING_TABLE,
+                arrayOf("local_status", "cost_kind"),
+                "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId),
+                null, null, null, "1").use { c ->
+                if (!c.moveToFirst()) null else c.getString(0) to c.getString(1)
+            } ?: return@transaction
+            val (localStatus, knownCost) = existing
+            val values = ContentValues().apply {
+                put("updated_at", System.currentTimeMillis())
+                if (localStatus == "running") put("local_status", status.ifBlank { "unknown" })
+                put("provider_status", status.ifBlank { "unknown" })
+                responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
+                httpRequestId?.takeIf { it.isNotBlank() }?.let { put("http_request_id", it) }
+                error?.takeIf { it.isNotBlank() }?.let { put("error", it.take(1200)) }
+                // No optLong defaults: omitted counters remain SQL NULL.
+                val prefix = if (usage?.has("prompt_tokens") == true || usage?.has("completion_tokens") == true)
+                    "openrouter" else "openai"
+                val inputKey = if (prefix == "openrouter") "prompt_tokens" else "input_tokens"
+                val outputKey = if (prefix == "openrouter") "completion_tokens" else "output_tokens"
+                fun knownNonnegative(source: JSONObject?, key: String): Long? =
+                    source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+                knownNonnegative(usage, inputKey)?.let { put("input_tokens", it) }
+                knownNonnegative(usage, outputKey)?.let { put("output_tokens", it) }
+                val cached = if (prefix == "openrouter")
+                    usage?.optJSONObject("prompt_tokens_details")?.let {
+                        knownNonnegative(it, "cached_tokens")
+                    }
+                else usage?.optJSONObject("input_tokens_details")?.let {
+                    knownNonnegative(it, "cached_tokens")
+                }
+                cached?.let { put("cached_tokens", it) }
+                val reasoning = if (prefix == "openrouter")
+                    usage?.optJSONObject("completion_tokens_details")?.let {
+                        knownNonnegative(it, "reasoning_tokens")
+                    }
+                else usage?.optJSONObject("output_tokens_details")?.let {
+                    knownNonnegative(it, "reasoning_tokens")
+                }
+                reasoning?.let { put("reasoning_tokens", it) }
+                val cost = reportedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
+                if (cost != null && knownCost != "provider_reported") {
+                    put("cost_kind", "provider_reported")
+                    put("cost_usd", cost.toString())
+                }
+            }
+            written = db.update(REQUEST_ACCOUNTING_TABLE, values,
+                "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId)) == 1
+        }
+        return written
+    }
+
+    fun listRequestAccounting(chatId: String): List<JSONObject> {
+        if (chatId.isBlank()) return emptyList()
+        val rows = mutableListOf<JSONObject>()
+        readableDatabase.query(REQUEST_ACCOUNTING_TABLE, null, "chat_id=?", arrayOf(chatId),
+            null, null, "created_at ASC, local_request_id ASC").use { c ->
+            while (c.moveToNext()) {
+                val value = JSONObject()
+                for (i in 0 until c.columnCount) {
+                    val key = c.getColumnName(i)
+                    if (c.isNull(i)) continue
+                    when (c.getType(i)) {
+                        android.database.Cursor.FIELD_TYPE_INTEGER -> value.put(key, c.getLong(i))
+                        android.database.Cursor.FIELD_TYPE_FLOAT -> value.put(key, c.getDouble(i))
+                        else -> value.put(key, c.getString(i))
+                    }
+                }
+                rows += value
+            }
+        }
+        return rows
+    }
+
+    /** Only provider-reported cost contributes to totals; unknowns stay visible. */
+    fun requestAccountingTotals(since: Long = 0L): JSONObject {
+        readableDatabase.rawQuery("""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN cost_kind='provider_reported'
+                        THEN CAST(cost_usd AS REAL) ELSE 0 END), 0)
+            FROM $REQUEST_ACCOUNTING_TABLE WHERE created_at>=?
+        """.trimIndent(), arrayOf(since.coerceAtLeast(0L).toString())).use { c ->
+            if (!c.moveToFirst()) return JSONObject()
+            val total = c.getLong(0)
+            val known = c.getLong(1)
+            return JSONObject().put("requests", total)
+                .put("known_cost_requests", known)
+                .put("unknown_cost_requests", total - known)
+                .put("provider_reported_cost_usd", c.getDouble(2))
+        }
+    }
+
     fun recordRequestEvent(
         chatId: String,
         eventType: String,
@@ -696,7 +894,12 @@ data class ExistingMessageRow(
 
     fun clearRequestEvents(chatId: String): Int {
         if (chatId.isBlank()) return 0
-        return writableDatabase.delete(REQUEST_EVENT_TABLE, "chat_id=?", arrayOf(chatId))
+        var cleared = 0
+        writableDatabase.transaction { db ->
+            cleared = db.delete(REQUEST_EVENT_TABLE, "chat_id=?", arrayOf(chatId))
+            db.delete(REQUEST_ACCOUNTING_TABLE, "chat_id=?", arrayOf(chatId))
+        }
+        return cleared
     }
 
     fun recordFeedback(chatId: String, requestId: String, value: Int) {
