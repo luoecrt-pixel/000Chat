@@ -2443,6 +2443,7 @@ class MainActivity : ComponentActivity() {
                     val assistantMessage=responseModel.toChatJson()
                         .put("requested_model", model)
                         .put("provider", "openai")
+                    responseModel.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
                     val savedGeneratedImages = saveGeneratedImages(responseModel.generatedImageResults)
                     if (savedGeneratedImages.length() > 0) assistantMessage.put("generated_images", savedGeneratedImages)
 
@@ -3117,6 +3118,8 @@ class MainActivity : ComponentActivity() {
                 ?: response.optJSONObject("incomplete_details")?.optString("reason"))
         val savedImages=saveGeneratedImages(model.generatedImageResults)
         val assistant=model.toChatJson().apply{
+            put("provider", "openai")
+            model.usage?.let { put("usage", JSONObject(it.toString())) }
             if(savedImages.length()>0)put("generated_images",savedImages)
         }
         val chatObj=chatDb.getChat(chatId) ?: return

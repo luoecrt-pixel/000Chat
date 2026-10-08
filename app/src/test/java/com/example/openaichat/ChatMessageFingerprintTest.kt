@@ -40,6 +40,19 @@ class ChatMessageFingerprintTest {
     }
 
     @Test
+    fun metadataOnlyEditsRequireSqliteUpdate() {
+        val original = JSONObject().put("role", "assistant").put("text", "hello")
+        for (key in MessageMetadataCodec.textKeys) {
+            val updated = JSONObject(original.toString()).put(key, "changed metadata")
+            assertNotEquals("metadata key $key", ChatMessageFingerprint.of(original), ChatMessageFingerprint.of(updated))
+        }
+        val trace = JSONObject(original.toString()).put("tool_trace", JSONArray().put(JSONObject().put("name", "github_get_file")))
+        val usage = JSONObject(original.toString()).put("usage", JSONObject().put("cost", 0.20))
+        assertNotEquals(ChatMessageFingerprint.of(original), ChatMessageFingerprint.of(trace))
+        assertNotEquals(ChatMessageFingerprint.of(original), ChatMessageFingerprint.of(usage))
+    }
+
+    @Test
     fun omittedOptionalFieldAndEmptyArrayAreDistinct() {
         val a = JSONObject().put("role", "assistant")
         val b = JSONObject().put("role", "assistant").put("tools", JSONArray())

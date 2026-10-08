@@ -14,11 +14,15 @@ object ChatMessageFingerprint {
         "file_ids", "file_names", "file_sizes", "file_paths", "file_mimes", "attachments",
         "image_path", "image_file_id", "image_name", "image_mime", "image_size",
         "annotations", "generated_images", "tools", "status", "feedback"
-    )
+    ) + MessageMetadataCodec.allKeys
 
     fun of(message: JSONObject): String {
         val normalized = JSONArray()
         persistedKeys.forEach { key ->
+            if (key in MessageMetadataCodec.allKeys) {
+                normalized.put(MessageMetadataCodec.serialized(message, key) ?: JSONObject.NULL)
+                return@forEach
+            }
             when (key) {
                 "role", "text" -> normalized.put(
                     message.optString(key)

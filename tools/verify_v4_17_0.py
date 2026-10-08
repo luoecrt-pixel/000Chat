@@ -68,7 +68,13 @@ assert 'listChatSummaries()' in main
 assert 'BuildConfig.APPLICATION_ID' in main
 assert 'listLocalFiles' in db
 assert 'generated_images' in db
-assert 'DB_VERSION = 16' in db
+assert 'DB_VERSION = 17' in db
+assert 'if (oldVersion < 17)' in db
+assert 'MessageMetadataCodec.allKeys.forEach' in db
+assert 'MessageMetadataCodec.decodeInto' in db
+codec = (ROOT / 'app/src/main/java/com/example/openaichat/MessageMetadataCodec.kt').read_text()
+for key in ['provider', 'model', 'requested_model', 'response_model', 'reasoning_summary', 'error', 'tool_trace', 'usage']:
+    assert '"'+key+'"' in codec, f'v17 message metadata contract missing {key}'
 assert 'idx_messages_chat_request' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_name TEXT' in db
 assert 'ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_mime TEXT' in db
