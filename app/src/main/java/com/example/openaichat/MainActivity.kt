@@ -1609,8 +1609,7 @@ class MainActivity : ComponentActivity() {
     private fun githubConfirmationText(name: String, arguments: JSONObject): String {
         return when (name) {
             "merge_pull_request" ->
-                "Модель хочет смержить PR #" + arguments.optInt("pull_number") +
-                    " методом " + arguments.optString("merge_method") + ".\n\nРазрешить?"
+                GitHubConfirmationPreview.text(name, arguments)
             "create_or_update_file" -> {
                 val repo = arguments.optString("owner") + "/" + arguments.optString("repo")
                 val path = arguments.optString("path")
@@ -1626,11 +1625,8 @@ class MainActivity : ComponentActivity() {
                     "\n\nPreview:\n" + preview + if (content.length > 3000) "\n… preview truncated …" else "" +
                     "\n\nРазрешить?"
             }
-            "create_issue_comment" ->
-                "Модель хочет добавить комментарий к issue/PR #" + arguments.optInt("issue_number") + ".\n\nРазрешить?"
-            "submit_pull_request_review" ->
-                "Модель хочет отправить review для PR #" + arguments.optInt("pull_number") +
-                    " с событием " + arguments.optString("event") + ".\n\nРазрешить?"
+            "create_issue_comment", "submit_pull_request_review" ->
+                GitHubConfirmationPreview.text(name, arguments)
             "trigger_workflow_dispatch" ->
                 "Модель хочет запустить GitHub Actions workflow " + arguments.optString("workflow_id") +
                     " на ref " + arguments.optString("ref") + ".\n\nРазрешить?"
