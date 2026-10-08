@@ -463,6 +463,120 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         return committed
     }
 
+    /**
+     * One-shot finalization claim shared by Activity, Worker and fatal recovery.
+     * The request's active ownership is consumed in the *same transaction* as
+     * the message checkpoint. A second terminal callback cannot commit again.
+     * No new requests or deleted chats can be resurrected.
+     */
+    fun finalizeCurrentChatIfActiveRequest(
+        id: String,
+        title: String,
+        responseId: String?,
+        baselineEffort: String?,
+        messages: List<JSONObject>,
+        expectedRequestId: String
+    ): Boolean = completeActiveRequestOnce(id, expectedRequestId) { db ->
+        upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
+    }
+
+    /** Fatal recovery with no new messages still consumes its one-shot claim. */
+    fun claimActiveRequestFailure(chatId: String, expectedRequestId: String): Boolean =
+        completeActiveRequestOnce(chatId, expectedRequestId) { }
+
+    /**
+     * Stop and active-cursor release are a single SQLite transaction. A Worker
+     * finalizer either wins the ownership claim first or observes Stop; the
+     * two cannot both persist a terminal assistant message.
+     */
+    fun stopActiveRequestOnce(chatId: String, expectedRequestId: String): Boolean {
+        if (chatId.isBlank() || expectedRequestId.isBlank()) return false
+        var stopped = false
+        writableDatabase.transaction { db ->
+            val active = db.query(
+                CHAT_TABLE, arrayOf("active_request_id"), "id=?",
+                arrayOf(chatId), null, null, null, "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+            if (!ActiveResponseWritePolicy.shouldCommit(active, expectedRequestId)) {
+                return@transaction
+            }
+            db.update(
+                REQUEST_ACCOUNTING_TABLE,
+                ContentValues().apply {
+                    put("local_status", "stopped")
+                    put("updated_at", System.currentTimeMillis())
+                },
+                "chat_id=? AND local_request_id=? AND local_status='running'",
+                arrayOf(chatId, expectedRequestId)
+            )
+            val cleared = ContentValues().apply {
+                putNull("active_response_id")
+                putNull("active_request_id")
+                putNull("active_text")
+                putNull("active_status")
+                putNull("active_started_at")
+                putNull("active_effort_pref")
+                putNull("active_effective_effort")
+                put("active_auto_selected", 0)
+                put("active_prompt_chars", 0)
+                put("active_attachments", 0)
+                put("active_background_enabled", 1)
+                put("active_last_sequence_number", -1)
+                put("updated_at", System.currentTimeMillis())
+            }
+            stopped = db.update(
+                CHAT_TABLE, cleared, "id=? AND active_request_id=?",
+                arrayOf(chatId, expectedRequestId)
+            ) == 1
+        }
+        return stopped
+    }
+
+    private fun completeActiveRequestOnce(
+        chatId: String,
+        expectedRequestId: String,
+        persist: (SQLiteDatabase) -> Unit
+    ): Boolean {
+        if (chatId.isBlank() || expectedRequestId.isBlank()) return false
+        var committed = false
+        writableDatabase.transaction { db ->
+            // CAS inside an SQLite write transaction serializes simultaneous
+            // Worker/Activity claims even when they use separate helpers.
+            val activeId = db.query(
+                CHAT_TABLE, arrayOf("active_request_id"), "id=?",
+                arrayOf(chatId), null, null, null, "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+            if (!ActiveResponseWritePolicy.shouldCommit(activeId, expectedRequestId)) {
+                return@transaction
+            }
+            persist(db)
+            val cleared = ContentValues().apply {
+                putNull("active_response_id")
+                putNull("active_request_id")
+                putNull("active_text")
+                putNull("active_status")
+                putNull("active_started_at")
+                putNull("active_effort_pref")
+                putNull("active_effective_effort")
+                put("active_auto_selected", 0)
+                put("active_prompt_chars", 0)
+                put("active_attachments", 0)
+                put("active_background_enabled", 1)
+                put("active_last_sequence_number", -1)
+                put("updated_at", System.currentTimeMillis())
+            }
+            committed = db.update(
+                CHAT_TABLE, cleared, "id=? AND active_request_id=?",
+                arrayOf(chatId, expectedRequestId)
+            ) == 1
+        }
+        return committed
+    }
+
     private fun upsertCurrentChatInDb(
         db: SQLiteDatabase,
         id: String,

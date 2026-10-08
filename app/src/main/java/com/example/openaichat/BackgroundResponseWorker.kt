@@ -329,7 +329,7 @@ class BackgroundResponseWorker(
         val cacheWriteTok = usage?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens", 0L) ?: 0L
         val reasoningTok = usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens", 0L) ?: 0L
         val cost = estimateCost(inTok, cachedTok, cacheWriteTok, outTok)
-        val committed = db.upsertCurrentChatIfActiveRequest(
+        val committed = db.finalizeCurrentChatIfActiveRequest(
             chatId, chatObj.optString("title", "Новый чат"), responseId.takeIf { it.isNotBlank() }, effectiveEffort, messages, requestId
         )
         if (!committed) {

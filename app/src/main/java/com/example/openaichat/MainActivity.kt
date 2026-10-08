@@ -1878,8 +1878,11 @@ class MainActivity : ComponentActivity() {
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
-        activeRequestId?.let { chatDb.markRequestAccountingStopped(chatId, it) }
-        activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = activeRequestId)
+        if (activeRequestId != null) {
+            chatDb.stopActiveRequestOnce(chatId, activeRequestId)
+        } else {
+            activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
+        }
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
         if(responseId!=null){
             executor.execute{
@@ -3135,6 +3138,7 @@ class MainActivity : ComponentActivity() {
         val active = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_:Exception) { null }
         val matchingRequest = requestId?.takeIf { it.isNotBlank() && it != "null" }
         if (active != null && matchingRequest != null && active.optString("request_id") == matchingRequest) {
+            if (!chatDb.claimActiveRequestFailure(chatId, matchingRequest)) return
             val chatObj = try { chatDb.getChat(chatId) } catch (_:Exception) { null }
             val messages = chatObj?.optJSONArray("messages")
             val requestMeta = messages?.let { arr ->
@@ -3167,7 +3171,9 @@ class MainActivity : ComponentActivity() {
                 error = message.take(1200)
             )
         }
-        activeResponsePersistence.clearActiveResponse(chatId,expectedRequestId=requestId)
+        // Already cleared inside claimActiveRequestFailure; a stale callback
+        // must not clear a newer request or mutate its UI.
+        if (active == null || matchingRequest == null || active.optString("request_id") != matchingRequest) return
         if(currentChatId()!=chatId) return
         runOnUiThread{
             if(currentChatId()!=chatId) return@runOnUiThread
@@ -3234,7 +3240,7 @@ class MainActivity : ComponentActivity() {
         val requestedModel = requestMeta?.optString("requested_model").orEmpty().ifBlank {
             requestMeta?.optString("model").orEmpty()
         }.ifBlank { null }
-        val committed = chatDb.upsertCurrentChatIfActiveRequest(
+        val committed = chatDb.finalizeCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
             responseId.takeIf{it.isNotBlank()},
