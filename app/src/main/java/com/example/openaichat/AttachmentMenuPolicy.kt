@@ -6,7 +6,7 @@ enum class AttachmentMenuAction(val title: String, val icon: String) {
     FILES("Файлы", "📎")
 }
 
-/** Only attachment actions already implementable by this app are shown. */
+/** Only the three supported attachment actions are shown; unrelated Claude features are not imitated. */
 object AttachmentMenuPolicy {
     val actions = listOf(
         AttachmentMenuAction.CAMERA,
