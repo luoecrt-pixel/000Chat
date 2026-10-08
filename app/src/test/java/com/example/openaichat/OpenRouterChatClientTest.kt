@@ -12,6 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -185,7 +186,7 @@ class OpenRouterChatClientTest {
                     }
                 )
                 null
-            } catch (e: OpenRouterCompletionException) {
+            } catch (e: IOException) {
                 e
             }
 
