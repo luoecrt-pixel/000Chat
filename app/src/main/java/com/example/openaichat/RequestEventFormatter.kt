@@ -21,13 +21,13 @@ object RequestEventFormatter {
             ModelCatalog.Match.UNKNOWN ->
                 "requested=${ModelCatalog.displayName(provider, requested)} · response=unknown"
         }
-        val cost = event.optDouble("estimated_cost_usd", 0.0)
+        val cost = costText(event)
         val latency = event.optLong("latency_ms", 0L)
         return "● $modelText · ${tokens(event.optLong("input_tokens"))} in · " +
             "${tokens(event.optLong("output_tokens"))} out · " +
             "${tokens(event.optLong("reasoning_tokens"))} reasoning · " +
             "cache ${tokens(event.optLong("cached_tokens"))} · " +
-            "$%.4f · %.1fs".format(Locale.US, cost, latency / 1000.0)
+            "$cost · %.1fs".format(Locale.US, latency / 1000.0)
     }
 
     fun details(event: JSONObject): String = buildString {
@@ -42,12 +42,24 @@ object RequestEventFormatter {
         append("cache_write_tokens=").append(event.optLong("cache_write_tokens")).append('\n')
         append("output_tokens=").append(event.optLong("output_tokens")).append('\n')
         append("reasoning_tokens=").append(event.optLong("reasoning_tokens")).append('\n')
-        append("estimated_cost_usd=").append("%.6f".format(Locale.US, event.optDouble("estimated_cost_usd", 0.0))).append('\n')
+        append("estimated_cost_usd=legacy/unverified").append('\n')
+        append("cost=").append(costText(event)).append('\n')
+        append("cost_kind=").append(event.optString("cost_kind", "unknown")).append('\n')
         append("latency_ms=").append(event.optLong("latency_ms")).append('\n')
         append("tools=").append(event.optString("tool_summary", "")).append('\n')
         append("request_id=").append(event.optString("request_id", "")).append('\n')
         val error = event.optString("error", "")
         if (error.isNotBlank()) append("error=").append(error).append('\n')
+    }
+
+    private fun costText(event: JSONObject): String {
+        if (event.optString("cost_kind") != "provider_reported") return "Расход неизвестен"
+        val raw = event.optString("cost_usd")
+        val amount = raw.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 } ?: return "Расход неизвестен"
+        return when {
+            amount > 0.0 && amount < 0.0001 -> "Расход < $0.0001"
+            else -> "Расход $%.4f".format(Locale.US, amount)
+        }
     }
 
     private fun tokens(value: Long): String = when {
