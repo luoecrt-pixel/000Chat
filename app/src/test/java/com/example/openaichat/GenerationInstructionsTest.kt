@@ -2,6 +2,8 @@ package com.example.openaichat
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.json.JSONArray
 import org.junit.Test
 
 class GenerationInstructionsTest {
@@ -16,15 +18,27 @@ class GenerationInstructionsTest {
     }
 
     @Test
-    fun systemPromptAndDeveloperInstructionsKeepTheirOrder() {
+    fun openAiPreservesSystemAndDeveloperAsDistinctRoles() {
         val value = GenerationInstructions(
             systemPrompt = "You are a concise assistant.\nKeep examples small.",
             developerInstructions = "Use the selected API source."
         )
-        assertEquals(
-            "You are a concise assistant.\nKeep examples small.\n\nUse the selected API source.",
-            value.openAi()
-        )
+        val instructions = value.openAi()
+        assertTrue(instructions is JSONArray)
+        val items = instructions as JSONArray
+        assertEquals(2, items.length())
+        assertEquals("system", items.getJSONObject(0).getString("role"))
+        assertEquals("You are a concise assistant.\nKeep examples small.", items.getJSONObject(0).getString("content"))
+        assertEquals("developer", items.getJSONObject(1).getString("role"))
+        assertEquals("Use the selected API source.", items.getJSONObject(1).getString("content"))
+    }
+
+    @Test
+    fun openAiSystemOnlyHasNoEmptyDeveloperMessage() {
+        val instructions = GenerationInstructions("Summarize precisely.", null).openAi() as JSONArray
+        assertEquals(1, instructions.length())
+        assertEquals("system", instructions.getJSONObject(0).getString("role"))
+        assertEquals("Summarize precisely.", instructions.getJSONObject(0).getString("content"))
     }
 
     @Test
