@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 10:00 +03:00
-**Следующий рабочий срез:** Завершить PR #91/#92 и провести merge-gates
+**Last updated:** 2026-10-08 09:29 +03:00
+**Следующий рабочий срез:** Merge #91, затем rebase/retarget и gate для #92
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Failed background recovery paths now also emit one session-scoped `request_failed` event before clearing active response, with provider/requested-model metadata when available. Open PR #92 is stacked on snapshot branch `stack/base-91-e660` and adds OpenRouter server-side web tools + IJG NOTICE. Current PR #91 head: `d4e4539fc1b681206078caf861dabdc503d0b32c`; `Verify handoff` Successful: run `37734534592`.
+- main code baseline: `39a885be73eb0190e54708a360d60118ddc6c57f` (merge #90); #91 основан на этом main и добавляет session telemetry + Drawer; request telemetry теперь также фиксируется при OpenAI background finalization, используя request metadata из persisted user message. Failed background recovery paths now also emit one session-scoped `request_failed` event before clearing active response, with provider/requested-model metadata when available. Open PR #92 is stacked on snapshot branch `stack/base-91-e660` and adds OpenRouter server-side web tools + IJG NOTICE. Current PR #91 validation head: `18954d4a9530aa66856e92d4e9fc8fcb3e2451fe` (tree-identical `[ci]` commit). Push Build `37737194094` Successful; push Release `37737194084` Successful; PR `Verify handoff` `37737199761` Successful. PR-triggered Build/Release were Skipped and are intentionally not counted as green.
 
 ## Подтверждённые lifecycle/recovery контракты
 
@@ -129,9 +129,9 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-### 1. Завершить PR #91/#92 и провести merge-gates — **следующий**
-Цель: закрыть session telemetry + Drawer, OpenRouter server-side web tools и IJG notice только после подтверждённого code CI и финального handoff verification; не объявлять Skipped/unknown как green.
-Первый шаг: дождаться подтверждаемого Successful push Build + Release для последнего code-changing head PR #91, затем выполнить тот же gate для #92/стековой интеграции; текущий connector не даёт workflow_dispatch и показывает для commit только PR-triggered runs, поэтому push-runs нельзя выдумывать или считать по косвенным признакам.
+### 1. Merge PR #91, затем довести #92 до merge-gate — **следующий**
+Цель: смержить #91 только после подтверждённых push Build + Release и финального Verify handoff; затем retarget #92 на фактический main, перепроверить его diff и выполнить тот же gate.
+Первый шаг: после финального docs-only handoff commit получить Successful Verify handoff на актуальном head #91 и только затем merge; после merge не переносить stacked assumptions из #92 — проверить его заново относительно main.
 
 ### 2. Реальные прогоны провайдеров
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; зафиксировать длительность, usage, cache, server-tool поведение, обрыв/завершение и фактическую response model.
@@ -187,13 +187,15 @@ Static verifier:
 
 Это не полный реестр PR. Здесь остаются только последние 5 merged PR; старые доказательства должны читаться через карту проекта и раздел подтверждённых контрактов по номерам PR.
 
-## История последних рабочих заходов — последние 5 PR
+## История последних рабочих заходов — последние 5 merged PR
 
+- **#86:** merged; docs-only уточнение истории (закрытый #81 не был merged); `Verify handoff` Successful.
 - **#87:** merged; docs-only: раздел контрактов переписан как карта доказанности; `Verify handoff` Successful.
 - **#88:** merged; docs-only: восстановлен обязательный `## Контекстный режим для агента`; `Verify handoff` Successful.
 - **#89:** merged; OpenRouter Chat Completions SSE streaming; Build/Release/Verify handoff Successful.
 - **#90:** merged; provider/model telemetry + request_events persistence; Build/Release/Verify handoff Successful.
-- **#91:** code complete; session telemetry card + Drawer + formatter regressions; дополнительно восстановлен OpenRouter streamed `responseModel` capture; merge ожидает подтверждённый green push CI и финальный `Verify handoff`.
+
+**Текущие открытые PR:** #91 — telemetry + Drawer, code gate подтверждён; #92 — server-side web tools, stacked поверх snapshot #91 и требует повторной проверки после merge #91.
 
 ## Product radar — идеи с реальной ценностью
 
