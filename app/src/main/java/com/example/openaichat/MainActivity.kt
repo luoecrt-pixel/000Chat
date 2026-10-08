@@ -1251,12 +1251,13 @@ class MainActivity : ComponentActivity() {
             if (!dir.isDirectory) return
             val referenced = linkedSetOf<String>()
             referenced.addAll(chatDb.listAllLocalFilePaths())
-            referenced.addAll(listComposerLocalFilePaths(currentChatId()))
+            referenced.addAll(LocalAttachmentReferences.allComposerPaths(prefs.all))
             val now = System.currentTimeMillis()
             dir.listFiles()?.forEach { file ->
                 if (!file.isFile) return@forEach
-                if (referenced.contains(file.absolutePath)) return@forEach
-                if (now - file.lastModified() < 7L * 24L * 60L * 60L * 1000L) return@forEach
+                if (!LocalAttachmentReferences.isOrphanOldEnough(
+                        file.absolutePath, file.lastModified(), now, referenced
+                    )) return@forEach
                 deleteOwnedLocalFile(file.absolutePath)
             }
         } catch (e: Exception) {
@@ -4864,26 +4865,6 @@ class MainActivity : ComponentActivity() {
             obj.put("pending_uploads",pending)
             prefs.edit().putString(composerPrefsKey(id),obj.toString()).apply()
         }catch(_:Exception){}
-    }
-
-    private fun listComposerLocalFilePaths(chatId:String):List<String>{
-        if(chatId.isBlank())return emptyList()
-        val raw=prefs.getString(composerPrefsKey(chatId),null) ?: return emptyList()
-        val out=linkedSetOf<String>()
-        try{
-            val obj=JSONObject(raw)
-            obj.optJSONArray("file_paths")?.let{arr->
-                for(i in 0 until arr.length()) arr.optString(i).takeIf{it.isNotBlank()}?.let(out::add)
-            }
-            obj.optString("image_path").takeIf{it.isNotBlank()}?.let(out::add)
-            obj.optJSONArray("openrouter_attachments")?.let { arr ->
-                for(i in 0 until arr.length()) {
-                    arr.optJSONObject(i)?.optString("path")?.takeIf { it.isNotBlank() }?.let(out::add)
-                    arr.optJSONObject(i)?.optString("text_path")?.takeIf { it.isNotBlank() }?.let(out::add)
-                }
-            }
-        }catch(_:Exception){}
-        return out.toList()
     }
 
     private fun deleteOwnedLocalFile(path:String){
