@@ -3019,6 +3019,35 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
+        val active = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_:Exception) { null }
+        val matchingRequest = requestId?.takeIf { it.isNotBlank() && it != "null" }
+        if (active != null && matchingRequest != null && active.optString("request_id") == matchingRequest) {
+            val chatObj = try { chatDb.getChat(chatId) } catch (_:Exception) { null }
+            val messages = chatObj?.optJSONArray("messages")
+            val requestMeta = messages?.let { arr ->
+                (0 until arr.length())
+                    .mapNotNull { arr.optJSONObject(it) }
+                    .firstOrNull { it.optString("request_id") == matchingRequest }
+            }
+            val provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" }
+            val requestedModel = requestMeta?.optString("requested_model").orEmpty()
+                .ifBlank { requestMeta?.optString("model").orEmpty() }
+                .takeIf { it.isNotBlank() }
+            val startedAt = active.optLong("started_at", System.currentTimeMillis())
+            val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            chatDb.recordRequestEvent(
+                chatId = chatId,
+                eventType = "request_failed",
+                requestId = matchingRequest,
+                provider = provider,
+                requestedModel = requestedModel,
+                responseModel = null,
+                modelMatch = ModelCatalog.Match.UNKNOWN,
+                status = "failed",
+                latencyMs = latency,
+                error = message.take(1200)
+            )
+        }
         activeResponsePersistence.clearActiveResponse(chatId,expectedRequestId=requestId)
         if(currentChatId()!=chatId) return
         runOnUiThread{
