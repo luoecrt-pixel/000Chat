@@ -1,7 +1,7 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 18:35 +03:00
-**Следующий рабочий срез:** Сохранность пользовательских данных
+**Last updated:** 2026-10-08 19:00 +03:00
+**Следующий рабочий срез:** История сообщений и метаданные ответа
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `8287abfee5f64d799764737021a9c47628528053` (merge #98), retaining #95/#96 OpenRouter fixes. #98 adds a global multiline user system prompt while keeping existing developer instructions: OpenAI Responses receives role-distinct system/developer entries (legacy developer-only string kept), OpenRouter appends user text to the existing cacheable system/context message.
+- main code baseline: `c31fa1e760f4b9cf2dc89f390782c142f3cbfda5` (merge #103, after #101 and docs-only #102). #101 preserves referenced normalized JPEG wires, all inactive composer drafts and attachments-only SQLite updates. #103 sends only automatic top-level 1h Claude cache control, removing explicit conflicting 5m marker. #98 system prompt remains.
 - Actual main at audit start: `b5dfbfd187074a12775570c6b272ea1c5821f198` (docs merge #99; code unchanged from #98). User provided live Android screenshots with OpenRouter TTL error and cancel telemetry; no APK SHA check on the device.
 - #98 code gate at `766916260ea2216360787ba6a47e1e70abfe5f54`: push Build `37787993221` Successful, push Release `37787993134` Successful. This head tree equals merged main tree `54c063316892fdff8e663ab9a787abfb2ea72745`. Previous head `966508f2...` Build `37786216846` failed due ActivityScenario state transition (expected CREATED, stayed RESUMED); its Release `37786216793` was Successful. Final full gate is green; actual UI/provider effects remain unverified.
 
@@ -107,6 +107,8 @@
 - [pure] **#95:** recorder для успешного OpenRouter завершения вызывает запись session request event и при отсутствующем provider usage; metric callback остаётся условным по наличию usage. Production wiring в MainActivity проверено по source; JVM callback regressions не заменяют реальный UI/provider run. Текущая DB схема сохраняет отсутствующие счётчики как нули, а не как отдельное состояние unknown.
 - [pure] **#96:** OpenRouter SSE round требует `[DONE]` перед successful result и local tool execution; JVM transport tests отвергают EOF без маркера даже после `finish_reason=stop`/tool_calls, сохраняют partial text и принимают терминальный фрейм без финальной пустой строки.
 - [pure] **#98:** `GenerationInstructions` сохраняет legacy developer-only текст для OpenAI, при заполненном system prompt отдаёт JSON instruction items с отдельными `system` и `developer` ролями; для OpenRouter проверено сохранение app GitHub/attachment/tool контекста и порядок частей. Production wiring в MainActivity есть на source-level, но реальная работа Settings/провайдера не доказана.
+- [robolectric] **#101:** `ChatDatabaseAttachmentOwnershipTest` подтверждает DB `wire_path` enumeration по всем/одному чату после reopen и `attachments`-only upsert; [pure] `LocalAttachmentReferencesTest` проверяет старый referenced wire, другой сохранённый composer, malformed prefs и aged orphan. Production cleanup wiring проверено на source, но реальный 7-дневный device cleanup не гоняли.
+- [pure] **#103:** `OpenRouterCachePolicyTest` и JVM `OpenRouterChatClientTest` проверяют 1h top-level marker без nested 5m system marker, в том числе при растущей истории двух tool rounds. Реальный OpenRouter error показан на телефоне **до** фикса, что не доказывает успешный повтор **после**.
 
 **Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
 
@@ -135,29 +137,27 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-**Актуальный триаж по реальным скриншотам и независимому аудиту:** `docs/audits/2026-10-08-live-and-independent-triage.md`. Это источник фактической сверки каждого замечания и критериев доказательств, не подтверждённый runtime bug list. PR и код пока не менялись; priority — сохранность данных и подтверждённая upstream ошибка Claude.
+**Аудит и UX:** `docs/audits/2026-10-08-live-and-independent-triage.md`. **Ответ другому агенту (полное обоснование исправлено/отложено):** `docs/audits/2026-10-08-external-auditor-response.md`. README до отдельного требования не трогать.
 
-### 1. Сохранность пользовательских данных — **следующий**
-Цель: прекратить возможное удаление используемых локальных вложений и пропуски изменений manifest в SQLite. Подтверждено чтением кода: cleanup не учитывает `wire_path` и другие `composer_state_<chatId>`, fingerprint пропускает persisted `attachments`. Само удаление на телефоне ещё не воспроизведено.
-Первый шаг: Robolectric/isolated regression на 8-дневный `wire_*.jpg` из истории + черновик другого чата и JVM/DB тест на `attachments`-only update (red до фикса). Сделать небольшие PR с разделением path collector и DB fingerprint.
+### 1. История сообщений и метаданные ответа — **следующий**
+Цель: сохранять фактические `tool_trace`, `response_model`, `reasoning_summary`, `provider`/`requested_model` и нужный `error` после SQLite reopen. Source-level дефект подтверждён: MainActivity формирует часть полей, но `ChatDatabase` schema v16 их пропускает; часть данных есть в отдельном `request_events`, что не заменяет пер-message историю. Не смешивать с ephemeral UI flags.
+Первый шаг: **красные Robolectric DB round-trip tests** для каждого нужного поля, открыть/reopen старую v16 БД и применить маленькую v17 миграцию; validate `getChat()`, `upsertCurrentChat` и legacy `upsertChatObject`. После green CI — использовать сохранённый model label в UI, а не переписывать старые bubbles текущей моделью.
 
-### 2. OpenRouter: несовместимые TTL cache breakpoints
-Цель: исправить реальный отказ Claude/OpenRouter (`cachecontrol: a ttl='1h' ... after a ttl='5m'`), присланный пользователем. Source: top-level 1h в OpenRouterChatClient + 5m explicit system block в MainActivity; official prompt caching требует сначала 1h, потом 5m по tools→system→messages.
-Первый шаг: JVM request-body regression на сочетания tools/system/messages и multi-round, затем согласованная TTL policy (без скрытого изменения маршрута provider). Повторный реальный Claude запрос после Build/Release.
+### 2. Защита GitHub-команд
+Цель: показывать реальное тело comment/review в подтверждении, безопасно проверять `merge_pull_request` head SHA/required push Build+Release, блокировать пустой/неразрешённый `ref` при read и не обходить user allow-list. Внешняя branch protection отсутствует (`main protected:false`), rulesets endpoint у GitHub вернул 403/upgrade; требуются права/тариф владельца, не считать серверные правила установленными.
+Первый шаг: pure GitHub confirmation/gate contract tests для declined/pending/skipped/stale SHA; Android UI-dialog smoke. CI/tools через приложение не считать автоматическим правом на merge.
 
-### 3. Message metadata и безопасность GitHub
-Цель: сохранить `tool_trace`, `reasoning_summary`, ответную/запрошенную модель и метаданные провайдера после SQLite reopen; сделать GitHub confirmation информативным и merge/read ref ограничения проверяемыми. Отдельно remote `main` сейчас `protected:false`; GitHub rulesets API возвращает 403/upgrade для private repo — не считать branch rules настроенными.
-Первый шаг: Robolectric round-trip baseline для `tool_trace` и `response_model`, затем отдельная DB migration; pure preview tests для comment/review и проверка head/CI для merge. Remote branch enforcement требует доступа/плана владельца.
+### 3. Живые прогоны провайдеров
+На телефоне уже наблюдались старый OpenRouter ответ `cachecontrol 1h after 5m`, Stop/cancel OpenAI `response_created` с HTTP 200 на cancel без usage, завышенная шапка, тесный composer. Пользователь сверил биллинг и сообщил `$0.20` реальных списаний после отмены; эту сумму нельзя привязать к конкретному запросу без provider usage ID. **#103 устранил source-конфликт TTL**, но реальный повтор Claude **не подтверждён**.
+Первый шаг: подготовить APK из code-identical к main после #103 и проверить на Android короткий/длинный Claude/OpenRouter, серверные web tools и OpenAI Stop/retrieve usage; проверить фактические `response_model`, cache hit, стоимость, terminal status. Для cancelled/failed без usage показывать `неизвестно`, не $0.0000; reconciled provider cost там, где API возвращает факт.
 
-### 4. Реальные прогоны провайдеров
-Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
-APK с #98 включает #95/#96 и новое поле системного промпта: Build `37787993221` Successful, Release `37787993134` Successful, artifact `11555328276`, ZIP SHA-256 `b1f989c5dbf5253dd2e261c414ce5d05c7c3e7a8a2af97806bd42d575a4b3ccf`, `app-debug.apk` SHA-256 `30bb03895feccb299dfbe970112b905c0a85a7dabe585f7171513f57d7f1dce3`. Артефакт собран из кодового дерева, совпадающего с main merge #98; это всё ещё не live provider/device proof.
-На реальном Android **уже наблюдались** OpenRouter upstream TTL ошибка, визуальные проблемы компоновки и Stop/cancel OpenAI с `response_created` и cancel HTTP 200 без финального usage. Это негативное/ограниченное live evidence: не доказывает валидный длинный Claude/OpenAI ответ, фактический cache hit, реальные списания или точный установленный commit APK. Нули в событиях после Stop нельзя трактовать как нулевую стоимость.
-Первый шаг: после cache/ownership fixes установить новый APK и прогнать длинный OpenAI и Claude запросы, server-side web search/fetch и GitHub диалог; приложить request IDs, response-model, terminal status, usage/cache/latency. При отмене проверять фактические usage/billing у провайдера, не угадывать их из zero telemetry.
+### 4. UI/device smoke
+Цель: компактная видимая цветная строка событий **без рамки**, отдельное закрытие expanded history, меньше верхнего отступа с учётом status bar safe area; свайп-открытие/закрытие Drawer (у DrawerLayout штатно предусмотрено, сначала доказать проблему на устройстве); зазоры между вложениями, убрать повторённый badge модели и надпись GitHub, перенести effort и model-scoped `standard/pro` к composer; переделать Settings по группам, не потеряв инструментальные параметры. Подпись в bubble — persisted модель конкретного ответа после пункта 1.
+Первый шаг: pure view-state/capability contract и Android small-screen/IME layout test. Никакого раннего Compose rewrite и автоматического FLAG_FULLSCREEN без device доказательств.
 
-### 5. UI/device smoke
-Цель: regression по Drawer, session event telemetry, IME/insets, server-tool toggles, системному промпту #98 и новым пользовательским пожеланиям по layout. Дизайн отложен до устранения сохранности данных и ошибки Claude (см. радар #9).
-Первый шаг: device smoke на маленьком экране — закрытие раскрытой панели событий, новое положение effort/standard-pro (только когда model/source поддерживает), зазор кнопок вложений, model per bubble без переименования старых сообщений, отсутствие нулевой "стоимости" без usage.
+### 5. Отложенные аудиторские проверки
+Цель: проверить source-risk общего 5h recovery deadline (сброс между Activity и Worker), preflight mutable-chat race, peak heap при PDF/JPEG → base64, а также ветки/default ref; на сегодня не называть их runtime-ошибками.
+Первый шаг: boundary test нескольких recovery handoffs, immutability test при переключении чатов и memory instrumentation. README/Gradle Wrapper/.gitignore/чистка веток отложены по указанию пользователя, не маскировать это выполнением.
 
 ## Репозиторий / branches
 
@@ -208,18 +208,18 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-- **#95:** merged as `950923c9f2087ae595d018841d603834b8d373d5`; OpenRouter completion event without usage; Build `37780620420` / Release `37780620439` Successful.
-- **#96:** merged as `e154e436213d292e9f894d1764f149f0e62b9b3c`; OpenRouter SSE `[DONE]` guard; Build `37781045311` / Release `37781045408` Successful.
-- **#97:** merged as `ee06389d14dd1bd4305e3a54517be7e3889896c4`; docs-only handoff and post-96 artifact proof; Verify `37784603937` Successful.
-- **#98:** merged as `8287abfee5f64d799764737021a9c47628528053`; configurable system prompt with source-specific payload; Build `37787993221` / Release `37787993134` Successful, provider/device proof outstanding.
-- **#99:** merged as `b5dfbfd187074a12775570c6b272ea1c5821f198`; docs-only system prompt proof/device APK artifact notes; Verify `37790262866` Successful.
+- **#99:** merged as `b5dfbfd187074a12775570c6b272ea1c5821f198`; docs-only #98 proof + APK, Verify `37790262866` Successful.
+- **#100:** merged as `b76501e175152a3ed705915afa4f341ce32cb5a9`; docs-only audit, mobile screenshots triage and UI plans, Verify `37797106241` Successful.
+- **#101:** merged as `5cb13281a50e1368964c975b3343a13e4599301d`; local attachment ownership + fingerprint; Build `37800833138` / Release `37800833134` Successful.
+- **#102:** merged as `dfe92077407de4c5a21fa5813c482d7c54988d52`; docs-only $0.20 billing, compact borderless telemetry, Drawer swipe/settings IA, README deferred; Verify `37800741964` Successful.
+- **#103:** merged as `c31fa1e760f4b9cf2dc89f390782c142f3cbfda5`; OpenRouter Claude mixed 5m/1h marker fix; Build `37801304588` / Release `37801304407` Successful.
 
 ## Product radar — идеи с реальной ценностью
 
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
-**Ревизия после пяти merged PR #92–#96:** новые pure contracts закрыли пробелы в учёте завершений и распознавании обрыва OpenRouter SSE; architectural layer остаётся прежним. Следующий доказательный слой — живое устройство/провайдер, а не новый массовый рефакторинг. #98 затем добавил отдельно редактируемый системный промпт без изменения политики runtime tool authorization; модели/провайдеры вживую ещё не проверены.
+**Ревизия после пяти merged PR #99–#103:** главные изменения — узкие контракты владения файлами (#101) и согласованная политика Anthropic cache TTL (#103), без пересоздания MainActivity/controller. Установлена граница доказательств: pure/JVM + Robolectric DB + emulator smoke закрывают локальную логику, **не** реальное списание при Stop, работу Claude после исправления, фактическую стоимость и provider billing. Следующий приоритет — schema-aware message metadata snapshot v17, затем GitHub authorization и только потом разбивка UI/Settings. Новые P3 идеи не добавлять, README владелец просил не трогать.
 
 ### 1. Версии ответа + обратимость
 Сейчас regenerate/edit — точечные действия над линейным чатом. Следующий уровень — сохранять альтернативы и уметь вернуть чат к состоянию «до этого ответа». Это естественное продолжение fork: пользователь не должен бояться попробовать другой prompt/effort. Первый шаг: pure domain contract для snapshot/branch point + DB test, без UI.
@@ -261,7 +261,7 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 
 ## Документация
 
-**Актуальный аудит/UX-план:** `docs/audits/2026-10-08-live-and-independent-triage.md` (source-confirmed vs runtime-observed; порядок маленьких регрессионных PR, отложенная UI-компоновка). README сейчас устарел (DB v15, baseline #42), не использовать как источник фактов. **По просьбе пользователя не трогать README в обозримом будущем**, включая чистку и переоформление: P0/P1 важнее. Отсутствие .gitignore/wrapper и архив notes — P3, не важнее риска потери данных.
+**Актуальный аудит/UX-план:** `docs/audits/2026-10-08-live-and-independent-triage.md`; **ответ аудитору:** `docs/audits/2026-10-08-external-auditor-response.md` (source-confirmed vs runtime-observed; порядок маленьких регрессионных PR, отложенная UI-компоновка). README сейчас устарел (DB v15, baseline #42), не использовать как источник фактов. **По просьбе пользователя не трогать README в обозримом будущем**, включая чистку и переоформление: P0/P1 важнее. Отсутствие .gitignore/wrapper и архив notes — P3, не важнее риска потери данных.
 
 **README** = человекочитаемый snapshot проекта.
 
