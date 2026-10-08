@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-08 10:15 +03:00
+**Last updated:** 2026-10-08 14:20 +03:00
 **Следующий рабочий срез:** Реальные прогоны провайдеров
 
 # START HERE — ОБЯЗАТЕЛЬНО
@@ -57,7 +57,7 @@
 
 ## Фактический baseline
 
-- main code baseline: `dc687591a642a48b87572197c673fad2a2951858` (merge #92); #91 and #92 are merged. Current implementation contains session telemetry + Drawer and OpenRouter server-side Web Search / Web Fetch with local-executor guard and IJG NOTICE.
+- main code baseline: `35d0df7a7db181765c61bdd95bfa939434a634a7` (docs merge #93 on top of #92); #91 and #92 are merged and #93 advances this handoff. Current implementation contains session telemetry + Drawer and OpenRouter server-side Web Search / Web Fetch with local-executor guard and IJG NOTICE.
 - #92 code gate: push Build `37739052818` Successful; push Release `37739052909` Successful; final Verify handoff `37740237478` Successful on docs-only head `81b5106af35ff01cd1eb8226a3dd97fd893f060a`.
 
 ## Подтверждённые lifecycle/recovery контракты
@@ -132,7 +132,8 @@
 
 ### 1. Реальные прогоны провайдеров — **следующий**
 Цель: подтвердить на живом приложении длинный OpenAI response, длинный Claude/OpenRouter response, server-side web search/fetch и один длинный GitHub-диалог с Claude; фиксировать длительность, usage, cache, response model, server-tool поведение и обрыв/завершение.
-Первый шаг: после получения APK пользователь запускает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств.
+Подготовка APK завершена: Build Android APK `37746579120` Successful, Release `37746579163` Successful; debug artifact `11536536715`, ZIP SHA-256 `39a960c74b3b10a6b2bb936872f85c80d401f7652df14b2982576fd170ee7a04`.
+Первый шаг: пользователь запускает этот APK на реальном Android-девайсе и делает длинный OpenAI запрос, длинный Claude/OpenRouter запрос с server-side web search или fetch и длинный GitHub-диалог с Claude; агент переносит только фактические наблюдения в карту доказательств. Эти запуски остаются отдельным proof level и не заменяются CI/instrumentation.
 
 ### 2. UI/device smoke
 Цель: подтвердить на реальном Android-девайсе Drawer, telemetry card, copy/select, rename/delete, IME/insets и OpenRouter server-tool toggles.
@@ -218,6 +219,9 @@ Static verifier:
 
 ### 7. Fork / ветвление чата
 MVP: «Ветвить отсюда» на выбранном сообщении создаёт независимый local snapshot до этой точки. Первый шаг: pure DB/domain contract + tests. Обязательно: новый `chatId`, новые local records, не переносить active response / Worker / temporary UI state, и сначала подтвердить актуальную семантику Responses API для продолжения ровно от fork point.
+
+### 8. Настройки генерации, зависящие от источника и модели
+Нужен пользовательский слой «как модель должна отвечать», но без ложной универсальности: **системный промпт/instructions**, reasoning effort («градус»), verbosity/формат ответа и sampling-настройки (`temperature`, `top_p` и аналоги) должны быть capability-aware для конкретного API source + model. OpenAI Responses уже имеет model-dependent `reasoning.effort`; OpenRouter exposes a richer but model-dependent parameter surface, поэтому один общий набор полей нельзя безусловно отправлять во все запросы. Первый шаг: audit request builders для OpenAI Responses и OpenRouter Chat Completions, описать pure `ModelCapabilities`/`GenerationSettings` contract и regression matrix на unsupported/omitted parameters; UI и per-chat profiles делать только после этого.
 
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
