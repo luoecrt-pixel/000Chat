@@ -1449,54 +1449,50 @@ class MainActivity : ComponentActivity() {
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
-                result.usage?.let { usage ->
-                    val inputTokens = usage.optLong("prompt_tokens", 0L)
-                    val promptDetails = usage.optJSONObject("prompt_tokens_details")
-                    val completionDetails = usage.optJSONObject("completion_tokens_details")
-                    val cachedTokens = promptDetails?.optLong("cached_tokens", 0L) ?: 0L
-                    val cacheWriteTokens = promptDetails?.optLong("cache_write_tokens", 0L) ?: 0L
-                    val outputTokens = usage.optLong("completion_tokens", 0L)
-                    val reasoningTokens = completionDetails?.optLong("reasoning_tokens", 0L) ?: 0L
-                    val cost = usage.optDouble("cost", 0.0).coerceAtLeast(0.0)
-                    chatDb.recordEffortMetric(
-                        requestId = requestId,
-                        chatId = chatId,
-                        taskClass = taskClass,
-                        effortPref = effortPref,
-                        effectiveEffort = effort,
-                        autoSelected = autoSelected,
-                        promptChars = promptChars,
-                        attachments = attachments,
-                        latencyMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L),
-                        inputTokens = inputTokens,
-                        cachedTokens = cachedTokens,
-                        cacheWriteTokens = cacheWriteTokens,
-                        outputTokens = outputTokens,
-                        reasoningTokens = reasoningTokens,
-                        success = true,
-                        errorType = null,
-                        estimatedCostUsd = cost
-                    )
-
-                    chatDb.recordRequestEvent(
-                        chatId = chatId,
-                        eventType = "request_completed",
-                        requestId = requestId,
-                        provider = "openrouter",
-                        requestedModel = model,
-                        responseModel = result.responseModel,
-                        modelMatch = ModelCatalog.match(model, result.responseModel),
-                        status = "completed",
-                        inputTokens = inputTokens,
-                        cachedTokens = cachedTokens,
-                        cacheWriteTokens = cacheWriteTokens,
-                        outputTokens = outputTokens,
-                        reasoningTokens = reasoningTokens,
-                        estimatedCostUsd = cost,
-                        latencyMs = SystemClock.elapsedRealtime() - startedAt,
-                        toolSummary = result.toolNames.distinct().joinToString(",")
-                    )
-                }
+                OpenRouterCompletionTelemetry.record(
+                    usage = result.usage,
+                    recordMetric = { totals ->
+                        chatDb.recordEffortMetric(
+                            requestId = requestId,
+                            chatId = chatId,
+                            taskClass = taskClass,
+                            effortPref = effortPref,
+                            effectiveEffort = effort,
+                            autoSelected = autoSelected,
+                            promptChars = promptChars,
+                            attachments = attachments,
+                            latencyMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L),
+                            inputTokens = totals.inputTokens,
+                            cachedTokens = totals.cachedTokens,
+                            cacheWriteTokens = totals.cacheWriteTokens,
+                            outputTokens = totals.outputTokens,
+                            reasoningTokens = totals.reasoningTokens,
+                            success = true,
+                            errorType = null,
+                            estimatedCostUsd = totals.costUsd
+                        )
+                    },
+                    recordEvent = { totals ->
+                        chatDb.recordRequestEvent(
+                            chatId = chatId,
+                            eventType = "request_completed",
+                            requestId = requestId,
+                            provider = "openrouter",
+                            requestedModel = model,
+                            responseModel = result.responseModel,
+                            modelMatch = ModelCatalog.match(model, result.responseModel),
+                            status = "completed",
+                            inputTokens = totals.inputTokens,
+                            cachedTokens = totals.cachedTokens,
+                            cacheWriteTokens = totals.cacheWriteTokens,
+                            outputTokens = totals.outputTokens,
+                            reasoningTokens = totals.reasoningTokens,
+                            estimatedCostUsd = totals.costUsd,
+                            latencyMs = SystemClock.elapsedRealtime() - startedAt,
+                            toolSummary = result.toolNames.distinct().joinToString(",")
+                        )
+                    }
+                )
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
                     .put("text", finalText)
