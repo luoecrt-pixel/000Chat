@@ -2034,6 +2034,8 @@ class MainActivity : ComponentActivity() {
         val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
 
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
+            put("provider", provider)
+            put("requested_model", model)
             val fileIds=JSONArray(); requestFileIds.forEach{fileIds.put(it)}
             val fileNames=JSONArray(); requestFileNames.forEach{fileNames.put(it)}
             val fileSizes=JSONArray(); requestFileSizes.forEach{fileSizes.put(it)}
@@ -3078,6 +3080,10 @@ class MainActivity : ComponentActivity() {
         val reasoningTok=usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
         val success=state=="completed"
         val cost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+        val requestMeta = msgs.firstOrNull { it.optString("request_id") == requestId }
+        val requestedModel = requestMeta?.optString("requested_model").orEmpty().ifBlank {
+            requestMeta?.optString("model").orEmpty()
+        }.ifBlank { null }
         val committed = chatDb.upsertCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
@@ -3100,6 +3106,24 @@ class MainActivity : ComponentActivity() {
             active.optInt("prompt_chars",0),active.optInt("attachments",0),
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
+        )
+        chatDb.recordRequestEvent(
+            chatId = chatId,
+            eventType = "request_completed",
+            requestId = requestId,
+            provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" },
+            requestedModel = requestedModel,
+            responseModel = model.model,
+            modelMatch = ModelCatalog.match(requestedModel, model.model),
+            status = state,
+            inputTokens = inTok,
+            cachedTokens = cachedTok,
+            cacheWriteTokens = cacheWriteTok,
+            outputTokens = outTok,
+            reasoningTokens = reasoningTok,
+            estimatedCostUsd = cost,
+            latencyMs = latency,
+            toolSummary = model.tools.distinct().joinToString(",")
         )
         activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
