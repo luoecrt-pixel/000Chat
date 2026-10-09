@@ -103,12 +103,16 @@ class MainActivityLifecycleTest {
             activity.setPendingCameraCaptureForTesting(photoPath, originalChatId, "openai")
             activity.newChat()
             otherChatId = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString(
+                "composer_state_$originalChatId", JSONObject().put("text", "Исходный текст").toString()
+            ).apply()
         }
         scenario.recreate()
         scenario.onActivity { activity ->
             activity.completePendingCameraCapture(Activity.RESULT_OK)
             val source = JSONObject(activity.prefs.getString("composer_state_$originalChatId", "{}")!!)
             val other = JSONObject(activity.prefs.getString("composer_state_$otherChatId", "{}")!!)
+            assertEquals("Исходный текст", source.getString("text"))
             assertEquals(photoPath, source.getString("image_path"))
             assertEquals("image/jpeg", source.getString("image_mime"))
             assertFalse(source.has("image_file_id")) // Upload is deferred: no API calls in the test.
@@ -132,6 +136,9 @@ class MainActivityLifecycleTest {
             activity.setPendingCameraCaptureForTesting(photoPath, originalChatId, "openrouter")
             activity.newChat()
             otherChatId = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString(
+                "composer_state_$originalChatId", JSONObject().put("text", "Старый черновик").toString()
+            ).apply()
         }
         scenario.recreate()
         scenario.onActivity { it.completePendingCameraCapture(Activity.RESULT_OK) }
@@ -142,6 +149,7 @@ class MainActivityLifecycleTest {
         scenario.onActivity { activity ->
             val source = JSONObject(activity.prefs.getString("composer_state_$originalChatId", "{}")!!)
             val entry = source.getJSONArray("openrouter_attachments").getJSONObject(0)
+            assertEquals("Старый черновик", source.getString("text"))
             assertEquals("image", entry.getString("kind"))
             assertTrue(java.io.File(entry.getString("path")).isFile)
             val other = JSONObject(activity.prefs.getString("composer_state_$otherChatId", "{}")!!)
