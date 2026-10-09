@@ -301,6 +301,17 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         activityVisible = true
+        // A Worker may have completed while this Activity was stopped. Reconcile
+        // committed history before launching another resume, without losing a new draft.
+        val currentId = currentChatId()
+        val durable = try { chatDb.getChat(currentId) } catch (_: Exception) { null }
+        val durableMessages = durable?.optJSONArray("messages")
+        if (durableMessages != null && durableMessages.toString() !=
+            JSONArray().apply { chat.forEach { put(it) } }.toString()) {
+            persistComposerStateNow()
+            restoreCurrentChat()
+            renderRequestTelemetry()
+        }
         BackgroundResponseWorkScheduler.cancelAll(applicationContext)
         activeResumeCalls.values.forEach { it.cancel() }
         activeResumeCalls.clear()
@@ -1706,7 +1717,6 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 clearOpenRouterActiveCallIfOwned(requestId)
-                activeResponsePersistence.clearActiveResponse(chatId, requestId)
                 val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
                 val errorMessage = (e.message?.take(800) ?: "неизвестная ошибка") + openRouterAttachmentErrorSuffix(chatId)
                 val displayedError = if (accumulatedText.isNotBlank()) {
@@ -1717,16 +1727,29 @@ class MainActivity : ComponentActivity() {
                 val wasStopped = chatDb.listRequestAccounting(chatId).any {
                     it.optString("local_request_id") == requestId && it.optString("local_status") == "stopped"
                 }
-                if (!wasStopped) {
+                val partialStatus = if (e is CancellationException) "disconnected" else "failed"
+                val errorMessageForHistory = JSONObject()
+                    .put("role", "assistant")
+                    .put("text", displayedError)
+                    .put("request_id", requestId)
+                    .put("provider", "openrouter")
+                    .put("requested_model", model)
+                    .put("status", partialStatus)
+                    .put("incomplete", true)
+                    .put("error", errorMessage)
+                val savedPartial = !wasStopped && chatDb.finalizeCurrentChatIfActiveRequest(
+                    chatId, "", null, null, listOf(errorMessageForHistory), requestId
+                )
+                if (savedPartial) {
                     chatDb.recordRequestAccounting(
                         chatId = chatId, localRequestId = requestId,
-                        status = if (e is CancellationException) "cancelled" else "failed",
+                        status = partialStatus,
                         error = errorMessage
                     )
                 }
                 chatDb.sealOpenRouterRounds(chatId, requestId)
                 reconcileOpenRouterGenerations(chatId, requestId)
-                if (!wasStopped) chatDb.recordRequestEvent(
+                if (savedPartial) chatDb.recordRequestEvent(
                     chatId = chatId,
                     eventType = "request_failed",
                     requestId = requestId,
@@ -3367,20 +3390,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun extractResponseText(response:JSONObject?):String{
-        val output=response?.optJSONArray("output") ?: return ""
-        val out=StringBuilder()
-        for(i in 0 until output.length()){
-            val item=output.optJSONObject(i) ?: continue
-            if(item.optString("type")!="message")continue
-            val content=item.optJSONArray("content") ?: continue
-            for(j in 0 until content.length()){
-                val c=content.optJSONObject(j) ?: continue
-                if(c.optString("type")=="output_text") out.append(c.optString("text"))
-            }
-        }
-        return out.toString()
-    }
+    private fun extractResponseText(response:JSONObject?):String =
+        OpenAiSseStreamReader.terminalOutputText(response)
 
     private fun finalizeBackgroundResponse(active:JSONObject,response:JSONObject){
         val chatId=active.optString("chat_id")
@@ -3469,7 +3480,6 @@ class MainActivity : ComponentActivity() {
             latencyMs = latency,
             toolSummary = model.tools.distinct().joinToString(",")
         )
-        activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("background_response_finalized",mapOf(
             "chat_id" to chatId,
             "response_id" to responseId,
@@ -3477,8 +3487,12 @@ class MainActivity : ComponentActivity() {
             "latency_ms" to latency,
             "estimated_cost_usd" to "%.6f".format(cost)
         ))
+        val claimedGeneration = activeResponseState.state.generation
         runOnUiThread{
-            if(currentChatId()==chatId){
+            if (currentChatId()==chatId &&
+                activeResponseState.state.generation == claimedGeneration &&
+                activeResponsePersistence.getActiveResponse(chatId) == null) {
+                persistComposerStateNow()
                 activeResponseState.nextGeneration()
                 currentResponseId=responseId.takeIf{it.isNotBlank()}
                 baselineEffort=effectiveEffort

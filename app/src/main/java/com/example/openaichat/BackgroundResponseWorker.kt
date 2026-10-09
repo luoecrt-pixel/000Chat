@@ -266,20 +266,8 @@ class BackgroundResponseWorker(
         }
     }
 
-    private fun extractResponseText(response: JSONObject): String {
-        val output = response.optJSONArray("output") ?: return ""
-        val out = StringBuilder()
-        for (i in 0 until output.length()) {
-            val item = output.optJSONObject(i) ?: continue
-            if (item.optString("type") != "message") continue
-            val content = item.optJSONArray("content") ?: continue
-            for (j in 0 until content.length()) {
-                val c = content.optJSONObject(j) ?: continue
-                if (c.optString("type") == "output_text") out.append(c.optString("text"))
-            }
-        }
-        return out.toString()
-    }
+    private fun extractResponseText(response: JSONObject?): String =
+        OpenAiSseStreamReader.terminalOutputText(response)
 
     private fun finalize(chatId: String, responseId: String, requestId: String, response: JSONObject, db: ChatDatabase, diagnostics: AstraDiagnostics) {
         val active = db.getActiveResponse(chatId) ?: return
