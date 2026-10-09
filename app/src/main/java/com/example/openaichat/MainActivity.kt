@@ -4223,7 +4223,7 @@ class MainActivity : ComponentActivity() {
         pendingCameraProvider = null
 
         val file = capturedPath?.let(::File)
-        if (resultCode != RESULT_OK || file?.isFile != true || file.length() <= 0L ||
+        if (resultCode != RESULT_OK || file == null || !file.isFile || file.length() <= 0L ||
             sourceChatId.isNullOrBlank()) {
             file?.delete()
             if (resultCode == RESULT_OK) status.text = "Фото не получено"
