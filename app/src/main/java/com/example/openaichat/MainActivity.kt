@@ -5134,7 +5134,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         if(r==pickVectorStoreFile){
-            val uri=d.data ?: return
+            val uri = d.data ?: run {
+                pendingVectorStorePickerId = null
+                return
+            }
             val vsId = pendingVectorStorePickerId.also { pendingVectorStorePickerId = null }
             if (vsId.isNullOrBlank() || vectorStoreId() != vsId) {
                 status.text = "Vector Store изменился — выберите файл заново"
