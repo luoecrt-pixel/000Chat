@@ -209,4 +209,36 @@ class ChatDatabaseActiveFinalizationTest {
             }
         }
     }
+    @Test fun terminalClaimPreservesDbRowsAndMetadataAddedAfterStaleSnapshot() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            val original = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            original.put("text", "text edited by another owner")
+            original.put("feedback", 1)
+            db.upsertCurrentChat("chat","Original",null,"high",listOf(original))
+            assertTrue(commitOnce(db, text="terminal from worker"))
+            val rows = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(2, rows.length())
+            assertEquals("text edited by another owner", rows.getJSONObject(0).getString("text"))
+            assertEquals(1, rows.getJSONObject(0).getInt("feedback"))
+            assertEquals("terminal from worker", rows.getJSONObject(1).getString("text"))
+            assertFalse(db.upsertUiSnapshotPreservingTail("chat","Original",null,"high",
+                listOf(JSONObject().put("role","user").put("text","stale old user").put("request_id","local_1"))))
+            val reopened = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(2, reopened.length())
+            assertEquals("terminal from worker", reopened.getJSONObject(1).getString("text"))
+            assertEquals("text edited by another owner", reopened.getJSONObject(0).getString("text"))
+        }
+    }
+
+    @Test fun concurrentStopAfterTerminalCannotEraseCommittedAssistant() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            assertTrue(db.finalizeCurrentChatIfActiveRequest(
+                "chat","Original","resp_1","high", finalizedMessages("local_1","winner"),"local_1"))
+            assertFalse(db.stopActiveRequestOnce("chat","local_1"))
+            assertEquals("winner",db.getChat("chat")!!.getJSONArray("messages")
+                .getJSONObject(1).getString("text"))
+        }
+    }
 }
