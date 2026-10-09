@@ -2231,6 +2231,16 @@ class MainActivity : ComponentActivity() {
             status.text = "История содержит вложения OpenRouter: этот контекст нельзя незаметно переслать в OpenAI. Создайте новый чат."
             return
         }
+        // A missing Responses chain cannot safely turn earlier OpenAI file/image inputs
+        // into plain text. Reject before changing generation, persistence, or composer.
+        if (provider == "openai" && currentResponseId == null && chat.any { message ->
+                message.optString("role") == "user" &&
+                    ((message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
+                        message.optString("image_file_id").let { it.isNotBlank() && it != "null" })
+            }) {
+            status.text = "История содержит прежние вложения OpenAI, но цепочка ответов недоступна. Создайте новый чат, чтобы не потерять файлы из контекста."
+            return
+        }
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
