@@ -1104,7 +1104,7 @@ class MainActivity : ComponentActivity() {
             return s
         }
 
-        section("Подключение")
+        section("Подключение и модель")
         val currentProvider = prefs.getString("provider", "openai") ?: "openai"
         val currentModel = prefs.getString(
             "model",
@@ -1142,22 +1142,64 @@ class MainActivity : ComponentActivity() {
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
 
-        section("Мышление")
+        section("Ответ и мышление")
         val efforts = arrayOf("auto","low","medium","high","xhigh","max")
         val reasoning = spinner(efforts,"reasoning","high")
         labeled("Reasoning effort (auto = клиент сам подбирает по сложности запроса)",reasoning)
 
         val modes = arrayOf("standard","pro")
         val mode = spinner(modes,"reasoning_mode","standard")
-        labeled("Reasoning mode",mode)
+        labeled("Reasoning mode (OpenAI GPT-6: standard/pro)",mode)
+        val modeHint = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(subtext)
+            setPadding(dp(2), dp(4), 0, dp(4))
+        }
+        box.addView(modeHint)
+        fun updateModeAvailability() {
+            val chosen = ModelCatalog.sources[provider.selectedItemPosition.coerceAtLeast(0)]
+            val selectedModel = modelIds.getOrNull(model.selectedItemPosition)
+            val supported = ModelRequestPolicy.supportsReasoningMode(chosen.id, selectedModel)
+            mode.isEnabled = supported
+            modeHint.text = if (supported)
+                "pro может использовать больше токенов; усилие мышления задаётся отдельно."
+            else
+                "Поддержка standard/pro не подтверждена: предпочтение сохранится, но в API не отправится."
+        }
+        model.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateModeAvailability()
+            }
+        }
+        updateModeAvailability()
 
-        section("Инструменты")
+        val verbosities = arrayOf("low","medium","high")
+        val verbosity = spinner(verbosities,"verbosity","medium")
+        labeled("Подробность ответа (Verbosity)",verbosity)
+
+        val summaries = arrayOf("auto","concise","detailed","null")
+        val summary = spinner(summaries,"reasoning_summary","auto")
+        labeled("Краткий ход рассуждений",summary)
+
+        val textFormats = arrayOf("text","json_object","json_schema")
+        val textFormat = spinner(textFormats,"text_format","text")
+        labeled("Формат ответа (text/json_object/json_schema)",textFormat)
+        val jsonSchema = field("JSON Schema — только при json_schema", prefs.getString("json_schema","") ?: "")
+        spaced(jsonSchema)
+        box.addView(TextView(this).apply {
+            text = "OpenRouter: auto → medium; xhigh/max → high. Temperature — отдельный параметр."
+            textSize = 11.5f
+            setTextColor(subtext)
+            setPadding(dp(2), dp(6), 0, dp(4))
+        })
+
+        section("GitHub")
         fun chk(label:String,pref:String) = CheckBox(this).apply {
             text=label; setTextColor(Color.LTGRAY); isChecked=prefs.getBoolean(pref,false)
             setPadding(dp(4),dp(6),0,dp(6))
         }
 
-        section("Claude → GitHub")
         val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")
         box.addView(githubTools)
         val githubToken = field("GitHub fine-grained PAT", secure.getGitHubToken(), true); spaced(githubToken)
@@ -1169,6 +1211,7 @@ class MainActivity : ComponentActivity() {
         }
         box.addView(githubNote)
 
+        section("Инструменты")
         val web=chk("Web Search","web")
         val file=chk("File Search","file_search")
         val code=chk("Code Interpreter","code_interpreter")
@@ -1180,20 +1223,26 @@ class MainActivity : ComponentActivity() {
         val openRouterWebFetch = chk("OpenRouter: Web Fetch","openrouter_web_fetch").apply {
             isEnabled = currentProvider == "openrouter"
         }
-        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val providerId = ModelCatalog.sources[position].id
-                refreshSettingsModels(providerId, null, preserveUnknown = false)
-                val enabled = providerId == "openrouter"
-                openRouterWebSearch.isEnabled = enabled
-                openRouterWebFetch.isEnabled = enabled
-            }
-        }
         val backgroundResponses=chk("Продолжать ответ, если Astra закрыта","background_responses").apply {
             isChecked = prefs.getBoolean("background_responses", true)
             isEnabled = currentProvider == "openai"
         }
+        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val providerId = ModelCatalog.sources[position].id
+                refreshSettingsModels(
+                    providerId, if (providerId == currentProvider) currentModel else null,
+                    preserveUnknown = providerId == currentProvider
+                )
+                val enabled = providerId == "openrouter"
+                openRouterWebSearch.isEnabled = enabled
+                openRouterWebFetch.isEnabled = enabled
+                backgroundResponses.isEnabled = providerId == "openai"
+                updateModeAvailability()
+            }
+        }
+        updateModeAvailability()
         val toolsCard=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
             setPadding(dp(10),dp(4),dp(10),dp(4))
@@ -1201,6 +1250,15 @@ class MainActivity : ComponentActivity() {
         }
         listOf(web,file,code,img,parallel,openRouterWebSearch,openRouterWebFetch,backgroundResponses).forEach { toolsCard.addView(it) }
         spaced(toolsCard)
+
+        section("Файлы")
+        val vector = field("Vector Store ID", prefs.getString("vector_store","") ?: ""); spaced(vector)
+        spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
+            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+        })
+        spaced(button("📁 Локальные файлы Astra") { showLocalFiles() }.apply {
+            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+        })
 
         lateinit var advancedToggle: TextView
         advancedToggle = TextView(this).apply{
@@ -1217,22 +1275,7 @@ class MainActivity : ComponentActivity() {
         box.addView(advancedBox)
         target = advancedBox
 
-        section("Формат ответа")
-        val verbosities = arrayOf("low","medium","high")
-        val verbosity = spinner(verbosities,"verbosity","medium")
-        labeled("Verbosity",verbosity)
-
-        val summaries = arrayOf("auto","concise","detailed","null")
-        val summary = spinner(summaries,"reasoning_summary","auto")
-        labeled("Краткий ход рассуждений",summary)
-
-        val textFormats = arrayOf("text","json_object","json_schema")
-        val textFormat = spinner(textFormats,"text_format","text")
-        labeled("Text format — для обычного чата оставьте \"text\". json_object/json_schema нужны, только если ответ разбирает другая программа (не человек)",textFormat)
-
-        val jsonSchema = field("JSON Schema — заполняйте только при Text format = json_schema", prefs.getString("json_schema","") ?: ""); spaced(jsonSchema)
-
-        section("Прочее")
+        section("Дополнительные параметры")
         val systemPrompt = field(
             "Системный промпт (общий для всех чатов)",
             prefs.getString("system_prompt", "") ?: ""
@@ -1244,17 +1287,10 @@ class MainActivity : ComponentActivity() {
         }
         labeled("Системный промпт", systemPrompt)
         val instructions = field("Developer instructions", prefs.getString("instructions","") ?: ""); spaced(instructions)
-        val vector = field("Vector Store ID", prefs.getString("vector_store","") ?: ""); spaced(vector)
-        spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
         val savedMaxOutput = prefs.getString("max_output","")?.trim().orEmpty().takeUnless { it == "128000" }.orEmpty()
         val max = field("Max output tokens (пусто = ограничение определяет API/модель)", savedMaxOutput); spaced(max)
         val cache = field("Prompt cache key (optional)", prefs.getString("cache_key","") ?: ""); spaced(cache)
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
-        spaced(button("📁 Локальные файлы Astra") { showLocalFiles() }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
         spaced(button("📈 Статистика auto-эффорта") {
@@ -1322,9 +1358,8 @@ class MainActivity : ComponentActivity() {
                     .putBoolean("background_responses",backgroundResponses.isChecked)
                     .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
-                effortBadge.text="⚡ "+efforts[reasoning.selectedItemPosition]
-                updateGithubBadge(githubTools.isChecked)
                 updateModelBadge()
+                updateEffortBadge()
                 status.text="Настройки сохранены"
             }.show()
     }
