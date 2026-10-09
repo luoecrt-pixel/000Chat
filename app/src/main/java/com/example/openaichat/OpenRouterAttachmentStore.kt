@@ -260,7 +260,10 @@ object OpenRouterAttachmentStore {
         val wireMime = when (a.kind) {
             "image" -> detectImageMime(wireFile)
                 ?: throw IOException("Повреждённое или неподдерживаемое изображение: " + a.name)
-            "pdf" -> if (wireFile.inputStream().use { it.readNBytes(5) }.contentEquals("%PDF-".toByteArray())) "application/pdf"
+            "pdf" -> if (wireFile.inputStream().use { input ->
+                val header = ByteArray(5)
+                input.read(header) == 5 && header.contentEquals("%PDF-".toByteArray())
+            }) "application/pdf"
                 else throw IOException("Повреждённый PDF: " + a.name)
             else -> a.wireMime ?: a.mime
         }

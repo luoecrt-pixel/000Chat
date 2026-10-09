@@ -149,4 +149,43 @@ class ResponseEventReducerTest {
         assertEquals("partial", decision.state.text)
         assertEquals("resp_cancelled", decision.state.responseId)
     }
+    @Test
+    fun refusalDeltasAndTerminalDoNotLoseOrDuplicateTheRefusal() {
+        var state = ResponseEventState()
+        state = ResponseEventReducer.reduce(state,
+            JSONObject().put("type", "response.refusal.delta").put("delta", "I cannot")).state
+        state = ResponseEventReducer.reduce(state,
+            JSONObject().put("type", "response.refusal.delta").put("delta", " comply")).state
+        assertEquals("I cannot comply", state.text)
+        state = ResponseEventReducer.reduce(state,
+            JSONObject().put("type", "response.refusal.done").put("refusal", "I cannot comply")).state
+        assertEquals("I cannot comply", state.text)
+        val completed = JSONObject().put("id", "response_refused").put("status", "completed")
+            .put("usage", JSONObject().put("output_tokens", 17))
+            .put("output", org.json.JSONArray().put(
+                JSONObject().put("type", "message").put("content", org.json.JSONArray().put(
+                    JSONObject().put("type", "refusal").put("refusal", "I cannot comply")
+                ))
+            ))
+        val final = ResponseEventReducer.reduce(state,
+            JSONObject().put("type","response.completed").put("response",completed)).state
+        assertEquals("I cannot comply", final.text)
+        assertEquals(ResponseTerminalState.COMPLETED, final.terminalState)
+        assertEquals(17L, final.usage?.optLong("output_tokens"))
+        assertEquals("I cannot comply", OpenAiSseStreamReader.terminalOutputText(completed))
+    }
+
+    @Test
+    fun refusalTerminalWithoutDeltasBecomesReadableText() {
+        val response = JSONObject().put("id","response_2").put("output",org.json.JSONArray().put(
+            JSONObject().put("type","message").put("content",org.json.JSONArray().put(
+                JSONObject().put("type","refusal").put("refusal","Sorry, not available")
+            ))
+        ))
+        val state = ResponseEventReducer.reduce(ResponseEventState(),
+            JSONObject().put("type","response.completed").put("response",response))
+        assertTrue(state.textChanged)
+        assertEquals("Sorry, not available", state.state.text)
+    }
+
 }

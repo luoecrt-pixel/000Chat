@@ -58,6 +58,21 @@ object ResponseEventReducer {
                 }
             }
 
+            "response.refusal.delta" -> {
+                val delta = event.optString("delta")
+                if (delta.isEmpty()) ResponseEventDecision(current)
+                else ResponseEventDecision(
+                    state = current.copy(text = current.text + delta),
+                    textChanged = true
+                )
+            }
+
+            "response.refusal.done" -> {
+                val full = event.optString("refusal")
+                if (full.isBlank() || full == current.text) ResponseEventDecision(current)
+                else ResponseEventDecision(current.copy(text = full), textChanged = true)
+            }
+
             "response.reasoning_summary_text.delta" -> {
                 val delta = event.optString("delta")
                 if (delta.isEmpty()) {
@@ -125,8 +140,10 @@ object ResponseEventReducer {
     ): ResponseEventDecision {
         val response = event.optJSONObject("response")
         val responseId = response?.optString("id")?.takeIf { it.isNotBlank() }
+        val canonical = OpenAiSseStreamReader.terminalOutputText(response)
         val state = current.copy(
             responseId = responseId ?: current.responseId,
+            text = canonical.ifBlank { current.text },
             terminalState = terminalState,
             terminalResponse = response,
             completionError = completionError,
@@ -134,6 +151,7 @@ object ResponseEventReducer {
         )
         return ResponseEventDecision(
             state = state,
+            textChanged = state.text != current.text,
             responseIdChanged = state.responseId != current.responseId
         )
     }

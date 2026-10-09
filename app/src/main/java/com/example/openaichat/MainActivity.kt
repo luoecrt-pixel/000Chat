@@ -197,6 +197,7 @@ class MainActivity : ComponentActivity() {
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     var preparingZipAttachments = false
     private val uploadCalls = ConcurrentHashMap<String, Call>()
+    private val activeGeneratedDownloads = ConcurrentHashMap.newKeySet<String>()
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
     private val cancelledUploads = ConcurrentHashMap.newKeySet<String>()
@@ -2520,6 +2521,7 @@ class MainActivity : ComponentActivity() {
                                         responseId = newId,
                                         text = responseState.text,
                                         status = "in_progress",
+                                        lastSequenceNumber = sequenceCursor.lastSequenceNumber,
                                         expectedRequestId = localRequestId
                                     )
                                 }
@@ -3622,8 +3624,8 @@ class MainActivity : ComponentActivity() {
             val directCachedPath=path?.takeIf{File(it).isFile}
             val cached=if(directCachedPath==null) try{chatDb.findLocalFileByFileId(fileId)}catch(_:Exception){null} else null
             val dbCachedPath=cached?.optString("path").orEmpty().takeIf{it.isNotBlank() && File(it).isFile}
-            val legacyCachedPath=if(directCachedPath==null && dbCachedPath==null) findLegacyGeneratedCache(filename) else null
-            val cachedPath=directCachedPath ?: dbCachedPath ?: legacyCachedPath
+            // Filename is never a stable identity: another response may have the same report.txt.
+            val cachedPath=directCachedPath ?: dbCachedPath
             if(cachedPath!=null && (state!="READY" || path!=cachedPath)){
                 path=cachedPath
                 annotation.put("state","READY").put("local_path",cachedPath)
@@ -3770,6 +3772,8 @@ class MainActivity : ComponentActivity() {
         val fileId=annotation.optString("file_id").trim()
         val filename=safeDisplayName(annotation.optString("filename").ifBlank{"file"})
         if(fileId.isBlank() || (containerId.isBlank() && annotationType != "file_citation")) return
+        val downloadIdentity = listOf(chatId, annotationType, containerId, fileId).joinToString("|")
+        if (!activeGeneratedDownloads.add(downloadIdentity)) return
         annotation.put("state","DOWNLOADING")
         chatDb.updateGeneratedFileState(chatId,fileId,"DOWNLOADING", annotationType=annotationType)
         if(currentChatId()==chatId) persistCurrentChatFor(chatId)
@@ -3840,6 +3844,8 @@ class MainActivity : ComponentActivity() {
                     addFileRetryButton(box,annotation,message,chatId,generation,filename)
                     diagnostics.log("file_download_failed",mapOf("container_id" to containerId,"file_id" to fileId,"error" to (e.message ?: e.toString()).take(300)))
                 }
+            } finally {
+                activeGeneratedDownloads.remove(downloadIdentity)
             }
         }
     }
