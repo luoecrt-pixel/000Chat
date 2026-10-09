@@ -6592,7 +6592,11 @@ class MainActivity : ComponentActivity() {
 
     private fun renderChatBubbleBody(item:ChatBubbleItem):CharSequence{
         // item.text is the live adapter snapshot. Persisted message JSON can lag SSE deltas.
-        return markdown(item.text, item.annotations ?: item.message?.optJSONArray("annotations"))
+        // Reconstruct the persisted response model only to recover structured citations.
+        val sourceAnnotations = if (!item.user && item.message != null) {
+            AstraResponseModel.fromChatJson(item.message).annotations
+        } else item.message?.optJSONArray("annotations")
+        return markdown(item.text, item.annotations ?: sourceAnnotations)
     }
 
     private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
