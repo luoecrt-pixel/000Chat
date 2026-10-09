@@ -999,10 +999,10 @@ class MainActivity : ComponentActivity() {
         updateEffortBadge()
     }
 
-    private fun updateEffortBadge() {
+    private fun updateEffortBadge(resolvedEffort: String? = null) {
         if (!::effortBadge.isInitialized) return
         effortBadge.text = ModelRequestPolicy.effortBadge(
-            normalizedProviderId(), prefs.getString("reasoning", "high") ?: "high"
+            prefs.getString("reasoning", "high") ?: "high", resolvedEffort
         )
     }
 
@@ -1114,7 +1114,7 @@ class MainActivity : ComponentActivity() {
         val effort = spinner("Усилие мышления", efforts, "reasoning", "high")
         if (provider == "openrouter") {
             box.addView(TextView(this).apply {
-                text = "OpenRouter: auto → medium; xhigh/max → high."
+                text = "auto: приложение выбирает усилие по запросу; xhigh/max не понижаются."
                 setTextColor(Color.rgb(170,180,195))
                 textSize = 11.5f
             })
@@ -1125,6 +1125,15 @@ class MainActivity : ComponentActivity() {
         val summary = if (openAi) spinner("Краткий ход рассуждений", summaries, "reasoning_summary", "auto") else null
         val verbosities = arrayOf("low","medium","high")
         val verbosity = spinner("Подробность ответа", verbosities, "verbosity", "medium")
+        val canSetVerbosity = provider != "openrouter" ||
+            OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
+        verbosity.isEnabled = canSetVerbosity
+        if (!canSetVerbosity) box.addView(TextView(this).apply {
+            text = "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие. Подробность задавайте в сообщении."
+            textSize = 11.5f
+            setTextColor(Color.rgb(170,180,195))
+            setPadding(0, dp(3), 0, dp(6))
+        })
         box.addView(TextView(this).apply {
             text = "Max output tokens (пусто = выбирает API)"
             setTextColor(Color.rgb(170,180,195))
@@ -2292,6 +2301,7 @@ class MainActivity : ComponentActivity() {
             effectiveEffort=effort
         }
         val actualEffort = configUpdateEffort ?: effectiveEffort
+        updateEffortBadge(actualEffort)
         val verbosity=prefs.getString("verbosity","medium") ?: "medium"
         val summary=prefs.getString("reasoning_summary","auto") ?: "auto"
         val maxOut=configuredMaxOutputTokens()

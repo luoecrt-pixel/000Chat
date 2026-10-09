@@ -43,15 +43,6 @@ class OpenRouterChatClient(
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
 
-    private fun normalizeReasoningEffort(value: String?): String? =
-        value?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
-            when (it) {
-                "xhigh", "max" -> "high"
-                "auto" -> "medium"
-                else -> it
-            }
-        }
-
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
@@ -74,6 +65,8 @@ class OpenRouterChatClient(
         onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
         onTextDelta: (String) -> Unit = {}
     ): OpenRouterCompletionResult {
+        // Resolve once before HTTP and all tool rounds; Activity already resolves auto.
+        val requestEffort = OpenRouterReasoningPolicy.requestEffort(model, reasoningEffort)
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
@@ -150,10 +143,12 @@ class OpenRouterChatClient(
                 body.put("session_id", it)
             }
             OpenRouterCachePolicy.configureRequest(body, model)
-            normalizeReasoningEffort(reasoningEffort)?.let {
+            requestEffort?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
             }
-            verbosity?.takeIf { it.isNotBlank() }?.let { body.put("verbosity", it) }
+            verbosity?.takeIf {
+                it.isNotBlank() && OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
+            }?.let { body.put("verbosity", it) }
 
             val roundIndex = nextRoundIndex++
             onRoundObserved(roundIndex, null, null)
