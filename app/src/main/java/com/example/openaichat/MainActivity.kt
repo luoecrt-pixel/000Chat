@@ -1635,7 +1635,29 @@ class MainActivity : ComponentActivity() {
             } else {
                 val content = JSONArray()
                 if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
-                attachments.forEach { content.put(OpenRouterAttachmentStore.toContentBlock(it)) }
+                attachments.forEach { attachment ->
+                    val index = content.length()
+                    val part = OpenRouterAttachmentStore.toContentBlock(attachment)
+                    content.put(part)
+                    if (attachment.kind == "image" || attachment.kind == "pdf") {
+                        val url = if (attachment.kind == "image") {
+                            part.optJSONObject("image_url")?.optString("url").orEmpty()
+                        } else part.optJSONObject("file")?.optString("file_data").orEmpty()
+                        diagnostics.log("openrouter_attachment_wire", mapOf(
+                            "request_id" to message.optString("request_id"),
+                            "message_index" to result.length(),
+                            "content_index" to index,
+                            "file" to attachment.name,
+                            "kind" to attachment.kind,
+                            "source_mime" to attachment.mime,
+                            "wire_mime" to url.substringBefore(",").removePrefix("data:").removeSuffix(";base64"),
+                            "source_bytes" to attachment.size,
+                            "wire_bytes" to File(attachment.wirePath ?: attachment.path).length(),
+                            "base64_chars" to url.substringAfter(",").length,
+                            "sha256" to attachment.sha256
+                        ))
+                    }
+                }
                 if (traceBlock.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", traceBlock))
                 result.put(JSONObject().put("role", role).put("content", content))
             }
@@ -1752,6 +1774,15 @@ class MainActivity : ComponentActivity() {
                     },
                     onTextDelta = { snapshot ->
                         postAssistantTextUpdate(chatId, generation, assistantItemId, snapshot)
+                    },
+                    onPayloadObserved = { round, bytes ->
+                        diagnostics.log("openrouter_http_payload", mapOf(
+                            "request_id" to requestId,
+                            "chat_id" to chatId,
+                            "round" to round,
+                            "model" to model,
+                            "json_bytes" to bytes
+                        ))
                     }
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
@@ -1890,6 +1921,21 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 clearOpenRouterActiveCallIfOwned(requestId)
+                val upstream = e as? OpenRouterUpstreamException
+                diagnostics.log("openrouter_failed", mapOf(
+                    "chat_id" to chatId,
+                    "request_id" to requestId,
+                    "provider" to "openrouter",
+                    "model" to model,
+                    "stage" to (upstream?.stage ?: "transport_or_tool"),
+                    "round" to upstream?.roundIndex,
+                    "http_status" to upstream?.httpStatus,
+                    "error_type" to (upstream?.errorType ?: e.javaClass.simpleName),
+                    "provider_name" to upstream?.providerName,
+                    "provider_code" to upstream?.providerCode,
+                    "raw_metadata" to upstream?.safeMetadata,
+                    "attachment_sha256" to preparedMessages.attachments.joinToString(",") { it.sha256.take(16) }
+                ))
                 val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
                 val errorMessage = (e.message?.take(800) ?: "неизвестная ошибка") + openRouterAttachmentErrorSuffix(chatId)
                 val displayedError = if (accumulatedText.isNotBlank()) {
@@ -2613,6 +2659,12 @@ class MainActivity : ComponentActivity() {
                             status.text = "Ошибка подготовки вложений: " +
                                 (e.message ?: "невозможно прочитать файлы")
                             setBusy(false)
+                            diagnostics.log("openrouter_preflight_failed", mapOf(
+                                "chat_id" to requestChatId,
+                                "request_id" to localRequestId,
+                                "stage" to "wire_prepare",
+                                "error_type" to e.javaClass.simpleName
+                            ))
                             // Nothing was sent or persisted: the complete draft remains.
                         }
                     }
