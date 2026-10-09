@@ -1,7 +1,6 @@
 package com.example.openaichat
 
 import android.net.Uri
-import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -138,11 +137,7 @@ class GitHubToolExecutor(
         val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
         val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
-        val obj = JSONObject(raw)
-        val encoded = obj.optString("content").replace("\\n", "").replace("\n", "")
-        val decoded = try { String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8) } catch (_: Exception) { "" }
-        return JSONObject().put("ok", true).put("path", path).put("sha", obj.optString("sha"))
-            .put("content", decoded.take(40000)).put("truncated", decoded.length > 40000).toString()
+        return GitHubFileContentPolicy.decode(path, JSONObject(raw)).toString()
     }
 
     private fun listDirectory(a: JSONObject): String {
