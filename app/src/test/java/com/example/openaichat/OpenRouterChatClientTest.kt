@@ -25,6 +25,47 @@ import java.util.concurrent.atomic.AtomicReference
 class OpenRouterChatClientTest {
 
     @Test
+    fun validImageWithWrongFilenameAndPickerMimeReachesHttpWithOriginalBytes() {
+        val original = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val local = java.io.File(createTempDir(), "camera.jpeg").apply { writeBytes(original) }
+        val attachment = OpenRouterAttachmentStore.classifyLocalFile(
+            local, "camera.jpeg", "image/jpeg"
+        )
+        val server = MockWebServer()
+        server.start()
+        val transport = OpenRouterChatClient(server.url("/api/v1").toString())
+        try {
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse(
+                """{"choices":[{"delta":{"content":"image received"},"finish_reason":"stop"}]}""",
+                "[DONE]"
+            )))
+            val result = transport.complete(
+                apiKey = "test", model = "anthropic/claude-sonnet-5.5",
+                messages = JSONArray().put(
+                    JSONObject().put("role", "user").put(
+                        "content", JSONArray().put(OpenRouterAttachmentStore.toContentBlock(attachment))
+                    )
+                ),
+                tools = JSONArray(), maxTokens = null,
+                reasoningEffort = "high", verbosity = "medium", parallelToolCalls = false,
+                executeTool = { _, _ -> error("No tool expected") }
+            )
+            assertEquals("image received", result.text)
+            val request = server.takeRequest(1, TimeUnit.SECONDS) ?: error("HTTP body missing")
+            val body = JSONObject(request.body.readUtf8())
+            val url = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+                .getJSONObject(0).getJSONObject("image_url").getString("url")
+            assertTrue(url.startsWith("data:image/png;base64,"))
+            assertTrue(java.util.Base64.getDecoder().decode(url.substringAfter(",")).contentEquals(original))
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun claudeXhighAndMaxSurviveEveryToolRoundWithoutVerbosityOverride() {
         for (model in listOf(
             "anthropic/claude-opus-5.5",
