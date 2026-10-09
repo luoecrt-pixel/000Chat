@@ -494,12 +494,12 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         var stopped = false
         writableDatabase.transaction { db ->
             val active = db.query(
-                CHAT_TABLE, arrayOf("active_request_id"), "id=?",
+                CHAT_TABLE, arrayOf("active_request_id", "active_response_id"), "id=?",
                 arrayOf(chatId), null, null, null, "1"
             ).use { cursor ->
-                if (cursor.moveToFirst()) cursor.getString(0) else null
+                if (cursor.moveToFirst()) Pair(cursor.getString(0), cursor.getString(1)) else null
             }
-            if (!ActiveResponseWritePolicy.shouldCommit(active, expectedRequestId)) {
+            if (!ActiveResponseWritePolicy.shouldCommit(active?.first, expectedRequestId)) {
                 return@transaction
             }
             db.update(
@@ -507,6 +507,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 ContentValues().apply {
                     put("local_status", "stopped")
                     put("updated_at", System.currentTimeMillis())
+                    active?.second?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
                 },
                 "chat_id=? AND local_request_id=? AND local_status='running'",
                 arrayOf(chatId, expectedRequestId)
@@ -865,6 +866,50 @@ data class ExistingMessageRow(
                 "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId)) == 1
         }
         return written
+    }
+
+    /**
+     * BILL-03: reconcile only an already-stopped, locally captured OpenAI response.
+     * A matching response ID from the provider is required; the provider may
+     * enrich usage/status but must never revive a chat, reset Stop, or mint cost.
+     * Repeated retrieved snapshots update the same row (no request_events entry).
+     */
+    fun reconcileStoppedOpenAiResponse(
+        chatId: String,
+        localRequestId: String,
+        responseId: String,
+        response: JSONObject
+    ): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank() || responseId.isBlank()) return false
+        if (response.optString("id") != responseId) return false
+        val status = response.optString("status")
+        if (status !in setOf("completed", "cancelled", "failed", "incomplete", "in_progress", "queued")) return false
+        val usage = response.optJSONObject("usage")
+        val values = ContentValues().apply {
+            put("updated_at", System.currentTimeMillis())
+            // "in_progress" / "queued" are observations, not terminal outcomes.
+            if (status in setOf("completed", "cancelled", "failed", "incomplete")) {
+                put("provider_status", status)
+            }
+            fun nonnegative(source: JSONObject?, key: String): Long? =
+                source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+            nonnegative(usage, "input_tokens")?.let { put("input_tokens", it) }
+            nonnegative(usage, "output_tokens")?.let { put("output_tokens", it) }
+            usage?.optJSONObject("input_tokens_details")?.let {
+                nonnegative(it, "cached_tokens")?.let { n -> put("cached_tokens", n) }
+            }
+            usage?.optJSONObject("output_tokens_details")?.let {
+                nonnegative(it, "reasoning_tokens")?.let { n -> put("reasoning_tokens", n) }
+            }
+            // Responses usage reports tokens; it does not establish a USD charge.
+            // cost_kind / cost_usd / local_status / response_id are immutable here.
+        }
+        if (values.size() <= 1) return false // no terminal status or usage evidence
+        return writableDatabase.update(
+            REQUEST_ACCOUNTING_TABLE, values,
+            "chat_id=? AND local_request_id=? AND response_id=? AND provider='openai' AND local_status='stopped'",
+            arrayOf(chatId, localRequestId, responseId)
+        ) == 1
     }
 
     fun listRequestAccounting(chatId: String): List<JSONObject> {
