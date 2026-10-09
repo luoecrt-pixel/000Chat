@@ -26,13 +26,13 @@ object OpenAiLocalContextEncoder {
             val parts = JSONArray()
             if (text.isNotEmpty()) parts.put(JSONObject().put("type", "input_text").put("text", text))
             val manifest = message.optJSONArray("attachments")
-            val items = if (manifest != null && manifest.length() > 0) {
+            val manifestItems = if (manifest != null) {
                 (0 until manifest.length()).mapNotNull { idx ->
-                    manifest.optJSONObject(idx)?.let(OpenRouterLocalAttachment::fromJson)
+                    manifest.optJSONObject(idx)?.let { OpenRouterLocalAttachment.fromJson(it) }
                 }
-            } else {
-                legacyItems(message)
-            }
+            } else emptyList()
+            // A message may combine a preserved OR manifest and local OpenAI files.
+            val items = (manifestItems + legacyItems(message)).distinctBy { it.path + "|" + it.name }
             items.forEach { item ->
                 if (!File(item.path).isFile) {
                     throw IOException("В истории не найдена локальная копия: " + item.name +
@@ -60,16 +60,15 @@ object OpenAiLocalContextEncoder {
                 }
             }
             // A lost response chain must not silently discard remote IDs.
-            if (manifest == null || manifest.length() == 0) {
-                val filesCount = message.optJSONArray("file_ids")?.length() ?: 0
-                val imagesCount = if (message.optString("image_file_id").isNotBlank() &&
-                    message.optString("image_file_id") != "null") 1 else 0
-                val localFilesCount = message.optJSONArray("file_paths")?.length() ?: 0
-                val hasLocalImage = message.optString("image_path").isNotBlank()
-                if (filesCount > localFilesCount || imagesCount > 0 && !hasLocalImage) {
-                    throw IOException("В истории есть вложение без доступных локальных байтов. " +
-                        "Откройте исходный чат и восстановите файл перед переключением.")
-                }
+            val filesCount = message.optJSONArray("file_ids")?.length() ?: 0
+            val imagesCount = if (message.optString("image_file_id").isNotBlank() &&
+                message.optString("image_file_id") != "null") 1 else 0
+            val localFilesCount = message.optJSONArray("file_paths")?.length() ?: 0
+            val hasLocalImage = message.optString("image_path").isNotBlank() ||
+                manifestItems.any { it.kind == "image" }
+            if (filesCount > localFilesCount || imagesCount > 0 && !hasLocalImage) {
+                throw IOException("В истории есть вложение без доступных локальных байтов. " +
+                    "Откройте исходный чат и восстановите файл перед переключением.")
             }
             if (parts.length() > 0) {
                 input.put(JSONObject().put("role", role).put("content", parts))
