@@ -163,7 +163,6 @@ class MainActivity : ComponentActivity() {
     private var vsStatusLine: TextView? = null
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
-    private lateinit var githubBadge: TextView
     private lateinit var modelBadge: TextView
     private lateinit var drawerLayout: DrawerLayout
     private lateinit var drawerList: LinearLayout
@@ -440,25 +439,43 @@ class MainActivity : ComponentActivity() {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(10), dp(10))
+            setPadding(dp(8), dp(3), dp(8), dp(3))
             setBackgroundColor(Color.rgb(22,23,27))
         }
 
-        val chatsBtn = button("☰") { showChats() }
-        header.addView(chatsBtn, LinearLayout.LayoutParams(-2,-2).apply{rightMargin=dp(10)})
-
+        val chatsBtn = button("☰") { showChats() }.apply {
+            contentDescription = "Открыть чаты"
+        }
+        header.addView(chatsBtn, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin=dp(6) })
+        val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         title = TextView(this).apply {
             text = currentChatTitle()
-            textSize = 19f
+            textSize = 17f
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
-        header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(button("＋") { newChat() }, LinearLayout.LayoutParams(-2,-2).apply{leftMargin=dp(8)})
-        header.addView(button("⚙") { showSettings() }, LinearLayout.LayoutParams(-2,-2).apply{leftMargin=dp(8)})
+        heading.addView(title)
+        modelBadge = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.rgb(170,180,200))
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            background = rippleRounded(Color.TRANSPARENT, 7)
+            setPadding(0, dp(2), 0, dp(2))
+            setOnClickListener { showModelPicker() }
+        }
+        heading.addView(modelBadge)
+        header.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(button("＋") { newChat() }.apply {
+            contentDescription = "Новый чат"
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
+        header.addView(button("⚙") { showSettings() }.apply {
+            contentDescription = "Настройки"
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
+        updateModelBadge()
         root.addView(View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }, LinearLayout.LayoutParams(-1,dp(1)))
 
         status = TextView(this).apply {
@@ -498,43 +515,6 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(toolLabel)
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), 0, dp(10), dp(4))
-        }
-        effortBadge = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(138,180,248))
-            setPadding(dp(10),0,dp(6),0)
-            text = "⚡ "+(prefs.getString("reasoning","high") ?: "high")
-            setOnClickListener { showQuickEffortPicker() }
-        }
-        row.addView(effortBadge)
-        githubBadge = TextView(this).apply {
-            textSize = 12f
-            setPadding(dp(4),0,dp(6),0)
-            setOnClickListener { showSettings() }
-        }
-        row.addView(githubBadge)
-        updateGithubBadge(prefs.getBoolean("github_tools", false))
-
-        val space = Space(this)
-        row.addView(space, LinearLayout.LayoutParams(0,1,1f))
-
-        modelBadge = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(185,190,200))
-            setPadding(dp(9), dp(6), dp(6), dp(6))
-            isSingleLine = true
-            ellipsize = TextUtils.TruncateAt.END
-            background = rippleRounded(Color.rgb(31,32,38), 9)
-            setOnClickListener { showModelPicker() }
-        }
-        row.addView(modelBadge)
-        updateModelBadge()
-        root.addView(row)
-
         attachRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -545,6 +525,24 @@ class MainActivity : ComponentActivity() {
             addView(attachRow, LinearLayout.LayoutParams(-2, -2))
         }
         root.addView(attachScroll)
+
+        // Effort stays near input; model selection moves to the compact header.
+        val composerOptions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(10), dp(3))
+        }
+        effortBadge = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(138,180,248))
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            background = rippleRounded(Color.rgb(31,32,38), 8)
+            contentDescription = "Усилие мышления"
+            setOnClickListener { showQuickEffortPicker() }
+        }
+        composerOptions.addView(effortBadge)
+        root.addView(composerOptions)
+        updateEffortBadge()
 
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -960,8 +958,16 @@ class MainActivity : ComponentActivity() {
         if (!::modelBadge.isInitialized) return
         val source = ModelCatalog.source(normalizedProviderId())
         val modelLabel = ModelCatalog.displayName(source.id, normalizedModelId())
-        modelBadge.text = "${source.label} · ${modelLabel}"
-        modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}"
+        modelBadge.text = "${source.label} · ${modelLabel} ▾"
+        modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}. Выбрать модель"
+        updateEffortBadge()
+    }
+
+    private fun updateEffortBadge() {
+        if (!::effortBadge.isInitialized) return
+        effortBadge.text = ModelRequestPolicy.effortBadge(
+            normalizedProviderId(), prefs.getString("reasoning", "high") ?: "high"
+        )
     }
 
     private fun showModelPicker() {
@@ -1048,10 +1054,11 @@ class MainActivity : ComponentActivity() {
         val current=prefs.getString("reasoning","high") ?: "high"
         val idx=efforts.indexOf(current).coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Мышление")
+            .setTitle(if (normalizedProviderId() == "openrouter")
+                "Усилие мышления · auto→medium, xhigh/max→high" else "Усилие мышления")
             .setSingleChoiceItems(efforts,idx){d,which->
                 prefs.edit().putString("reasoning",efforts[which]).apply()
-                effortBadge.text="⚡ "+efforts[which]
+                updateEffortBadge()
                 d.dismiss()
             }.show()
     }
@@ -1819,12 +1826,6 @@ class MainActivity : ComponentActivity() {
             }
         } catch (_: Exception) { "" }
     }
-    private fun updateGithubBadge(enabled: Boolean) {
-        if (!::githubBadge.isInitialized) return
-        githubBadge.text = if (enabled) "GitHub ✓" else "GitHub выключен"
-        githubBadge.setTextColor(if (enabled) Color.rgb(130, 205, 150) else Color.rgb(145, 150, 160))
-    }
-
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun newChat() {
         persistComposerStateNow()
