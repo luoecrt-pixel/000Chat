@@ -163,7 +163,6 @@ class MainActivity : ComponentActivity() {
     private var vsStatusLine: TextView? = null
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
-    private lateinit var githubBadge: TextView
     private lateinit var modelBadge: TextView
     private lateinit var drawerLayout: DrawerLayout
     private lateinit var drawerList: LinearLayout
@@ -440,25 +439,43 @@ class MainActivity : ComponentActivity() {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(10), dp(10))
+            setPadding(dp(8), dp(3), dp(8), dp(3))
             setBackgroundColor(Color.rgb(22,23,27))
         }
 
-        val chatsBtn = button("☰") { showChats() }
-        header.addView(chatsBtn, LinearLayout.LayoutParams(-2,-2).apply{rightMargin=dp(10)})
-
+        val chatsBtn = button("☰") { showChats() }.apply {
+            contentDescription = "Открыть чаты"
+        }
+        header.addView(chatsBtn, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin=dp(6) })
+        val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         title = TextView(this).apply {
             text = currentChatTitle()
-            textSize = 19f
+            textSize = 17f
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }
-        header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(button("＋") { newChat() }, LinearLayout.LayoutParams(-2,-2).apply{leftMargin=dp(8)})
-        header.addView(button("⚙") { showSettings() }, LinearLayout.LayoutParams(-2,-2).apply{leftMargin=dp(8)})
+        heading.addView(title)
+        modelBadge = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.rgb(170,180,200))
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            background = rippleRounded(Color.TRANSPARENT, 7)
+            setPadding(0, dp(2), 0, dp(2))
+            setOnClickListener { showModelPicker() }
+        }
+        heading.addView(modelBadge)
+        header.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(button("＋") { newChat() }.apply {
+            contentDescription = "Новый чат"
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
+        header.addView(button("⚙") { showSettings() }.apply {
+            contentDescription = "Настройки"
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
+        updateModelBadge()
         root.addView(View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }, LinearLayout.LayoutParams(-1,dp(1)))
 
         status = TextView(this).apply {
@@ -498,43 +515,6 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(toolLabel)
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), 0, dp(10), dp(4))
-        }
-        effortBadge = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(138,180,248))
-            setPadding(dp(10),0,dp(6),0)
-            text = "⚡ "+(prefs.getString("reasoning","high") ?: "high")
-            setOnClickListener { showQuickEffortPicker() }
-        }
-        row.addView(effortBadge)
-        githubBadge = TextView(this).apply {
-            textSize = 12f
-            setPadding(dp(4),0,dp(6),0)
-            setOnClickListener { showSettings() }
-        }
-        row.addView(githubBadge)
-        updateGithubBadge(prefs.getBoolean("github_tools", false))
-
-        val space = Space(this)
-        row.addView(space, LinearLayout.LayoutParams(0,1,1f))
-
-        modelBadge = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(185,190,200))
-            setPadding(dp(9), dp(6), dp(6), dp(6))
-            isSingleLine = true
-            ellipsize = TextUtils.TruncateAt.END
-            background = rippleRounded(Color.rgb(31,32,38), 9)
-            setOnClickListener { showModelPicker() }
-        }
-        row.addView(modelBadge)
-        updateModelBadge()
-        root.addView(row)
-
         attachRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -545,6 +525,24 @@ class MainActivity : ComponentActivity() {
             addView(attachRow, LinearLayout.LayoutParams(-2, -2))
         }
         root.addView(attachScroll)
+
+        // Effort stays near input; model selection moves to the compact header.
+        val composerOptions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(10), dp(3))
+        }
+        effortBadge = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(138,180,248))
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            background = rippleRounded(Color.rgb(31,32,38), 8)
+            contentDescription = "Усилие мышления"
+            setOnClickListener { showQuickEffortPicker() }
+        }
+        composerOptions.addView(effortBadge)
+        root.addView(composerOptions)
+        updateEffortBadge()
 
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -960,8 +958,16 @@ class MainActivity : ComponentActivity() {
         if (!::modelBadge.isInitialized) return
         val source = ModelCatalog.source(normalizedProviderId())
         val modelLabel = ModelCatalog.displayName(source.id, normalizedModelId())
-        modelBadge.text = "${source.label} · ${modelLabel}"
-        modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}"
+        modelBadge.text = "${source.label} · ${modelLabel} ▾"
+        modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}. Выбрать модель"
+        updateEffortBadge()
+    }
+
+    private fun updateEffortBadge() {
+        if (!::effortBadge.isInitialized) return
+        effortBadge.text = ModelRequestPolicy.effortBadge(
+            normalizedProviderId(), prefs.getString("reasoning", "high") ?: "high"
+        )
     }
 
     private fun showModelPicker() {
@@ -1004,7 +1010,9 @@ class MainActivity : ComponentActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val source = sources[position]
-                refreshModels(source.id, null, preserveUnknown = false)
+                refreshModels(source.id,
+                    if (source.id == normalizedProviderId()) normalizedModelId() else null,
+                    preserveUnknown = source.id == normalizedProviderId())
             }
         }
 
@@ -1048,10 +1056,11 @@ class MainActivity : ComponentActivity() {
         val current=prefs.getString("reasoning","high") ?: "high"
         val idx=efforts.indexOf(current).coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Мышление")
+            .setTitle(if (normalizedProviderId() == "openrouter")
+                "Усилие мышления · auto→medium, xhigh/max→high" else "Усилие мышления")
             .setSingleChoiceItems(efforts,idx){d,which->
                 prefs.edit().putString("reasoning",efforts[which]).apply()
-                effortBadge.text="⚡ "+efforts[which]
+                updateEffortBadge()
                 d.dismiss()
             }.show()
     }
@@ -1097,7 +1106,7 @@ class MainActivity : ComponentActivity() {
             return s
         }
 
-        section("Подключение")
+        section("Подключение и модель")
         val currentProvider = prefs.getString("provider", "openai") ?: "openai"
         val currentModel = prefs.getString(
             "model",
@@ -1135,22 +1144,64 @@ class MainActivity : ComponentActivity() {
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
 
-        section("Мышление")
+        section("Ответ и мышление")
         val efforts = arrayOf("auto","low","medium","high","xhigh","max")
         val reasoning = spinner(efforts,"reasoning","high")
         labeled("Reasoning effort (auto = клиент сам подбирает по сложности запроса)",reasoning)
 
         val modes = arrayOf("standard","pro")
         val mode = spinner(modes,"reasoning_mode","standard")
-        labeled("Reasoning mode",mode)
+        labeled("Reasoning mode (OpenAI GPT-6: standard/pro)",mode)
+        val modeHint = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(subtext)
+            setPadding(dp(2), dp(4), 0, dp(4))
+        }
+        box.addView(modeHint)
+        fun updateModeAvailability() {
+            val chosen = ModelCatalog.sources[provider.selectedItemPosition.coerceAtLeast(0)]
+            val selectedModel = modelIds.getOrNull(model.selectedItemPosition)
+            val supported = ModelRequestPolicy.supportsReasoningMode(chosen.id, selectedModel)
+            mode.isEnabled = supported
+            modeHint.text = if (supported)
+                "pro может использовать больше токенов; усилие мышления задаётся отдельно."
+            else
+                "Поддержка standard/pro не подтверждена: предпочтение сохранится, но в API не отправится."
+        }
+        model.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateModeAvailability()
+            }
+        }
+        updateModeAvailability()
 
-        section("Инструменты")
+        val verbosities = arrayOf("low","medium","high")
+        val verbosity = spinner(verbosities,"verbosity","medium")
+        labeled("Подробность ответа (Verbosity)",verbosity)
+
+        val summaries = arrayOf("auto","concise","detailed","null")
+        val summary = spinner(summaries,"reasoning_summary","auto")
+        labeled("Краткий ход рассуждений",summary)
+
+        val textFormats = arrayOf("text","json_object","json_schema")
+        val textFormat = spinner(textFormats,"text_format","text")
+        labeled("Формат ответа (text/json_object/json_schema)",textFormat)
+        val jsonSchema = field("JSON Schema — только при json_schema", prefs.getString("json_schema","") ?: "")
+        spaced(jsonSchema)
+        box.addView(TextView(this).apply {
+            text = "OpenRouter: auto → medium; xhigh/max → high. Temperature — отдельный параметр."
+            textSize = 11.5f
+            setTextColor(subtext)
+            setPadding(dp(2), dp(6), 0, dp(4))
+        })
+
+        section("GitHub")
         fun chk(label:String,pref:String) = CheckBox(this).apply {
             text=label; setTextColor(Color.LTGRAY); isChecked=prefs.getBoolean(pref,false)
             setPadding(dp(4),dp(6),0,dp(6))
         }
 
-        section("Claude → GitHub")
         val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")
         box.addView(githubTools)
         val githubToken = field("GitHub fine-grained PAT", secure.getGitHubToken(), true); spaced(githubToken)
@@ -1162,6 +1213,7 @@ class MainActivity : ComponentActivity() {
         }
         box.addView(githubNote)
 
+        section("Инструменты")
         val web=chk("Web Search","web")
         val file=chk("File Search","file_search")
         val code=chk("Code Interpreter","code_interpreter")
@@ -1173,20 +1225,26 @@ class MainActivity : ComponentActivity() {
         val openRouterWebFetch = chk("OpenRouter: Web Fetch","openrouter_web_fetch").apply {
             isEnabled = currentProvider == "openrouter"
         }
-        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val providerId = ModelCatalog.sources[position].id
-                refreshSettingsModels(providerId, null, preserveUnknown = false)
-                val enabled = providerId == "openrouter"
-                openRouterWebSearch.isEnabled = enabled
-                openRouterWebFetch.isEnabled = enabled
-            }
-        }
         val backgroundResponses=chk("Продолжать ответ, если Astra закрыта","background_responses").apply {
             isChecked = prefs.getBoolean("background_responses", true)
             isEnabled = currentProvider == "openai"
         }
+        provider.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val providerId = ModelCatalog.sources[position].id
+                refreshSettingsModels(
+                    providerId, if (providerId == currentProvider) currentModel else null,
+                    preserveUnknown = providerId == currentProvider
+                )
+                val enabled = providerId == "openrouter"
+                openRouterWebSearch.isEnabled = enabled
+                openRouterWebFetch.isEnabled = enabled
+                backgroundResponses.isEnabled = providerId == "openai"
+                updateModeAvailability()
+            }
+        }
+        updateModeAvailability()
         val toolsCard=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
             setPadding(dp(10),dp(4),dp(10),dp(4))
@@ -1194,6 +1252,15 @@ class MainActivity : ComponentActivity() {
         }
         listOf(web,file,code,img,parallel,openRouterWebSearch,openRouterWebFetch,backgroundResponses).forEach { toolsCard.addView(it) }
         spaced(toolsCard)
+
+        section("Файлы")
+        val vector = field("Vector Store ID", prefs.getString("vector_store","") ?: ""); spaced(vector)
+        spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
+            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+        })
+        spaced(button("📁 Локальные файлы Astra") { showLocalFiles() }.apply {
+            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+        })
 
         lateinit var advancedToggle: TextView
         advancedToggle = TextView(this).apply{
@@ -1210,22 +1277,7 @@ class MainActivity : ComponentActivity() {
         box.addView(advancedBox)
         target = advancedBox
 
-        section("Формат ответа")
-        val verbosities = arrayOf("low","medium","high")
-        val verbosity = spinner(verbosities,"verbosity","medium")
-        labeled("Verbosity",verbosity)
-
-        val summaries = arrayOf("auto","concise","detailed","null")
-        val summary = spinner(summaries,"reasoning_summary","auto")
-        labeled("Краткий ход рассуждений",summary)
-
-        val textFormats = arrayOf("text","json_object","json_schema")
-        val textFormat = spinner(textFormats,"text_format","text")
-        labeled("Text format — для обычного чата оставьте \"text\". json_object/json_schema нужны, только если ответ разбирает другая программа (не человек)",textFormat)
-
-        val jsonSchema = field("JSON Schema — заполняйте только при Text format = json_schema", prefs.getString("json_schema","") ?: ""); spaced(jsonSchema)
-
-        section("Прочее")
+        section("Дополнительные параметры")
         val systemPrompt = field(
             "Системный промпт (общий для всех чатов)",
             prefs.getString("system_prompt", "") ?: ""
@@ -1237,17 +1289,10 @@ class MainActivity : ComponentActivity() {
         }
         labeled("Системный промпт", systemPrompt)
         val instructions = field("Developer instructions", prefs.getString("instructions","") ?: ""); spaced(instructions)
-        val vector = field("Vector Store ID", prefs.getString("vector_store","") ?: ""); spaced(vector)
-        spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
         val savedMaxOutput = prefs.getString("max_output","")?.trim().orEmpty().takeUnless { it == "128000" }.orEmpty()
         val max = field("Max output tokens (пусто = ограничение определяет API/модель)", savedMaxOutput); spaced(max)
         val cache = field("Prompt cache key (optional)", prefs.getString("cache_key","") ?: ""); spaced(cache)
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
-        spaced(button("📁 Локальные файлы Astra") { showLocalFiles() }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
         spaced(button("📈 Статистика auto-эффорта") {
@@ -1315,9 +1360,8 @@ class MainActivity : ComponentActivity() {
                     .putBoolean("background_responses",backgroundResponses.isChecked)
                     .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
-                effortBadge.text="⚡ "+efforts[reasoning.selectedItemPosition]
-                updateGithubBadge(githubTools.isChecked)
                 updateModelBadge()
+                updateEffortBadge()
                 status.text="Настройки сохранены"
             }.show()
     }
@@ -1819,12 +1863,6 @@ class MainActivity : ComponentActivity() {
             }
         } catch (_: Exception) { "" }
     }
-    private fun updateGithubBadge(enabled: Boolean) {
-        if (!::githubBadge.isInitialized) return
-        githubBadge.text = if (enabled) "GitHub ✓" else "GitHub выключен"
-        githubBadge.setTextColor(if (enabled) Color.rgb(130, 205, 150) else Color.rgb(145, 150, 160))
-    }
-
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun newChat() {
         persistComposerStateNow()
@@ -2183,9 +2221,10 @@ class MainActivity : ComponentActivity() {
         val baselineAutoEffort = autoEffortHeuristic(text,hasAttachments)
         val effort=if(autoSelected) chatDb.autoEffortHint(taskClass, baselineAutoEffort) else effortPref
         val reasoningMode=prefs.getString("reasoning_mode","standard") ?: "standard"
+        val supportedReasoningMode = ModelRequestPolicy.supportedMode(provider, model, reasoningMode)
         var configUpdateEffort:String? = null
         val effectiveEffort:String
-        if(reasoningMode=="standard"){
+        if(supportedReasoningMode == "standard"){
             val baseline=baselineEffort
             when {
                 baseline==null -> { baselineEffort=effort; effectiveEffort=effort }
@@ -2200,7 +2239,12 @@ class MainActivity : ComponentActivity() {
         val summary=prefs.getString("reasoning_summary","auto") ?: "auto"
         val maxOut=configuredMaxOutputTokens()
         val backgroundEnabled = provider == "openai" && prefs.getBoolean("background_responses",true)
-        val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
+        val preflightWarning = listOfNotNull(
+            buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort),
+            if (reasoningMode == "pro" && provider == "openai" && supportedReasoningMode == null)
+                "Режим pro для модели не подтверждён — параметр режима не отправлен"
+            else null
+        ).joinToString(" · ").takeIf { it.isNotBlank() }
 
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
             put("provider", provider)
@@ -2305,8 +2349,7 @@ class MainActivity : ComponentActivity() {
 
         // Keep the request-level effort stable in standard mode; Astra's configuration_update
         // changes the conversation effort while preserving the original prompt prefix for caching.
-        val reasoningObj=JSONObject().put("effort",effectiveEffort).put("mode",reasoningMode)
-        if(summary!="null") reasoningObj.put("summary",summary)
+        val reasoningObj = ModelRequestPolicy.openAiReasoning(model, effectiveEffort, reasoningMode, summary)
 
         val textObj=JSONObject().put("verbosity",verbosity)
         val inputArr=JSONArray()

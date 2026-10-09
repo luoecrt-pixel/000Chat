@@ -1,8 +1,8 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 11:52 +03:00
-**Следующий рабочий срез:** Сведения о запросе и события — APP-01: BILL-01-MIN + UI-01 + MODEL-01 одним PR на существующих данных; затем APP-02 (ввод/настройки), APP-03 (проверки/доказанные регрессии). Точное восстановление расходов отложено.
-**Состояние APP-01:** PR #125: stopped-event в v20 SQLite, provider-reported cost/unknown, компактная история с «Закрыть», модель из metadata ответа; добавлены регрессии. Исправлены ожидания существующих OpenAI cancel-тестов (при Stop теперь сохраняется одно событие). Полный CI/merge ещё не подтверждён.
+**Last updated:** 2026-10-09 12:27 +03:00
+**Следующий рабочий срез:** Поле ввода, шапка и настройки — APP-02: UI-02 + MODEL-02 + SET-01 одним PR; затем APP-03 (телефон/API и доказанные регрессии). Точное восстановление расходов отложено.
+**Состояние APP-01:** PR #125 merged, exact head `6aa069be89500a86bf4907cc90205e640af628e9`, merge `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`. Successful push APK `37908225095` (instrumentation), push Release `37908225079`, Verify handoff `37908229012`. **APP-02 в работе:** компактная шапка с моделью, quick effort рядом с composer, группировка существующих настроек, ограниченная поддержка mode standard/pro для подтверждённых OpenAI GPT-6, тесты чистой сериализации/Android UI. Пока нет successful CI/merge APP-02. Реальные платные API/телефон не проверены.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -144,24 +144,15 @@
 
 **Три этапа вместо списка отдельных PR.** Старые BILL/UI/MODEL/RISK коды — метки проверки и трассировки, а не требование делать отдельный PR на каждый. Владелец ограничивает бюджет Actions и разрешил небольшую правку стоимости после отмены. Реализацию Android-кода выполняет следующий агент; проверяющий ведёт планы. Полный внешний план `OpenAIApiChat-implementation-plan-2026-10-08.md` и отдельный ответ исходному аудитору остаются вне GitHub. Ответ аудитору содержит только его находки. README не трогать. Уже merged #101/#103/#105/#107/#109 и #112/#113/#115/#117/#119/#121 сохранять.
 
-### 1. Сведения о запросе и события — **следующий**
+### 1. Сведения о запросе и события — выполнено PR #125
 
-**APP-01 = BILL-01-MIN + UI-01 + MODEL-01. Цель — один согласованный UI PR на текущей v20 схеме.**
+**APP-01 = BILL-01-MIN + UI-01 + MODEL-01.** Stop сохраняет событие текущего local request с cost known/unknown; компактная история имеет явное «Закрыть»; bubble метаданные модели берёт из конкретного ответа. Схема v20 и README не менялись. PR #125 merged после Successful Build APK + instrumentation, Release и Verify handoff. Физический телефон и реальные расходы остаются непроверенными.
 
-Первый шаг: проверить актуальный main/open PR и actual Stop/display path, затем подготовить все три связанные правки до одного полного CI:
+Первый шаг: не повторять APP-01; при последующем аудите сравнить наблюдения владельца и подтверждённые source/CI контракты. Полный billing reconciliation — отдельный отложенный backlog.
 
-- **Стоимость текущего Stop:** сейчас stopCurrentResponse пишет только «Остановлено — запрос отменён»; OpenRouter stopped catch пропускает recordRequestEvent, история читает прежние request_events. Показывать остановленный текущий local request и достоверный полный cost именно этого запроса либо **«Расход неизвестен»**. Старую цену, известную часть и estimate не выдавать за полный итог. При неоднозначности достаточно unknown.
-- **Формат стоимости:** общий небольшой formatter, explicit known zero отличается от отсутствия данных; положительная сумма меньше $0.0001 — «< $0.0001», а не округлённый $0.0000. При необходимости stopped-event/snapshot на существующей таблице с captured metadata, без дубликатов или UI resurrection от late callback.
-- **События:** сохранить цветную нажимаемую строку, убрать большую рамку/card background, добавить явное «Закрыть» раскрытой истории.
-- **Модель ответа:** bubble использует response/requested model из metadata конкретного сообщения; legacy/unknown не подменять текущим global picker или «Astra». Worker producer дополнен #115; при неполных старых metadata использовать честный fallback без нового DB refactor.
+### 2. Поле ввода, шапка и настройки — **следующий**
 
-Не добавлять схемы/миграции, WorkManager/очередь сверки, новые API-вызовы, полноценный ledger/UI join или переработку всех producer paths. Не возвращать отдельные кнопки вложений вместо `+` #109. Если получение точной суммы требует большой переделки, завершить BILL-01-MIN через unknown. Остальные простые правки APP-01 идут в тот же PR; при обнаружении большого независимого блока отложить его, а не дробить заранее всё на мини-PR.
-
-Проверить прежний completed event с ценой → новый request → Stop, missing/known zero/tiny positive, late callback; открытие/«Закрыть» истории; label после смены global model и reopen/legacy fallback. Runtime использовать по доступным seams; source assertion не выдавать за Android. Условия готовности APP-01: эти UI outcomes доказаны, оба exact final-code push APK/Release Successful, handoff обновлён в этом же PR до запуска CI, один итоговый отчёт. Точная сумма всех реальных отмен пока не гарантируется.
-
-### 2. Поле ввода, шапка и настройки
-
-**APP-02 = UI-02 + MODEL-02 + SET-01. Один следующий PR в пределах существующего UI/prefs.**
+**APP-02 = UI-02 + MODEL-02 + SET-01. Один PR в пределах существующего UI/prefs.**
 
 Первый шаг: инвентаризировать текущие controls/prefs и проверить capability/serialization выбранных API/model по актуальной документации. Затем перенести reasoning effort к composer, показывать `standard/pro` только при подтверждённой поддержке, уменьшить шапку с корректными Insets/IME, убрать повторные composer model/GitHub badges и разнести длинные настройки по понятным категориям. `temperature` и reasoning effort — разные параметры. OpenRouter сейчас нормализует xhigh/max→high и auto→medium: отсутствие сведений о поддержке не считать поддержкой, не добавлять silent downgrade.
 
@@ -229,11 +220,11 @@ Static verifier:
 ## История последних рабочих заходов — последние 5 PR
 
 
-- **#119:** BILL-03 merged `355b337be9e5321a2fc0206efb64071972d915dc`; final head `394779aa498a46ec74ca1e8ff9bbd587e0dbf35a`; push Build Android APK `37892879735` **Successful** включая instrumentation; push Release `37892879656` **Successful**; OpenAI background /cancel response parse, bounded retrieve (2 GET max), exact owned ledger reconciliation after Stop, cost unknown. API/phone not tested.
-- **#120:** docs-only handoff после BILL-03: merge `5f2796a3507fdc7cf7e942cfeb958761d5f3ba00`; Verify handoff `37894088101` — **Successful**; Android code unchanged.
 - **#121:** BILL-04 first round-level ledger: merged `2acc39bf98b432742e5e28462d82d1f952de62a3`, final code head `37e061b9c2179c4a301b223013104361250b01fe`; Build Android APK push `37895662110` — **Successful** включая instrumentation; Build Android Release push `37895662075` — **Successful**. SQLite v20 per-round generation ID/cost, bounded GET lookup, idempotent usage. No paid API/device checks.
 - **#122:** docs-only handoff BILL-04: merged `ba11422a3bd9ea9d2ea8b56cb336825fdaa5f7f5`; final head `a27f0a41bf2f9e21d4db4b918b7b9a3510df91c0`; Verify handoff `37899366370` — **Successful**.
 - **#123:** docs-only ограничение стоимости после Stop до BILL-01-MIN и фиксация бюджета Actions; merged `8a532e2b1e0a8b67007f45cde7bafe1ccabc140d`; final head `1059654f16715e5436f123209245c8ac38d297ea`; Verify `37903090821` — **Successful**. История — snapshot перед текущим документационным PR.
+- **#124:** docs-only перегруппировка задач в APP-01/02/03; merged `eaa324720e227dcc5d33148e84bd375ea69dd021`, Verify handoff `37905260657` — **Successful**; Android-код не менялся.
+- **#125:** APP-01 (BILL-01-MIN + UI-01 + MODEL-01) merged `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`, exact head `6aa069be89500a86bf4907cc90205e640af628e9`; push Build APK `37908225095` — **Successful** c instrumentation, Release `37908225079` — **Successful**, Verify handoff `37908229012` — **Successful**. LIVE/телефон не проверены.
 
 ## Product radar — идеи с реальной ценностью
 
