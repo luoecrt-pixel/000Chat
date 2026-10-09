@@ -40,11 +40,14 @@ data class OpenRouterLocalAttachment(
         wireMime?.let { put("wire_mime", it) }
     }
     companion object {
+        private fun optional(o: JSONObject, key: String): String? =
+            o.optString(key).takeIf { it.isNotBlank() && it != "null" && !o.isNull(key) }
+
         fun fromJson(o: JSONObject) = OpenRouterLocalAttachment(
             o.optString("id"), o.optString("name", "attachment"), o.optString("kind", "unknown"),
             o.optString("path"), o.optString("mime", "application/octet-stream"), o.optLong("size", 0L),
-            o.optString("sha256"), o.optString("text_path").takeIf { it.isNotBlank() }, o.optString("text_encoding").takeIf { it.isNotBlank() },
-            o.optString("wire_path").takeIf { it.isNotBlank() }, o.optString("wire_mime").takeIf { it.isNotBlank() }
+            o.optString("sha256"), optional(o, "text_path"), optional(o, "text_encoding"),
+            optional(o, "wire_path"), optional(o, "wire_mime")
         )
     }
 }
@@ -250,7 +253,17 @@ object OpenRouterAttachmentStore {
 
     fun toDataUrl(a: OpenRouterLocalAttachment): String {
         val wireFile = File(a.wirePath ?: a.path)
-        val wireMime = a.wireMime ?: a.mime
+        if (!wireFile.isFile || wireFile.length() == 0L) {
+            throw IOException("Локальные байты вложения недоступны: " + a.name)
+        }
+        // A name, picker MIME or legacy manifest is not evidence of the actual wire type.
+        val wireMime = when (a.kind) {
+            "image" -> detectImageMime(wireFile)
+                ?: throw IOException("Повреждённое или неподдерживаемое изображение: " + a.name)
+            "pdf" -> if (wireFile.inputStream().use { it.readNBytes(5) }.contentEquals("%PDF-".toByteArray())) "application/pdf"
+                else throw IOException("Повреждённый PDF: " + a.name)
+            else -> a.wireMime ?: a.mime
+        }
         return "data:" + wireMime + ";base64," + Base64.getEncoder().encodeToString(wireFile.readBytes())
     }
 
@@ -267,13 +280,27 @@ object OpenRouterAttachmentStore {
             textFile.writeText(decoded.first, Charsets.UTF_8)
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, decoded.second)
         } else if (kind == "image") {
+            val actualMime = detectImageMime(file)
+                ?: throw IOException("Изображение не соответствует JPEG, PNG, GIF или WebP: " + name)
             val normalized = context?.let { normalizeImageOrientation(it, file, dir, name) }
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath,
-                if (normalized != null) "image/jpeg" else (mimeForFilename(name).takeIf { it.startsWith("image/") } ?: mime),
-                size, sha, null, null, normalized?.absolutePath, if (normalized != null) "image/jpeg" else null)
+                actualMime, size, sha, null, null, normalized?.absolutePath,
+                if (normalized != null) "image/jpeg" else actualMime)
         } else {
             OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
         }
+    }
+
+    /** Read bounded magic bytes; never trust an extension as a wire media type. */
+    internal fun detectImageMime(file: File): String? {
+        if (!file.isFile) return null
+        val magic = ByteArray(12)
+        val count = try { file.inputStream().use { it.read(magic) } } catch (_: IOException) { return null }
+        if (count >= 3 && magic.copyOfRange(0, 3).contentEquals(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()))) return "image/jpeg"
+        if (count >= 8 && magic.copyOfRange(0, 8).contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 13, 10, 26, 10))) return "image/png"
+        if (count >= 6 && (String(magic, 0, 6, Charsets.US_ASCII) == "GIF87a" || String(magic, 0, 6, Charsets.US_ASCII) == "GIF89a")) return "image/gif"
+        if (count >= 12 && String(magic, 0, 4, Charsets.US_ASCII) == "RIFF" && String(magic, 8, 4, Charsets.US_ASCII) == "WEBP") return "image/webp"
+        return null
     }
 
     private fun classifyKind(file: File, name: String): String {

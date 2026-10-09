@@ -40,7 +40,7 @@ class OpenRouterAttachmentStoreTest {
     @Test
     fun imageUsesOriginalBytesForDataUrl() {
         val dir = createTempDir()
-        val original = byteArrayOf(1,2,3,4,5,6)
+        val original = byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),1,2,3)
         val file = File(dir, "x.jpg").apply { writeBytes(original) }
         val a = OpenRouterLocalAttachment("1", "x.jpg", "image", file.absolutePath, "image/jpeg", original.size.toLong(), "hash")
         val data = OpenRouterAttachmentStore.toDataUrl(a)
@@ -95,4 +95,50 @@ class OpenRouterAttachmentStoreTest {
         assertEquals("x.pdf", block.optJSONObject("file")?.optString("filename"))
         assertTrue(block.optJSONObject("file")?.optString("file_data")?.startsWith("data:application/pdf;base64,") == true)
     }
+    @Test
+    fun mismatchedFilenameAndPickerMimeUseActualJpegBytes() {
+        val dir = createTempDir()
+        val jpg = File(dir, "wrong.png").apply {
+            writeBytes(byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),42))
+        }
+        val attachment = OpenRouterAttachmentStore.classifyLocalFile(jpg, "wrong.png", "image/png")
+        assertEquals("image", attachment.kind)
+        assertEquals("image/jpeg", attachment.mime)
+        val block = OpenRouterAttachmentStore.toContentBlock(attachment)
+        val url = block.getJSONObject("image_url").getString("url")
+        assertTrue(url.startsWith("data:image/jpeg;base64,"))
+        assertTrue(Base64.getDecoder().decode(url.substringAfter(",")).contentEquals(jpg.readBytes()))
+    }
+
+    @Test
+    fun legacyNullWireFieldsRoundTripAsAbsent() {
+        val dir = createTempDir()
+        val jpeg = File(dir, "camera.jpg").apply {
+            writeBytes(byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),7))
+        }
+        val a = OpenRouterLocalAttachment.fromJson(
+            org.json.JSONObject()
+                .put("id","one").put("name","camera.jpg").put("path",jpeg.absolutePath)
+                .put("kind","image").put("mime","image/jpeg")
+                .put("wire_path",org.json.JSONObject.NULL).put("wire_mime",org.json.JSONObject.NULL)
+        )
+        assertEquals(null, a.wirePath)
+        assertEquals(null, a.wireMime)
+        assertTrue(OpenRouterAttachmentStore.toDataUrl(a).startsWith("data:image/jpeg;base64,"))
+    }
+
+    @Test(expected = java.io.IOException::class)
+    fun rejectsFakeImageEvenWithJpegExtensionAndMime() {
+        val dir = createTempDir()
+        val fake = File(dir, "fake.jpg").apply { writeText("NOT A JPEG") }
+        val a = OpenRouterLocalAttachment("id","fake.jpg","image",fake.absolutePath,"image/jpeg",fake.length(),"sha")
+        OpenRouterAttachmentStore.toContentBlock(a)
+    }
+
+    @Test(expected = java.io.IOException::class)
+    fun missingWireFileDoesNotProduceEmptyBase64() {
+        val a = OpenRouterLocalAttachment("id","x.png","image","/missing/app04-image.png","image/png",12L,"sha")
+        OpenRouterAttachmentStore.toDataUrl(a)
+    }
+
 }
