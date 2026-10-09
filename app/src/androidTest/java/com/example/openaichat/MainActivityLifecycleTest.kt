@@ -23,6 +23,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.MockResponse
 import java.lang.reflect.Proxy
 import java.util.concurrent.CompletableFuture
 import java.io.ByteArrayInputStream
@@ -745,6 +747,143 @@ class MainActivityLifecycleTest {
             assertEquals(null, pending.get())
         }
         scenario.close()
+    }
+
+    @Test
+    fun realOpenRouterSendKeepsNewDraftAndSendsOriginalPngBytes() {
+        val original = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val server = MockWebServer()
+        server.start()
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"picture received\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val model = "anthropic/claude-sonnet-5.5"
+        try {
+            scenario.onActivity { activity ->
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", model).putString("reasoning", "high").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                val file = java.io.File(activity.filesDir, "photo-with-wrong-jpg-name.jpeg")
+                    .apply { writeBytes(original) }
+                @Suppress("UNCHECKED_CAST")
+                val attachments = privateField(activity, "attachedOpenRouterAttachments")
+                    as MutableList<OpenRouterLocalAttachment>
+                attachments.add(OpenRouterLocalAttachment(
+                    "photo", "photo-with-wrong-jpg-name.jpeg", "image", file.absolutePath,
+                    "image/jpeg", file.length(), "sha"
+                ))
+                @Suppress("UNCHECKED_CAST")
+                val modalities = privateField(activity, "openRouterModelModalities")
+                    as ConcurrentHashMap<String, Set<String>>
+                modalities[model] = setOf("text", "image")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString()) })
+                setPrivateField(activity, "openRouterPreparationHook", {
+                    entered.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                    Unit
+                })
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("What is in this picture?")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("Send never entered the background preparation", entered.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("New draft typed while the file is being prepared")
+            }
+            release.countDown()
+
+            val request = server.takeRequest(5, TimeUnit.SECONDS)
+                ?: throw AssertionError("Production Send never reached local MockWebServer")
+            val body = JSONObject(request.body.readUtf8())
+            val messages = body.getJSONArray("messages")
+            val user = (0 until messages.length()).map { messages.getJSONObject(it) }
+                .first { it.optString("role") == "user" }
+            val content = user.getJSONArray("content")
+            val image = (0 until content.length()).map { content.getJSONObject(it) }
+                .first { it.optString("type") == "image_url" }
+            val url = image.getJSONObject("image_url").getString("url")
+            assertTrue("Wrong image MIME in real HTTP body", url.startsWith("data:image/png;base64,"))
+            assertTrue("Source photo was transcoded", java.util.Base64.getDecoder()
+                .decode(url.substringAfter(",")).contentEquals(original))
+
+            var completed = false
+            for (attempt in 0 until 100) {
+                scenario.onActivity { activity ->
+                    val status = privateField(activity, "status") as android.widget.TextView
+                    completed = status.text.toString().startsWith("Готово")
+                    val composer = privateField(activity, "input") as android.widget.EditText
+                    assertEquals("New draft typed while the file is being prepared",
+                        composer.text.toString())
+                }
+                if (completed) break
+                SystemClock.sleep(25L)
+            }
+            assertTrue("Mock HTTP success was not reflected by Activity", completed)
+        } finally {
+            release.countDown()
+            scenario.onActivity { activity ->
+                setPrivateField(activity, "openRouterPreparationHook", null)
+                SecureStore(activity).setOpenRouterApiKey("")
+            }
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp() {
+        val server = MockWebServer()
+        server.start()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            scenario.onActivity { activity ->
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", "anthropic/claude-sonnet-5.5").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString()) })
+                setPrivateField(activity, "openRouterPreparationHook", {
+                    entered.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                    Unit
+                })
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("Do not send after Stop")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("Preparation hook did not run", entered.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("Unsent draft after Stop")
+                invoke(activity, "stopCurrentResponse")
+                assertEquals("Unsent draft after Stop", composer.text.toString())
+            }
+            release.countDown()
+            // The only network destination is the local mock; a cancelled snapshot
+            // must never create a Call against it.
+            assertEquals(null, server.takeRequest(300, TimeUnit.MILLISECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                assertEquals("Unsent draft after Stop", composer.text.toString())
+                assertTrue(activity.send.isEnabled)
+            }
+        } finally {
+            release.countDown()
+            scenario.onActivity { activity ->
+                setPrivateField(activity, "openRouterPreparationHook", null)
+                SecureStore(activity).setOpenRouterApiKey("")
+            }
+            scenario.close()
+            server.shutdown()
+        }
     }
 
     @Test
