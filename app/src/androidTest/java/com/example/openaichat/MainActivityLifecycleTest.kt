@@ -106,10 +106,20 @@ class MainActivityLifecycleTest {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
             val root = activity.window.decorView
-            assertTrue(find(root, "Выбрать модель") != null)
+            val model = find(root, "Выбрать модель")
+                ?: throw AssertionError("Bottom model selector missing")
             val effort = find(root, "Усилие мышления")
                 ?: throw AssertionError("Composer effort control missing")
+            val advanced = find(root, "Дополнительные настройки мышления и ответа")
+                ?: throw AssertionError("Advanced panel button missing")
+            val header = find(root, "Открыть чаты") ?: error("Header missing")
+            assertTrue("Model must not be in header", model.top > header.bottom)
+            assertTrue("Bottom controls must share composer options row",
+                model.parent === effort.parent && model.parent === advanced.parent)
             assertTrue((effort as android.widget.TextView).text.toString().startsWith("⚡"))
+            assertTrue("Model picker should be clickable", model.hasOnClickListeners())
+            assertTrue("Quick effort picker should be clickable", effort.hasOnClickListeners())
+            assertTrue("Advanced settings should be clickable", advanced.hasOnClickListeners())
             assertTrue(find(root, "Добавить в чат") != null)
             assertTrue(find(root, "Настройки") != null)
         }
@@ -1387,6 +1397,87 @@ class MainActivityLifecycleTest {
         method.isAccessible = true
         return method.invoke(activity, *args)
     }
+
+    @Test
+    fun externalImagePickerResultAfterChatSwitchAndRecreateBelongsToSourceChat() {
+        val png = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val uri = Uri.parse("content://test-photo-picker/synthetic.png")
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var originalChatId = ""
+        var otherChatId = ""
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                originalChatId = activity.currentChatIdForTesting()
+                setPrivateField(activity, "pendingPickerChatId", originalChatId)
+                setPrivateField(activity, "pendingPickerProvider", "openrouter")
+                activity.newChat()
+                otherChatId = activity.currentChatIdForTesting()
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("D2 in another chat")
+            }
+            scenario.recreate()
+            scenario.onActivity { activity ->
+                activity.openRouterAttachmentInputStreamSource =
+                    AttachmentInputStreamSource { _, _ -> ByteArrayInputStream(png) }
+                assertEquals(originalChatId, privateField(activity, "pendingPickerChatId"))
+                activity.handleActivityResult(5101, Activity.RESULT_OK, Intent().setData(uri))
+            }
+            assertTrue("External picker result did not reach source draft",
+                waitForSourceAttachmentCount(scenario, originalChatId, 1))
+            scenario.onActivity { activity ->
+                assertEquals(otherChatId, activity.currentChatIdForTesting())
+                assertEquals("D2 in another chat",
+                    (privateField(activity, "input") as android.widget.EditText).text.toString())
+                assertEquals(0, composerAttachmentCount(activity, otherChatId))
+                val source = JSONObject(activity.prefs.getString("composer_state_" + originalChatId, "{}")!!)
+                val item = source.getJSONArray("openrouter_attachments").getJSONObject(0)
+                assertEquals("image", item.getString("kind"))
+                assertTrue(java.io.File(item.getString("path")).isFile)
+            }
+        } finally {
+            scenario.close()
+        }
+    }
+
+    @Test
+    fun deliberateHorizontalGestureOpensAndClosesChatDrawer() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        fun swipe(view: android.view.View, x0: Float, x1: Float, y: Float) {
+            val down = SystemClock.uptimeMillis()
+            val positions = floatArrayOf(x0, x0 + (x1 - x0) / 2, x1)
+            positions.forEachIndexed { i, x ->
+                val event = android.view.MotionEvent.obtain(
+                    down, down + i * 50, when (i) {
+                        0 -> android.view.MotionEvent.ACTION_DOWN
+                        2 -> android.view.MotionEvent.ACTION_UP
+                        else -> android.view.MotionEvent.ACTION_MOVE
+                    }, x, y, 0)
+                view.dispatchTouchEvent(event)
+                event.recycle()
+            }
+        }
+        try {
+            scenario.onActivity { activity ->
+                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
+                val scroll = privateField(activity, "scroll") as androidx.recyclerview.widget.RecyclerView
+                val width = scroll.width.toFloat()
+                assertTrue("RecyclerView must be laid out", width > 200f)
+                swipe(scroll, width * 0.2f, width * 0.9f, scroll.height / 2f)
+                assertTrue("Swipe right must open drawer",
+                    drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
+                // DrawerLayout handles the standard close gesture from the drawer surface.
+                swipe(drawer, drawer.width * 0.65f, drawer.width * 0.1f, drawer.height / 2f)
+                assertFalse("Swipe left must close drawer",
+                    drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
+            }
+        } finally {
+            scenario.close()
+        }
+    }
+
     private class BlockingAttachmentInputStreamSource : AttachmentInputStreamSource {
         private val opened = ConcurrentHashMap.newKeySet<String>()
         private val releases = ConcurrentHashMap<String, CountDownLatch>()
