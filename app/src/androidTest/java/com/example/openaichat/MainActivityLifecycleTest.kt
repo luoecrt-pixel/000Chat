@@ -986,7 +986,19 @@ class MainActivityLifecycleTest {
             val status = privateField(activity, "status") as android.widget.TextView
             assertTrue("Missing explanation for unavailable file history",
                 status.text.toString().contains("вложения OpenAI"))
+
+            // A non-null ID is not a usable Responses chain if a different provider
+            // answered last; the same OpenAI file inputs must still block fallback.
+            history.add(JSONObject().put("role", "assistant")
+                .put("provider", "openrouter").put("text", "other provider"))
+            setPrivateField(activity, "currentResponseId", "resp_stale")
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            assertEquals(generation, activeGeneration(activity))
+            assertEquals("Next question", composer.text.toString())
+            assertEquals(oldSize + 2, history.size)
             history.removeAt(history.lastIndex)
+            history.removeAt(history.lastIndex)
+            setPrivateField(activity, "currentResponseId", null)
         }
         scenario.close()
     }
