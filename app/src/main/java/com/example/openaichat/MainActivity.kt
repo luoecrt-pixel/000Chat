@@ -4869,13 +4869,6 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        if (r == pickVoice || r == pickImage || r == pickAny) {
-            val source = pendingPickerChatId
-            if (source != null && source != currentChatId()) {
-                status.text = "Действие относится к другому чату — откройте исходный чат и повторите"
-                return
-            }
-        }
         if(r==pickExportTxt){
             val uri=d.data ?: return
             val source=pendingExportPath
@@ -4939,14 +4932,15 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        val provider = prefs.getString("provider", "openai") ?: "openai"
+        val provider = pendingPickerProvider ?: normalizedProviderId()
+        val pickerSourceChatId = pendingPickerChatId ?: currentChatId()
 
         if (provider == "openrouter" && r != pickVectorStoreFile && r != pickExportTxt && r != pickSaveGenerated && r != pickVoice) {
             val selectedUris = urisFromIntent(d)
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
-                    val uploadChatId = currentChatId()
+                    val uploadChatId = pickerSourceChatId
                     val uploadGeneration = activeResponseState.state.generation
                     beginUpload(uploadChatId, uploadGeneration)
                     executor.execute {
@@ -5023,7 +5017,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val uri = imageUris.first()
-            val uploadChatId=currentChatId()
+            val uploadChatId=pickerSourceChatId
             val uploadGeneration=activeResponseState.state.generation
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
@@ -5079,7 +5073,7 @@ class MainActivity : ComponentActivity() {
         uris.distinct().forEach{uri->
             val name=queryName(uri) ?: "attachment"
             val ext=name.substringAfterLast('.',"").lowercase()
-            val uploadChatId=currentChatId()
+            val uploadChatId=pickerSourceChatId
             val uploadGeneration=activeResponseState.state.generation
             val kind=if(ext=="zip")"zip" else "file"
             if(ext=="zip"){
@@ -5150,10 +5144,13 @@ class MainActivity : ComponentActivity() {
     private fun launchActivityForResult(intent: Intent, requestCode: Int) {
         pendingActivityResultCode = requestCode
         pendingPickerChatId = currentChatId()
+        pendingPickerProvider = normalizedProviderId()
         try {
             activityResultLauncher.launch(intent)
         } catch (e: Exception) {
             pendingActivityResultCode = null
+            pendingPickerChatId = null
+            pendingPickerProvider = null
             status.text = "Операция недоступна: ${e.message}"
         }
     }
