@@ -646,11 +646,11 @@ class MainActivityLifecycleTest {
         // Completion is asynchronous; assert cleanup explicitly after the source
         // manifest is persisted instead of racing the UI callback.
         var preparationFinished = false
-        repeat(100) {
+        for (attempt in 0 until 100) {
             scenario.onActivity { launched ->
                 preparationFinished = !launched.preparingZipAttachments
             }
-            if (preparationFinished) return@repeat
+            if (preparationFinished) break
             SystemClock.sleep(20L)
         }
         scenario.onActivity { launched ->
