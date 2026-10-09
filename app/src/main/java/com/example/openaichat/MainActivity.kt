@@ -2224,7 +2224,7 @@ class MainActivity : ComponentActivity() {
         val supportedReasoningMode = ModelRequestPolicy.supportedMode(provider, model, reasoningMode)
         var configUpdateEffort:String? = null
         val effectiveEffort:String
-        if(supportedReasoningMode != "pro"){
+        if(supportedReasoningMode == "standard"){
             val baseline=baselineEffort
             when {
                 baseline==null -> { baselineEffort=effort; effectiveEffort=effort }
