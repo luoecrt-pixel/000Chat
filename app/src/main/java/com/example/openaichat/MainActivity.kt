@@ -4977,28 +4977,47 @@ class MainActivity : ComponentActivity() {
         launchActivityForResult(i, pickVectorStoreFile)
     }
 
-    private fun listVectorStoreFiles(vsId:String):List<Pair<String,String>>{
-        val key=secure.getApiKey()
-        val req=Request.Builder().url("https://api.openai.com/v1/vector_stores/$vsId/files?limit=100")
-            .addHeader("Authorization","Bearer $key").get().build()
-        client.newCall(req).execute().use{resp->
-            val raw=resp.body?.string().orEmpty()
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
-            val arr=JSONObject(raw).optJSONArray("data") ?: JSONArray()
-            val out=mutableListOf<Pair<String,String>>()
-            for(i in 0 until arr.length()){
-                val fid=arr.optJSONObject(i)?.optString("id") ?: continue
-                val name=try{ fetchFileName(fid) }catch(_:Exception){ fid }
-                out.add(fid to name)
+    private fun listVectorStoreFiles(vsId: String): VectorStoreListResult {
+        val key = secure.getApiKey()
+        if (key.isBlank()) throw IOException("OpenAI API key не настроен")
+        val ids = mutableListOf<String>()
+        var after: String? = null
+        var more = true
+        var pageNumber = 0
+        while (more && pageNumber < VectorStorePagePolicy.MAX_PAGES) {
+            if (Thread.currentThread().isInterrupted) throw IOException("Загрузка списка отменена")
+            val base = "https://api.openai.com/v1/vector_stores/" +
+                Uri.encode(vsId) + "/files?limit=" + VectorStorePagePolicy.PAGE_SIZE
+            val requestUrl = if (after == null) base else base + "&after=" + Uri.encode(after)
+            val request = Request.Builder().url(requestUrl)
+                .addHeader("Authorization", "Bearer " + key).get().build()
+            val page = vsControlClient.newCall(request).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw IOException("Vector Store HTTP " + response.code)
+                VectorStorePagePolicy.parse(JSONObject(raw))
             }
-            return out
+            ids.addAll(page.ids)
+            pageNumber++
+            if (page.hasMore && (page.nextAfter.isNullOrBlank() || page.nextAfter == after))
+                throw IOException("Vector Store pagination cursor did not advance")
+            after = page.nextAfter
+            more = page.hasMore
         }
+        var unresolvedNames = 0
+        val entries = ids.mapIndexed { index, id ->
+            val displayName = if (index < VectorStorePagePolicy.MAX_FILENAME_LOOKUPS) {
+                try { fetchFileName(id) } catch (_: Exception) { unresolvedNames++; id }
+            } else { unresolvedNames++; id }
+            id to displayName
+        }
+        return VectorStoreListResult(entries, more, unresolvedNames)
     }
+
     private fun fetchFileName(fileId:String):String{
         val key=secure.getApiKey()
         val req=Request.Builder().url("https://api.openai.com/v1/files/$fileId")
             .addHeader("Authorization","Bearer $key").get().build()
-        client.newCall(req).execute().use{resp->
+        vsControlClient.newCall(req).execute().use{resp->
             val raw=resp.body?.string().orEmpty()
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}")
             return JSONObject(raw).optString("filename",fileId)
@@ -5009,7 +5028,7 @@ class MainActivity : ComponentActivity() {
         val reqBody=JSONObject().put("name",name).toString().toRequestBody("application/json".toMediaType())
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores")
             .addHeader("Authorization","Bearer $key").post(reqBody).build()
-        client.newCall(req).execute().use{resp->
+        vsControlClient.newCall(req).execute().use{resp->
             val raw=resp.body?.string().orEmpty()
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
             return JSONObject(raw).getString("id")
@@ -5020,7 +5039,7 @@ class MainActivity : ComponentActivity() {
         val reqBody=JSONObject().put("file_id",fileId).toString().toRequestBody("application/json".toMediaType())
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores/$vsId/files")
             .addHeader("Authorization","Bearer $key").post(reqBody).build()
-        client.newCall(req).execute().use{resp->
+        vsControlClient.newCall(req).execute().use{resp->
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${resp.body?.string()}")
         }
     }
@@ -5028,7 +5047,7 @@ class MainActivity : ComponentActivity() {
         val key=secure.getApiKey()
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores/$vsId/files/$fileId")
             .addHeader("Authorization","Bearer $key").delete().build()
-        client.newCall(req).execute().use{resp->
+        vsControlClient.newCall(req).execute().use{resp->
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${resp.body?.string()}")
         }
     }
@@ -5036,7 +5055,14 @@ class MainActivity : ComponentActivity() {
         val key=secure.getApiKey()
         val temp=File(cacheDir,"upload_${System.nanoTime()}")
         val input=contentResolver.openInputStream(uri) ?: throw IOException("Не удалось открыть файл")
-        input.use{src->temp.outputStream().use{out->src.copyTo(out,64*1024)}}
+        try {
+            input.use { source ->
+                BoundedAttachmentCopy.copy(source, temp, maxBytes = 50L * 1024 * 1024)
+            }
+        } catch (e: Exception) {
+            temp.delete()
+            throw e
+        }
         val mime=contentResolver.getType(uri) ?: "application/octet-stream"
         val name=queryName(uri) ?: "attachment"
         val body=MultipartBody.Builder().setType(MultipartBody.FORM)
