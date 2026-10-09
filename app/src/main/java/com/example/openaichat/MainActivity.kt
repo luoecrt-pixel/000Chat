@@ -286,7 +286,7 @@ class MainActivity : ComponentActivity() {
         buildUi()
         restoreCurrentChat()
         executor.execute { cleanupOrphanOpenRouterAttachments() }
-        diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
+        diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "git_sha" to BuildConfig.BUILD_GIT_SHA, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -507,10 +507,6 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Настройки"
         }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
-        // Full-width, always visible row belongs to the next-request model selection.
-        modelBadge.setPadding(dp(14), dp(8), dp(14), dp(8))
-        modelBadge.contentDescription = "Выбрать модель"
-        root.addView(modelBadge, LinearLayout.LayoutParams(-1, -2))
         updateModelBadge()
         root.addView(View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }, LinearLayout.LayoutParams(-1,dp(1)))
 
@@ -562,7 +558,7 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(attachScroll)
 
-        // Effort stays near input; model selection moves to the compact header.
+        // All next-request controls stay in the composer above the keyboard.
         val composerOptions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -576,7 +572,17 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Усилие мышления"
             setOnClickListener { showQuickEffortPicker() }
         }
+        modelBadge.setPadding(dp(8), dp(6), dp(8), dp(6))
+        modelBadge.setTextColor(Color.rgb(190, 200, 220))
+        modelBadge.textSize = 12f
+        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, -2, 1f))
         composerOptions.addView(effortBadge)
+        composerOptions.addView(button("⚙") { showResponseSettings() }.apply {
+            contentDescription = "Дополнительные настройки мышления и ответа"
+            textSize = 16f
+            minWidth = 0
+            minimumWidth = 0
+        }, LinearLayout.LayoutParams(dp(42), dp(40)).apply { leftMargin = dp(4) })
         root.addView(composerOptions)
         updateEffortBadge()
 
@@ -1003,7 +1009,7 @@ class MainActivity : ComponentActivity() {
         if (!::modelBadge.isInitialized) return
         val source = ModelCatalog.source(normalizedProviderId())
         val modelLabel = ModelCatalog.displayName(source.id, normalizedModelId())
-        modelBadge.text = "Модель для следующего запроса: ${source.label} · ${modelLabel} ▾"
+        modelBadge.text = "${source.label} · ${modelLabel} ▾"
         modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}. Выбрать модель"
         updateEffortBadge()
     }
@@ -1098,6 +1104,22 @@ class MainActivity : ComponentActivity() {
     // ---------- Settings ----------
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun showQuickEffortPicker() {
+        val efforts = arrayOf("auto", "low", "medium", "high", "xhigh", "max")
+        val current = prefs.getString("reasoning", "high") ?: "high"
+        AlertDialog.Builder(this)
+            .setTitle("⚡ Усилие мышления")
+            .setSingleChoiceItems(efforts, efforts.indexOf(current).coerceAtLeast(0)) { dialog, position ->
+                prefs.edit().putString("reasoning", efforts[position]).apply()
+                updateEffortBadge()
+                status.text = "Усилие для следующего запроса: " + efforts[position]
+                dialog.dismiss()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun showResponseSettings() {
         val provider = normalizedProviderId()
         val model = normalizedModelId()
         val openAi = provider == "openai"
@@ -1184,6 +1206,87 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun showDiagnostics() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+        }
+        val buildLabel = TextView(this).apply {
+            text = "Версия " + BuildConfig.VERSION_NAME + " · Git " + BuildConfig.BUILD_GIT_SHA
+            setTextColor(Color.rgb(180,190,205))
+            textSize = 12f
+            setTextIsSelectable(true)
+        }
+        container.addView(buildLabel)
+        val events = TextView(this).apply {
+            text = "Загрузка последних событий…"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setTextIsSelectable(true)
+            setPadding(dp(4), dp(10), dp(4), dp(10))
+        }
+        val eventScroll = ScrollView(this).apply {
+            addView(events)
+            isFillViewport = true
+        }
+        container.addView(eventScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        var rawEvents = ""
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(button("Копировать всё") {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Astra diagnostics", rawEvents))
+            status.text = "Диагностика скопирована"
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(button("Экспорт") {
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, "Version: " + BuildConfig.VERSION_NAME +
+                    "\nGit: " + BuildConfig.BUILD_GIT_SHA + "\n" + rawEvents)
+            }, "Экспорт диагностики"))
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(button("В конец") {
+            eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        container.addView(actions)
+        AlertDialog.Builder(this)
+            .setTitle("Диагностика запросов")
+            .setView(container)
+            .setNegativeButton("Закрыть", null)
+            .show().window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.75).toInt())
+        executor.execute {
+            val read = diagnostics.tail(300)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                rawEvents = read
+                events.text = formatDiagnostics(read)
+                eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    private fun formatDiagnostics(raw: String): String {
+        val fieldPattern = Regex("""(?:^|\\s)([A-Za-z][A-Za-z_0-9]*)=""")
+        return raw.lines().filter { it.isNotBlank() }.joinToString("\n\n") { line ->
+            if (line.length < 24) return@joinToString line
+            val stamp = line.take(23)
+            val rest = line.drop(24)
+            val event = rest.substringBefore(' ')
+            val body = rest.drop(event.length).trim()
+            val fields = fieldPattern.findAll(body).toList()
+            buildString {
+                append("● ").append(stamp).append(" · ").append(event.replace('_', ' '))
+                fields.forEachIndexed { index, match ->
+                    val from = match.range.last + 1
+                    val to = fields.getOrNull(index + 1)?.range?.first ?: body.length
+                    val value = body.substring(from, to).trim()
+                    append("\n   ").append(match.groupValues[1].replace('_', ' '))
+                        .append(": ").append(value)
+                }
+                if (fields.isEmpty() && body.isNotBlank()) append("\n   ").append(body)
+            }
+        }
+    }
+
     private fun showSettings() {
         val cardBg = Color.rgb(36,38,44)
         val accent = Color.rgb(138,180,248)
@@ -1229,6 +1332,9 @@ class MainActivity : ComponentActivity() {
         val currentProvider = normalizedProviderId()
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
+        spaced(button("🧪 Диагностика") { showDiagnostics() }.apply {
+            setTextColor(accent); background = rounded(Color.rgb(40,48,66))
+        })
 
         section("GitHub")
         fun chk(label:String,pref:String) = CheckBox(this).apply {
@@ -1317,15 +1423,6 @@ class MainActivity : ComponentActivity() {
                 .setMessage(chatDb.effortStats())
                 .setPositiveButton("OK", null)
                 .setNeutralButton("Очистить лог") { _, _ -> diagnostics.clear(); status.text = "Диагностический лог очищен" }
-                .show()
-        }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
-        spaced(button("🧪 Диагностика") {
-            AlertDialog.Builder(this)
-                .setTitle("Astra diagnostics")
-                .setMessage(diagnostics.tail())
-                .setPositiveButton("OK", null)
                 .show()
         }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
