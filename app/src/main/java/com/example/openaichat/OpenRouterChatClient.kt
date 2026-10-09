@@ -99,7 +99,8 @@ class OpenRouterChatClient(
         onCallCreated: (Call) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
         onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
-        onTextDelta: (String) -> Unit = {}
+        onTextDelta: (String) -> Unit = {},
+        onPayloadObserved: (roundIndex: Int, jsonBytes: Int) -> Unit = { _, _ -> }
     ): OpenRouterCompletionResult {
         // Resolve once before HTTP and all tool rounds; Activity already resolves auto.
         val requestEffort = OpenRouterReasoningPolicy.requestEffort(model, reasoningEffort)
@@ -188,6 +189,8 @@ class OpenRouterChatClient(
 
             val roundIndex = nextRoundIndex++
             onRoundObserved(roundIndex, null, null)
+            val wireBody = body.toString()
+            onPayloadObserved(roundIndex, wireBody.toByteArray(Charsets.UTF_8).size)
             val request = Request.Builder()
                 .url(baseUrl.trimEnd('/') + "/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
@@ -195,7 +198,7 @@ class OpenRouterChatClient(
                 .addHeader("Accept", "text/event-stream")
                 .addHeader("HTTP-Referer", "com.example.openaichat")
                 .addHeader("X-Title", "OpenAIApiChat")
-                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .post(wireBody.toRequestBody("application/json".toMediaType()))
                 .build()
 
             val call = httpClient.newCall(request)
