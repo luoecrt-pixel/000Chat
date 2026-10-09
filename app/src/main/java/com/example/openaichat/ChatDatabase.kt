@@ -482,17 +482,34 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.transaction { db ->
             // UI snapshots can be older than Worker/async metadata, even when they have
             // the same number of messages. Never rewrite existing rows here.
-            val existing = db.rawQuery(
-                "SELECT COUNT(*) FROM $MESSAGE_TABLE WHERE chat_id=?", arrayOf(id)
-            ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
-            if (existing > messages.size) return@transaction
             val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?",
-                arrayOf(id), null,null,null,"1").use { it.moveToFirst() }
+                arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
             if (!exists) return@transaction
-            for (position in existing until messages.size) {
-                val msg = JSONObject(messages[position].toString())
-                db.insertOrThrow(MESSAGE_TABLE, null,
-                    messageContentValues(id, position, msg, ChatMessageFingerprint.of(msg)))
+            val known = mutableSetOf<String>()
+            var nextPosition = 0
+            db.query(MESSAGE_TABLE, arrayOf("role","request_id","position"),
+                "chat_id=?", arrayOf(id), null, null, "position ASC").use { cursor ->
+                while(cursor.moveToNext()) {
+                    val role = cursor.getString(0).orEmpty()
+                    val requestId = cursor.getString(1).orEmpty()
+                    if (requestId.isNotBlank()) known.add("$role|$requestId")
+                    nextPosition = maxOf(nextPosition, cursor.getInt(2) + 1)
+                }
+            }
+            // A Worker may have inserted an assistant at position N while the UI
+            // produced another user at position N. Append by request identity,
+            // not by the count or stale positional alignment.
+            messages.forEach { snapshot ->
+                val role = snapshot.optString("role")
+                val requestId = snapshot.optString("request_id")
+                val identity = "$role|$requestId"
+                if (role == "user" && requestId.isNotBlank() && requestId != "null" &&
+                    known.add(identity)) {
+                    val copy = JSONObject(snapshot.toString())
+                    db.insertOrThrow(MESSAGE_TABLE, null,
+                        messageContentValues(id, nextPosition++, copy,
+                            ChatMessageFingerprint.of(copy)))
+                }
             }
             val values = ContentValues().apply {
                 if (title.isNotBlank()) put("title", title)

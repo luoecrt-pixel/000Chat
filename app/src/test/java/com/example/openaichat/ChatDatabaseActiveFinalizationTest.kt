@@ -209,6 +209,22 @@ class ChatDatabaseActiveFinalizationTest {
             }
         }
     }
+    @Test fun newRequestAfterWorkerTerminalIsAppendedDespiteEqualSnapshotCount() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            assertTrue(commitOnce(db, text="old assistant"))
+            val freshUser = JSONObject().put("role","user").put("text","new prompt")
+                .put("request_id","local_2")
+            assertTrue(db.upsertUiSnapshotPreservingTail("chat","Original",null,null,
+                listOf(JSONObject().put("role","user").put("text","old prompt")
+                    .put("request_id","local_1"),freshUser)))
+            val rows = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(3, rows.length())
+            assertEquals("old assistant",rows.getJSONObject(1).getString("text"))
+            assertEquals("new prompt",rows.getJSONObject(2).getString("text"))
+        }
+    }
+
     @Test fun sameLengthStaleUiSnapshotCannotOverwriteCommittedMetadata() {
         ChatDatabase(context).use { db ->
             prepare(db)
