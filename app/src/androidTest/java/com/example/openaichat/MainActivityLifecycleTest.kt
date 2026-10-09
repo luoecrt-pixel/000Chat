@@ -748,6 +748,37 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.prefs.edit().putString("provider", "openai").apply()
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            val oldSize = history.size
+            history.add(
+                JSONObject().put("role", "user").put("text", "Old photo")
+                    .put("provider", "openai")
+                    .put("image_file_id", "file-example")
+            )
+            setPrivateField(activity, "currentResponseId", null)
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("Next question")
+            val generation = activeGeneration(activity)
+
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+
+            assertEquals("Unsafe fallback advanced generation", generation, activeGeneration(activity))
+            assertEquals("Next question", composer.text.toString())
+            assertEquals("Unsafe fallback appended to chat", oldSize + 1, history.size)
+            val status = privateField(activity, "status") as android.widget.TextView
+            assertTrue("Missing explanation for unavailable file history",
+                status.text.toString().contains("вложения OpenAI"))
+            history.removeAt(history.lastIndex)
+        }
+        scenario.close()
+    }
+
+    @Test
     fun githubConfirmationRejectsMissingAndStaleOwnerWithoutOpeningDialog() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
