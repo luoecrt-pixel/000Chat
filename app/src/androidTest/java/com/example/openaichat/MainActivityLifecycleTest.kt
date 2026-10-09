@@ -310,7 +310,12 @@ class MainActivityLifecycleTest {
             val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
             activeCall.set(fakeCall)
 
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
             Thread {
+                ownerSlot.set(owner)
                 try {
                     confirmationResult.set(
                         invoke(
@@ -323,6 +328,7 @@ class MainActivityLifecycleTest {
                         ) as Boolean
                     )
                 } finally {
+                    ownerSlot.remove()
                     confirmationDone.countDown()
                 }
             }.start()
@@ -691,7 +697,12 @@ class MainActivityLifecycleTest {
         val oldDialog = AtomicReference<AlertDialog?>(null)
 
         scenario.onActivity { activity ->
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
             Thread {
+                ownerSlot.set(owner)
                 try {
                     confirmationResult.set(
                         invoke(
@@ -704,6 +715,7 @@ class MainActivityLifecycleTest {
                         ) as Boolean
                     )
                 } finally {
+                    ownerSlot.remove()
                     confirmationDone.countDown()
                 }
             }.start()
@@ -731,6 +743,48 @@ class MainActivityLifecycleTest {
             @Suppress("UNCHECKED_CAST")
             val pending = privateField(activity, "pendingGitHubConfirmation") as AtomicReference<java.util.concurrent.CompletableFuture<Boolean>?>
             assertEquals(null, pending.get())
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun githubConfirmationRejectsMissingAndStaleOwnerWithoutOpeningDialog() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
+            val deniedWithoutOwner = invoke(
+                activity,
+                "confirmGitHubWrite",
+                String::class.java,
+                JSONObject::class.java,
+                "create_issue_comment",
+                JSONObject().put("issue_number", 3)
+            ) as Boolean
+            assertFalse("GitHub confirmation without a request owner must be denied", deniedWithoutOwner)
+
+            // A previously valid generation must not be allowed to open a new decision.
+            ownerSlot.set(owner.first to (owner.second - 1L))
+            try {
+                assertFalse(isRequestCurrent(activity, owner.first, owner.second - 1L))
+                val deniedStale = invoke(
+                    activity,
+                    "confirmGitHubWrite",
+                    String::class.java,
+                    JSONObject::class.java,
+                    "create_issue_comment",
+                    JSONObject().put("issue_number", 3)
+                ) as Boolean
+                assertFalse("Stale GitHub confirmation owner must be denied", deniedStale)
+            } finally {
+                ownerSlot.remove()
+            }
+            @Suppress("UNCHECKED_CAST")
+            val dialogRef = privateField(activity, "pendingGitHubConfirmationDialog")
+                as AtomicReference<AlertDialog?>
+            assertEquals(null, dialogRef.get())
         }
         scenario.close()
     }
