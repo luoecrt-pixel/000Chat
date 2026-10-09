@@ -74,12 +74,12 @@ class BackgroundResponseWorker(
             db.startRequestAccounting(chatId, requestId, "openai", requestedModel, "openai_api_key")
 
             setForeground(createForegroundInfo(db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }))
-            val startedAt = SystemClock.elapsedRealtime()
-            val deadline = startedAt + BackgroundRecoveryPolicy.MAX_RECOVERY_MS
+            // started_at was persisted at original Send; a new Worker must not restart the clock.
+            val requestStartedAt = activeAtStart.optLong("started_at", -1L)
             var retryDelayMs = 1_500L
 
             while (!isStopped) {
-                if (SystemClock.elapsedRealtime() >= deadline) {
+                if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                     diagnostics.log("worker_recovery_timeout", mapOf(
                         "chat_id" to chatId,
                         "response_id" to responseId,
@@ -105,7 +105,8 @@ class BackgroundResponseWorker(
                     val result = streamClient.stream(
                         responseId = responseId,
                         startingAfter = cursor,
-                        onCallCreated = { call -> activeCall = call }
+                        onCallCreated = { call -> activeCall = call },
+                        startedAtEpochMs = requestStartedAt
                     ) { event ->
                         val sequence = event.optLong("sequence_number", -1L)
                         if (sequence >= 0L && sequence > lastSequence) {
