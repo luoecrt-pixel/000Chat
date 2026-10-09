@@ -1,8 +1,8 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 12:27 +03:00
-**Следующий рабочий срез:** Поле ввода, шапка и настройки — APP-02: UI-02 + MODEL-02 + SET-01 одним PR; затем APP-03 (телефон/API и доказанные регрессии). Точное восстановление расходов отложено.
-**Состояние APP-01:** PR #125 merged, exact head `6aa069be89500a86bf4907cc90205e640af628e9`, merge `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`. Successful push APK `37908225095` (instrumentation), push Release `37908225079`, Verify handoff `37908229012`. **APP-02 в работе:** компактная шапка с моделью, quick effort рядом с composer, группировка существующих настроек, ограниченная поддержка mode standard/pro для подтверждённых OpenAI GPT-6, тесты чистой сериализации/Android UI. Пока нет successful CI/merge APP-02. Реальные платные API/телефон не проверены.
+**Last updated:** 2026-10-09 12:47 +03:00
+**Следующий рабочий срез:** Проверка приложения и подтверждённые регрессии — APP-03: начать с готового APK #126, физического телефона и диагностики LIVE/risks без новых платных запросов без согласия. Кодовый PR только для доказанных регрессий; полный financial backlog отложен.
+**Завершённые пакеты:** APP-01 — PR #125, merge `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`, Successful APK `37908225095`, Release `37908225079`, Verify `37908229012`. APP-02 — PR #126, exact code head `a2d8de607606c7ec4213d73705b39393d0b83cf1`, merge `3e9cbf2c03a12d6f8a005b995e5c35d0d4c77f55`, Successful push APK `37911721448` (instrumentation + Upload APK), push Release `37911721472`, Verify handoff `37911728484`. Composer quick effort, compact header model picker, regrouped settings and capability-guarded standard/pro delivered. README, secrets storage, DB v20 unchanged. APP-03: physical phone, LIVE and source-risk reproduction **not verified**; no paid API calls made.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -150,15 +150,13 @@
 
 Первый шаг: не повторять APP-01; при последующем аудите сравнить наблюдения владельца и подтверждённые source/CI контракты. Полный billing reconciliation — отдельный отложенный backlog.
 
-### 2. Поле ввода, шапка и настройки — **следующий**
+### 2. Поле ввода, шапка и настройки — выполнено PR #126
 
-**APP-02 = UI-02 + MODEL-02 + SET-01. Один PR в пределах существующего UI/prefs.**
+**APP-02 = UI-02 + MODEL-02 + SET-01.** В одном кодовом PR перенесён быстрый effort к composer, model picker расположен под заголовком, убраны дублирующие composer model/GitHub badges, сгруппированы прежние settings/prefs/secrets. reasoning.mode передаётся только для подтверждённых GPT-6 OpenAI Responses моделей; effort независим, текущая OpenRouter-нормализация показана явно. Новый температурный параметр без доказанной поддержки не добавлялся. UI test + pure model serialization, полный push APK instrumentation, Release и handoff Verify успешны. Телефон и LIVE — APP-03.
 
-Первый шаг: инвентаризировать текущие controls/prefs и проверить capability/serialization выбранных API/model по актуальной документации. Затем перенести reasoning effort к composer, показывать `standard/pro` только при подтверждённой поддержке, уменьшить шапку с корректными Insets/IME, убрать повторные composer model/GitHub badges и разнести длинные настройки по понятным категориям. `temperature` и reasoning effort — разные параметры. OpenRouter сейчас нормализует xhigh/max→high и auto→medium: отсутствие сведений о поддержке не считать поддержкой, не добавлять silent downgrade.
+Первый шаг: не повторять APP-02; использовать финальный APK #126 при APP-03, проверяя клавиатуру, Insets, малый экран и доступность всех старых настроек на устройстве.
 
-Сохранить все prefs/опции/секреты/guards. Подготовить связанные UI/settings изменения и локальные capability/serialization проверки до одной пары APK/Release. Без Compose/controller rewrite, новых модельных features или смены схемы. Если часть требует отдельной архитектуры, отложить её; делить PR только при конкретной независимой причине, а не по количеству подпунктов. Device smoke: маленький экран, Android bars, keyboard, доступность прежних настроек.
-
-### 3. Проверка приложения и подтверждённые регрессии
+### 3. Проверка приложения и подтверждённые регрессии — **следующий**
 
 **APP-03 = LIVE-01 + UI-03 + RISK-01/02/03 + GH-01/02 + DOC-01. Сначала проверки; новый кодовый PR не обязателен.**
 
@@ -220,11 +218,11 @@ Static verifier:
 ## История последних рабочих заходов — последние 5 PR
 
 
-- **#121:** BILL-04 first round-level ledger: merged `2acc39bf98b432742e5e28462d82d1f952de62a3`, final code head `37e061b9c2179c4a301b223013104361250b01fe`; Build Android APK push `37895662110` — **Successful** включая instrumentation; Build Android Release push `37895662075` — **Successful**. SQLite v20 per-round generation ID/cost, bounded GET lookup, idempotent usage. No paid API/device checks.
 - **#122:** docs-only handoff BILL-04: merged `ba11422a3bd9ea9d2ea8b56cb336825fdaa5f7f5`; final head `a27f0a41bf2f9e21d4db4b918b7b9a3510df91c0`; Verify handoff `37899366370` — **Successful**.
 - **#123:** docs-only ограничение стоимости после Stop до BILL-01-MIN и фиксация бюджета Actions; merged `8a532e2b1e0a8b67007f45cde7bafe1ccabc140d`; final head `1059654f16715e5436f123209245c8ac38d297ea`; Verify `37903090821` — **Successful**. История — snapshot перед текущим документационным PR.
 - **#124:** docs-only перегруппировка задач в APP-01/02/03; merged `eaa324720e227dcc5d33148e84bd375ea69dd021`, Verify handoff `37905260657` — **Successful**; Android-код не менялся.
 - **#125:** APP-01 (BILL-01-MIN + UI-01 + MODEL-01) merged `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`, exact head `6aa069be89500a86bf4907cc90205e640af628e9`; push Build APK `37908225095` — **Successful** c instrumentation, Release `37908225079` — **Successful**, Verify handoff `37908229012` — **Successful**. LIVE/телефон не проверены.
+- **#126:** APP-02 UI-02/MODEL-02/SET-01 merged `3e9cbf2c03a12d6f8a005b995e5c35d0d4c77f55`; final head `a2d8de607606c7ec4213d73705b39393d0b83cf1`; push APK `37911721448` **Successful** включая instrumentation, Release `37911721472` **Successful**, Verify handoff `37911728484` **Successful**. Model capability policy and settings preserved; телефон/LIVE не проверены.
 
 ## Product radar — идеи с реальной ценностью
 
