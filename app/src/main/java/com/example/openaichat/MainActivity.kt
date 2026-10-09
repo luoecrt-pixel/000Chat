@@ -5062,13 +5062,13 @@ class MainActivity : ComponentActivity() {
             input.use { source ->
                 BoundedAttachmentCopy.copy(source, temp, maxBytes = 50L * 1024 * 1024)
             }
-        val mime=contentResolver.getType(uri) ?: "application/octet-stream"
-        val name=queryName(uri) ?: "attachment"
-        val body=MultipartBody.Builder().setType(MultipartBody.FORM)
+            val mime=contentResolver.getType(uri) ?: "application/octet-stream"
+            val name=queryName(uri) ?: "attachment"
+            val body=MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("purpose","assistants")
             .addFormDataPart("file",name,temp.asRequestBody(mime.toMediaType()))
             .build()
-        val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
+            val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
             client.newCall(req).execute().use { resp ->
                 val raw = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) throw IOException("HTTP " + resp.code)
