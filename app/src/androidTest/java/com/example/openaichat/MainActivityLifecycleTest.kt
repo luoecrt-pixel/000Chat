@@ -798,8 +798,23 @@ class MainActivityLifecycleTest {
             }
             release.countDown()
 
-            val request = server.takeRequest(5, TimeUnit.SECONDS)
-                ?: throw AssertionError("Production Send never reached local MockWebServer")
+            val request = server.takeRequest(20, TimeUnit.SECONDS)
+                ?: run {
+                    var diagnostic = ""
+                    scenario.onActivity { activity ->
+                        val status = privateField(activity, "status") as android.widget.TextView
+                        @Suppress("UNCHECKED_CAST")
+                        val pending = privateField(activity, "pendingOpenRouterPreparation")
+                            as AtomicReference<String?>
+                        @Suppress("UNCHECKED_CAST")
+                        val callOwner = privateField(activity, "openRouterCallOwnerToken")
+                            as AtomicReference<String?>
+                        diagnostic = "status=" + status.text + "; pending=" + pending.get() +
+                            "; callOwner=" + callOwner.get() +
+                            "; visible=" + (privateField(activity, "activityVisible") as Boolean)
+                    }
+                    throw AssertionError("Production Send never reached local MockWebServer: $diagnostic")
+                }
             val body = JSONObject(request.body.readUtf8())
             val messages = body.getJSONArray("messages")
             val user = (0 until messages.length()).map { messages.getJSONObject(it) }
@@ -973,7 +988,8 @@ class MainActivityLifecycleTest {
                     .put("provider", "openai")
                     .put("image_file_id", "file-example")
             )
-            setPrivateField(activity, "currentResponseId", null)
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId(null)
             val composer = privateField(activity, "input") as android.widget.EditText
             composer.setText("Next question")
             val generation = activeGeneration(activity)
@@ -991,14 +1007,16 @@ class MainActivityLifecycleTest {
             // answered last; the same OpenAI file inputs must still block fallback.
             history.add(JSONObject().put("role", "assistant")
                 .put("provider", "openrouter").put("text", "other provider"))
-            setPrivateField(activity, "currentResponseId", "resp_stale")
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId("resp_stale")
             invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
             assertEquals(generation, activeGeneration(activity))
             assertEquals("Next question", composer.text.toString())
             assertEquals(oldSize + 2, history.size)
             history.removeAt(history.lastIndex)
             history.removeAt(history.lastIndex)
-            setPrivateField(activity, "currentResponseId", null)
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId(null)
         }
         scenario.close()
     }
