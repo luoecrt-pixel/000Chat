@@ -25,6 +25,7 @@ class OpenRouterChatClientTest {
     @Test
     fun aggregatesUsageAcrossToolLoopAndRequestsUsageDetails() {
         val requestCount = AtomicInteger(0)
+        val observedDeltas = mutableListOf<String>()
         val capturedBodies = mutableListOf<JSONObject>()
         val firstRequestBody = AtomicReference<String?>(null)
         val firstArguments = AtomicReference<JSONObject?>(null)
@@ -79,7 +80,8 @@ class OpenRouterChatClientTest {
                 executeTool = { _, arguments ->
                     firstArguments.set(arguments)
                     "tool-result"
-                }
+                },
+                onTextDelta = { snapshot -> observedDeltas += snapshot }
             )
 
             val firstBody = JSONObject(firstRequestBody.get())
@@ -111,7 +113,8 @@ class OpenRouterChatClientTest {
             assertEquals(20L, usage.getJSONObject("prompt_tokens_details").getLong("cache_write_tokens"))
             assertEquals(15L, usage.getJSONObject("completion_tokens_details").getLong("reasoning_tokens"))
             assertEquals(0.03, usage.getDouble("cost"), 0.000001)
-            assertEquals("done", result.text)
+            assertEquals("working\n\ndone", result.text)
+            assertEquals(listOf("working", "working\n\ndone"), observedDeltas)
             assertEquals(2, requestCount.get())
         } finally {
             client.close()

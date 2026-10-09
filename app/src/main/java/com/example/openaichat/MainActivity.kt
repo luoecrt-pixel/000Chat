@@ -1589,6 +1589,9 @@ class MainActivity : ComponentActivity() {
                     onCallCreated = { call -> registerOpenRouterCallIfOwned(requestId, chatId, generation, call) },
                     onRoundObserved = { roundIndex, generationId, usage ->
                         chatDb.observeOpenRouterRound(chatId, requestId, roundIndex, generationId, usage)
+                    },
+                    onTextDelta = { snapshot ->
+                        postAssistantTextUpdate(chatId, generation, assistantItemId, snapshot)
                     }
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)

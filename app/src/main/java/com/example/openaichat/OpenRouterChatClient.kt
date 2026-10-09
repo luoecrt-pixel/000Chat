@@ -71,7 +71,8 @@ class OpenRouterChatClient(
         executeTool: (name: String, arguments: JSONObject) -> String,
         onCallCreated: (Call) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
-        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> }
+        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
+        onTextDelta: (String) -> Unit = {}
     ): OpenRouterCompletionResult {
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
@@ -226,7 +227,11 @@ class OpenRouterChatClient(
                 val delta = choice.optJSONObject("delta") ?: return
 
                 delta.optString("role").takeIf { it.isNotBlank() }?.let { role = it }
-                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { contentParts.append(it) }
+                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { chunk ->
+                    contentParts.append(chunk)
+                    onTextDelta((accumulatedText + contentParts.toString())
+                        .filter { it.isNotEmpty() }.joinToString("\n\n"))
+                }
 
                 delta.optJSONArray("reasoning_details")?.let { details ->
                     for (i in 0 until details.length()) {
@@ -335,7 +340,8 @@ class OpenRouterChatClient(
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
-                        text = message.optString("content").trim(),
+                        text = (accumulatedText + message.optString("content"))
+                            .filter { it.isNotBlank() }.joinToString("\n\n").trim(),
                         usage = JSONObject(accumulatedUsage.toString()).apply {
                             // Never present a tool-loop subtotal as a complete charge.
                             if (!everyRoundCostKnown) remove("cost")
