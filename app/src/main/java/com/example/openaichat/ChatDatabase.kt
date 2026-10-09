@@ -14,12 +14,13 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 19
+        private const val DB_VERSION = 20
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
         private const val REQUEST_EVENT_TABLE = "request_events"
         private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
+        private const val OPENROUTER_ROUND_TABLE = "openrouter_request_rounds"
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -78,6 +79,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 cost_kind TEXT NOT NULL DEFAULT 'unknown',
                 cost_usd TEXT,
                 error TEXT,
+                rounds_sealed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(chat_id, local_request_id),
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
@@ -85,10 +87,33 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_accounting_created ON $REQUEST_ACCOUNTING_TABLE(created_at)")
     }
 
+    /** Each HTTP tool-loop round is distinct from its local request ID. */
+    private fun ensureOpenRouterRoundsTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $OPENROUTER_ROUND_TABLE (
+                chat_id TEXT NOT NULL,
+                local_request_id TEXT NOT NULL,
+                round_index INTEGER NOT NULL,
+                generation_id TEXT,
+                cost_kind TEXT NOT NULL DEFAULT 'unknown',
+                cost_usd TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, local_request_id, round_index),
+                FOREIGN KEY(chat_id, local_request_id)
+                    REFERENCES $REQUEST_ACCOUNTING_TABLE(chat_id, local_request_id)
+                    ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_openrouter_generation_identity ON $OPENROUTER_ROUND_TABLE(generation_id) WHERE generation_id IS NOT NULL")
+    }
+
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
         ensureRequestEventsTable(db)
         ensureRequestAccountingTable(db)
+        ensureOpenRouterRoundsTable(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -207,6 +232,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         """.trimIndent())
         db.execSQL("CREATE INDEX idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
         ensureRequestAccountingTable(db)
+        ensureOpenRouterRoundsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -309,6 +335,17 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             // There is no trustworthy legacy local_request_id/cost coverage;
             // never fabricate ledger entries by assigning older event zeros.
             ensureRequestAccountingTable(db)
+        }
+        if (oldVersion < 20) {
+            val columns = db.rawQuery("PRAGMA table_info($REQUEST_ACCOUNTING_TABLE)", null).use { c ->
+                val found = mutableSetOf<String>()
+                while (c.moveToNext()) found += c.getString(c.getColumnIndexOrThrow("name"))
+                found
+            }
+            if ("rounds_sealed" !in columns) {
+                db.execSQL("ALTER TABLE $REQUEST_ACCOUNTING_TABLE ADD COLUMN rounds_sealed INTEGER NOT NULL DEFAULT 0")
+            }
+            ensureOpenRouterRoundsTable(db)
         }
     }
 
@@ -910,6 +947,159 @@ data class ExistingMessageRow(
             "chat_id=? AND local_request_id=? AND response_id=? AND provider='openai' AND local_status='stopped'",
             arrayOf(chatId, localRequestId, responseId)
         ) == 1
+    }
+
+    /**
+     * One row per actual attempted OpenRouter HTTP round. The generation ID
+     * cannot be replaced by an unrelated SSE frame, and usage snapshots are
+     * replacements (not increments) to prevent duplicate stream billing.
+     * A stopped request may enrich an existing round; never start a new round
+     * after Stop or create a deleted chat.
+     */
+    fun observeOpenRouterRound(
+        chatId: String, localRequestId: String, roundIndex: Int,
+        generationId: String? = null, usage: JSONObject? = null
+    ): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank() || roundIndex !in 0..9999) return false
+        var changed = false
+        writableDatabase.transaction { db ->
+            val row = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("provider", "local_status", "rounds_sealed"),
+                "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId),
+                null, null, null, "1").use { c ->
+                if (c.moveToFirst()) Triple(c.getString(0), c.getString(1), c.getInt(2)) else null
+            } ?: return@transaction
+            if (row.first != "openrouter") return@transaction
+            val existing = db.query(OPENROUTER_ROUND_TABLE, arrayOf("generation_id", "cost_kind"),
+                "chat_id=? AND local_request_id=? AND round_index=?",
+                arrayOf(chatId, localRequestId, roundIndex.toString()),
+                null, null, null, "1").use { c ->
+                if (c.moveToFirst()) Pair(c.getString(0), c.getString(1)) else null
+            }
+            if (existing == null) {
+                if (row.second != "running" || row.third != 0) return@transaction
+                val now = System.currentTimeMillis()
+                val inserted = db.insertWithOnConflict(OPENROUTER_ROUND_TABLE, null,
+                    ContentValues().apply {
+                        put("chat_id", chatId)
+                        put("local_request_id", localRequestId)
+                        put("round_index", roundIndex)
+                        put("updated_at", now)
+                    }, SQLiteDatabase.CONFLICT_IGNORE)
+                if (inserted == -1L) return@transaction
+            }
+            val knownGeneration = existing?.first
+            val proposed = generationId?.takeIf {
+                it.matches(Regex("[A-Za-z0-9_-]{1,128}"))
+            }
+            if (knownGeneration != null && proposed != null && knownGeneration != proposed) return@transaction
+            val data = ContentValues().apply {
+                put("updated_at", System.currentTimeMillis())
+                if (knownGeneration == null && proposed != null) put("generation_id", proposed)
+                fun nonnegative(key: String): Long? =
+                    usage?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+                nonnegative("prompt_tokens")?.let { put("input_tokens", it) }
+                nonnegative("completion_tokens")?.let { put("output_tokens", it) }
+                val cost = usage?.takeIf { it.has("cost") && !it.isNull("cost") }
+                    ?.opt("cost")?.toString()?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+                if (cost != null && existing?.second != "provider_reported") {
+                    put("cost_kind", "provider_reported")
+                    put("cost_usd", cost.toString())
+                }
+            }
+            changed = db.update(OPENROUTER_ROUND_TABLE, data,
+                "chat_id=? AND local_request_id=? AND round_index=?",
+                arrayOf(chatId, localRequestId, roundIndex.toString())) == 1
+            if (changed) recomputeOpenRouterTotalsInDb(db, chatId, localRequestId)
+        }
+        return changed
+    }
+
+    /** A terminal success or local Stop establishes the number of attempted rounds. */
+    fun sealOpenRouterRounds(chatId: String, localRequestId: String): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank()) return false
+        var sealed = false
+        writableDatabase.transaction { db ->
+            sealed = db.update(REQUEST_ACCOUNTING_TABLE,
+                ContentValues().apply { put("rounds_sealed", 1) },
+                "chat_id=? AND local_request_id=? AND provider='openrouter' AND rounds_sealed=0",
+                arrayOf(chatId, localRequestId)) == 1
+            if (sealed) recomputeOpenRouterTotalsInDb(db, chatId, localRequestId)
+        }
+        return sealed
+    }
+
+    private fun recomputeOpenRouterTotalsInDb(db: SQLiteDatabase, chatId: String, localRequestId: String) {
+        val account = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("rounds_sealed"), 
+            "chat_id=? AND local_request_id=? AND provider='openrouter'",
+            arrayOf(chatId, localRequestId), null, null, null, "1").use { c ->
+            c.moveToFirst() && c.getInt(0) == 1
+        }
+        if (!account) return
+        db.rawQuery("""
+            SELECT COUNT(*), COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN CAST(cost_usd AS REAL) ELSE 0 END),0)
+            FROM $OPENROUTER_ROUND_TABLE WHERE chat_id=? AND local_request_id=?
+        """.trimIndent(), arrayOf(chatId, localRequestId)).use { c ->
+            if (!c.moveToFirst()) return
+            val count = c.getLong(0)
+            val complete = count > 0 && count == c.getLong(1)
+            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+                put("updated_at", System.currentTimeMillis())
+                if (complete) {
+                    put("cost_kind", "provider_reported")
+                    put("cost_usd", c.getDouble(2).toString())
+                } else {
+                    put("cost_kind", "unknown")
+                    putNull("cost_usd")
+                }
+            }, "chat_id=? AND local_request_id=? AND provider='openrouter'",
+                arrayOf(chatId, localRequestId))
+        }
+    }
+
+    /** A provider generation lookup can enrich only a previously captured ID. */
+    fun reconcileOpenRouterGeneration(
+        chatId: String, localRequestId: String, generationId: String,
+        metadata: JSONObject
+    ): Boolean {
+        if (generationId.isBlank() || metadata.optString("id") != generationId) return false
+        val cost = metadata.opt("total_cost")?.toString()?.toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it >= 0.0 } ?: return false
+        var updated = false
+        writableDatabase.transaction { db ->
+            updated = db.update(OPENROUTER_ROUND_TABLE, ContentValues().apply {
+                put("cost_kind", "provider_reported")
+                put("cost_usd", cost.toString())
+                put("updated_at", System.currentTimeMillis())
+                listOf("tokens_prompt" to "input_tokens", "tokens_completion" to "output_tokens").forEach { (source,target) ->
+                    metadata.opt(source)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }?.let { put(target, it) }
+                }
+            }, "chat_id=? AND local_request_id=? AND generation_id=? AND EXISTS " +
+                "(SELECT 1 FROM $REQUEST_ACCOUNTING_TABLE a WHERE a.chat_id=$OPENROUTER_ROUND_TABLE.chat_id " +
+                "AND a.local_request_id=$OPENROUTER_ROUND_TABLE.local_request_id AND a.provider='openrouter')",
+                arrayOf(chatId, localRequestId, generationId)) == 1
+            if (updated) recomputeOpenRouterTotalsInDb(db, chatId, localRequestId)
+        }
+        return updated
+    }
+
+    fun listOpenRouterRounds(chatId: String, localRequestId: String): List<JSONObject> {
+        val rows = mutableListOf<JSONObject>()
+        readableDatabase.query(OPENROUTER_ROUND_TABLE, null,
+            "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId),
+            null, null, "round_index ASC").use { c ->
+            while (c.moveToNext()) {
+                val item = JSONObject()
+                for (i in 0 until c.columnCount) {
+                    if (c.isNull(i)) continue
+                    val name = c.getColumnName(i)
+                    if (c.getType(i) == android.database.Cursor.FIELD_TYPE_INTEGER) item.put(name, c.getLong(i))
+                    else item.put(name, c.getString(i))
+                }
+                rows.add(item)
+            }
+        }
+        return rows
     }
 
     fun listRequestAccounting(chatId: String): List<JSONObject> {

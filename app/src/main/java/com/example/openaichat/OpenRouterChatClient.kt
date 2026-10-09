@@ -70,7 +70,8 @@ class OpenRouterChatClient(
         parallelToolCalls: Boolean,
         executeTool: (name: String, arguments: JSONObject) -> String,
         onCallCreated: (Call) -> Unit = {},
-        shouldContinue: () -> Boolean = { true }
+        shouldContinue: () -> Boolean = { true },
+        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> }
     ): OpenRouterCompletionResult {
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
@@ -80,6 +81,7 @@ class OpenRouterChatClient(
         var everyRoundCostKnown = true
         var responseModel: String? = null
         var accumulatedTotalTokens = 0L
+        var nextRoundIndex = 0
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
         fun addUsageLong(target: JSONObject, key: String, value: Long) {
@@ -152,6 +154,8 @@ class OpenRouterChatClient(
             }
             verbosity?.takeIf { it.isNotBlank() }?.let { body.put("verbosity", it) }
 
+            val roundIndex = nextRoundIndex++
+            onRoundObserved(roundIndex, null, null)
             val request = Request.Builder()
                 .url(baseUrl.trimEnd('/') + "/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
@@ -180,6 +184,8 @@ class OpenRouterChatClient(
             var sawDone = false
             var roundResponseModel: String? = null
             var roundReportedCost: Double? = null
+            var roundUsage: JSONObject? = null
+            var generationId: String? = null
             val contentParts = StringBuilder()
             val reasoningDetails = JSONArray()
             val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
@@ -198,15 +204,21 @@ class OpenRouterChatClient(
                     val message = error.optString("message").ifBlank { error.toString() }
                     throw IOException("OpenRouter streaming error: $message")
                 }
+                val candidateId = json.optString("id").takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
+                if (candidateId != null && generationId == null) {
+                    generationId = candidateId
+                    onRoundObserved(roundIndex, candidateId, null)
+                }
                 json.optString("model").takeIf { it.isNotBlank() }?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
-                    accumulateUsage(usage)
+                    // Repeated final usage frames are snapshots, not billable deltas.
+                    roundUsage = JSONObject(usage.toString())
                     // Cost may arrive after finish_reason, just before [DONE].
                     // Explicit zero is known; missing/invalid values are not.
                     if (usage.has("cost")) {
                         roundReportedCost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
                     }
-                    usage.optLong("total_tokens", 0L).takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
+                    onRoundObserved(roundIndex, generationId, roundUsage)
                 }
                 val choices = json.optJSONArray("choices")
                 if (choices == null || choices.length() == 0) return
@@ -277,6 +289,8 @@ class OpenRouterChatClient(
             }
 
             ensureActive()
+            accumulateUsage(roundUsage)
+            roundUsage?.optLong("total_tokens", 0L)?.takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
             val completedRoundCost = roundReportedCost
             if (completedRoundCost == null) {
                 everyRoundCostKnown = false
