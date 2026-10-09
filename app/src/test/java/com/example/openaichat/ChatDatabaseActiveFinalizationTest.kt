@@ -68,6 +68,32 @@ class ChatDatabaseActiveFinalizationTest {
         return committed
     }
 
+    @Test fun stopEventUsesCurrentIdentityInsteadOfPreviousCostOrLateCallback() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            db.recordRequestEvent("chat", "request_completed", "previous",
+                "openai", "old", "old", ModelCatalog.Match.EXACT,
+                "completed", reportedCostUsd = 0.20)
+            assertTrue(db.stopActiveRequestOnce("chat", "local_1"))
+            val events = db.listRequestEvents("chat")
+            assertEquals(2, events.size)
+            assertEquals("local_1", events.first().getString("request_id"))
+            assertEquals("stopped", events.first().getString("status"))
+            assertTrue(RequestEventFormatter.summary(events.first()).contains("Расход неизвестен"))
+            assertTrue(db.recordRequestAccounting("chat", "local_1", "completed",
+                reportedCostUsd = 0.0))
+            db.recordRequestEvent("chat", "request_completed", "local_1",
+                "openai", "gpt-test", "gpt-test", ModelCatalog.Match.EXACT,
+                "completed", reportedCostUsd = 4.0)
+            assertEquals(2, db.listRequestEvents("chat").size)
+            val enriched = RequestStopEventPolicy.enrich(
+                db.listRequestEvents("chat").first(), db.listRequestAccounting("chat").single()
+            )
+            assertEquals("stopped", enriched.getString("status"))
+            assertTrue(RequestEventFormatter.summary(enriched).contains("Расход $0.0000"))
+        }
+    }
+
     @Test fun duplicateRecoveryCallbackOnlyOneWinnerAndOneEvent() {
         ChatDatabase(context).use { db ->
             prepare(db)
@@ -92,7 +118,7 @@ class ChatDatabaseActiveFinalizationTest {
             assertFalse(db.stopActiveRequestOnce("chat", "local_1"))
             assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
             assertEquals("stopped", db.listRequestAccounting("chat").single().getString("local_status"))
-            assertTrue(db.listRequestEvents("chat").isEmpty())
+            assertEquals("stopped", db.listRequestEvents("chat").single().getString("status"))
         }
     }
 
@@ -175,7 +201,7 @@ class ChatDatabaseActiveFinalizationTest {
                 assertTrue(stopWon.xor(finishWon))
                 assertNull(db.getActiveResponse("chat"))
                 assertEquals(if (finishWon) 2 else 1, db.getChat("chat")!!.getJSONArray("messages").length())
-                assertEquals(if (finishWon) 1 else 0, db.listRequestEvents("chat").size)
+                assertEquals(1, db.listRequestEvents("chat").size)
                 assertEquals(if (stopWon) "stopped" else "completed",
                     db.listRequestAccounting("chat").single().getString("local_status"))
             } finally {

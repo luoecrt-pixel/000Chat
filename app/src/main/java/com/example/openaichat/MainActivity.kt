@@ -730,7 +730,7 @@ class MainActivity : ComponentActivity() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.rgb(27,29,34), 11)
+            background = null
         }
         requestTelemetrySummary = TextView(this).apply {
             textSize = 12f
@@ -763,7 +763,13 @@ class MainActivity : ComponentActivity() {
 
     private fun renderRequestTelemetry() {
         if (!::requestTelemetrySummary.isInitialized) return
-        val events = try { chatDb.listRequestEvents(currentChatId(), 50) } catch (_: Exception) { emptyList() }
+        val accounts = try {
+            chatDb.listRequestAccounting(currentChatId()).associateBy { it.optString("local_request_id") }
+        } catch (_: Exception) { emptyMap() }
+        val events = (try { chatDb.listRequestEvents(currentChatId(), 50) }
+            catch (_: Exception) { emptyList() }).map { event ->
+            RequestStopEventPolicy.enrich(event, accounts[event.optString("request_id")])
+        }
         requestTelemetryHistory.removeAllViews()
         if (events.isEmpty()) {
             requestTelemetrySummary.text = "● Нет запросов для этой сессии"
@@ -794,6 +800,16 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(8), dp(4), dp(4), dp(4))
             setOnClickListener { copyText("История запросов", events.joinToString("\n\n") { RequestEventFormatter.details(it) }) }
         })
+        actions.addView(TextView(this).apply {
+            text = "Закрыть"
+            textSize = 11.5f
+            setTextColor(Color.rgb(150,195,245))
+            setPadding(dp(12), dp(4), dp(4), dp(4))
+            setOnClickListener {
+                requestTelemetryExpanded = false
+                renderRequestTelemetry()
+            }
+        })
         requestTelemetryHistory.addView(actions)
         events.forEach { event ->
             requestTelemetryHistory.addView(buildRequestEventView(event), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
@@ -804,7 +820,7 @@ class MainActivity : ComponentActivity() {
         val wrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(7), dp(10), dp(7))
-            background = rounded(Color.rgb(33,35,41), 9)
+            background = null
         }
         var details: TextView? = null
         val summary = TextView(this).apply {
@@ -1618,7 +1634,18 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         chat.add(assistantMessage)
-                        messageAdapter.updateText(assistantItemId, finalText)
+                        messageAdapter.replaceItem(
+                            assistantItemId,
+                            ChatBubbleItem.create(
+                                id = assistantItemId,
+                                label = AssistantModelLabel.text(assistantMessage),
+                                text = finalText,
+                                user = false,
+                                annotations = assistantMessage.optJSONArray("annotations"),
+                                message = assistantMessage,
+                                chatIndex = chat.lastIndex
+                            )
+                        )
                         activeAssistantItemId = assistantItemId
                         persistCurrentChat()
                         toolLabel.text = result.toolNames.distinct().joinToString("  ")
@@ -1626,7 +1653,8 @@ class MainActivity : ComponentActivity() {
                             val inputTokens = usage.optLong("prompt_tokens", 0L)
                             val cachedTokens = usage.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens", 0L) ?: 0L
                             val outputTokens = usage.optLong("completion_tokens", 0L)
-                            val costText = if (usage.has("cost")) " · $"+("%.4f".format(usage.optDouble("cost", 0.0).coerceAtLeast(0.0))) else ""
+                            val costText = if (usage.has("cost")) " · " +
+                                RequestCostFormatter.reportedText(usage.opt("cost")?.toString()) else ""
                             " · "+fmtTokens(inputTokens)+" in"+(if (cachedTokens > 0) " · cache "+fmtTokens(cachedTokens) else "")+" · "+fmtTokens(outputTokens)+" out"+costText
                         }.orEmpty()
                         status.text = "Готово • OpenRouter$usageSuffix"
@@ -1974,7 +2002,14 @@ class MainActivity : ComponentActivity() {
         activeAssistantItemId=null
         setBusy(false)
         activeRequestRegenerate=false
-        status.text="Остановлено — запрос отменён"
+        val stoppedAccount = if (stopped && activeRequestId != null) {
+            chatDb.listRequestAccounting(chatId).firstOrNull {
+                it.optString("local_request_id") == activeRequestId &&
+                    it.optString("local_status") == "stopped"
+            }
+        } else null
+        status.text = "Остановлено — запрос отменён · " + RequestCostFormatter.text(stoppedAccount)
+        renderRequestTelemetry()
         toolStates.clear(); renderToolActivity()
     }
 
@@ -2670,7 +2705,7 @@ class MainActivity : ComponentActivity() {
                             error = (e.message ?: e.toString()).take(1200)
                         )
                     }
-                    chatDb.recordRequestEvent(
+                    if (!userStopped) chatDb.recordRequestEvent(
                         chatId = requestChatId,
                         eventType = "request_failed",
                         requestId = requestId ?: localRequestId,
@@ -3301,6 +3336,7 @@ class MainActivity : ComponentActivity() {
         val requestedModel = requestMeta?.optString("requested_model").orEmpty().ifBlank {
             requestMeta?.optString("model").orEmpty()
         }.ifBlank { null }
+        assistant.put("requested_model", requestedModel ?: JSONObject.NULL)
         val committed = chatDb.finalizeCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
@@ -5321,7 +5357,7 @@ class MainActivity : ComponentActivity() {
             chat.add(m)
             restoredItems += ChatBubbleItem.create(
                 id="chat-message-$i",
-                label=if(role=="user")"Ты" else "Astra",
+                label=if(role=="user")"Ты" else AssistantModelLabel.text(m),
                 text=t,
                 user=role=="user",
                 annotations=m.optJSONArray("annotations"),
@@ -6280,7 +6316,7 @@ class MainActivity : ComponentActivity() {
         card.background=rounded(if(item.user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
 
         val who=TextView(this).apply{
-            text=item.label
+            text=if (item.user) item.label else item.message?.let(AssistantModelLabel::text) ?: item.label
             textSize=12f
             setTextColor(if(item.user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
             setTypeface(null,Typeface.BOLD)

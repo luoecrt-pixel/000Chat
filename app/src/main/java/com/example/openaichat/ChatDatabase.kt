@@ -568,6 +568,28 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 CHAT_TABLE, cleared, "id=? AND active_request_id=?",
                 arrayOf(chatId, expectedRequestId)
             ) == 1
+            if (stopped) {
+                // One event for this exact stopped local request, within the CAS transaction.
+                val now = System.currentTimeMillis()
+                db.execSQL("""
+                    INSERT INTO $REQUEST_EVENT_TABLE (
+                        chat_id, created_at, event_type, request_id, provider,
+                        requested_model, model_match, status, input_tokens,
+                        cached_tokens, output_tokens, reasoning_tokens,
+                        cost_kind, cost_usd, latency_ms
+                    )
+                    SELECT chat_id, ?, 'request_stopped', local_request_id, provider,
+                        requested_model, 'unknown', 'stopped',
+                        COALESCE(input_tokens, 0), COALESCE(cached_tokens, 0),
+                        COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0),
+                        CASE WHEN cost_kind='provider_reported' AND cost_usd IS NOT NULL
+                            THEN 'provider_reported' ELSE 'unknown' END,
+                        CASE WHEN cost_kind='provider_reported' THEN cost_usd ELSE NULL END,
+                        MAX(0, ? - created_at)
+                    FROM $REQUEST_ACCOUNTING_TABLE
+                    WHERE chat_id=? AND local_request_id=?
+                """.trimIndent(), arrayOf(now, now, chatId, expectedRequestId))
+            }
         }
         return stopped
     }
@@ -1173,6 +1195,13 @@ data class ExistingMessageRow(
                 null, null, null, "1"
             ).use { it.moveToFirst() }
             if (!chatExists) return@transaction
+
+            // Late completion/error callbacks cannot displace the stopped event.
+            if (requestId != null && db.query(
+                    REQUEST_ACCOUNTING_TABLE, arrayOf("local_request_id"),
+                    "chat_id=? AND (local_request_id=? OR http_request_id=?) AND local_status='stopped'",
+                    arrayOf(chatId, requestId, requestId), null, null, null, "1"
+                ).use { it.moveToFirst() }) return@transaction
 
             val values = ContentValues().apply {
                 put("chat_id", chatId)

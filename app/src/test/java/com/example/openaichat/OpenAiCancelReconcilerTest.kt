@@ -75,7 +75,7 @@ class OpenAiCancelReconcilerTest {
                 assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
                 assertEquals(0, db.requestAccountingTotals().getInt("known_cost_requests"))
                 assertEquals(1, db.requestAccountingTotals().getInt("unknown_cost_requests"))
-                assertTrue(db.listRequestEvents("chat").isEmpty())
+                assertEquals("stopped", db.listRequestEvents("chat").single().getString("status"))
             }
             val req = server.takeRequest()
             assertEquals("POST", req.method)
@@ -103,7 +103,7 @@ class OpenAiCancelReconcilerTest {
                 assertTrue(db.reconcileStoppedOpenAiResponse("chat", "local_one", "resp_one", same))
                 assertEquals(1, db.listRequestAccounting("chat").size)
                 assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
-                assertTrue(db.listRequestEvents("chat").isEmpty())
+                assertEquals("stopped", db.listRequestEvents("chat").single().getString("status"))
                 val row = db.listRequestAccounting("chat").single()
                 assertEquals("completed", row.getString("provider_status"))
                 assertEquals("stopped", row.getString("local_status"))
