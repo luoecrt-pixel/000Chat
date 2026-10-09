@@ -624,8 +624,12 @@ class MainActivityLifecycleTest {
         var sourceUri: Uri? = null
 
         scenario.onActivity { launched ->
+            // A previous test can leave a composer attachment in the restored chat.
+            // Do not treat that old attachment as proof the ZIP executor finished.
+            launched.newChat()
             launched.openRouterAttachmentInputStreamSource = source
             sourceChatId = currentChatId(launched)
+            assertEquals(0, composerAttachmentCount(launched, sourceChatId))
             sourceUri = Uri.parse("content://blocking.test/archive.zip")
             launched.pendingUploadUris.add(sourceUri.toString() to "zip")
             launched.preparePendingOpenRouterZipsThenSend(false)
@@ -639,10 +643,20 @@ class MainActivityLifecycleTest {
 
         assertTrue("stale ZIP completion did not persist to the source chat", waitForSourceAttachmentCount(scenario, sourceChatId, 1))
 
+        // Completion is asynchronous; assert cleanup explicitly after the source
+        // manifest is persisted instead of racing the UI callback.
+        var preparationFinished = false
+        repeat(100) {
+            scenario.onActivity { launched ->
+                preparationFinished = !launched.preparingZipAttachments
+            }
+            if (preparationFinished) return@repeat
+            SystemClock.sleep(20L)
+        }
         scenario.onActivity { launched ->
             val currentId = currentChatId(launched)
             assertEquals(0, composerAttachmentCount(launched, currentId))
-            assertFalse(launched.preparingZipAttachments)
+            assertTrue("ZIP operation never cleared the preparation state", preparationFinished)
         }
         scenario.close()
     }
@@ -1001,7 +1015,12 @@ class MainActivityLifecycleTest {
     fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
-            activity.prefs.edit().putString("provider", "openai").apply()
+            // Settings and the selected chat survive earlier instrumentation tests.
+            // This scenario must exercise the file-chain guard, not stale JSON mode
+            // or a request left by another test.
+            activity.newChat()
+            activity.prefs.edit().putString("provider", "openai")
+                .putString("text_format", "text").apply()
             @Suppress("UNCHECKED_CAST")
             val history = privateField(activity, "chat") as MutableList<JSONObject>
             val oldSize = history.size
@@ -1022,7 +1041,7 @@ class MainActivityLifecycleTest {
             assertEquals("Next question", composer.text.toString())
             assertEquals("Unsafe fallback appended to chat", oldSize + 1, history.size)
             val status = privateField(activity, "status") as android.widget.TextView
-            assertTrue("Missing explanation for unavailable file history",
+            assertTrue("Missing explanation for unavailable file history: ${status.text}",
                 status.text.toString().contains("вложения OpenAI"))
 
             // A non-null ID is not a usable Responses chain if a different provider
