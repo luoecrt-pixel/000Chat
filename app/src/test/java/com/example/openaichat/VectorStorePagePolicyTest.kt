@@ -45,13 +45,13 @@ class VectorStorePagePolicyTest {
     }
 
     @Test fun delayedUiOwnerDoesNotMatchNewStoreSession() {
-        // Exact UI guard used by MainActivity: generation + store + dialog live.
-        fun valid(capturedGeneration: Int, currentGeneration: Int,
-                  capturedStore: String, currentStore: String, showing: Boolean): Boolean =
-            capturedGeneration == currentGeneration && capturedStore == currentStore && showing
-        assertTrue(valid(7, 7, "vs_original", "vs_original", true))
-        assertFalse(valid(7, 8, "vs_original", "vs_original", true))
-        assertFalse(valid(7, 7, "vs_original", "vs_other", true))
-        assertFalse(valid(7, 7, "vs_original", "vs_original", false))
+        assertTrue(VectorStoreUiOwnershipPolicy.mayCommit(
+            7, 7, "vs_original", "vs_original", true))
+        assertFalse(VectorStoreUiOwnershipPolicy.mayCommit(
+            7, 8, "vs_original", "vs_original", true))
+        assertFalse(VectorStoreUiOwnershipPolicy.mayCommit(
+            7, 7, "vs_original", "vs_other", true))
+        assertFalse(VectorStoreUiOwnershipPolicy.mayCommit(
+            7, 7, "vs_original", "vs_original", false))
     }
 }
