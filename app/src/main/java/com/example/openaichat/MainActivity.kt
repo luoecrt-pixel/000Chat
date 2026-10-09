@@ -5059,10 +5059,6 @@ class MainActivity : ComponentActivity() {
             input.use { source ->
                 BoundedAttachmentCopy.copy(source, temp, maxBytes = 50L * 1024 * 1024)
             }
-        } catch (e: Exception) {
-            temp.delete()
-            throw e
-        }
         val mime=contentResolver.getType(uri) ?: "application/octet-stream"
         val name=queryName(uri) ?: "attachment"
         val body=MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -5070,18 +5066,20 @@ class MainActivity : ComponentActivity() {
             .addFormDataPart("file",name,temp.asRequestBody(mime.toMediaType()))
             .build()
         val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
-        try{
-            client.newCall(req).execute().use{resp->
-                val raw=resp.body?.string().orEmpty()
-                if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
+            client.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IOException("HTTP " + resp.code)
                 return JSONObject(raw).getString("id") to name
             }
-        }finally{temp.delete()}
+        } finally {
+            temp.delete()
+        }
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun handleActivityResult(r:Int,c:Int,d:Intent?){
         if(c!=RESULT_OK || d==null) {
+            if (r == pickVectorStoreFile) pendingVectorStorePickerId = null
             if (r == pickExportTxt) {
                 pendingExportPath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
                 pendingExportPath = null
