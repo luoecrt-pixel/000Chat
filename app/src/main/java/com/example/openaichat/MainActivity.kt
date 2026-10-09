@@ -202,6 +202,7 @@ class MainActivity : ComponentActivity() {
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
     private val composerMergeLock = Any()
+    @Volatile private var activeZipOperation: String? = null
     private val cancelledUploads = ConcurrentHashMap.newKeySet<String>()
     private val openRouterModelModalities = ConcurrentHashMap<String, Set<String>>()
     private val openRouterModelModalitiesRetryAfter = ConcurrentHashMap<String, Long>()
@@ -4790,6 +4791,24 @@ class MainActivity : ComponentActivity() {
         "xlt","xlw","xml","yaml","yml"
     )
 
+    /** ZIP ownership is bound to the selected source draft, never to the latest UI. */
+    private fun sourceStillOwnsZips(chatId: String, selected: List<Pair<String, String>>): Boolean {
+        if (chatDb.getChatTitle(chatId) == null) return false
+        val current = if (chatId == currentChatId()) {
+            pendingUploadUris.toSet()
+        } else {
+            val raw = prefs.getString(composerPrefsKey(chatId), null) ?: return false
+            try {
+                val array = JSONObject(raw).optJSONArray("pending_uploads") ?: return false
+                (0 until array.length()).mapNotNull { i ->
+                    array.optJSONObject(i)?.let { it.optString("uri") to it.optString("kind") }
+                }.toSet()
+            } catch (_: Exception) { return false }
+        }
+        return selected.all { it in current } &&
+            selected.none { (raw, kind) -> cancelledUploads.contains("$kind|$raw") }
+    }
+
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun preparePendingOpenRouterZipsThenSend(regenerate: Boolean) {
         if (preparingZipAttachments) return
@@ -4797,78 +4816,71 @@ class MainActivity : ComponentActivity() {
         if (zipItems.isEmpty()) return
         val sourceChatId = currentChatId()
         val sourceGeneration = activeResponseState.state.generation
+        val token = UUID.randomUUID().toString()
+        activeZipOperation = token
         preparingZipAttachments = true
         send.isEnabled = false
         status.text = "Готовлю ZIP-вложение…"
         executor.execute {
+            val extracted = mutableListOf<OpenRouterLocalAttachment>()
             try {
-                val extracted = mutableListOf<OpenRouterLocalAttachment>()
                 zipItems.forEach { (rawUri, _) ->
+                    if (activeZipOperation != token || !sourceStillOwnsZips(sourceChatId, zipItems)) {
+                        throw CancellationException("ZIP preparation was cancelled")
+                    }
                     val uri = Uri.parse(rawUri)
-                    val zipName = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "archive.zip"
+                    val zipName = OpenRouterAttachmentStore.queryName(this, uri)
+                        ?: uri.lastPathSegment ?: "archive.zip"
                     extracted += OpenRouterAttachmentStore.extractZip(this, uri, zipName, { message ->
-                        diagnostics.log("openrouter_zip_skip", mapOf("chat_id" to sourceChatId, "message" to message.take(300)))
+                        diagnostics.log("openrouter_zip_skip", mapOf(
+                            "chat_id" to sourceChatId, "message" to message.take(300)
+                        ))
                     }, openRouterAttachmentInputStreamSource)
                 }
-                val initialTarget = OpenRouterBackgroundOwnershipPolicy.decide(
-                    sourceChatId = sourceChatId,
-                    currentChatId = currentChatId(),
-                    sourceGeneration = sourceGeneration,
-                    currentGeneration = activeResponseState.state.generation,
-                    activityVisible = activityVisible,
-                    cancelled = false
-                )
-                if (initialTarget != OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
-                    if (initialTarget == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
-                        saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
-                    } else deleteOpenRouterAttachmentFiles(extracted)
-                    if (activityVisible) runOnUiThread { preparingZipAttachments = false }
-                    return@execute
-                }
                 runOnUiThread {
+                    val owned = activeZipOperation == token &&
+                        sourceStillOwnsZips(sourceChatId, zipItems)
                     val target = OpenRouterBackgroundOwnershipPolicy.decide(
-                        sourceChatId, currentChatId(), sourceGeneration, activeResponseState.state.generation, activityVisible, false
+                        sourceChatId, currentChatId(), sourceGeneration,
+                        activeResponseState.state.generation, activityVisible, !owned
                     )
-                    when (target) {
-                        OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> {
-                            zipItems.forEach { pendingUploadUris.remove(it) }
-                            extracted.forEach { a ->
-                                if (attachedOpenRouterAttachments.none { it.sha256 == a.sha256 && it.name == a.name }) attachedOpenRouterAttachments.add(a)
-                            }
-                            preparingZipAttachments = false
-                            persistComposerStateNow()
-                            refreshAttachChips()
-                            status.text = "ZIP подготовлен · файлов: " + extracted.size
-                            sendMessage(regenerate)
+                    if (owned && target == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                        zipItems.forEach { pendingUploadUris.remove(it) }
+                        extracted.forEach { attachment ->
+                            if (attachedOpenRouterAttachments.none {
+                                it.sha256 == attachment.sha256 && it.name == attachment.name
+                            }) attachedOpenRouterAttachments.add(attachment)
                         }
-                        OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
-                            saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
-                            preparingZipAttachments = false
-                            diagnostics.log("openrouter_zip_saved_source_chat", mapOf("chat_id" to sourceChatId, "generation" to sourceGeneration))
-                        }
-                        OpenRouterAttachmentCompletionTarget.DISCARD -> {
-                            deleteOpenRouterAttachmentFiles(extracted)
-                            preparingZipAttachments = false
-                        }
+                        persistComposerStateNow()
+                        refreshAttachChips()
+                        status.text = "ZIP подготовлен · файлов: " + extracted.size
+                    } else if (owned && target == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
+                        saveOpenRouterAttachmentsToComposer(sourceChatId, extracted, zipItems)
+                        diagnostics.log("openrouter_zip_saved_source_chat", mapOf("chat_id" to sourceChatId))
+                    } else {
+                        deleteOpenRouterAttachmentFiles(extracted)
+                    }
+                    if (activeZipOperation == token) {
+                        activeZipOperation = null
+                        preparingZipAttachments = false
+                    }
+                    if (currentChatId() == sourceChatId && stop.visibility != View.VISIBLE) send.isEnabled = true
+                    if (owned && target == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                        sendMessage(regenerate)
                     }
                 }
             } catch (e: Exception) {
-                val target = OpenRouterBackgroundOwnershipPolicy.decide(
-                    sourceChatId,
-                    currentChatId(),
-                    sourceGeneration,
-                    activeResponseState.state.generation,
-                    activityVisible,
-                    false
-                )
-                if (target == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
-                    runOnUiThread {
+                deleteOpenRouterAttachmentFiles(extracted)
+                runOnUiThread {
+                    if (activeZipOperation == token) {
+                        activeZipOperation = null
                         preparingZipAttachments = false
-                        refreshAttachChips()
-                        status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
+                        if (stop.visibility != View.VISIBLE) send.isEnabled = true
+                        if (currentChatId() == sourceChatId && activityVisible) {
+                            refreshAttachChips()
+                            status.text = "Ошибка ZIP: " + (e.message ?: "не удалось обработать архив")
+                        }
                     }
-                } else {
-                    diagnostics.log("openrouter_zip_prepare_stale_failure", mapOf("chat_id" to sourceChatId, "error" to (e.message ?: e.toString()).take(300)))
                 }
             }
         }
@@ -6351,6 +6363,7 @@ class MainActivity : ComponentActivity() {
     private fun cancelPendingUpload(uri:Uri,kind:String){
         val key=attachmentKey(uri,kind)
         cancelledUploads.add(key)
+        if (kind == "zip") activeZipOperation = null
         uploadCalls.remove(key)?.cancel()
         uploadProgress.remove(key)
         pendingUploadUris.removeAll{it.first==uri.toString() && it.second==kind}
