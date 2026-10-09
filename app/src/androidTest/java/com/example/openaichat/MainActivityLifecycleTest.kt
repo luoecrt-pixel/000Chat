@@ -39,6 +39,27 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
+    // Production blocks cleartext HTTP. Exercise real Send over an isolated local HTTPS
+    // server with a certificate trusted only by this test client's OkHttp instance.
+    private fun createHttpsMockServer(): Pair<MockWebServer, OkHttpClient> {
+        val localhost = HeldCertificate.Builder()
+            .commonName("localhost")
+            .addSubjectAlternativeName("localhost")
+            .build()
+        val serverCertificates = HandshakeCertificates.Builder()
+            .heldCertificate(localhost)
+            .build()
+        val clientCertificates = HandshakeCertificates.Builder()
+            .addTrustedCertificate(localhost.certificate)
+            .build()
+        val server = MockWebServer()
+        server.useHttps(serverCertificates.sslSocketFactory(), false)
+        server.start()
+        val client = OkHttpClient.Builder()
+            .sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+            .build()
+        return server to client
+    }
     @Test
     fun plusOpensThreeAttachmentActionsAndClosesWithoutLaunchingPicker() {
         fun byDescription(v: android.view.View, description: String): android.view.View? {
@@ -757,8 +778,7 @@ class MainActivityLifecycleTest {
         val original = java.util.Base64.getDecoder().decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
         )
-        val server = MockWebServer()
-        server.start()
+        val (server, testHttpClient) = createHttpsMockServer()
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"picture received\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         val entered = CountDownLatch(1)
@@ -784,7 +804,7 @@ class MainActivityLifecycleTest {
                     as ConcurrentHashMap<String, Set<String>>
                 modalities[model] = setOf("text", "image")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString()) })
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
@@ -856,8 +876,7 @@ class MainActivityLifecycleTest {
 
     @Test
     fun stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp() {
-        val server = MockWebServer()
-        server.start()
+        val (server, testHttpClient) = createHttpsMockServer()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -867,7 +886,7 @@ class MainActivityLifecycleTest {
                     .putString("model", "anthropic/claude-sonnet-5.5").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString()) })
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
