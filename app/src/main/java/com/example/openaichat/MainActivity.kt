@@ -121,6 +121,7 @@ class MainActivity : ComponentActivity() {
     private val currentGitHubToolOwner = ThreadLocal<Pair<String, Long>>()
     // Cancels an in-flight serialization before it can commit a user message or start HTTP.
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
+    @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
             secureStore = secure,
@@ -2406,6 +2407,8 @@ class MainActivity : ComponentActivity() {
             status.text = "Готовлю файлы и контекст…"
             executor.execute {
                 try {
+                    // Test-only seam to hold a real Send at the serialization boundary.
+                    openRouterPreparationHook?.invoke()
                     val prepared = buildOpenRouterMessagesSnapshot(
                         capturedHistory, capturedSystemPrompt, capturedDeveloperInstructions,
                         capturedGithubEnabled, capturedGithubRepo, capturedGithubBranches
