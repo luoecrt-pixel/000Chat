@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
@@ -294,16 +295,66 @@ object OpenRouterAttachmentStore {
         }
     }
 
-    /** Read bounded magic bytes; never trust an extension as a wire media type. */
+    /**
+     * Cheap container-level validation: a signature alone accepts 3-byte "JPEGs".
+     * Only the header and file trailer are inspected; this is not a full decode.
+     */
     internal fun detectImageMime(file: File): String? {
         if (!file.isFile) return null
-        val magic = ByteArray(12)
+        val magic = ByteArray(16)
         val count = try { file.inputStream().use { it.read(magic) } } catch (_: IOException) { return null }
-        if (count >= 3 && magic.copyOfRange(0, 3).contentEquals(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()))) return "image/jpeg"
-        if (count >= 8 && magic.copyOfRange(0, 8).contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 13, 10, 26, 10))) return "image/png"
-        if (count >= 6 && (String(magic, 0, 6, Charsets.US_ASCII) == "GIF87a" || String(magic, 0, 6, Charsets.US_ASCII) == "GIF89a")) return "image/gif"
-        if (count >= 12 && String(magic, 0, 4, Charsets.US_ASCII) == "RIFF" && String(magic, 8, 4, Charsets.US_ASCII) == "WEBP") return "image/webp"
-        return null
+        val type = when {
+            count >= 3 && magic.copyOfRange(0, 3).contentEquals(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) -> "image/jpeg"
+            count >= 8 && magic.copyOfRange(0, 8).contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 13, 10, 26, 10)) -> "image/png"
+            count >= 10 && (String(magic, 0, 6, Charsets.US_ASCII) == "GIF87a" ||
+                String(magic, 0, 6, Charsets.US_ASCII) == "GIF89a") -> "image/gif"
+            count >= 16 && String(magic, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+                String(magic, 8, 4, Charsets.US_ASCII) == "WEBP" -> "image/webp"
+            else -> return null
+        }
+        return type.takeIf { hasImageContainerEnding(file, magic, it) }
+    }
+
+    private fun hasImageContainerEnding(file: File, header: ByteArray, mime: String): Boolean {
+        val length = file.length()
+        return try {
+            RandomAccessFile(file, "r").use { source ->
+                when (mime) {
+                    "image/jpeg" -> {
+                        if (length < 64L) return false
+                        source.seek(length - 2L)
+                        source.readUnsignedByte() == 0xFF && source.readUnsignedByte() == 0xD9
+                    }
+                    "image/png" -> {
+                        if (length < 45L) return false
+                        val iend = ByteArray(12)
+                        source.seek(length - 12L)
+                        source.readFully(iend)
+                        iend.contentEquals(byteArrayOf(
+                            0, 0, 0, 0, 0x49, 0x45, 0x4E, 0x44,
+                            0xAE.toByte(), 0x42, 0x60, 0x82.toByte()
+                        ))
+                    }
+                    "image/gif" -> {
+                        if (length < 14L) return false
+                        val width = (header[6].toInt() and 0xFF) or ((header[7].toInt() and 0xFF) shl 8)
+                        val height = (header[8].toInt() and 0xFF) or ((header[9].toInt() and 0xFF) shl 8)
+                        source.seek(length - 1L)
+                        width > 0 && height > 0 && source.readUnsignedByte() == 0x3B
+                    }
+                    "image/webp" -> {
+                        if (length < 20L) return false
+                        val riffLength = (0..3).fold(0L) { acc, i ->
+                            acc or ((header[4 + i].toLong() and 0xFFL) shl (8 * i))
+                        }
+                        val chunk = String(header, 12, 4, Charsets.US_ASCII)
+                        riffLength + 8L == length &&
+                            chunk in setOf("VP8 ", "VP8L", "VP8X")
+                    }
+                    else -> false
+                }
+            }
+        } catch (_: IOException) { false }
     }
 
     private fun classifyKind(file: File, name: String): String {
