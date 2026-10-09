@@ -43,15 +43,6 @@ class OpenRouterChatClient(
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
     }
 
-    private fun normalizeReasoningEffort(value: String?): String? =
-        value?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let {
-            when (it) {
-                "xhigh", "max" -> "high"
-                "auto" -> "medium"
-                else -> it
-            }
-        }
-
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
@@ -71,8 +62,11 @@ class OpenRouterChatClient(
         executeTool: (name: String, arguments: JSONObject) -> String,
         onCallCreated: (Call) -> Unit = {},
         shouldContinue: () -> Boolean = { true },
-        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> }
+        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
+        onTextDelta: (String) -> Unit = {}
     ): OpenRouterCompletionResult {
+        // Resolve once before HTTP and all tool rounds; Activity already resolves auto.
+        val requestEffort = OpenRouterReasoningPolicy.requestEffort(model, reasoningEffort)
         val history = JSONArray(messages.toString())
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
@@ -149,10 +143,12 @@ class OpenRouterChatClient(
                 body.put("session_id", it)
             }
             OpenRouterCachePolicy.configureRequest(body, model)
-            normalizeReasoningEffort(reasoningEffort)?.let {
+            requestEffort?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
             }
-            verbosity?.takeIf { it.isNotBlank() }?.let { body.put("verbosity", it) }
+            verbosity?.takeIf {
+                it.isNotBlank() && OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
+            }?.let { body.put("verbosity", it) }
 
             val roundIndex = nextRoundIndex++
             onRoundObserved(roundIndex, null, null)
@@ -226,7 +222,11 @@ class OpenRouterChatClient(
                 val delta = choice.optJSONObject("delta") ?: return
 
                 delta.optString("role").takeIf { it.isNotBlank() }?.let { role = it }
-                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { contentParts.append(it) }
+                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { chunk ->
+                    contentParts.append(chunk)
+                    onTextDelta((accumulatedText + contentParts.toString())
+                        .filter { it.isNotEmpty() }.joinToString("\n\n"))
+                }
 
                 delta.optJSONArray("reasoning_details")?.let { details ->
                     for (i in 0 until details.length()) {
@@ -335,7 +335,8 @@ class OpenRouterChatClient(
                 val calls = message.optJSONArray("tool_calls")
                 if (calls == null || calls.length() == 0) {
                     return OpenRouterCompletionResult(
-                        text = message.optString("content").trim(),
+                        text = (accumulatedText + message.optString("content"))
+                            .filter { it.isNotBlank() }.joinToString("\n\n").trim(),
                         usage = JSONObject(accumulatedUsage.toString()).apply {
                             // Never present a tool-loop subtotal as a complete charge.
                             if (!everyRoundCostKnown) remove("cost")

@@ -23,6 +23,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
+import okhttp3.OkHttpClient
 import java.lang.reflect.Proxy
 import java.util.concurrent.CompletableFuture
 import java.io.ByteArrayInputStream
@@ -34,6 +39,27 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
+    // Production blocks cleartext HTTP. Exercise real Send over an isolated local HTTPS
+    // server with a certificate trusted only by this test client's OkHttp instance.
+    private fun createHttpsMockServer(): Pair<MockWebServer, OkHttpClient> {
+        val localhost = HeldCertificate.Builder()
+            .commonName("localhost")
+            .addSubjectAlternativeName("localhost")
+            .build()
+        val serverCertificates = HandshakeCertificates.Builder()
+            .heldCertificate(localhost)
+            .build()
+        val clientCertificates = HandshakeCertificates.Builder()
+            .addTrustedCertificate(localhost.certificate)
+            .build()
+        val server = MockWebServer()
+        server.useHttps(serverCertificates.sslSocketFactory(), false)
+        server.start()
+        val client = OkHttpClient.Builder()
+            .sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+            .build()
+        return server to client
+    }
     @Test
     fun plusOpensThreeAttachmentActionsAndClosesWithoutLaunchingPicker() {
         fun byDescription(v: android.view.View, description: String): android.view.View? {
@@ -191,6 +217,58 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun newChatKeepsOldDraftAndStartsWithEmptyComposer() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.newChat()
+            val source = activity.currentChatIdForTesting()
+            val input = activity.window.decorView
+                .let { root ->
+                    fun findEdit(v: android.view.View): android.widget.EditText? {
+                        if (v is android.widget.EditText && v.hint?.toString() == "Сообщение…") return v
+                        if (v is android.view.ViewGroup) for (i in 0 until v.childCount)
+                            findEdit(v.getChildAt(i))?.let { return it }
+                        return null
+                    }
+                    findEdit(root) ?: throw AssertionError("No composer")
+                }
+            input.setText("черновик исходного чата")
+            activity.newChat()
+            assertEquals("", input.text.toString())
+            val sourceState = JSONObject(activity.prefs.getString("composer_state_$source", "{}")!!)
+            assertEquals("черновик исходного чата", sourceState.getString("text"))
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun concurrentSourceCompletionsKeepBothAttachmentsAndOriginalText() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.newChat()
+            val source = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString("composer_state_$source", JSONObject().put("text","newer draft").toString()).commit()
+            val a = OpenRouterLocalAttachment("a","a.txt","text","/tmp/a","text/plain",2L,"sha-a")
+            val b = OpenRouterLocalAttachment("b","b.txt","text","/tmp/b","text/plain",2L,"sha-b")
+            val gate = CountDownLatch(1)
+            val done = CountDownLatch(2)
+            listOf(a,b).forEach { attachment ->
+                Thread {
+                    gate.await()
+                    activity.saveOpenRouterAttachmentsToComposer(source, listOf(attachment))
+                    done.countDown()
+                }.start()
+            }
+            gate.countDown()
+            assertTrue("concurrent writes timed out", done.await(4, TimeUnit.SECONDS))
+            val result = JSONObject(activity.prefs.getString("composer_state_$source", "{}")!!)
+            assertEquals(2, result.getJSONArray("openrouter_attachments").length())
+            assertEquals("newer draft", result.getString("text"))
+        }
+        scenario.close()
+    }
+
+    @Test
     fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
@@ -258,7 +336,12 @@ class MainActivityLifecycleTest {
             val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
             activeCall.set(fakeCall)
 
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
             Thread {
+                ownerSlot.set(owner)
                 try {
                     confirmationResult.set(
                         invoke(
@@ -271,6 +354,7 @@ class MainActivityLifecycleTest {
                         ) as Boolean
                     )
                 } finally {
+                    ownerSlot.remove()
                     confirmationDone.countDown()
                 }
             }.start()
@@ -540,8 +624,12 @@ class MainActivityLifecycleTest {
         var sourceUri: Uri? = null
 
         scenario.onActivity { launched ->
+            // A previous test can leave a composer attachment in the restored chat.
+            // Do not treat that old attachment as proof the ZIP executor finished.
+            launched.newChat()
             launched.openRouterAttachmentInputStreamSource = source
             sourceChatId = currentChatId(launched)
+            assertEquals(0, composerAttachmentCount(launched, sourceChatId))
             sourceUri = Uri.parse("content://blocking.test/archive.zip")
             launched.pendingUploadUris.add(sourceUri.toString() to "zip")
             launched.preparePendingOpenRouterZipsThenSend(false)
@@ -555,10 +643,20 @@ class MainActivityLifecycleTest {
 
         assertTrue("stale ZIP completion did not persist to the source chat", waitForSourceAttachmentCount(scenario, sourceChatId, 1))
 
+        // Completion is asynchronous; assert cleanup explicitly after the source
+        // manifest is persisted instead of racing the UI callback.
+        var preparationFinished = false
+        for (attempt in 0 until 100) {
+            scenario.onActivity { launched ->
+                preparationFinished = !launched.preparingZipAttachments
+            }
+            if (preparationFinished) break
+            SystemClock.sleep(20L)
+        }
         scenario.onActivity { launched ->
             val currentId = currentChatId(launched)
             assertEquals(0, composerAttachmentCount(launched, currentId))
-            assertFalse(launched.preparingZipAttachments)
+            assertTrue("ZIP operation never cleared the preparation state", preparationFinished)
         }
         scenario.close()
     }
@@ -639,7 +737,12 @@ class MainActivityLifecycleTest {
         val oldDialog = AtomicReference<AlertDialog?>(null)
 
         scenario.onActivity { activity ->
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
             Thread {
+                ownerSlot.set(owner)
                 try {
                     confirmationResult.set(
                         invoke(
@@ -652,6 +755,7 @@ class MainActivityLifecycleTest {
                         ) as Boolean
                     )
                 } finally {
+                    ownerSlot.remove()
                     confirmationDone.countDown()
                 }
             }.start()
@@ -679,6 +783,323 @@ class MainActivityLifecycleTest {
             @Suppress("UNCHECKED_CAST")
             val pending = privateField(activity, "pendingGitHubConfirmation") as AtomicReference<java.util.concurrent.CompletableFuture<Boolean>?>
             assertEquals(null, pending.get())
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun realOpenRouterSendKeepsNewDraftAndSendsOriginalPngBytes() {
+        val original = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val (server, testHttpClient) = createHttpsMockServer()
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"picture received\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val model = "anthropic/claude-sonnet-5.5"
+        try {
+            scenario.onActivity { activity ->
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", model).putString("reasoning", "high").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                val file = java.io.File(activity.filesDir, "photo-with-wrong-jpg-name.jpeg")
+                    .apply { writeBytes(original) }
+                @Suppress("UNCHECKED_CAST")
+                val attachments = privateField(activity, "attachedOpenRouterAttachments")
+                    as MutableList<OpenRouterLocalAttachment>
+                attachments.add(OpenRouterLocalAttachment(
+                    "photo", "photo-with-wrong-jpg-name.jpeg", "image", file.absolutePath,
+                    "image/jpeg", file.length(), "sha"
+                ))
+                @Suppress("UNCHECKED_CAST")
+                val modalities = privateField(activity, "openRouterModelModalities")
+                    as ConcurrentHashMap<String, Set<String>>
+                modalities[model] = setOf("text", "image")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                setPrivateField(activity, "openRouterPreparationHook", {
+                    entered.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                    Unit
+                })
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("What is in this picture?")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("Send never entered the background preparation", entered.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("New draft typed while the file is being prepared")
+            }
+            release.countDown()
+
+            val request = server.takeRequest(20, TimeUnit.SECONDS)
+                ?: run {
+                    var diagnostic = ""
+                    scenario.onActivity { activity ->
+                        val status = privateField(activity, "status") as android.widget.TextView
+                        @Suppress("UNCHECKED_CAST")
+                        val pending = privateField(activity, "pendingOpenRouterPreparation")
+                            as AtomicReference<String?>
+                        @Suppress("UNCHECKED_CAST")
+                        val callOwner = privateField(activity, "openRouterCallOwnerToken")
+                            as AtomicReference<String?>
+                        diagnostic = "status=" + status.text + "; pending=" + pending.get() +
+                            "; callOwner=" + callOwner.get() +
+                            "; visible=" + (privateField(activity, "activityVisible") as Boolean)
+                    }
+                    throw AssertionError("Production Send never reached local MockWebServer: $diagnostic")
+                }
+            val body = JSONObject(request.body.readUtf8())
+            val messages = body.getJSONArray("messages")
+            val user = (0 until messages.length()).map { messages.getJSONObject(it) }
+                .first { it.optString("role") == "user" }
+            val content = user.getJSONArray("content")
+            val image = (0 until content.length()).map { content.getJSONObject(it) }
+                .first { it.optString("type") == "image_url" }
+            val url = image.getJSONObject("image_url").getString("url")
+            assertTrue("Wrong image MIME in real HTTP body", url.startsWith("data:image/png;base64,"))
+            assertTrue("Source photo was transcoded", java.util.Base64.getDecoder()
+                .decode(url.substringAfter(",")).contentEquals(original))
+
+            var completed = false
+            for (attempt in 0 until 100) {
+                scenario.onActivity { activity ->
+                    val status = privateField(activity, "status") as android.widget.TextView
+                    completed = status.text.toString().startsWith("Готово")
+                    val composer = privateField(activity, "input") as android.widget.EditText
+                    assertEquals("New draft typed while the file is being prepared",
+                        composer.text.toString())
+                }
+                if (completed) break
+                SystemClock.sleep(25L)
+            }
+            assertTrue("Mock HTTP success was not reflected by Activity", completed)
+        } finally {
+            release.countDown()
+            scenario.onActivity { activity ->
+                setPrivateField(activity, "openRouterPreparationHook", null)
+                SecureStore(activity).setOpenRouterApiKey("")
+            }
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp() {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            scenario.onActivity { activity ->
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", "anthropic/claude-sonnet-5.5").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                setPrivateField(activity, "openRouterPreparationHook", {
+                    entered.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                    Unit
+                })
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("Do not send after Stop")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("Preparation hook did not run", entered.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("Unsent draft after Stop")
+                invoke(activity, "stopCurrentResponse")
+                assertEquals("Unsent draft after Stop", composer.text.toString())
+            }
+            release.countDown()
+            // The only network destination is the local mock; a cancelled snapshot
+            // must never create a Call against it.
+            assertEquals(null, server.takeRequest(300, TimeUnit.MILLISECONDS))
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                assertEquals("Unsent draft after Stop", composer.text.toString())
+                assertTrue(activity.send.isEnabled)
+            }
+        } finally {
+            release.countDown()
+            scenario.onActivity { activity ->
+                setPrivateField(activity, "openRouterPreparationHook", null)
+                SecureStore(activity).setOpenRouterApiKey("")
+            }
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun missingHistoricalOpenRouterFileKeepsUnsentComposerAndNeverStartsHttp() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var beforeSize = 0
+        scenario.onActivity { activity ->
+            activity.prefs.edit().putString("provider", "openrouter").apply()
+            SecureStore(activity).setOpenRouterApiKey("test-key")
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            beforeSize = history.size
+            val missing = OpenRouterLocalAttachment(
+                "deleted-file", "old.png", "image",
+                java.io.File(activity.filesDir, "no-such-attachment.png").absolutePath,
+                "image/png", 128L, "removed"
+            )
+            history.add(
+                JSONObject().put("role", "user").put("text", "previous image")
+                    .put("provider", "openrouter")
+                    .put("attachments", JSONArray().put(missing.toJson()))
+            )
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("New message that must stay a draft")
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+        }
+
+        var failed = false
+        for (attempt in 0 until 100) {
+            scenario.onActivity { activity ->
+                val status = privateField(activity, "status") as android.widget.TextView
+                failed = status.text.toString().contains("Ошибка подготовки вложений")
+                if (failed) {
+                    val composer = privateField(activity, "input") as android.widget.EditText
+                    assertEquals("New message that must stay a draft", composer.text.toString())
+                    assertTrue("Send stayed locked after failed preparation", activity.send.isEnabled)
+                    @Suppress("UNCHECKED_CAST")
+                    val history = privateField(activity, "chat") as MutableList<JSONObject>
+                    assertEquals("Failed send was committed to history", beforeSize + 1, history.size)
+                    @Suppress("UNCHECKED_CAST")
+                    val call = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
+                    assertEquals("HTTP call started despite missing file", null, call.get())
+                    history.removeAt(history.lastIndex)
+                    SecureStore(activity).setOpenRouterApiKey("")
+                }
+            }
+            if (failed) break
+            SystemClock.sleep(25L)
+        }
+        assertTrue("Missing historical file did not reach controlled failure path", failed)
+        scenario.close()
+    }
+
+    @Test
+    fun stopDuringOpenRouterPreparationPreservesDraftAndPreviousHistory() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            @Suppress("UNCHECKED_CAST")
+            val token = privateField(activity, "pendingOpenRouterPreparation")
+                as AtomicReference<String?>
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("Keep this during Stop")
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            val size = history.size
+            token.set("in-flight-test")
+            invoke(activity, "setBusy", Boolean::class.javaPrimitiveType!!, true)
+            invoke(activity, "stopCurrentResponse")
+            assertEquals(null, token.get())
+            assertEquals("Keep this during Stop", composer.text.toString())
+            assertEquals(size, history.size)
+            assertTrue(activity.send.isEnabled)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            // Settings and the selected chat survive earlier instrumentation tests.
+            // This scenario must exercise the file-chain guard, not stale JSON mode
+            // or a request left by another test.
+            activity.newChat()
+            activity.prefs.edit().putString("provider", "openai")
+                .putString("text_format", "text").apply()
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            val oldSize = history.size
+            history.add(
+                JSONObject().put("role", "user").put("text", "Old photo")
+                    .put("provider", "openai")
+                    .put("image_file_id", "file-example")
+            )
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId(null)
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("Next question")
+            val generation = activeGeneration(activity)
+
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+
+            assertEquals("Unsafe fallback advanced generation", generation, activeGeneration(activity))
+            assertEquals("Next question", composer.text.toString())
+            assertEquals("Unsafe fallback appended to chat", oldSize + 1, history.size)
+            val status = privateField(activity, "status") as android.widget.TextView
+            assertTrue("Missing explanation for unavailable file history: ${status.text}",
+                status.text.toString().contains("вложения OpenAI"))
+
+            // A non-null ID is not a usable Responses chain if a different provider
+            // answered last; the same OpenAI file inputs must still block fallback.
+            history.add(JSONObject().put("role", "assistant")
+                .put("provider", "openrouter").put("text", "other provider"))
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId("resp_stale")
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            assertEquals(generation, activeGeneration(activity))
+            assertEquals("Next question", composer.text.toString())
+            assertEquals(oldSize + 2, history.size)
+            history.removeAt(history.lastIndex)
+            history.removeAt(history.lastIndex)
+            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                .setResponseId(null)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun githubConfirmationRejectsMissingAndStaleOwnerWithoutOpeningDialog() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val owner = currentChatId(activity) to activeGeneration(activity)
+            @Suppress("UNCHECKED_CAST")
+            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
+                as ThreadLocal<Pair<String, Long>>
+            val deniedWithoutOwner = invoke(
+                activity,
+                "confirmGitHubWrite",
+                String::class.java,
+                JSONObject::class.java,
+                "create_issue_comment",
+                JSONObject().put("issue_number", 3)
+            ) as Boolean
+            assertFalse("GitHub confirmation without a request owner must be denied", deniedWithoutOwner)
+
+            // A previously valid generation must not be allowed to open a new decision.
+            ownerSlot.set(owner.first to (owner.second - 1L))
+            try {
+                assertFalse(isRequestCurrent(activity, owner.first, owner.second - 1L))
+                val deniedStale = invoke(
+                    activity,
+                    "confirmGitHubWrite",
+                    String::class.java,
+                    JSONObject::class.java,
+                    "create_issue_comment",
+                    JSONObject().put("issue_number", 3)
+                ) as Boolean
+                assertFalse("Stale GitHub confirmation owner must be denied", deniedStale)
+            } finally {
+                ownerSlot.remove()
+            }
+            @Suppress("UNCHECKED_CAST")
+            val dialogRef = privateField(activity, "pendingGitHubConfirmationDialog")
+                as AtomicReference<AlertDialog?>
+            assertEquals(null, dialogRef.get())
         }
         scenario.close()
     }

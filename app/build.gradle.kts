@@ -65,6 +65,8 @@ android {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     testImplementation("org.json:json:20250517")
     testImplementation("org.robolectric:robolectric:4.14")
     androidTestImplementation("androidx.test:core:1.7.0")

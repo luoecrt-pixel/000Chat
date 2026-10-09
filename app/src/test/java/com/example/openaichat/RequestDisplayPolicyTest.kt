@@ -36,9 +36,9 @@ class RequestDisplayPolicyTest {
         val m = JSONObject().put("provider", "openrouter")
             .put("requested_model", "anthropic/claude-sonnet-5.5")
             .put("response_model", "anthropic/claude-opus-5.5")
-        assertEquals("Astra · Claude Opus 5.5", AssistantModelLabel.text(m))
+        assertEquals("Claude Opus 5.5", AssistantModelLabel.text(m))
         m.remove("response_model")
-        assertEquals("Astra · запрошена Claude Sonnet 5.5", AssistantModelLabel.text(m))
-        assertEquals("Astra · модель неизвестна", AssistantModelLabel.text(JSONObject()))
+        assertEquals("Запрошена: Claude Sonnet 5.5", AssistantModelLabel.text(m))
+        assertEquals("Ассистент · модель неизвестна", AssistantModelLabel.text(JSONObject()))
     }
 }

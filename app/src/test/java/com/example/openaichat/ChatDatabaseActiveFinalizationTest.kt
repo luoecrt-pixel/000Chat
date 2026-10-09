@@ -209,4 +209,68 @@ class ChatDatabaseActiveFinalizationTest {
             }
         }
     }
+    @Test fun newRequestAfterWorkerTerminalIsAppendedDespiteEqualSnapshotCount() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            assertTrue(commitOnce(db, text="old assistant"))
+            val freshUser = JSONObject().put("role","user").put("text","new prompt")
+                .put("request_id","local_2")
+            assertTrue(db.upsertUiSnapshotPreservingTail("chat","Original",null,null,
+                listOf(JSONObject().put("role","user").put("text","old prompt")
+                    .put("request_id","local_1"),freshUser)))
+            val rows = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(3, rows.length())
+            assertEquals("old assistant",rows.getJSONObject(1).getString("text"))
+            assertEquals("new prompt",rows.getJSONObject(2).getString("text"))
+        }
+    }
+
+    @Test fun sameLengthStaleUiSnapshotCannotOverwriteCommittedMetadata() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            val enriched = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            enriched.put("feedback", -1).put("text", "latest persisted text")
+            db.upsertCurrentChat("chat", "Original", null, "high", listOf(enriched))
+            val oldSnapshot = listOf(
+                JSONObject().put("role","user").put("request_id","local_1")
+                    .put("text","stale").put("feedback",1))
+            assertTrue(db.upsertUiSnapshotPreservingTail("chat","Original",null,"high",oldSnapshot))
+            val actual = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            assertEquals(-1, actual.getInt("feedback"))
+            assertEquals("latest persisted text",actual.getString("text"))
+        }
+    }
+
+    @Test fun terminalClaimPreservesDbRowsAndMetadataAddedAfterStaleSnapshot() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            val original = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            original.put("text", "text edited by another owner")
+            original.put("feedback", 1)
+            db.upsertCurrentChat("chat","Original",null,"high",listOf(original))
+            assertTrue(commitOnce(db, text="terminal from worker"))
+            val rows = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(2, rows.length())
+            assertEquals("text edited by another owner", rows.getJSONObject(0).getString("text"))
+            assertEquals(1, rows.getJSONObject(0).getInt("feedback"))
+            assertEquals("terminal from worker", rows.getJSONObject(1).getString("text"))
+            assertFalse(db.upsertUiSnapshotPreservingTail("chat","Original",null,"high",
+                listOf(JSONObject().put("role","user").put("text","stale old user").put("request_id","local_1"))))
+            val reopened = db.getChat("chat")!!.getJSONArray("messages")
+            assertEquals(2, reopened.length())
+            assertEquals("terminal from worker", reopened.getJSONObject(1).getString("text"))
+            assertEquals("text edited by another owner", reopened.getJSONObject(0).getString("text"))
+        }
+    }
+
+    @Test fun concurrentStopAfterTerminalCannotEraseCommittedAssistant() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            assertTrue(db.finalizeCurrentChatIfActiveRequest(
+                "chat","Original","resp_1","high", finalizedMessages("local_1","winner"),"local_1"))
+            assertFalse(db.stopActiveRequestOnce("chat","local_1"))
+            assertEquals("winner",db.getChat("chat")!!.getJSONArray("messages")
+                .getJSONObject(1).getString("text"))
+        }
+    }
 }

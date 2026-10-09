@@ -470,6 +470,69 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     }
 
     /**
+     * Ordinary UI writes must not erase an assistant already committed by a Worker.
+     * Explicit Edit/Delete can use the exact replacement writer instead.
+     */
+    fun upsertUiSnapshotPreservingTail(
+        id: String, title: String, responseId: String?,
+        baselineEffort: String?, messages: List<JSONObject>
+    ): Boolean {
+        if (id.isBlank()) return false
+        var committed = false
+        writableDatabase.transaction { db ->
+            // UI snapshots can be older than Worker/async metadata, even when they have
+            // the same number of messages. Never rewrite existing rows here.
+            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?",
+                arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
+            if (!exists) return@transaction
+            val known = mutableSetOf<String>()
+            var nextPosition = 0
+            var existingCount = 0
+            db.query(MESSAGE_TABLE, arrayOf("role","request_id","position"),
+                "chat_id=?", arrayOf(id), null, null, "position ASC").use { cursor ->
+                while(cursor.moveToNext()) {
+                    existingCount++
+                    val role = cursor.getString(0).orEmpty()
+                    val requestId = cursor.getString(1).orEmpty()
+                    if (requestId.isNotBlank()) known.add("$role|$requestId")
+                    nextPosition = maxOf(nextPosition, cursor.getInt(2) + 1)
+                }
+            }
+            // Reject a truly stale, shorter snapshot if it contributes no new user request.
+            // A snapshot with a different new request at the same position is still appendable.
+            val hasNewUser = messages.any { item ->
+                val requestId = item.optString("request_id")
+                item.optString("role") == "user" && requestId.isNotBlank() &&
+                    requestId != "null" && "user|$requestId" !in known
+            }
+            if (!hasNewUser && messages.size < existingCount) return@transaction
+            // A Worker may have inserted an assistant at position N while the UI
+            // produced another user at position N. Append by request identity,
+            // not by the count or stale positional alignment.
+            messages.forEach { snapshot ->
+                val role = snapshot.optString("role")
+                val requestId = snapshot.optString("request_id")
+                val identity = "$role|$requestId"
+                if (role == "user" && requestId.isNotBlank() && requestId != "null" &&
+                    known.add(identity)) {
+                    val copy = JSONObject(snapshot.toString())
+                    db.insertOrThrow(MESSAGE_TABLE, null,
+                        messageContentValues(id, nextPosition++, copy,
+                            ChatMessageFingerprint.of(copy)))
+                }
+            }
+            val values = ContentValues().apply {
+                if (title.isNotBlank()) put("title", title)
+                // Response/effort metadata is owned by terminal writer, not stale UI.
+                put("updated_at", System.currentTimeMillis())
+            }
+            db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
+            committed = true
+        }
+        return committed
+    }
+
+    /**
      * Atomically persists a completed response only while the same request is still active.
      * This closes the stop/delete/new-request race in background recovery.
      */
@@ -514,7 +577,45 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         messages: List<JSONObject>,
         expectedRequestId: String
     ): Boolean = completeActiveRequestOnce(id, expectedRequestId) { db ->
-        upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
+        // This callback may hold an older full-chat snapshot. Commit only the assistant
+        // belonging to the winning request, preserving newer messages/feedback/files.
+        val assistant = messages.lastOrNull { item ->
+            item.optString("role") == "assistant" && item.optString("request_id") == expectedRequestId
+        }
+        if (assistant != null) {
+            val existingId = db.query(
+                MESSAGE_TABLE, arrayOf("id"),
+                "chat_id=? AND request_id=? AND role='assistant'",
+                arrayOf(id, expectedRequestId), null, null, "position DESC", "1"
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+            if (existingId == null) {
+                val nextPosition = db.rawQuery(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM $MESSAGE_TABLE WHERE chat_id=?",
+                    arrayOf(id)
+                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+                val copy = JSONObject(assistant.toString())
+                db.insertOrThrow(
+                    MESSAGE_TABLE, null,
+                    messageContentValues(id, nextPosition, copy, ChatMessageFingerprint.of(copy))
+                )
+            } else {
+                val position = db.query(
+                    MESSAGE_TABLE, arrayOf("position"), "id=?", arrayOf(existingId.toString()),
+                    null,null,null,"1"
+                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+                db.update(MESSAGE_TABLE,
+                    messageContentValues(id, position, assistant, ChatMessageFingerprint.of(assistant)),
+                    "id=?", arrayOf(existingId.toString())
+                )
+            }
+        }
+        if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank()) {
+            db.update(CHAT_TABLE, ContentValues().apply {
+                responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
+                baselineEffort?.takeIf { it.isNotBlank() }?.let { put("baseline_effort", it) }
+                put("updated_at", System.currentTimeMillis())
+            }, "id=?", arrayOf(id))
+        }
     }
 
     /** Fatal recovery with no new messages still consumes its one-shot claim. */

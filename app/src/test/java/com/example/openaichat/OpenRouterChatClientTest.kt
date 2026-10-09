@@ -5,6 +5,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -23,8 +25,161 @@ import java.util.concurrent.atomic.AtomicReference
 class OpenRouterChatClientTest {
 
     @Test
+    fun validImageWithWrongFilenameAndPickerMimeReachesHttpWithOriginalBytes() {
+        val original = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val local = java.io.File(createTempDir(), "camera.jpeg").apply { writeBytes(original) }
+        val attachment = OpenRouterAttachmentStore.classifyLocalFile(
+            local, "camera.jpeg", "image/jpeg"
+        )
+        val server = MockWebServer()
+        server.start()
+        val transport = OpenRouterChatClient(server.url("/api/v1").toString())
+        try {
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse(
+                """{"choices":[{"delta":{"content":"image received"},"finish_reason":"stop"}]}""",
+                "[DONE]"
+            )))
+            val result = transport.complete(
+                apiKey = "test", model = "anthropic/claude-sonnet-5.5",
+                messages = JSONArray().put(
+                    JSONObject().put("role", "user").put(
+                        "content", JSONArray().put(OpenRouterAttachmentStore.toContentBlock(attachment))
+                    )
+                ),
+                tools = JSONArray(), maxTokens = null,
+                reasoningEffort = "high", verbosity = "medium", parallelToolCalls = false,
+                executeTool = { _, _ -> error("No tool expected") }
+            )
+            assertEquals("image received", result.text)
+            val request = server.takeRequest(1, TimeUnit.SECONDS) ?: error("HTTP body missing")
+            val body = JSONObject(request.body.readUtf8())
+            val url = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+                .getJSONObject(0).getJSONObject("image_url").getString("url")
+            assertTrue(url.startsWith("data:image/png;base64,"))
+            assertTrue(java.util.Base64.getDecoder().decode(url.substringAfter(",")).contentEquals(original))
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun claudeXhighAndMaxSurviveEveryToolRoundWithoutVerbosityOverride() {
+        for (model in listOf(
+            "anthropic/claude-opus-5.5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-fable-5.1"
+        )) {
+            for (effort in listOf("xhigh", "max")) {
+                val server = MockWebServer()
+                server.start()
+                val transport = OpenRouterChatClient(server.url("/api/v1").toString())
+                try {
+                    server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse(
+                        """{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-effort","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""",
+                        "[DONE]"
+                    )))
+                    server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse(
+                        """{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}""",
+                        "[DONE]"
+                    )))
+                    val result = transport.complete(
+                        apiKey = "test",
+                        model = model,
+                        messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                        tools = JSONArray().put(JSONObject().put("type", "function").put("function",
+                            JSONObject().put("name", "test_tool").put("parameters", JSONObject()))),
+                        maxTokens = null,
+                        reasoningEffort = effort,
+                        verbosity = "medium", // Stored preference must not override effort.
+                        parallelToolCalls = false,
+                        executeTool = { _, _ -> "tool-result" }
+                    )
+                    assertEquals("done", result.text)
+                    assertEquals(2, server.requestCount)
+                    repeat(2) {
+                        val request = server.takeRequest(1, TimeUnit.SECONDS) ?: error("HTTP round missing")
+                        assertEquals("/api/v1/chat/completions", request.path)
+                        val body = JSONObject(request.body.readUtf8())
+                        assertEquals(model, body.getString("model"))
+                        assertEquals(effort, body.getJSONObject("reasoning").getString("effort"))
+                        assertFalse(body.getJSONObject("reasoning").has("mode"))
+                        assertFalse(body.has("verbosity"))
+                    }
+                } finally {
+                    transport.close()
+                    server.shutdown()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun nonAnthropicResponseVerbosityIsStillForwarded() {
+        val requestBody = AtomicReference<String?>(null)
+        val transport = OkHttpClient.Builder().addInterceptor { chain ->
+            requestBody.set(okio.Buffer().also { chain.request().body?.writeTo(it) }.readUtf8())
+            sseResponse(chain, sse(
+                """{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}""",
+                "[DONE]"
+            ))
+        }.build()
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            client.complete(
+                apiKey = "test",
+                model = "openai/gpt-6-astra",
+                messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+                tools = null,
+                maxTokens = null,
+                reasoningEffort = "high",
+                verbosity = "low",
+                parallelToolCalls = false,
+                executeTool = { _, _ -> error("unexpected tool call") }
+            )
+            val body = JSONObject(requestBody.get() ?: error("request body missing"))
+            assertEquals("high", body.getJSONObject("reasoning").getString("effort"))
+            assertEquals("low", body.getString("verbosity"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun unresolvedAutoIsRejectedBeforeHttpOrToolExecution() {
+        val requests = AtomicInteger(0)
+        val transport = OkHttpClient.Builder().addInterceptor { chain ->
+            requests.incrementAndGet()
+            error("unresolved auto must not reach HTTP")
+        }.build()
+        val client = OpenRouterChatClient("http://test.invalid", transport)
+        try {
+            org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+                client.complete(
+                    apiKey = "test",
+                    model = "anthropic/claude-opus-5.5",
+                    messages = JSONArray(),
+                    tools = null,
+                    maxTokens = null,
+                    reasoningEffort = "auto",
+                    verbosity = "medium",
+                    parallelToolCalls = false,
+                    executeTool = { _, _ -> error("unexpected tool call") }
+                )
+            }
+            assertEquals(0, requests.get())
+        } finally {
+            client.close()
+        }
+    }
+
+
+    @Test
     fun aggregatesUsageAcrossToolLoopAndRequestsUsageDetails() {
         val requestCount = AtomicInteger(0)
+        val observedDeltas = mutableListOf<String>()
         val capturedBodies = mutableListOf<JSONObject>()
         val firstRequestBody = AtomicReference<String?>(null)
         val firstArguments = AtomicReference<JSONObject?>(null)
@@ -79,7 +234,8 @@ class OpenRouterChatClientTest {
                 executeTool = { _, arguments ->
                     firstArguments.set(arguments)
                     "tool-result"
-                }
+                },
+                onTextDelta = { snapshot -> observedDeltas += snapshot }
             )
 
             val firstBody = JSONObject(firstRequestBody.get())
@@ -111,7 +267,8 @@ class OpenRouterChatClientTest {
             assertEquals(20L, usage.getJSONObject("prompt_tokens_details").getLong("cache_write_tokens"))
             assertEquals(15L, usage.getJSONObject("completion_tokens_details").getLong("reasoning_tokens"))
             assertEquals(0.03, usage.getDouble("cost"), 0.000001)
-            assertEquals("done", result.text)
+            assertEquals("working\n\ndone", result.text)
+            assertEquals(listOf("working", "working\n\ndone"), observedDeltas)
             assertEquals(2, requestCount.get())
         } finally {
             client.close()

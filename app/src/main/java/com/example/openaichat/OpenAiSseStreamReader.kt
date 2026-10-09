@@ -80,7 +80,10 @@ object OpenAiSseStreamReader {
             val content = item.optJSONArray("content") ?: continue
             for (j in 0 until content.length()) {
                 val part = content.optJSONObject(j) ?: continue
-                if (part.optString("type") == "output_text") text.append(part.optString("text"))
+                when (part.optString("type")) {
+                    "output_text" -> text.append(part.optString("text"))
+                    "refusal" -> text.append(part.optString("refusal"))
+                }
             }
         }
         return text.toString()

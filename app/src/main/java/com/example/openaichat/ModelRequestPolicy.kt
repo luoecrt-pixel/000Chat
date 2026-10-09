@@ -19,13 +19,9 @@ object ModelRequestPolicy {
             if (summary != "null") put("summary", summary)
         }
 
-    /** Mirrors the existing OpenRouter transport mapping; never rewrites the selected pref. */
-    fun effortBadge(provider: String?, effort: String): String {
-        val normalized = if (provider == "openrouter") when (effort) {
-            "auto" -> "medium"
-            "xhigh", "max" -> "high"
-            else -> effort
-        } else effort
-        return if (effort == normalized) "⚡ $effort" else "⚡ $effort → $normalized"
-    }
+    /** Until auto is resolved for a request, the badge must not invent a level. */
+    fun effortBadge(effort: String, resolvedEffort: String? = null): String =
+        if (effort == "auto" && !resolvedEffort.isNullOrBlank())
+            "⚡ auto → $resolvedEffort"
+        else "⚡ $effort"
 }
