@@ -2297,13 +2297,17 @@ class MainActivity : ComponentActivity() {
         val requestFileSizes = sourceToRepeat?.optJSONArray("file_sizes")?.let { a -> (0 until a.length()).map { a.optLong(it) } } ?: attachedFileSizes.toList()
         val requestFilePaths = sourceToRepeat?.optJSONArray("file_paths")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFilePaths.toList()
         val requestFileMimes = sourceToRepeat?.optJSONArray("file_mimes")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileMimes.toList()
+        // Capture manifests, not files: legacy file_paths and image_path are classified
+        // by the worker against the cloned message before any composer mutation.
         val requestOpenRouterAttachments = if (provider == "openrouter") {
-            try {
-                if (sourceToRepeat != null) resolveOpenRouterAttachments(sourceToRepeat)
-                else prepareOpenRouterComposerAttachments()
-            } catch (e: Exception) {
-                status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл")
-                return
+            if (sourceToRepeat != null) {
+                sourceToRepeat.optJSONArray("attachments")?.let { manifest ->
+                    (0 until manifest.length()).mapNotNull { i ->
+                        manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) }
+                    }
+                }.orEmpty()
+            } else {
+                attachedOpenRouterAttachments.toList()
             }
         } else emptyList()
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
@@ -2314,14 +2318,18 @@ class MainActivity : ComponentActivity() {
         }
         val requestImagePath = imagePath
         val requestImageFileId = imageFileId
-        if(!regenerate && text.isBlank() && requestImageFileId==null && requestFileIds.isEmpty() && requestOpenRouterAttachments.isEmpty()) return
+        if(!regenerate && text.isBlank() && requestImageFileId==null &&
+            requestFileIds.isEmpty() && requestFilePaths.isEmpty() &&
+            imagePath == null && requestOpenRouterAttachments.isEmpty()) return
         if(regenerate && text.isBlank()) return
 
         val modelDefault = if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
         val model=prefs.getString("model",modelDefault) ?: modelDefault
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
-        val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId!=null || requestOpenRouterAttachments.isNotEmpty()
+        val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId != null ||
+            (provider == "openrouter" && (requestFilePaths.isNotEmpty() || imagePath != null)) ||
+            requestOpenRouterAttachments.isNotEmpty()
         val autoSelected = effortPref=="auto"
         val taskClass = classifyTask(text, hasAttachments)
         val baselineAutoEffort = autoEffortHeuristic(text,hasAttachments)
@@ -2366,7 +2374,8 @@ class MainActivity : ComponentActivity() {
             if(fileSizes.length()>0) put("file_sizes",fileSizes)
             if(filePaths.length()>0) put("file_paths",filePaths)
             if(fileMimes.length()>0) put("file_mimes",fileMimes)
-            requestImagePath?.takeIf{File(it).isFile}?.let{path->put("image_path",path)}
+            requestImagePath?.takeIf { provider == "openrouter" || File(it).isFile }
+                ?.let { path -> put("image_path", path) }
             requestImageFileId?.let{fid->put("image_file_id",fid)}
             pendingImageName?.takeIf{it.isNotBlank()}?.let{put("image_name",it)}
             pendingImageMime?.takeIf{it.isNotBlank()}?.let{put("image_mime",it)}
