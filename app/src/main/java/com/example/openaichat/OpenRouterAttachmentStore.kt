@@ -134,6 +134,7 @@ object OpenRouterAttachmentStore {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
                         val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
                         var entryBytes = 0L
+                        try {
                         local.outputStream().use { out ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
@@ -143,7 +144,7 @@ object OpenRouterAttachmentStore {
                                 if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
                                 out.write(buffer, 0, n)
                             }
-                        }
+                        } catch (e: Exception) { local.delete(); throw e }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
                         else {
                             try {
@@ -226,6 +227,7 @@ object OpenRouterAttachmentStore {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
                         val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
                         var entryBytes = 0L
+                        try {
                         local.outputStream().use { out ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
@@ -235,7 +237,7 @@ object OpenRouterAttachmentStore {
                                 if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
                                 out.write(buffer, 0, n)
                             }
-                        }
+                        } catch (e: Exception) { local.delete(); throw e }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
                         else {
                             try {
