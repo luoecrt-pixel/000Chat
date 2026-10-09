@@ -2475,6 +2475,7 @@ class MainActivity : ComponentActivity() {
         if (provider == "openrouter") openRouterModelPreflightCall.getAndSet(null)?.cancel()
         val requestGeneration = activeResponseState.nextGeneration()
         val startedAt = SystemClock.elapsedRealtime()
+        val requestWallStartedAt = System.currentTimeMillis()
 
         val text = sourceToRepeat?.optString("text") ?: input.text.toString().trim()
         val imagePath = sourceToRepeat?.optString("image_path")?.takeIf { it.isNotBlank() } ?: pendingImagePath
@@ -2622,7 +2623,7 @@ class MainActivity : ComponentActivity() {
                         activeRequestRegenerate = regenerate
                         activeResponsePersistence.setActiveResponse(
                             requestChatId, responseId = null, requestId = localRequestId,
-                            text = "", status = "starting", startedAt = System.currentTimeMillis(),
+                            text = "", status = "starting", startedAt = requestWallStartedAt,
                             effortPref = effortPref, effectiveEffort = actualEffort,
                             autoSelected = autoSelected, promptChars = text.length,
                             attachments = requestOpenRouterAttachments.size,
@@ -2717,7 +2718,7 @@ class MainActivity : ComponentActivity() {
             requestId = localRequestId,
             text = "",
             status = "starting",
-            startedAt = System.currentTimeMillis(),
+            startedAt = requestWallStartedAt,
             effortPref = effortPref,
             effectiveEffort = actualEffort,
             autoSelected = autoSelected,
@@ -2872,6 +2873,7 @@ class MainActivity : ComponentActivity() {
             var lastUiUpdate=0L
             var lastActiveCheckpoint=0L
             try {
+                ResponseDeadlinePolicy.boundCall(call, requestWallStartedAt, System.currentTimeMillis())
                 call.execute().use { response ->
                     requestId=response.header("x-request-id")
                     activeResponsePersistence.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
@@ -3485,8 +3487,7 @@ class MainActivity : ComponentActivity() {
         val requestId = active.optString("request_id").takeIf { it.isNotBlank() && it != "null" } ?: return
         if (chatId.isBlank() || responseId.isBlank()) return
 
-        val started = SystemClock.elapsedRealtime()
-        val deadline = started + BackgroundRecoveryPolicy.MAX_RECOVERY_MS
+        val requestStartedAt = active.optLong("started_at", -1L)
         var retryDelayMs = 1_500L
 
         while (!executor.isShutdown) {
@@ -3501,6 +3502,10 @@ class MainActivity : ComponentActivity() {
                 activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 return
             }
+            if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
+                finishBackgroundRecovery(chatId, "Истёк сквозной лимит ответа (5 часов)", requestId)
+                return
+            }
 
             val cursor = current.optLong("last_sequence_number", -1L)
             var responseState = ResponseEventState(
@@ -3513,7 +3518,8 @@ class MainActivity : ComponentActivity() {
                 val result = resumableResponseClient.stream(
                     responseId = responseId,
                     startingAfter = cursor,
-                    onCallCreated = { call -> activeResumeCalls[chatId] = call }
+                    onCallCreated = { call -> activeResumeCalls[chatId] = call },
+                    startedAtEpochMs = requestStartedAt
                 ) { event ->
                     val sequence = event.optLong("sequence_number", -1L)
                     if (sequence >= 0L) {
@@ -3644,7 +3650,7 @@ class MainActivity : ComponentActivity() {
                     expectedRequestId = requestId
                 )
 
-                if (SystemClock.elapsedRealtime() >= deadline) {
+                if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                     finishBackgroundRecovery(
                         chatId,
                         "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
@@ -3722,7 +3728,7 @@ class MainActivity : ComponentActivity() {
                     "response_id" to responseId,
                     "error" to (e.message ?: e.toString()).take(400)
                 ))
-                if (SystemClock.elapsedRealtime() >= deadline) {
+                if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                     finishBackgroundRecovery(
                         chatId,
                         "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
