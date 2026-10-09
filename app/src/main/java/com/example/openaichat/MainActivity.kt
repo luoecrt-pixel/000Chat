@@ -2263,9 +2263,12 @@ class MainActivity : ComponentActivity() {
             status.text = "История содержит вложения OpenRouter: этот контекст нельзя незаметно переслать в OpenAI. Создайте новый чат."
             return
         }
-        // A missing Responses chain cannot safely turn earlier OpenAI file/image inputs
-        // into plain text. Reject before changing generation, persistence, or composer.
-        if (provider == "openai" && currentResponseId == null && chat.any { message ->
+        // An ID is only reusable when the last assistant belongs to OpenAI.
+        // Otherwise reconstruct history, but never silently discard its typed files.
+        val usableOpenAiChain = currentResponseId != null &&
+            chat.lastOrNull { it.optString("role") == "assistant" }
+                ?.optString("provider") == "openai"
+        if (provider == "openai" && !usableOpenAiChain && chat.any { message ->
                 message.optString("role") == "user" &&
                     ((message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
                         message.optString("image_file_id").let { it.isNotBlank() && it != "null" })
@@ -2558,7 +2561,7 @@ class MainActivity : ComponentActivity() {
 
         val textObj=JSONObject().put("verbosity",verbosity)
         val inputArr=JSONArray()
-        if (currentResponseId == null && chat.size > 1) {
+        if (!usableOpenAiChain && chat.size > 1) {
             chat.dropLast(1).forEach { message ->
                 val role = message.optString("role")
                 val messageText = message.optString("text").trim()
@@ -2594,9 +2597,7 @@ class MainActivity : ComponentActivity() {
         if (configUpdateEffort == null) {
             body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",800000)))
         }
-        val latestAssistantProvider = chat.dropLast(1).lastOrNull { it.optString("role") == "assistant" }
-            ?.optString("provider").orEmpty()
-        if (latestAssistantProvider == "openai") {
+        if (usableOpenAiChain) {
             currentResponseId?.let { body.put("previous_response_id", it) }
         }
 
