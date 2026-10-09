@@ -4241,7 +4241,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (sourceProvider == "openrouter") {
-            // Work on a local copy that belongs to the source draft, never on current composer UI.
+            // Classify the private camera file for the source draft, never the current composer.
             executor.execute {
                 try {
                     val attachment = OpenRouterAttachmentStore.classifyLocalFile(this, file, file.name, "image/jpeg")
