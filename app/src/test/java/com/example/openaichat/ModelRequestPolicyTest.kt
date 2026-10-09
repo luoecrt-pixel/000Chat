@@ -28,11 +28,18 @@ class ModelRequestPolicyTest {
         assertEquals("concise", reasoning.getString("summary"))
     }
 
-    @Test fun existingOpenRouterEffortNormalizationIsExplicitlyShown() {
-        assertEquals("⚡ auto → medium", ModelRequestPolicy.effortBadge("openrouter", "auto"))
-        assertEquals("⚡ xhigh → high", ModelRequestPolicy.effortBadge("openrouter", "xhigh"))
-        assertEquals("⚡ max → high", ModelRequestPolicy.effortBadge("openrouter", "max"))
-        assertEquals("⚡ xhigh", ModelRequestPolicy.effortBadge("openai", "xhigh"))
-        assertEquals("⚡ high", ModelRequestPolicy.effortBadge("openrouter", "high"))
+    @Test fun manualEffortBadgeMatchesTheSelectedLevel() {
+        for (effort in listOf("low", "medium", "high", "xhigh", "max")) {
+            assertEquals("⚡ $effort", ModelRequestPolicy.effortBadge(effort))
+        }
+    }
+
+    @Test fun autoBadgeShowsOnlyAResolvedRequestLevel() {
+        assertEquals("⚡ auto", ModelRequestPolicy.effortBadge("auto"))
+        assertEquals("⚡ auto", ModelRequestPolicy.effortBadge("auto", ""))
+        assertEquals("⚡ auto → low", ModelRequestPolicy.effortBadge("auto", "low"))
+        assertEquals("⚡ auto → xhigh", ModelRequestPolicy.effortBadge("auto", "xhigh"))
+        assertEquals("⚡ auto → max", ModelRequestPolicy.effortBadge("auto", "max"))
+        assertEquals("⚡ high", ModelRequestPolicy.effortBadge("high", "medium"))
     }
 }
