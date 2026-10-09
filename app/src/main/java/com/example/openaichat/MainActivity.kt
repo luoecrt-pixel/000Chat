@@ -1878,26 +1878,37 @@ class MainActivity : ComponentActivity() {
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
-        if (activeRequestId != null) {
-            chatDb.stopActiveRequestOnce(chatId, activeRequestId)
-        } else {
+        val stopped = activeRequestId?.let { chatDb.stopActiveRequestOnce(chatId, it) } ?: false
+        if (activeRequestId == null) {
             activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
         }
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
-        if(responseId!=null){
-            executor.execute{
-                try{
-                    val key=secure.getApiKey()
-                    val req=Request.Builder()
-                        .url("https://api.openai.com/v1/responses/$responseId/cancel")
-                        .addHeader("Authorization","Bearer $key")
-                        .post("{}".toRequestBody("application/json".toMediaType()))
-                        .build()
-                    pollingClient.newCall(req).execute().use{resp->
-                        diagnostics.log("background_response_cancel",mapOf("chat_id" to chatId,"response_id" to responseId,"status" to resp.code))
+        // OpenAI only permits /cancel for background=true Responses.
+        if (stopped && active?.optBoolean("background_enabled", false) == true &&
+            responseId != null && activeRequestId != null) {
+            // Reconciliation has no UI callback and cannot resurrect chat messages.
+            // Capture only the request identity; no API keys enter SQLite or logs.
+            executor.execute {
+                try {
+                    val key = secure.getApiKey()
+                    if (key.isBlank()) return@execute
+                    val result = OpenAiCancelReconciler(pollingClient).reconcile(responseId, key) { snapshot ->
+                        chatDb.reconcileStoppedOpenAiResponse(
+                            chatId, activeRequestId, responseId, snapshot
+                        )
                     }
-                }catch(e:Exception){
-                    diagnostics.log("background_response_cancel_failed",mapOf("chat_id" to chatId,"response_id" to responseId,"error" to (e.message?:e.toString()).take(300)))
+                    diagnostics.log("background_response_cancel_reconciled", mapOf(
+                        "chat_id" to chatId, "response_id" to responseId,
+                        "cancel_http_status" to result.cancelStatus,
+                        "retrieve_count" to result.retrievals,
+                        "provider_status" to result.terminalStatus,
+                        "usage_present" to result.hasUsage
+                    ))
+                } catch (e: Exception) {
+                    diagnostics.log("background_response_cancel_failed", mapOf(
+                        "chat_id" to chatId, "response_id" to responseId,
+                        "error_type" to e.javaClass.simpleName
+                    ))
                 }
             }
         }
@@ -2600,15 +2611,20 @@ class MainActivity : ComponentActivity() {
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
                 }
                 if(!canContinueInBackground || userStopped){
-                    chatDb.recordRequestAccounting(
-                        chatId = requestChatId,
-                        localRequestId = localRequestId,
-                        status = if (userStopped) "cancelled" else if (completionState == "disconnected") "disconnected" else "failed",
-                        responseId = newId,
-                        httpRequestId = requestId,
-                        usage = responseState.usage,
-                        error = (e.message ?: e.toString()).take(1200)
-                    )
+                    // Local Stop was persisted atomically above. A cancelled HTTP
+                    // stream is not evidence that OpenAI actually cancelled
+                    // or billed the response; the /cancel + GET path owns that.
+                    if (!userStopped) {
+                        chatDb.recordRequestAccounting(
+                            chatId = requestChatId,
+                            localRequestId = localRequestId,
+                            status = if (completionState == "disconnected") "disconnected" else "failed",
+                            responseId = newId,
+                            httpRequestId = requestId,
+                            usage = responseState.usage,
+                            error = (e.message ?: e.toString()).take(1200)
+                        )
+                    }
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
                         eventType = "request_failed",
