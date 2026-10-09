@@ -172,6 +172,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var attachRow: LinearLayout
     private var vsListArea: LinearLayout? = null
     private var vsStatusLine: TextView? = null
+    private var vsDialog: AlertDialog? = null
+    private val vsUiGeneration = AtomicInteger(0)
+    private var pendingVectorStorePickerId: String? = null
+    private val vsControlClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(12, TimeUnit.SECONDS)
+        .build()
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
     private lateinit var modelBadge: TextView
@@ -269,6 +277,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveSourcePath = savedInstanceState?.getString("pending_save_path")
         pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
         pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
+        pendingVectorStorePickerId = savedInstanceState?.getString("pending_vector_store_picker")
         pendingPickerChatId = savedInstanceState?.getString("pending_picker_chat")
         pendingPickerProvider = savedInstanceState?.getString("pending_picker_provider")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -320,6 +329,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveSourcePath?.let { outState.putString("pending_save_path", it) }
         pendingSaveFilename?.let { outState.putString("pending_save_name", it) }
         pendingSaveMime?.let { outState.putString("pending_save_mime", it) }
+        pendingVectorStorePickerId?.let { outState.putString("pending_vector_store_picker", it) }
         pendingPickerChatId?.let { outState.putString("pending_picker_chat", it) }
         pendingPickerProvider?.let { outState.putString("pending_picker_provider", it) }
         super.onSaveInstanceState(outState)
@@ -4823,78 +4833,146 @@ class MainActivity : ComponentActivity() {
     // ---------- vector store management ----------
     private fun vectorStoreId():String? = prefs.getString("vector_store","")?.trim()?.takeIf{it.isNotBlank()}
 
-    private fun showVectorStoreManager(){
-        val container=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL; setPadding(dp(20),dp(10),dp(20),dp(10))}
-        val statusLine=TextView(this).apply{this.text="Загрузка…";setTextColor(Color.GRAY);textSize=12f}
-        val listArea=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
+
+    private data class VectorStoreListResult(
+        val entries: List<Pair<String, String>>,
+        val hasMore: Boolean,
+        val unresolvedNames: Int
+    )
+
+    private fun showVectorStoreManager() {
+        vsDialog?.dismiss()
+        val generation = vsUiGeneration.incrementAndGet()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+        val statusLine = TextView(this).apply { text = "Загрузка…"; setTextColor(Color.GRAY); textSize = 12f }
+        val listArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.addView(statusLine)
         container.addView(listArea)
-        vsListArea=listArea
-        vsStatusLine=statusLine
-
-        val dialog=AlertDialog.Builder(this)
+        vsListArea = listArea
+        vsStatusLine = statusLine
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Файлы Vector Store")
-            .setView(ScrollView(this).apply{addView(container)})
-            .setPositiveButton("+ Добавить файл",null)
-            .setNegativeButton("Закрыть",null)
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("+ Добавить файл", null)
+            .setNegativeButton("Закрыть", null)
             .create()
-        dialog.setOnShowListener{
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener{
-                val existing=vectorStoreId()
-                if(existing==null){
-                    statusLine.text="Создаю Vector Store…"
-                    executor.execute{
-                        try{
-                            val newId=createVectorStore("Astra Files")
-                            prefs.edit().putString("vector_store",newId).apply()
-                            runOnUiThread{ pickFileForVectorStore() }
-                        }catch(e:Exception){ runOnUiThread{statusLine.text="Ошибка создания: ${e.message}"} }
+        vsDialog = dialog
+        dialog.setOnDismissListener {
+            if (vsDialog === dialog) {
+                vsUiGeneration.incrementAndGet()
+                vsDialog = null
+                vsListArea = null
+                vsStatusLine = null
+            }
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val existing = vectorStoreId()
+                if (existing != null) {
+                    pickFileForVectorStore()
+                } else {
+                    statusLine.text = "Создаю Vector Store…"
+                    executor.execute {
+                        try {
+                            val newId = createVectorStore("Astra Files")
+                            runOnUiThread {
+                                if (vsUiGeneration.get() != generation || !dialog.isShowing) {
+                                    diagnostics.log("vector_store_late_create", mapOf("store_id" to newId))
+                                    return@runOnUiThread
+                                }
+                                prefs.edit().putString("vector_store", newId).apply()
+                                pickFileForVectorStore()
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                if (vsUiGeneration.get() == generation && dialog.isShowing) {
+                                    statusLine.text = "Ошибка создания: " + (e.message ?: "неизвестная")
+                                }
+                            }
+                        }
                     }
-                } else pickFileForVectorStore()
+                }
             }
         }
         dialog.show()
-        val vsId=vectorStoreId()
-        if(vsId==null) statusLine.text="Vector Store ещё не создан — нажмите «Добавить файл»"
+        val vsId = vectorStoreId()
+        if (vsId == null) statusLine.text = "Vector Store ещё не создан — нажмите «Добавить файл»"
         else renderVectorStoreList(vsId)
     }
 
-    private fun renderVectorStoreList(vsId:String){
-        runOnUiThread{
-            vsStatusLine?.text="Загрузка списка файлов…"
-            executor.execute{
-                try{
-                    val files=listVectorStoreFiles(vsId)
-                    runOnUiThread{
-                        val area=vsListArea ?: return@runOnUiThread
+    private fun renderVectorStoreList(vsId: String) {
+        runOnUiThread {
+            val generation = vsUiGeneration.get()
+            val statusLine = vsStatusLine ?: return@runOnUiThread
+            val area = vsListArea ?: return@runOnUiThread
+            statusLine.text = "Загрузка списка файлов…"
+            executor.execute {
+                try {
+                    val listed = listVectorStoreFiles(vsId)
+                    runOnUiThread {
+                        if (vsUiGeneration.get() != generation || vsDialog?.isShowing != true ||
+                            vectorStoreId() != vsId || vsListArea !== area) return@runOnUiThread
                         area.removeAllViews()
-                        if(files.isEmpty()){
-                            area.addView(TextView(this).apply{this.text="Файлов пока нет";setTextColor(Color.GRAY);textSize=13f})
-                        }
-                        files.forEach{(fid,name)->
-                            val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,dp(6))}
-                            row.addView(TextView(this).apply{this.text=name;textSize=14f;setTextColor(Color.WHITE)}, LinearLayout.LayoutParams(0,-2,1f))
-                            row.addView(TextView(this).apply{
-                                this.text="✕";setTextColor(Color.rgb(210,120,120));setPadding(dp(12),dp(6),dp(6),dp(6))
-                                setOnClickListener{
-                                    executor.execute{
-                                        try{ removeFileFromVectorStore(vsId,fid) }catch(_:Exception){}
-                                        renderVectorStoreList(vsId)
+                        if (listed.entries.isEmpty()) area.addView(TextView(this).apply {
+                            text = "Файлов пока нет"; setTextColor(Color.GRAY); textSize = 13f
+                        })
+                        listed.entries.forEach { (fid, name) ->
+                            val row = LinearLayout(this).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                setPadding(0, dp(6), 0, dp(6))
+                            }
+                            row.addView(TextView(this).apply {
+                                text = name; textSize = 14f; setTextColor(Color.WHITE)
+                            }, LinearLayout.LayoutParams(0, -2, 1f))
+                            row.addView(TextView(this).apply {
+                                text = "✕"; setTextColor(Color.rgb(210, 120, 120))
+                                setPadding(dp(12), dp(6), dp(6), dp(6))
+                                setOnClickListener {
+                                    executor.execute {
+                                        try {
+                                            removeFileFromVectorStore(vsId, fid)
+                                            runOnUiThread {
+                                                if (vsUiGeneration.get() == generation &&
+                                                    vsDialog?.isShowing == true && vectorStoreId() == vsId)
+                                                    renderVectorStoreList(vsId)
+                                            }
+                                        } catch (e: Exception) {
+                                            runOnUiThread {
+                                                if (vsUiGeneration.get() == generation && vsDialog?.isShowing == true)
+                                                    statusLine.text = "Удаление не удалось: " + (e.message ?: "неизвестная")
+                                            }
+                                        }
                                     }
                                 }
                             })
                             area.addView(row)
                         }
-                        vsStatusLine?.text="Vector Store: $vsId"
+                        val incomplete = if (listed.hasMore) " · показаны первые " +
+                            listed.entries.size + " (список неполный)" else ""
+                        val unnamed = if (listed.unresolvedNames > 0) " · часть имён недоступна: " +
+                            listed.unresolvedNames else ""
+                        statusLine.text = "Vector Store: " + vsId + incomplete + unnamed
                     }
-                }catch(e:Exception){
-                    runOnUiThread{ vsStatusLine?.text="Ошибка загрузки: ${e.message}" }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        if (vsUiGeneration.get() == generation && vsDialog?.isShowing == true)
+                            statusLine.text = "Ошибка загрузки: " + (e.message ?: "неизвестная")
+                    }
                 }
             }
         }
     }
 
     private fun pickFileForVectorStore(){
+        pendingVectorStorePickerId = vectorStoreId()
+        if (pendingVectorStorePickerId == null) {
+            vsStatusLine?.text = "Сначала выберите Vector Store"
+            return
+        }
         val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{addCategory(Intent.CATEGORY_OPENABLE);type="*/*"}
         launchActivityForResult(i, pickVectorStoreFile)
     }
@@ -5033,16 +5111,28 @@ class MainActivity : ComponentActivity() {
         }
         if(r==pickVectorStoreFile){
             val uri=d.data ?: return
-            val vsId=vectorStoreId()
-            if(vsId==null){ vsStatusLine?.text="Сначала создайте Vector Store"; return }
+            val vsId = pendingVectorStorePickerId.also { pendingVectorStorePickerId = null }
+            if (vsId.isNullOrBlank() || vectorStoreId() != vsId) {
+                status.text = "Vector Store изменился — выберите файл заново"
+                return
+            }
+            val generation = vsUiGeneration.get()
             vsStatusLine?.text="Загружаю файл…"
-            executor.execute{
-                try{
-                    val (fileId,_)=uploadFileForVectorStore(uri)
-                    attachFileToVectorStore(vsId,fileId)
-                    runOnUiThread{ renderVectorStoreList(vsId) }
-                }catch(e:Exception){
-                    runOnUiThread{ vsStatusLine?.text="Ошибка: ${e.message}" }
+            executor.execute {
+                try {
+                    val (fileId, _) = uploadFileForVectorStore(uri)
+                    attachFileToVectorStore(vsId, fileId)
+                    runOnUiThread {
+                        if (vsUiGeneration.get() == generation && vsDialog?.isShowing == true &&
+                            vectorStoreId() == vsId) renderVectorStoreList(vsId)
+                        else status.text = "Файл добавлен в исходный Vector Store: " + vsId
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        if (vsUiGeneration.get() == generation && vsDialog?.isShowing == true)
+                            vsStatusLine?.text = "Ошибка: " + (e.message ?: "неизвестная")
+                        else status.text = "Ошибка загрузки Vector Store"
+                    }
                 }
             }
             return
