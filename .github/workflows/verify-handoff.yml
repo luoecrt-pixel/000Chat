@@ -3,7 +3,10 @@ name: Verify handoff
 on:
   pull_request:
     paths:
-      - NEXT_AGENT_HANDOFF.md
+      # GitHubMergeCheckPolicy requires this check on every Markdown-only PR.
+      # Previously docs/foo.md was not eligible to run it, blocking safe merge.
+      - '*.md'
+      - '**/*.md'
       - tools/**
 
 permissions:
