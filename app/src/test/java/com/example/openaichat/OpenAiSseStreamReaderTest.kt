@@ -78,7 +78,8 @@ class OpenAiSseStreamReaderTest {
             """{"type":"response.completed","response":{"id":"resp","output":[{"type":"message","content":[{"type":"output_text","text":"terminal text"}]}]}}"""
         ))
         assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
-        assertTrue(state.text.isEmpty())
+        // Terminal response is the authoritative fallback when no deltas arrived.
+        assertEquals("terminal text", state.text)
         assertEquals("terminal text", OpenAiSseStreamReader.terminalOutputText(state.terminalResponse))
     }
 

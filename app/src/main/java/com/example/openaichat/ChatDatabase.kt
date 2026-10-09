@@ -487,15 +487,25 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if (!exists) return@transaction
             val known = mutableSetOf<String>()
             var nextPosition = 0
+            var existingCount = 0
             db.query(MESSAGE_TABLE, arrayOf("role","request_id","position"),
                 "chat_id=?", arrayOf(id), null, null, "position ASC").use { cursor ->
                 while(cursor.moveToNext()) {
+                    existingCount++
                     val role = cursor.getString(0).orEmpty()
                     val requestId = cursor.getString(1).orEmpty()
                     if (requestId.isNotBlank()) known.add("$role|$requestId")
                     nextPosition = maxOf(nextPosition, cursor.getInt(2) + 1)
                 }
             }
+            // Reject a truly stale, shorter snapshot if it contributes no new user request.
+            // A snapshot with a different new request at the same position is still appendable.
+            val hasNewUser = messages.any { item ->
+                val requestId = item.optString("request_id")
+                item.optString("role") == "user" && requestId.isNotBlank() &&
+                    requestId != "null" && "user|$requestId" !in known
+            }
+            if (!hasNewUser && messages.size < existingCount) return@transaction
             // A Worker may have inserted an assistant at position N while the UI
             // produced another user at position N. Append by request identity,
             // not by the count or stale positional alignment.

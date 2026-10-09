@@ -129,7 +129,7 @@ object RichTextRenderer {
             }
             val start = i
             i++
-            while (i < source.length && source[i] != '[' && source[i] != '`' && source[i] != '*' && source[i] != '_' && source[i] != '~') i++
+            while (i < source.length && source[i] != '[' && source[i] != '`' && source[i] != '*' && source[i] != '_' && source[i] != '~' && source[i] != '\\') i++
             appendPlain(start, i)
         }
 
