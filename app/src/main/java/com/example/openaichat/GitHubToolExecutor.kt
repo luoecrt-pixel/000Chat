@@ -1,6 +1,7 @@
 package com.example.openaichat
 
 import android.net.Uri
+import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
