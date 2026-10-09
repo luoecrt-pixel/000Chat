@@ -2141,7 +2141,34 @@ class MainActivity : ComponentActivity() {
         return true
     }
     private fun sendMessage(regenerate:Boolean) {
+        if (stop.visibility == View.VISIBLE || preparingZipAttachments || pendingUploads.get() > 0) {
+            status.text = "Дождитесь завершения или остановите текущую операцию"
+            return
+        }
+        val sourceToRepeat = if (regenerate) {
+            chat.lastOrNull { it.optString("role") == "user" }?.let { JSONObject(it.toString()) }
+                ?: run { status.text = "В этом чате нечего повторять"; return }
+        } else null
         val provider = prefs.getString("provider", "openai") ?: "openai"
+        if (provider == "openai" && prefs.getString("text_format","text") == "json_schema") {
+            val schema = prefs.getString("json_schema","").orEmpty().trim()
+            if (schema.isBlank() || try { JSONObject(schema); false } catch (_: Exception) { true }) {
+                status.text = "Сначала укажите корректную JSON Schema в панели «Мышление и ответ»"
+                return
+            }
+        }
+        if (provider == "openai" && attachedOpenRouterAttachments.isNotEmpty() && !regenerate) {
+            status.text = "Есть локальные вложения OpenRouter. Выберите OpenRouter или начните новый чат — OpenAI не получил бы их."
+            return
+        }
+        if (provider == "openai" && chat.any { msg ->
+                msg.optString("role") == "user" &&
+                    (msg.optJSONArray("attachments")?.length() ?: 0) > 0 &&
+                    msg.optString("provider") == "openrouter"
+            }) {
+            status.text = "История содержит вложения OpenRouter: этот контекст нельзя незаметно переслать в OpenAI. Создайте новый чат."
+            return
+        }
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
@@ -2160,18 +2187,19 @@ class MainActivity : ComponentActivity() {
         val requestGeneration = activeResponseState.nextGeneration()
         val startedAt = SystemClock.elapsedRealtime()
 
-        var text = if(regenerate) lastUserText else input.text.toString().trim()
-        if(regenerate) restoreLastUserAttachments()
-
-        val imagePath=pendingImagePath
-        val imageFileId=pendingImageFileId
-        val requestFileIds = attachedFileIds.toList()
-        val requestFileNames = attachedFileNames.toList()
-        val requestFileSizes = attachedFileSizes.toList()
-        val requestFilePaths = attachedFilePaths.toList()
-        val requestFileMimes = attachedFileMimes.toList()
+        val text = sourceToRepeat?.optString("text") ?: input.text.toString().trim()
+        val imagePath = sourceToRepeat?.optString("image_path")?.takeIf { it.isNotBlank() } ?: pendingImagePath
+        val imageFileId = sourceToRepeat?.optString("image_file_id")?.takeIf { it.isNotBlank() && it != "null" } ?: pendingImageFileId
+        val requestFileIds = sourceToRepeat?.optJSONArray("file_ids")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileIds.toList()
+        val requestFileNames = sourceToRepeat?.optJSONArray("file_names")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileNames.toList()
+        val requestFileSizes = sourceToRepeat?.optJSONArray("file_sizes")?.let { a -> (0 until a.length()).map { a.optLong(it) } } ?: attachedFileSizes.toList()
+        val requestFilePaths = sourceToRepeat?.optJSONArray("file_paths")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFilePaths.toList()
+        val requestFileMimes = sourceToRepeat?.optJSONArray("file_mimes")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileMimes.toList()
         val requestOpenRouterAttachments = if (provider == "openrouter") {
-            try { prepareOpenRouterComposerAttachments() } catch (e: Exception) {
+            try {
+                if (sourceToRepeat != null) resolveOpenRouterAttachments(sourceToRepeat)
+                else prepareOpenRouterComposerAttachments()
+            } catch (e: Exception) {
                 status.text = "Ошибка вложения: " + (e.message ?: "не удалось подготовить файл")
                 return
             }
@@ -2243,10 +2271,11 @@ class MainActivity : ComponentActivity() {
             if (provider == "openrouter" && requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
         }
 
-        if(!regenerate) {
-            addBubble("Ты",text,true, message=sentUserMessage)
-            chat.add(sentUserMessage)
-            persistCurrentChat()
+        // Repeat creates a new user request under current settings without touching a newer draft.
+        addBubble("Ты",text,true, message=sentUserMessage)
+        chat.add(sentUserMessage)
+        persistCurrentChat()
+        if (!regenerate) {
             input.setText("")
             clearComposerState(requestChatId)
         }
@@ -2365,7 +2394,11 @@ class MainActivity : ComponentActivity() {
         if (configUpdateEffort == null) {
             body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",800000)))
         }
-        currentResponseId?.let { body.put("previous_response_id",it) }
+        val latestAssistantProvider = chat.dropLast(1).lastOrNull { it.optString("role") == "assistant" }
+            ?.optString("provider").orEmpty()
+        if (latestAssistantProvider == "openai") {
+            currentResponseId?.let { body.put("previous_response_id", it) }
+        }
 
         when(prefs.getString("text_format","text")){
             "json_object" -> textObj.put("format",JSONObject().put("type","json_object"))
