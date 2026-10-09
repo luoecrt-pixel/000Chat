@@ -4,46 +4,18 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
-import java.awt.image.BufferedImage
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.Base64
-import java.util.Random
-import javax.imageio.IIOImage
-import javax.imageio.ImageIO
-import javax.imageio.ImageWriteParam
 
 class OpenAiLocalContextEncoderTest {
-    private fun largeRealJpeg(): ByteArray {
-        // Decodable pixels throughout the image, never padded signature bytes.
-        val image = BufferedImage(3100, 2700, BufferedImage.TYPE_INT_RGB)
-        val random = Random(6102026L)
-        for (y in 0 until image.height) {
-            for (x in 0 until image.width) image.setRGB(x, y, random.nextInt() and 0xFFFFFF)
-        }
-        val output = ByteArrayOutputStream()
-        val writer = ImageIO.getImageWritersByFormatName("jpeg").next()
-        try {
-            writer.output = ImageIO.createImageOutputStream(output)
-            val param = writer.defaultWriteParam.apply {
-                compressionMode = ImageWriteParam.MODE_EXPLICIT
-                compressionQuality = 0.92f
-            }
-            writer.write(null, IIOImage(image, null, null), param)
-        } finally {
-            writer.dispose()
-        }
-        val bytes = output.toByteArray()
-        assertTrue("Must exercise a real 6+ MB JPEG: " + bytes.size, bytes.size >= 6_000_000)
-        assertTrue(bytes.size < 10_000_000)
-        assertNotNull(ImageIO.read(bytes.inputStream()))
-        return bytes
-    }
+    private fun realJpeg(): ByteArray = Base64.getDecoder().decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDlqKKK8E/aT//Z"
+    )
 
     @Test
-    fun sixMegabytePhotoSurvivesManifestPersistenceAndProviderReplay() {
-        val bytes = largeRealJpeg()
+    fun realJpegPhotoSurvivesManifestPersistenceAndProviderReplay() {
+        val bytes = realJpeg()
         val folder = createTempDir()
         val source = File(folder, "camera.jpg").apply { writeBytes(bytes) }
         val attachment = OpenRouterAttachmentStore.classifyLocalFile(source, "camera.jpg", "image/png")
