@@ -16,6 +16,7 @@ object BoundedAttachmentCopy {
     ): Long {
         require(maxBytes > 0)
         var total = 0L
+        var emptyReads = 0
         try {
             target.outputStream().use { output ->
                 val buffer = ByteArray(64 * 1024)
@@ -23,6 +24,11 @@ object BoundedAttachmentCopy {
                     if (!shouldContinue()) throw IOException("Подготовка вложения отменена")
                     val n = source.read(buffer)
                     if (n < 0) break
+                    if (n == 0) {
+                        if (++emptyReads > 100) throw IOException("Источник вложения не отдаёт данные")
+                        continue
+                    }
+                    emptyReads = 0
                     if (total > maxBytes - n) throw IOException(
                         "Вложение превышает лимит " + (maxBytes / 1024 / 1024) + " МБ; оригинал не изменён"
                     )
