@@ -191,6 +191,58 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun newChatKeepsOldDraftAndStartsWithEmptyComposer() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.newChat()
+            val source = activity.currentChatIdForTesting()
+            val input = activity.window.decorView
+                .let { root ->
+                    fun findEdit(v: android.view.View): android.widget.EditText? {
+                        if (v is android.widget.EditText && v.hint?.toString() == "Сообщение…") return v
+                        if (v is android.view.ViewGroup) for (i in 0 until v.childCount)
+                            findEdit(v.getChildAt(i))?.let { return it }
+                        return null
+                    }
+                    findEdit(root) ?: throw AssertionError("No composer")
+                }
+            input.setText("черновик исходного чата")
+            activity.newChat()
+            assertEquals("", input.text.toString())
+            val sourceState = JSONObject(activity.prefs.getString("composer_state_$source", "{}")!!)
+            assertEquals("черновик исходного чата", sourceState.getString("text"))
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun concurrentSourceCompletionsKeepBothAttachmentsAndOriginalText() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.newChat()
+            val source = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString("composer_state_$source", JSONObject().put("text","newer draft").toString()).commit()
+            val a = OpenRouterLocalAttachment("a","a.txt","text","/tmp/a","text/plain",2L,"sha-a")
+            val b = OpenRouterLocalAttachment("b","b.txt","text","/tmp/b","text/plain",2L,"sha-b")
+            val gate = CountDownLatch(1)
+            val done = CountDownLatch(2)
+            listOf(a,b).forEach { attachment ->
+                Thread {
+                    gate.await()
+                    activity.saveOpenRouterAttachmentsToComposer(source, listOf(attachment))
+                    done.countDown()
+                }.start()
+            }
+            gate.countDown()
+            assertTrue("concurrent writes timed out", done.await(4, TimeUnit.SECONDS))
+            val result = JSONObject(activity.prefs.getString("composer_state_$source", "{}")!!)
+            assertEquals(2, result.getJSONArray("openrouter_attachments").length())
+            assertEquals("newer draft", result.getString("text"))
+        }
+        scenario.close()
+    }
+
+    @Test
     fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->

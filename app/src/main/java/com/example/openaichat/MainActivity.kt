@@ -200,6 +200,7 @@ class MainActivity : ComponentActivity() {
     private val activeGeneratedDownloads = ConcurrentHashMap.newKeySet<String>()
     private val uploadProgress = ConcurrentHashMap<String, Pair<Long, Int>>()
     private val activePendingUploadKeys = ConcurrentHashMap.newKeySet<String>()
+    private val composerMergeLock = Any()
     private val cancelledUploads = ConcurrentHashMap.newKeySet<String>()
     private val openRouterModelModalities = ConcurrentHashMap<String, Set<String>>()
     private val openRouterModelModalitiesRetryAfter = ConcurrentHashMap<String, Long>()
@@ -908,6 +909,9 @@ class MainActivity : ComponentActivity() {
         if(currentChatId()==id){
             activeResponseState.nextGeneration()
             currentCall?.cancel()
+            cancelOpenRouterRequest()
+            openRouterModelPreflightCall.getAndSet(null)?.cancel()
+            cancelPendingGitHubConfirmation()
         }
         activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
@@ -915,8 +919,10 @@ class MainActivity : ComponentActivity() {
         activeResponsePersistence.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId)
         localPaths.forEach(::deleteOwnedLocalFile)
-        clearComposerState(id)
-        chatDb.deleteChat(id)
+        synchronized(composerMergeLock) {
+            clearComposerState(id)
+            chatDb.deleteChat(id)
+        }
         if (currentChatId()==id) {
             val newId = newChatId()
             prefs.edit().putString("current_chat",newId).apply()
@@ -928,7 +934,12 @@ class MainActivity : ComponentActivity() {
             messageAdapter.clearItems()
             toolLabel.text=""
             title.text="Новый чат"
+            lastUserText = ""
+            restoringComposer = true
+            try { input.setText("") } finally { restoringComposer = false }
+            toolStates.clear(); renderToolActivity()
             ensureChatEntry(newId,"Новый чат")
+            setBusy(false)
             status.text="Новый чат"
             requestTelemetryExpanded = false
         }
@@ -1868,6 +1879,8 @@ class MainActivity : ComponentActivity() {
         baselineEffort=null
         lastUserText=""
         clearAttachedSelection()
+        restoringComposer = true
+        try { input.setText("") } finally { restoringComposer = false }
         refreshAttachChips()
         messageAdapter.clearItems()
         toolLabel.text=""
@@ -2061,12 +2074,15 @@ class MainActivity : ComponentActivity() {
         return out.distinctBy { it.id }
     }
 
-    private fun saveOpenRouterAttachmentsToComposer(
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun saveOpenRouterAttachmentsToComposer(
         chatId: String,
         attachments: List<OpenRouterLocalAttachment>,
         completedPending: List<Pair<String, String>> = emptyList()
     ) {
         if (chatId.isBlank()) return
+        synchronized(composerMergeLock) {
+        if (chatDb.getChatTitle(chatId) == null) return
         try {
             val key = composerPrefsKey(chatId)
             val o = try { JSONObject(prefs.getString(key, null).orEmpty()) } catch (_: Exception) { JSONObject() }
@@ -2090,8 +2106,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             o.put("openrouter_attachments", stored).put("pending_uploads", pending).put("saved_at", System.currentTimeMillis())
-            prefs.edit().putString(key, o.toString()).apply()
+            prefs.edit().putString(key, o.toString()).commit()
         } catch (_: Exception) {}
+        }
     }
 
     private fun deleteOpenRouterAttachmentFiles(attachments: List<OpenRouterLocalAttachment>) {
@@ -5126,6 +5143,8 @@ class MainActivity : ComponentActivity() {
         pendingUploadKind:String="file"
     ){
         if(chatId.isBlank()) return
+        synchronized(composerMergeLock) {
+        if (chatDb.getChatTitle(chatId) == null) return
         try{
             val key=composerPrefsKey(chatId)
             val o=try{JSONObject(prefs.getString(key,null).orEmpty())}catch(_:Exception){JSONObject()}
@@ -5152,12 +5171,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
             o.put("file_ids",ids).put("file_names",names).put("file_sizes",sizes).put("file_paths",paths).put("file_mimes",mimes).put("pending_uploads",pending).put("saved_at",System.currentTimeMillis())
-            prefs.edit().putString(key,o.toString()).apply()
+            prefs.edit().putString(key,o.toString()).commit()
         }catch(_:Exception){}
+        }
     }
 
     private fun saveUploadedImageToComposer(chatId:String,path:String,fileId:String,rawUri:String,name:String="image",mime:String="image/*",size:Long=0L){
         if(chatId.isBlank()) return
+        synchronized(composerMergeLock) {
+        if (chatDb.getChatTitle(chatId) == null) return
         try{
             val key=composerPrefsKey(chatId)
             val o=try{JSONObject(prefs.getString(key,null).orEmpty())}catch(_:Exception){JSONObject()}
@@ -5171,8 +5193,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             o.put("pending_uploads",pending).put("saved_at",System.currentTimeMillis())
-            prefs.edit().putString(key,o.toString()).apply()
+            prefs.edit().putString(key,o.toString()).commit()
         }catch(_:Exception){}
+        }
     }
 
     private fun rememberUploadUri(uri:Uri, kind:String){
@@ -5292,6 +5315,7 @@ class MainActivity : ComponentActivity() {
     private fun persistComposerStateNow(){
         val id=currentChatId()
         if(id.isBlank() || !::input.isInitialized)return
+        synchronized(composerMergeLock) {
         try{
             val obj=JSONObject()
                 .put("text",input.text.toString())
@@ -5314,8 +5338,9 @@ class MainActivity : ComponentActivity() {
                 pending.put(JSONObject().put("uri",uri).put("kind",kind))
             }
             obj.put("pending_uploads",pending)
-            prefs.edit().putString(composerPrefsKey(id),obj.toString()).apply()
+            prefs.edit().putString(composerPrefsKey(id),obj.toString()).commit()
         }catch(_:Exception){}
+        }
     }
 
     private fun listComposerLocalFilePaths(chatId:String):List<String>{
@@ -5347,7 +5372,9 @@ class MainActivity : ComponentActivity() {
 
     private fun clearComposerState(chatId:String){
         if(chatId.isBlank())return
-        prefs.edit().remove(composerPrefsKey(chatId)).apply()
+        synchronized(composerMergeLock) {
+            prefs.edit().remove(composerPrefsKey(chatId)).commit()
+        }
     }
 
     private fun restoreComposerState(){
@@ -5544,8 +5571,25 @@ class MainActivity : ComponentActivity() {
     private fun editMessage(idx:Int){
         if(idx<0 || idx>=chat.size) return
         if(chat[idx].optString("role")!="user") return
+        val editingChatId = currentChatId()
+        val active = activeResponsePersistence.getActiveResponse(editingChatId)
+        val editingRequestId = active?.optString("request_id").takeIf { !it.isNullOrBlank() && it != "null" }
+        // Invalidate the persisted request *before* truncating history. UI Stop would
+        // restore/remove unrelated bubbles and is not suitable for Edit.
+        if (editingRequestId != null) {
+            chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
+            BackgroundResponseWorkScheduler.cancel(applicationContext, editingChatId, editingRequestId)
+            activeResumeCalls.remove(editingChatId)?.cancel()
+            val activeId = active.optString("response_id").takeIf { it.isNotBlank() && it != "null" }
+            if (activeId != null && active.optBoolean("background_enabled", false)) {
+                cancelRemoteResponse(editingChatId, activeId)
+            }
+        }
         activeResponseState.nextGeneration()
         currentCall?.cancel()
+        cancelOpenRouterRequest()
+        openRouterModelPreflightCall.getAndSet(null)?.cancel()
+        cancelPendingGitHubConfirmation()
         val message=chat[idx]
         val text=message.optString("text")
 
