@@ -25,6 +25,17 @@ class OpenRouterCompletionException(
     cause: Throwable? = null
 ) : IOException(message, cause)
 
+class OpenRouterUpstreamException(
+    message: String,
+    val stage: String,
+    val roundIndex: Int,
+    val httpStatus: Int?,
+    val errorType: String?,
+    val providerName: String?,
+    val providerCode: String?,
+    val safeMetadata: String?
+) : IOException(message)
+
 private data class OpenRouterStreamToolCall(
     var id: String = "",
     var type: String = "function",
@@ -41,6 +52,31 @@ class OpenRouterChatClient(
         // time/iteration caps here: this ceiling is the emergency stop.
         const val COMPLETE_TIME_LIMIT_MS = 5 * 60 * 60 * 1000L
         const val MAX_ACCUMULATED_TOTAL_TOKENS = 5_000_000L
+    }
+
+    private fun upstreamError(
+        error: JSONObject, stage: String, roundIndex: Int, status: Int? = null
+    ): OpenRouterUpstreamException {
+        val metadata = error.optJSONObject("metadata")
+        val provider = metadata?.optString("provider_name")
+            ?.takeIf { it.isNotBlank() } ?: error.optString("provider_name").takeIf { it.isNotBlank() }
+        val providerCode = metadata?.optString("provider_code")
+            ?.takeIf { it.isNotBlank() } ?: error.optString("provider_code").takeIf { it.isNotBlank() }
+        val code = error.optString("code").takeIf { it.isNotBlank() }
+        val errorType = error.optString("type").takeIf { it.isNotBlank() } ?: code
+        val message = error.optString("message").ifBlank { "Unknown upstream error" }.take(480)
+        // Never record a whole provider payload. The diagnostic logger redacts secrets.
+        val safeMeta = metadata?.let {
+            JSONObject().apply {
+                listOf("provider_name", "provider_code", "raw_error").forEach { key ->
+                    if (it.has(key)) put(key, it.optString(key).take(180))
+                }
+            }.toString().take(420)
+        }
+        return OpenRouterUpstreamException(
+            "OpenRouter " + stage + " error: " + message,
+            stage, roundIndex, status, errorType, provider, providerCode, safeMeta
+        )
     }
 
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
@@ -197,8 +233,7 @@ class OpenRouterChatClient(
                     throw IOException("Invalid OpenRouter SSE event", e)
                 }
                 json.optJSONObject("error")?.let { error ->
-                    val message = error.optString("message").ifBlank { error.toString() }
-                    throw IOException("OpenRouter streaming error: $message")
+                    throw upstreamError(error, "SSE", roundIndex)
                 }
                 val candidateId = json.optString("id").takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
                 if (candidateId != null && generationId == null) {
@@ -254,7 +289,9 @@ class OpenRouterChatClient(
                     ensureActive()
                     if (!httpResponse.isSuccessful) {
                         val raw = httpResponse.body?.string().orEmpty()
-                        throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(1200)}")
+                        val error = runCatching { JSONObject(raw).optJSONObject("error") }.getOrNull()
+                        if (error != null) throw upstreamError(error, "HTTP", roundIndex, httpResponse.code)
+                        throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(320)}")
                     }
                     val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
                     val parser = SseEventParser()
