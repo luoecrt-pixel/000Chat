@@ -1028,52 +1028,111 @@ class MainActivityLifecycleTest {
     @Test
     fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
-        scenario.onActivity { activity ->
-            // Settings and the selected chat survive earlier instrumentation tests.
-            // This scenario must exercise the file-chain guard, not stale JSON mode
-            // or a request left by another test.
-            activity.newChat()
-            activity.prefs.edit().putString("provider", "openai")
-                .putString("text_format", "text").apply()
-            @Suppress("UNCHECKED_CAST")
-            val history = privateField(activity, "chat") as MutableList<JSONObject>
-            val oldSize = history.size
-            history.add(
-                JSONObject().put("role", "user").put("text", "Old photo")
-                    .put("provider", "openai")
-                    .put("image_file_id", "file-example")
-            )
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId(null)
-            val composer = privateField(activity, "input") as android.widget.EditText
-            composer.setText("Next question")
-            val generation = activeGeneration(activity)
+        val httpAttempts = AtomicInteger(0)
+        var originalApiKey: String? = null
+        var originalHistory = emptyList<JSONObject>()
+        var expectedHistorySize = 0
+        var preparationGeneration = 0L
 
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-
-            assertEquals("Unsafe fallback advanced generation", generation, activeGeneration(activity))
-            assertEquals("Next question", composer.text.toString())
-            assertEquals("Unsafe fallback appended to chat", oldSize + 1, history.size)
-            val status = privateField(activity, "status") as android.widget.TextView
-            assertTrue("Missing explanation for unavailable file history: ${status.text}",
-                status.text.toString().contains("вложения OpenAI"))
-
-            // A non-null ID is not a usable Responses chain if a different provider
-            // answered last; the same OpenAI file inputs must still block fallback.
-            history.add(JSONObject().put("role", "assistant")
-                .put("provider", "openrouter").put("text", "other provider"))
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId("resp_stale")
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-            assertEquals(generation, activeGeneration(activity))
-            assertEquals("Next question", composer.text.toString())
-            assertEquals(oldSize + 2, history.size)
-            history.removeAt(history.lastIndex)
-            history.removeAt(history.lastIndex)
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId(null)
+        fun assertFailedPreparation() {
+            // Local history encoding now runs off-main. Wait for its owned failure
+            // before inspecting the draft, rather than assuming a synchronous guard.
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            var failed = false
+            while (!failed && SystemClock.uptimeMillis() < deadline) {
+                scenario.onActivity { activity ->
+                    val pending = privateField(activity, "pendingOpenAiPreparation")
+                        as AtomicReference<*>
+                    val status = privateField(activity, "status") as android.widget.TextView
+                    failed = pending.get() == null &&
+                        status.text.toString().startsWith("Не отправлено:")
+                }
+                if (!failed) SystemClock.sleep(20L)
+            }
+            scenario.onActivity { activity ->
+                val status = privateField(activity, "status") as android.widget.TextView
+                assertTrue("Local context failure did not settle: ${status.text}", failed)
+                assertTrue("Missing explanation for unavailable bytes: ${status.text}",
+                    status.text.toString().contains("локальных байтов"))
+                assertEquals("Failed preparation must not commit another generation",
+                    preparationGeneration, activeGeneration(activity))
+                assertEquals("Next question",
+                    (privateField(activity, "input") as android.widget.EditText).text.toString())
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                assertEquals("Unsafe fallback appended to chat", expectedHistorySize, history.size)
+                assertTrue("Remote-only file must remain in history",
+                    history.any { it.optString("image_file_id") == "file-example" })
+                assertEquals("Preflight failure must not start HTTP", 0, httpAttempts.get())
+                assertTrue("Failure must release Send", activity.send.isEnabled)
+                assertEquals("Failure must release Stop", android.view.View.GONE,
+                    (privateField(activity, "stop") as android.view.View).visibility)
+            }
         }
-        scenario.close()
+
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                activity.prefs.edit().putString("provider", "openai")
+                    .putString("model", "gpt-6-astra").putString("reasoning", "high")
+                    .putString("text_format", "text").apply()
+                val secrets = SecureStore(activity)
+                originalApiKey = secrets.getApiKey()
+                secrets.setApiKey("test-key")
+                // Reject any accidental real call, and prove both fallback cases
+                // finish before HTTP rather than merely failing authentication.
+                setPrivateField(activity, "client", OkHttpClient.Builder()
+                    .addInterceptor {
+                        httpAttempts.incrementAndGet()
+                        throw java.io.IOException("Unexpected HTTP during local context preflight")
+                    }.build())
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                originalHistory = history.map { JSONObject(it.toString()) }
+                history.add(
+                    JSONObject().put("role", "user").put("text", "Old photo")
+                        .put("provider", "openai").put("image_file_id", "file-example")
+                )
+                expectedHistorySize = history.size
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId(null)
+                (privateField(activity, "input") as android.widget.EditText).setText("Next question")
+                val previousGeneration = activeGeneration(activity)
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                preparationGeneration = activeGeneration(activity)
+                assertTrue("Test must enter owned local preparation",
+                    preparationGeneration > previousGeneration)
+            }
+            assertFailedPreparation()
+
+            scenario.onActivity { activity ->
+                // A stored ID is not usable after another provider answered.
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.add(JSONObject().put("role", "assistant")
+                    .put("provider", "openrouter").put("text", "other provider"))
+                expectedHistorySize = history.size
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId("resp_stale")
+                val previousGeneration = activeGeneration(activity)
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                preparationGeneration = activeGeneration(activity)
+                assertTrue("Stale chain must enter local preparation",
+                    preparationGeneration > previousGeneration)
+            }
+            assertFailedPreparation()
+        } finally {
+            scenario.onActivity { activity ->
+                originalApiKey?.let { SecureStore(activity).setApiKey(it) }
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.clear()
+                history.addAll(originalHistory)
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId(null)
+            }
+            scenario.close()
+        }
     }
 
     @Test
@@ -1449,45 +1508,94 @@ class MainActivityLifecycleTest {
     @Test
     fun deliberateHorizontalGestureOpensAndClosesChatDrawer() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
-        fun swipe(view: android.view.View, x0: Float, x1: Float, y: Float) {
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+
+        fun swipe(x0: Float, y0: Float, x1: Float, y1: Float) {
+            // Send real touchscreen events through the window. The first MOVE may
+            // only capture DrawerLayout's drag; subsequent MOVEs must move it.
             val down = SystemClock.uptimeMillis()
-            val positions = floatArrayOf(x0, x0 + (x1 - x0) / 2, x1)
-            positions.forEachIndexed { i, x ->
+            for (step in 0..12) {
+                if (step > 0) SystemClock.sleep(25L)
+                val fraction = step / 12f
+                val action = when (step) {
+                    0 -> android.view.MotionEvent.ACTION_DOWN
+                    12 -> android.view.MotionEvent.ACTION_UP
+                    else -> android.view.MotionEvent.ACTION_MOVE
+                }
                 val event = android.view.MotionEvent.obtain(
-                    down, down + i * 50, when (i) {
-                        0 -> android.view.MotionEvent.ACTION_DOWN
-                        2 -> android.view.MotionEvent.ACTION_UP
-                        else -> android.view.MotionEvent.ACTION_MOVE
-                    }, x, y, 0)
-                view.dispatchTouchEvent(event)
-                event.recycle()
+                    down, SystemClock.uptimeMillis(), action,
+                    x0 + (x1 - x0) * fraction, y0 + (y1 - y0) * fraction, 0
+                ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                try {
+                    instrumentation.sendPointerSync(event)
+                } finally {
+                    event.recycle()
+                }
             }
+            instrumentation.waitForIdleSync()
         }
+
+        fun awaitDrawer(open: Boolean) {
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            var settled = false
+            while (!settled && SystemClock.uptimeMillis() < deadline) {
+                scenario.onActivity { activity ->
+                    val drawer = privateField(activity, "drawerLayout")
+                        as androidx.drawerlayout.widget.DrawerLayout
+                    settled = if (open) drawer.isDrawerOpen(androidx.core.view.GravityCompat.START)
+                        else !drawer.isDrawerVisible(androidx.core.view.GravityCompat.START)
+                }
+                if (!settled) SystemClock.sleep(20L)
+            }
+            assertTrue(if (open) "Swipe right must open drawer"
+                else "Swipe left must fully close drawer", settled)
+        }
+
         try {
+            val chatBounds = android.graphics.Rect()
             scenario.onActivity { activity ->
-                val scroll = privateField(activity, "scroll") as androidx.recyclerview.widget.RecyclerView
-                val width = scroll.width.toFloat()
-                assertTrue("RecyclerView must be laid out", width > 200f)
-                swipe(scroll, width * 0.2f, width * 0.9f, scroll.height / 2f)
+                activity.newChat()
+                val scroll = privateField(activity, "scroll") as android.view.View
+                assertTrue("Chat surface must be visible", scroll.getGlobalVisibleRect(chatBounds))
+                val rootLocation = IntArray(2)
+                scroll.rootView.getLocationOnScreen(rootLocation)
+                chatBounds.offset(rootLocation[0], rootLocation[1])
+                assertTrue("Chat surface must be laid out", chatBounds.width() > 200)
             }
-            SystemClock.sleep(450L)
+            // A vertical gesture must keep the drawer closed.
+            swipe(chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.25f,
+                chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.75f)
             scenario.onActivity { activity ->
-                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
-                assertTrue("Swipe right must open drawer",
-                    drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
-                swipe(drawer, drawer.width * 0.65f, drawer.width * 0.1f, drawer.height / 2f)
+                val drawer = privateField(activity, "drawerLayout")
+                    as androidx.drawerlayout.widget.DrawerLayout
+                assertFalse("Vertical scroll must not open drawer",
+                    drawer.isDrawerVisible(androidx.core.view.GravityCompat.START))
             }
-            SystemClock.sleep(450L)
+            swipe(chatBounds.left + chatBounds.width() * 0.2f, chatBounds.exactCenterY(),
+                chatBounds.left + chatBounds.width() * 0.9f, chatBounds.exactCenterY())
+            awaitDrawer(true)
+
+            val panelBounds = android.graphics.Rect()
             scenario.onActivity { activity ->
-                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
-                assertFalse("Swipe left must close drawer",
-                    drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
+                val drawer = privateField(activity, "drawerLayout")
+                    as androidx.drawerlayout.widget.DrawerLayout
+                val panel = (0 until drawer.childCount).map { drawer.getChildAt(it) }
+                    .first { (it.layoutParams as androidx.drawerlayout.widget.DrawerLayout.LayoutParams)
+                        .gravity == androidx.core.view.GravityCompat.START }
+                assertTrue("Open drawer panel must be visible",
+                    panel.getGlobalVisibleRect(panelBounds))
+                val rootLocation = IntArray(2)
+                panel.rootView.getLocationOnScreen(rootLocation)
+                panelBounds.offset(rootLocation[0], rootLocation[1])
             }
+            // Stay inside the actual drawer panel, independent of screen width.
+            swipe(panelBounds.left + panelBounds.width() * 0.85f, panelBounds.exactCenterY(),
+                panelBounds.left + panelBounds.width() * 0.1f, panelBounds.exactCenterY())
+            awaitDrawer(false)
         } finally {
             scenario.close()
         }
     }
-
 
     @Test
     fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {

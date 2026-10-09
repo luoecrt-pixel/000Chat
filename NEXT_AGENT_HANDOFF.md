@@ -1,12 +1,14 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 22:27 +03:00
+**Last updated:** 2026-10-09 23:40 +03:00
 **Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — APP-04-PHONE: один последующий кодовый PR, три блока SEND/UI/DIAG по проверке владельца после merge #133. Модель и два отдельных управления мышлением только внизу; исправить доставку/перенос фото, реальные жесты, picker и диагностику. APP-05 после этого; расширение финансового учёта отмены отложено.
-**Внесённый код и приёмка:** APP-04 #133 уже merged (`8a4d019328c90745df4448bea5c5dc1e1a2d9351`), final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`: APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful. Тесты/CI не закрыли выявленные на телефоне сценарии. CI #134 merged; проверенная база main `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, открытых PR на момент проверки нет, SQLite v20.
+**Внесённый код и приёмка:** APP-04 #133 уже merged (`8a4d019328c90745df4448bea5c5dc1e1a2d9351`), final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`: APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful. Тесты/CI не закрыли выявленные на телефоне сценарии. CI #134 merged; проверенная база main после docs #135 `c492e74e3aaed8f87752be41e8ad2618d8215afa`, на текущей базе #135 открыт draft PR #136, SQLite v20.
 **Коррекция прежнего ТЗ:** требование model row сверху и полной панели из ⚡ было неверно закреплено этим handoff. Его заменяет нижняя группа из трёх отдельных controls: модель → выбор provider/model; ⚡ → быстрый effort; дополнительная кнопка → полные настройки мышления/ответа. Верхнюю model row удалить, место над чатом ей не занимать.
 
 **Что сохранять из #133:** immutable/deep-copied Send snapshot, off-main историческую подготовку вложений, ownership/Stop/draft D2, узкие DB writers, request-bound GitHub approvals, refusal/streaming, identity файлов, model metadata и reasoning transport policy. Реальные 2×2 image fixtures и Send→локальный HTTPS MockWebServer доказали bounded MIME/body paths, но не большие JPEG или ответ настоящего Claude. OpenAI history guard предотвратил молчаливую потерю файлов; теперь нужен совместимый перенос по доступным локальным байтам, а не постоянная блокировка чата. Не удалять guard без такого замещения. Camera #128 подтверждена владельцем.
 **Граница этого аудита:** прочитан текущий код и два доступных скриншота; исходные большие фото, точный installed SHA и OpenRouter upstream trace отсутствуют. Kotlin/Android/платные API этим проверяющим агентом не запускались. UI-нарушения, отсутствие thumbnails, blanket provider guard и потеря error metadata установлены по source; точная причина upstream media_type и открытия Drawer ещё требует regression/trace.
+
+**PR #136, повтор APK после 34-test прогона:** ветка `agent/app-04-phone-send-ui-diag`, предыдущий head `56e711188e6aacf6d625bfab0bb5db19ccae397c`. Release `37985487769` — Successful, Verify `37985497430` — Successful; APK `37985488028` — Failed: 34 tests завершены, 2 failures (OpenAI unavailable local history и Drawer close). Эмулятор не падал. В этом исправлении меняются только instrumentation tests и handoff: OpenAI test задаёт isolated API key, ждёт async local preflight и проверяет отсутствие HTTP/потери draft; gesture test вводит полный touchscreen swipe через окно, реальные bounds и ожидание полного закрытия. Assertions не отключены; production guards/код приложения не меняются. Новый полный [ci] запускается на head этого исправления. **Merge здесь не выполнять:** по указанию владельца следующий агент сверяет новый APK/Release/Verify на matching SHA, объединяет #136 после Successful и затем приступает к APP-05. Failed/Skipped/Running не успех. Результаты нового прогона ещё не установлены.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -68,7 +70,7 @@
 
 ## Фактический baseline
 
-- **Проверено 2026-10-09:** main `a5a99f3cd1c6dba60cba0235bb9995df25fe4195` после #134, tree `a52dc1519eb74e5f04a33d85410ef59ed05f937c`; открытых PR нет. Последний Android-код — #133; #134 менял только push triggers/инструкции. SQLite v20; перед реализацией заново сверить HEAD/open PR.
+- **Проверено 2026-10-09:** main `c492e74e3aaed8f87752be41e8ad2618d8215afa` после docs #135; открыт draft PR #136, исходный head `56e711188e6aacf6d625bfab0bb5db19ccae397c`. Последний merged Android-код — #133; #134 менял только push triggers/инструкции, #135 — только handoff. SQLite v20; перед реализацией заново сверить HEAD/open PR.
 - **#133:** merge `8a4d019328c90745df4448bea5c5dc1e1a2d9351`, final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`; APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful, APK выполнил Android instrumentation. Последующие docs-коммиты не меняли Android-код. #134 head `883d76ccc07b223b9f8a538d57d2f6e0343e390b`, Verify `37972109767` — Successful. Не выдавать Skipped PR-runs за сборки.
 - **Прежние рабочие proof:** #125 final-code `6aa069be89500a86bf4907cc90205e640af628e9`, APK `37908225095`, Release `37908225079`, Verify `37908229012`; #126 `a2d8de607606c7ec4213d73705b39393d0b83cf1`, APK `37911721448`, Release `37911721472`, Verify `37911728484`; #128 `1676c5c2964478a3bb0379b1c01dbe2b04db1c75`, APK `37917519700`, Release `37917519729`, Verify `37917524650` — Successful. Камеру владелец подтвердил; это не доказательство всей доставки фото.
 - **Новые PHONE-наблюдения после #133:** маленькое фото распознаётся, большие около 6.3/6.4 MB — нет; следующий текст тоже может получить `messages.2.content.1.image.source.base64.media_type` enum error. Model picker всё ещё сверху, Drawer не открывается свайпом, ⚡ мешает быстрому переключению, OR thumbnail нет, Фото открывает Files, диагностика неудобна. Переход OR → GPT с вложениями блокирует Send. В доступных скриншотах нет отдельного GPT warning и оригинальных больших image bytes.
@@ -267,13 +269,14 @@ Static verifier:
 
 ## История последних рабочих заходов — последние 5 PR
 
-Последние пять merged PR на проверенной базе #134, до этого docs PR. CI proof относится к соответствующему code/head SHA; phone proof отдельно.
+Последние пять merged PR на проверенной базе #135, до текущего code PR #136. CI proof относится к соответствующему code/head SHA; phone proof отдельно.
 
-- **#130:** docs/editorial plan revision 7, merge `181dca5cdaddcf0190bb446c5e161c0dfe1a501e`, head `877770bc8501e5d1a3dfa6f67a33c611ab49303c`; Verify `37931552848` — Successful. Android-код не менялся.
 - **#131:** широкий docs audit revision 8, merge `18c9cd23d7dbda0f09f5543bac93d66e83dc806e`, head `b22e6e434ee06fa7f1e7c6bd4c37ca11ba8df36f`; Verify `37935958150` — Successful.
 - **#132:** docs revision 9, merge `c9069333050d85bc1db6105c1c7ad4d9dd68c02d`, head `debd9ee6b77bf9bc66c3e638bbb0c63de2a11fc8`; DB writers/preflight/Repeat design уточнён без Android-кода.
 - **#133:** APP-04 A/B/C + F18 + FIN133, merge `8a4d019328c90745df4448bea5c5dc1e1a2d9351`. Final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`: APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful. Ошибки прежних тестовых прогонов исправлены; source guards/HTTPS policy не ослаблены. Phone acceptance остаётся частичной, новые находки включены в APP-04-PHONE.
 - **#134:** main push-trigger exclusion APK/Release при сохранённом branch [ci]/manual dispatch, merge `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, head `883d76ccc07b223b9f8a538d57d2f6e0343e390b`; Verify `37972109767` — Successful. YAML/routes/jobs неизменность проверены, Android CI ради trigger-only правки не запускался.
+
+- **#135:** docs APP-04-PHONE revision 10, merge `c492e74e3aaed8f87752be41e8ad2618d8215afa`, head `54948e341c1c096e928c369b115a218f835f04a2`; Verify `37980410307` — Successful. Требования телефона объединены в SEND/UI/DIAG, прежний APP-05 F21–F26 сохранён.
 
 ## Product radar — идеи с реальной ценностью
 
