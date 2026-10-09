@@ -13,6 +13,10 @@ android {
         targetSdk = 35
         versionCode = 64
         versionName = "4.17.0"
+        // Branch [ci] workflows set GITHUB_SHA; local installs must not claim a CI commit.
+        val githubSha = System.getenv("GITHUB_SHA")
+            ?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) } ?: "local-unknown"
+        buildConfigField("String", "BUILD_GIT_SHA", "\"$githubSha\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -1,86 +1,72 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 22:27 +03:00
-**Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — APP-04-PHONE: один последующий кодовый PR, три блока SEND/UI/DIAG по проверке владельца после merge #133. Модель и два отдельных управления мышлением только внизу; исправить доставку/перенос фото, реальные жесты, picker и диагностику. APP-05 после этого; расширение финансового учёта отмены отложено.
-**Внесённый код и приёмка:** APP-04 #133 уже merged (`8a4d019328c90745df4448bea5c5dc1e1a2d9351`), final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`: APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful. Тесты/CI не закрыли выявленные на телефоне сценарии. CI #134 merged; проверенная база main `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, открытых PR на момент проверки нет, SQLite v20.
-**Коррекция прежнего ТЗ:** требование model row сверху и полной панели из ⚡ было неверно закреплено этим handoff. Его заменяет нижняя группа из трёх отдельных controls: модель → выбор provider/model; ⚡ → быстрый effort; дополнительная кнопка → полные настройки мышления/ответа. Верхнюю model row удалить, место над чатом ей не занимать.
-
-**Что сохранять из #133:** immutable/deep-copied Send snapshot, off-main историческую подготовку вложений, ownership/Stop/draft D2, узкие DB writers, request-bound GitHub approvals, refusal/streaming, identity файлов, model metadata и reasoning transport policy. Реальные 2×2 image fixtures и Send→локальный HTTPS MockWebServer доказали bounded MIME/body paths, но не большие JPEG или ответ настоящего Claude. OpenAI history guard предотвратил молчаливую потерю файлов; теперь нужен совместимый перенос по доступным локальным байтам, а не постоянная блокировка чата. Не удалять guard без такого замещения. Camera #128 подтверждена владельцем.
-**Граница этого аудита:** прочитан текущий код и два доступных скриншота; исходные большие фото, точный installed SHA и OpenRouter upstream trace отсутствуют. Kotlin/Android/платные API этим проверяющим агентом не запускались. UI-нарушения, отсутствие thumbnails, blanket provider guard и потеря error metadata установлены по source; точная причина upstream media_type и открытия Drawer ещё требует regression/trace.
+**Last updated:** 2026-10-10 00:35 +03:00
+**Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — завершить существующий draft PR #136 (APP-04-PHONE), проверить новый APK после test-only коррекции, затем следующий агент объединяет PR по гейту и начинает сохранённый APP-05 F21–F26.
+**Текущая работа:** `main c492e74e3aaed8f87752be41e8ad2618d8215afa`; PR [#136](https://github.com/luoecrt-pixel/OpenAIApiChat/pull/136), ветка `agent/app-04-phone-send-ui-diag`. Проверенный исходный head перед этой коррекцией: `d0624e318fc8cc14b96d8879f6d55c7c87201b3c`. Не создавать заменяющий PR и не накладывать F18-патч повторно.
+**Последний завершённый прогон:** APK [37988996183](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37988996183) — Failure: выполнены 34 tests, один сбой в `deliberateHorizontalGestureOpensAndClosesChatDrawer`; Release [37988996250](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37988996250) и Verify [37989003185](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37989003185) — Successful, все на `d0624e3`. JVM/compile/lint/build успешны; APK не загружен, поскольку instrumentation не прошла.
+**Точная ошибка:** `java.lang.IllegalArgumentException: Targeted input event injection from pid 4815 was not directed at a window owned by uid 10192.` Это отказ OS input injection в тесте, не AssertionError закрытия Drawer и не crash эмулятора. Какое именно чужое окно получило координаты, лог не устанавливает.
+**Эта коррекция:** тест посылает полную DOWN/MOVE/UP последовательность через `Activity.dispatchTouchEvent` на main с `getLocalVisibleRect + getLocationInWindow`; сохраняет отрицательный vertical gesture и ожидание полного открытия/закрытия. Это проверяет Activity→Window→View routing, а не системный injector/физический телефон. Производственный код и workflow не меняются. Один новый полный branch `[ci]` нужен из-за изменения instrumentation; его исход ещё не установлен этим текстом.
+**Указание владельца:** текущий исправляющий агент оставляет PR открытым и проверки запущенными. Следующий агент дожидается обязательных Successful, объединяет #136 и начинает APP-05. Телефонный smoke/реальные API остаются отдельно отмеченными; они не являются новым запретом начать APP-05 после разрешённого merge. Финансовое расширение отмены отложено. Автосборки после merge в main отключены в #134; запуск агентами в рабочих ветках сохранён.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
-**Это основной документ для агента. README на старте не нужен.**
+**Основной документ агента — этот handoff. README на старте не нужен.**
 
-1. Начинай с фактического `main` и открытых PR.
-2. Сначала докажи, что проблема существует. Не делай PR ради уменьшения TODO.
-3. Для lifecycle/recovery смотри границу **Activity ↔ Executor ↔ Worker ↔ DB**, а не только один метод.
-4. Используй узкие чтения файлов. Не загружай весь README, весь `MainActivity` или полные CI-логи без причины.
-5. CI: queued/in_progress/Skipped/Cancelled ≠ green. Static verifier и Gradle CI — отдельные проверки. Правила — в разделе «CI и merge-правила».
-6. Пользователь не программист: объясняй просто и коротко; ветки, PR, `[ci]` и merge по гейту делай сам, проси только то, чего коннектор не умеет (настройки GitHub, repository variable, установка и проверка APK на телефоне). Чужие оценки, в том числе другой модели, — гипотезы: проверяй по коду и логам; «зелёным» называй только Successful run.
-7. После завершения задачи: план → история; устаревшее удалить, а не оставлять вечным backlog.
-8. Архитектурный/продуктовый обзор делай **каждые 5 merged PR или раньше, если активный план опустел/сменил слой**. Новая идея нужна только при конкретной ценности + маленьком проверяемом первом шаге.
-9. **Не теряй общую картину:** Compose, controller extraction, thread-safety и fork chat — это разные уровни одной дорожной карты, а не взаимозаменяемые TODO.
-10. **Изменения в main только через PR** (включая CI, docs и handoff, даже одной строки). Исключение — если пользователь прямо написал «коммить в main».
+1. Сверь фактические main, открытый PR/head, последние runs и их attempts. Запись «запущено» не означает Success; не исправляй уже закрытый дефект по старому описанию.
+2. Перед кодом составь короткую матрицу «требование владельца → наблюдаемый результат → проверка». Сохраняй точное расположение/действие controls: здесь модель у ввода, ⚡ только quick effort, третья кнопка advanced; наличие кнопки не доказывает её поведение.
+3. Сначала воспроизведи проблему и установи владельца состояния. Для lifecycle смотри Activity ↔ Executor ↔ Worker ↔ DB, для отправки — весь outbound context, включая исторические вложения.
+4. Читай узкие функции/patches и failing часть лога; полный файл нужен лишь для конкретной проверки. Не загружай README или весь MainActivity без причины.
+5. Проверь доступность Java/Gradle/SDK/эмулятора в начале. Изменённые runtime-сценарии запускай локально, если окружение работает. Static PASS не заменяет Kotlin compile/Android run; отсутствие среды честно запиши, не называй проверку выполненной.
+6. Выполняй пакет внутри одного PR по частям с локальной проверкой каждой части; перед финальным CI интегрируй части и handoff. После падения нужен диагноз и конкретная проверенная правка, а не случайный rerun или отключение assert/защиты.
+7. Пользователь не программист: ветки, PR, поддерживаемые запуск/merge по гейту делай сам в разрешённом scope. Не проси повторного согласия на уже порученное. Точные ограничения коннектора проверь по доступным инструментам; телефон/новые платные API требуют отдельного согласования.
+8. Main изменяется только через PR, включая docs/workflow. Исключение — прямое «коммить в main». Учитывай чужие новые коммиты; перед записью перечитай head/blob, не force-push поверх работы другого агента.
+9. После результата обнови фактический статус и доказательства, завершённый план перенеси в историю. Устаревшие инструкции и дубли удали; обязательные незавершённые задачи и ограничения сохрани.
+10. Архитектурный/продуктовый обзор — **каждые 5 merged PR или раньше, если активный план опустел/сменил слой**. Compose, controller extraction, thread-safety и fork — разные слои; не подменяй текущую задачу rewrite.
 
 ## CI и merge-правила
 
-**CI.** Автоматические `Build Android APK` и `Build Android Release` по push разрешены только в ветках **кроме main**. В рабочей ветке агента полный прогон идёт по `[ci]` в сообщении head-коммита или `CI_AUTO_RUN=true`; без них job = **Skipped**. Ручной `workflow_dispatch` доступен на любой выбранной ветке, включая main. Точное условие — в `build.yml`/`release.yml`.
-- Коннектор не умеет `workflow_dispatch` и repository variables: рычаг агента — `[ci]` в коммите ветки PR. Ставь, когда прогон нужен; перед повтором назови причину прошлого падения строкой из лога. Пользователь может запустить вручную: Actions → Run workflow → ветка.
-- Смотри строки `(push)` у Build и Release. `(pull_request)` Skipped — норма; счётчик «4/4» с галочкой может значить «всё пропущено». Skipped, Cancelled, queued, in_progress ≠ green.
-- Concurrency group включает имя workflow, ref и событие (иначе Build и Release с одним `[ci]` отменяют друг друга); новый push в ветку отменяет идущий прогон — не пушь, пока он идёт.
-- После merge push в main **вообще не запускает** APK/Release благодаря `push.branches-ignore: [main]`, даже если squash commit body содержит старые `[ci]`. Не отключай push в рабочих ветках: коннектор не умеет `workflow_dispatch`, агенты сохраняют запуск по `[ci]` в своей ветке PR. Для явной проверки main пользователь может выбрать main через Actions → Run workflow.
-- `Verify handoff` — дешёвый workflow (без Android) на PR, меняющие `NEXT_AGENT_HANDOFF.md` или `tools/**`; docs-коммиты без `[ci]`.
-- **Бюджет Actions ограничен:** подготовь весь согласованный пакет и выполни доступные локальные проверки до `[ci]`. План — одна обязательная пара APK/Release на окончательном коде выбранного пакета; промежуточные коммиты без `[ci]`. Handoff подготовь в том же кодовом PR до полного CI. Повтор — только после разобранного падения или изменения кода/workflow. Не расширяй задачу ради новых проверок; required merge-гейт сохраняется.
+- APK/Release: push только в ветки **кроме main**; полный job разрешён `[ci]` в head commit или `CI_AUTO_RUN=true`. В текущем подключении нет нового `workflow_dispatch`/repository-variable write; агент запускает рабочую ветку через `[ci]`. Ручной Run workflow у владельца сохранён, включая main.
+- `push.branches-ignore: [main]` в обоих workflow исключает повторную Android-сборку после merge даже при старых `[ci]` в squash body. Не отключай рабочие ветки и не переводи всё в manual-only.
+- Смотри event, SHA, attempt и conclusion конкретного run. PR-event Skipped при текущих условиях — ожидаемая строка, не успешная сборка; queued/in_progress/Skipped/Cancelled ≠ Successful. API `fetch_commit_workflow_runs` возвращает только PR-event runs: для push используй repository actions/runs с head_sha и event=push или уже известный run ID.
+- Concurrency содержит workflow/ref/event, cancel-in-progress=true. Новый push той же ветки может отменить идущий run, даже docs push без `[ci]`; дождись завершения до записи, если нет поручения намеренно заменить прогон.
+- Бюджет: промежуточные коммиты без `[ci]`, одна финальная пара APK/Release на кодовом пакете. Повтор — после установленной ошибки/исправления или доказанного инфраструктурного сбоя. Если код неизменен, transient failure и подходящий rerun доступен — перезапускай только failed job; повтор того же детерминированного падения ничего не проверяет.
+- Verify handoff — дешёвый PR workflow для `NEXT_AGENT_HANDOFF.md`/`tools/**`. Docs-коммит отдельно без `[ci]`; если он объединён с необходимой test/code-коррекцией, полный прогон нужен из-за кода/теста.
 
 **Merge-гейт.**
-1. Код приложения, его тесты или шаги сборки/проверок workflow: оба `(push)` — Build и Release — Successful на последнем изменяющем их коммите (включая instrumentation); после него допустимы docs-коммиты без `[ci]`, но `Verify handoff` на финальном head должен быть Successful. Docs-only PR: достаточно Successful `Verify handoff`.
-   **Конфигурационная правка запуска 2026-10-09 по запросу владельца:** только исключение main из push-trigger двух workflow и обновление этих инструкций; код приложения, jobs/steps и условия `[ci]` не меняются. Для этой правки достаточно проверки YAML, матрицы событий/веток и неизменности jobs/steps плюс Successful Verify handoff; полные Android-сборки ради выключения дублирующего запуска не требуются. Изменения кода или steps этим исключением не покрываются.
-2. Описание PR точно перечисляет изменённые файлы, а размер diff соответствует задаче: неожиданно большой diff у большого файла (`MainActivity.kt`) — признак его полной перезаписи.
-3. Не мержи, если обязательный run красный, Cancelled или не запускался (Skipped), даже при «Able to merge». Force-push после старта проверок — только с сообщением пользователю и перезапуском проверок.
-4. Статус PR — по `merged`/`merged_at`; `merge_commit_sha` у closed PR ничего не доказывает.
-5. В отчёте: PR, merge SHA, run ID и результат каждого обязательного run (сверены со страницей GitHub); отдельно — что не проверено.
 
-**Причина фильтра main:** squash merge #133 включил старые `[ci]` в сообщение коммита и повторно запустил APK `37969088883`/Release `37969088862` на `8a4d019`, хотя код уже прошёл `37967095171`/`37967095269` на `73d9e435`. Владелец попросил исключить лишний автозапуск, сохранив работу агентов. Полное отключение push или режим «только вручную» не применять; дешёвый Verify handoff остаётся автоматическим.
+1. Приложение, его тесты или build/test steps workflow менялись: APK и Release push Successful на последнем коммите, меняющем эти пути, включая instrumentation. Docs-only последующие коммиты допустимы после проверки, что код не менялся; Verify на final PR head — Successful. Docs-only PR требует только Verify. Failed/Cancelled/Skipped не засчитывать.
+2. Запиши code SHA + head SHA + run IDs + attempts/results; различай локальную проверку, CI, mock API, телефон и реального провайдера. «Тесты прошли» допустимо только для фактически прошедшего harness.
+3. Проверь final diff/список файлов, PR body, отсутствие случайной полной перезаписи большого файла. Перечитай head прямо перед merge, не объединяй другой непроверенный SHA.
+4. PR status подтверждай по `merged/merged_at`, не по наличию merge_commit_sha/«Able to merge». Force-push после запуска требует обоснования и новой проверки изменённого кода.
+5. Scope запуска #134 уже проверен/merged: main исключён, jobs/steps сохранены. Не держи прежнее одноразовое исключение «CI ради выключения merge trigger не нужен» как разрешение обходить гейт будущего code/workflow PR.
 
 ## 30-секундная карта проекта
 
-**Продукт:** локальный multi-chat Android-клиент. Основной путь — OpenAI Responses API; отдельный путь — OpenRouter Chat Completions для Claude (#47). GitHub-инструменты исполняет само приложение; включаются чекбоксом в настройках (#48).
-
-**OpenAI (основной путь):** foreground Responses без app-side таймаутов (`readTimeout(0)`, `callTimeout(0)`); `max_output_tokens` отправляется только при явной настройке; background recovery использует общую константу 5 ч (#84); непрерывность бюджета Activity↔Worker и прерывание зависшего recovery stream ещё не доказаны (APP-05/F21).
-
-**Надёжность:** основная lifecycle-модель:
-`generation → request/response ownership → immutable UI snapshot → persisted active-response state → WorkManager recovery`.
-
-**Persistence:** DB schema v20 (после #121); metadata сообщений введена в v17 #105, `request_events.cost_kind/cost_usd` — v18 #112, независимый `request_accounting` — v19 #115, `openrouter_request_rounds`/`rounds_sealed` — v20 #121. Важные active-поля:
-`active_request_id`, `active_response_id`, `active_text`, `active_status`, `active_background_enabled`, `active_last_sequence_number`.
-Устаревший request не должен финализировать persisted state.
-
-**Тесты:** JVM/pure contracts + Robolectric SQLite покрывают большую часть lifecycle/persistence; Android ActivityScenario/instrumentation — критичные callback-пути (с #35). Что доказано, а что нет — в разделе контрактов.
-
-**Архитектура:** `MainActivity.kt` — большой монолит (>6 тыс. строк на дату передачи); Pure seams: `ResponseEventReducer` (response semantics), `ActiveResponsePersistence` (persisted active-response boundary), `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy`, `AttachmentUploadCompletionPolicy`. Foreground cadence 750ms не менялась. Tool-state path остаётся на `chatId + generation`: он обновляет глобальный tool label, а не конкретный assistant item. Compose — после state/controller extraction.
-
-**OpenRouter/Claude (#47–#57, #76, #78, #80, #89, #90, #91):** отдельный Chat Completions client с синхронным tool loop; с #89 transport-level SSE streaming для одного round; без фиксированного лимита раундов и без app-side read/call таймаутов (#80), только аварийный потолок 5 ч / 5M токенов на ответ (#78); `max_tokens` необязателен; partial output при ошибке; usage/cache telemetry (#76); #90 добавляет отдельный каталог source/model и сохраняет requested/response model telemetry + session-scoped request events; репозиторий и ветки GitHub добавляются в system prompt (#50); `tool_trace` восстанавливается из SQLite после reopen только с #105 (ранние несохранённые traces не восстановить); `reasoning.effort` исторически понижался на границе (#53); в #133 F18 заменено явной transport policy: manual effort не понижается скрыто, auto разрешается до HTTP, совместимость конкретного upstream отдельно проверяется; запись файла в GitHub принимает обычный UTF-8 `content`, base64 оставлен для совместимости (#52); composer не уходит под клавиатуру (#51). GitHub API вызывает только приложение: allow-list репозитория/веток, write/merge/review/workflow только после подтверждения пользователя, audit log. Prompt caching Anthropic: plain system text + только top-level automatic `cache_control`, TTL 1 час (#103, без прежнего конфликтующего системного marker 5m) (поле `cache_key` в настройках — это OpenAI `prompt_cache_key`, к нему не относится). К OpenAI background recovery OpenRouter не подключён (намеренно). #91 добавляет user-facing session telemetry и Drawer поверх уже сохранённых request_events; UI runtime на реальном устройстве отдельно не подтверждён.
-
-**Вложения (#57, #83):** `content://` сразу копируется в private storage; text/image/pdf/zip готовятся локально; история хранит attachment manifest; OpenAI File API path отдельный и не затронут. Модель может создавать локальные текстовые файлы (UTF-8). Картинки уходят без lossy-сжатия и downscale: EXIF-поворот 3/6/8 — только strict lossless (`ajpegtran:0.1.14`) при идеальной MCU-геометрии, иначе исходные байты; старые manifests с PNG-wire обновляются при чтении. Anthropic принимает до 10 MB base64 на изображение и 32 MB на запрос; через OpenRouter лимиты зависят от provider/model.
-
-**APP-04 после #133:** код пакета уже в main, обязательные CI на final-code SHA Successful (см. верх документа). F18-патч интегрирован; не накладывать его повторно и не возвращать silent xhigh/max → high. Телефонная приёмка выявила оставшиеся SEND/UI/DIAG-пробелы; ближайшая работа — APP-04-PHONE ниже. Платные API вызовы автоматически не выполнять.
+- Локальный multi-chat Android-клиент: OpenAI Responses и отдельный OpenRouter Chat Completions/SSE + local tool loop. GitHub API исполняет приложение, с repo/ref allow-list и подтверждением write/review/merge.
+- Ownership: generation → immutable request/UI snapshot → request-aware persisted active response → WorkManager recovery. Поля `active_request_id/active_response_id/active_text/active_status/active_background_enabled/active_last_sequence_number`; устаревший request не финализирует новый.
+- SQLite v20: messages attachments/metadata, request_events, независимый request_accounting и openrouter_request_rounds/rounds_sealed. Metadata и активные данные не стирать broad stale UI snapshot.
+- MainActivity остаётся монолитом. Pure seams: ResponseEventReducer, ResponseCheckpointPolicy, BackgroundResponseUiOwnershipPolicy, AttachmentUploadCompletionPolicy; persisted boundary ActiveResponsePersistence. Foreground checkpoint cadence 750 ms.
+- Нет коротких app read/call timeout, неявного output-token cap или fixed tool-round count. Аварийные границы: 5h response/recovery и 5M accumulated OpenRouter usage tokens. Сквозной durable deadline ещё задача F21.
+- Вложения: content:// копируется в private storage; text/image/pdf/zip manifests + wire bytes. Оригиналы без скрытого lossy/downscale; preview отдельно. EXIF strict lossless по #83 при допустимой геометрии, иначе оригинал. Provider/upstream limits нельзя выводить из одного общего числа.
+- OpenRouter сохраняет requested/response model, SSE partial/usage, верхний automatic cache_control 1h без конфликтующего nested 5m marker. Manual effort не понижается молча; auto разрешается до HTTP; Anthropic verbosity опускается по F18. Поддержка конкретного upstream — отдельное доказательство.
+- OpenAI background recovery и OpenRouter — разные пути; OpenRouter не подключать к Worker автоматически. Секреты не попадают в DB/diagnostics. Неподтверждённая стоимость — unknown, не бесплатный ноль.
 
 ## Фактический baseline
 
-- **Проверено 2026-10-09:** main `a5a99f3cd1c6dba60cba0235bb9995df25fe4195` после #134, tree `a52dc1519eb74e5f04a33d85410ef59ed05f937c`; открытых PR нет. Последний Android-код — #133; #134 менял только push triggers/инструкции. SQLite v20; перед реализацией заново сверить HEAD/open PR.
-- **#133:** merge `8a4d019328c90745df4448bea5c5dc1e1a2d9351`, final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`; APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful, APK выполнил Android instrumentation. Последующие docs-коммиты не меняли Android-код. #134 head `883d76ccc07b223b9f8a538d57d2f6e0343e390b`, Verify `37972109767` — Successful. Не выдавать Skipped PR-runs за сборки.
-- **Прежние рабочие proof:** #125 final-code `6aa069be89500a86bf4907cc90205e640af628e9`, APK `37908225095`, Release `37908225079`, Verify `37908229012`; #126 `a2d8de607606c7ec4213d73705b39393d0b83cf1`, APK `37911721448`, Release `37911721472`, Verify `37911728484`; #128 `1676c5c2964478a3bb0379b1c01dbe2b04db1c75`, APK `37917519700`, Release `37917519729`, Verify `37917524650` — Successful. Камеру владелец подтвердил; это не доказательство всей доставки фото.
-- **Новые PHONE-наблюдения после #133:** маленькое фото распознаётся, большие около 6.3/6.4 MB — нет; следующий текст тоже может получить `messages.2.content.1.image.source.base64.media_type` enum error. Model picker всё ещё сверху, Drawer не открывается свайпом, ⚡ мешает быстрому переключению, OR thumbnail нет, Фото открывает Files, диагностика неудобна. Переход OR → GPT с вложениями блокирует Send. В доступных скриншотах нет отдельного GPT warning и оригинальных больших image bytes.
-- **Новые SOURCE-находки:** MainActivity помещает modelBadge в root под header; showQuickEffortPicker открывает полную панель; renderUserAttachments игнорирует OR attachments, composer chip не содержит thumbnail; chooseImage использует ACTION_OPEN_DOCUMENT; handleActivityResult отвергает picker result другого чата; sendMessage содержит blanket OR-attachment history guard. buildOpenRouterMessagesSnapshot повторно включает старые изображения; SSE error handler сохраняет только message, теряя provider/code/raw metadata. Diagnostics спрятана в advanced Settings, AlertDialog текст не selectable; versionName 4.17.0/versionCode 64 не идентифицируют проверенный Git SHA.
-- **Старый широкий аудит редакций 8/9:** разобраны production/test sources, SQLite design traces и F01–F26. Это исторический реестр рисков, а не 26 текущих доказанных неисправностей: #133 изменил соответствующий код. Сохранять результаты и проверять существующие regressions при затрагивании путей; не переписывать всё заново по старому source description.
-- #101 attachments/wire_path/drafts/fingerprint, #103 Claude caching, #105 persisted metadata, #107 GitHub guards, #109 меню +, #128 camera ownership и #133 не переделывать без регрессии. #112–121 сохранили unknown/reported, ledger и round accounting; их финансовое расширение не ведёт очередь. Серверная branch protection отдельно от client guards.
+| Срез | Подтверждение | Граница |
+| --- | --- | --- |
+| main после #135 | `c492e74e3aaed8f87752be41e8ad2618d8215afa`; Android baseline #133; SQLite v20 | #134 trigger-only, #135 docs-only |
+| #133 final code | `73d9e4357838fbd55f6564b11e3806bb3f65bd65`; APK 37967095171, Release 37967095269, Verify 37967102030 — Successful; merged `8a4d019328c90745df4448bea5c5dc1e1a2d9351` | Телефон выявил новые PHONE-пробелы; старые зелёные тесты их не доказали |
+| #136 исходный head этой коррекции | `d0624e318fc8cc14b96d8879f6d55c7c87201b3c`; unit/lint/build Successful; 33/34 instrumentation без сбоя, единственный failed — Drawer input injection | Release/Verify успешны, весь APK workflow Failed; merge запрещён до нового зелёного результата |
+| Физический телефон | Владелец подтвердил камеру #128 и распознавание маленькой фотографии после #133 | Большие фото/media_type error, OR→GPT блокировка, thumbnails, жест/нижние controls/picker/логи — причины нового #136; installed SHA и upstream trace тех фото отсутствуют |
+
+Новый код #136 уже внесён в его ветку: typed OpenAI local replay, фото/picker ownership, OR previews, нижние controls, диагностический SHA/error metadata. Прежние source-находки «верхняя row», «blanket OR guard», «нет preview» — описание базы до #136, а не доказательство дефекта в текущем head. Проверять текущий код и сценарий.
+
+Сохранять #133: deep-copied Send snapshot, off-main history preparation, D2, narrow DB writers/terminal claim, request-bound approvals, partial/refusal, model metadata и reasoning transport. Финансовые #112–121 unknown/reported/ledger/rounds не переписывать ради PHONE.
 
 ## Подтверждённые lifecycle/recovery контракты
 
-Единая карта доказанности: подтверждено запуском (контракты ниже) → только source-level → не подтверждено (список в конце раздела). Тег — самый сильный реально выполненный harness именно для этого утверждения; соседний pure/static контракт не переносит proof на runtime wiring.
-
-Теги: instrumentation — эмулятор/ActivityScenario; robolectric — Android/SQLite без эмулятора; pure — JVM-тест без Android runtime; static — только source-level/verifier, runtime-теста этого утверждения нет.
+Единая карта доказанности: instrumentation — Android/ActivityScenario; robolectric — Android/SQLite без эмулятора; pure — JVM без Android runtime; static — source/verifier без runtime. Тег применяется к конкретному утверждению, а не ко всему PR. Старые записи — исторический proof; новые проверки и границы ниже.
 
 - [pure] **#19:** foreground и resumable SSE соблюдают строгий sequence-gap contract: пропущенная последовательность не принимается как корректное продолжение stream.
 - [static] **#20:** Stop привязан к generation конкретного request; state-level contract `markUserStop()` проверен, но прямой runtime-вызов полного `stopCurrentResponse()` в этом proof отсутствует.
@@ -104,7 +90,6 @@
 - [robolectric] **#57:** миграция ChatDatabase до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки истории; lifecycle DB tests прошли на PR head.
 - [instrumentation] **#59:** pending GitHub confirmation имеет одного владельца (future/dialog); Stop/onStop/onDestroy завершают решение как `false`; ActivityScenario проверяет Stop против подтверждения.
 - [instrumentation] **#60:** ActivityScenario `recreate()` при открытом GitHub-диалоге закрывает старое решение и оставляет новую Activity без pending confirmation.
-**Уточнение доказательств #59/#60 на APP-04:** эти теги относятся к успешной исторической версии. На PR #133 SHA `c077f1d7` оба `MainActivityLifecycleTest` confirmation-сценария **упали**: в тестовых потоках отсутствовал обязательный owner. Test-contract обновлён, но успешного instrumentation на новой версии кода пока нет; после CI обновить статус и exact SHA.
 - [instrumentation] **#61:** Stop отменяет сохранённый `Call` model-capability preflight; helper сохранения вложения в исходный chat работает после навигации. Executor → copy/ZIP → policy отдельно подтверждён #68.
 - [instrumentation] **#62:** новое OpenRouter-сообщение отменяет предыдущий active Call и pending GitHub confirmation; request-ownership проверяется до/после HTTP и вокруг tool boundaries.
 - [instrumentation] **#67:** stale `onCallCreated` не публикует Call старого request; active Call принадлежит текущему request на Activity boundary.
@@ -127,19 +112,40 @@
 - [pure] **#103:** `OpenRouterCachePolicyTest` и JVM `OpenRouterChatClientTest` проверяют 1h top-level marker без nested 5m system marker, в том числе при растущей истории двух tool rounds. Реальный OpenRouter error показан на телефоне **до** фикса, что не доказывает успешный повтор **после**.
 - [robolectric] **#105:** `ChatDatabaseMessageMetadataTest` покрывает DB v16→v17 migration, write/reopen, metadata-only update и импорт LegacyPrefs; pure `ChatMessageFingerprintTest` отслеживает изменения всех optional metadata. Production wiring/source подтверждено, но длительный Claude/GitHub диалог на устройстве после фикса не гоняли. CI Build `37810616575` / Release `37810616596` Successful на exact code head `ca06cec760407c0e8aa84895dce044f7e290efe4`; static verifier + 3 intentional negative mutations PASS (матрица проверяет UI gate renderVectorStoreList, не metadata/usage producer coverage).
 
-**Не подтверждено запуском — общая картина пробелов.** Когда пробел закрыт тестом или наблюдением, перенеси его в список выше с тегом.
+**Дополнено по текущим тестам и завершённым CI, а не по одному факту merge.**
 
-Только source-level: #20 — тест проверяет state-контракт `markUserStop()`, но не вызывает `stopCurrentResponse()`; #37 — нет теста wiring adapter; #40 — runtime wiring reasoning callback не гоняется; #42 — нет runtime-теста image/ZIP completion wiring через policy; #78 — потолок 5 ч / 5M токенов; #80 — снятие 10-минутных таймаутов и implicit 128K.
+- [pure] **#107:** `GitHubToolSafetyTest` проверяет explicit allowed ref, non-draft/open target, exact head, только Successful push builds, latest failed attempt вместо старого Success и полное confirmation preview. Текущие JVM-тесты прошли на `d0624e3` (APK 37988996183, шаг Test, lint and build); это client policy, не серверная защита/реальная запись.
+- [robolectric] **#112:** known zero и unknown не смешиваются; migration v18 не выдумывает provider cost из legacy estimated. `ChatDatabaseCostMigrationTest`, `OpenRouterAccountingTransportTest`, formatter tests; текущий unit step `d0624e3` Successful. Provider-reported mock data не доказывает фактические расходы.
+- [robolectric] **#115:** ledger сохраняет immutable captured identity и nullable usage, переживает reopen/v18 migration, idempotent по request ID; late cost после Stop не воскрешает state, Delete/clear блокируют late callback. `ChatDatabaseRequestAccountingTest`, `BackgroundRequestFailureRecorderTest`; текущий unit step `d0624e3` Successful.
+- [robolectric] **#121:** v20 round ledger/rounds_sealed, все раунды нужны для known total; повторные usage frames/Stop/late/Delete/reopen не удваивают стоимость. `OpenRouterAccountingTransportTest`, `OpenRouterGenerationAccountingTest`; текущий unit step `d0624e3` Successful, live generation lookup не доказан.
+- [robolectric] **#125:** Stop event принадлежит captured request, старый cost не становится ценой нового Stop; terminal claim/Stop mutually exclusive, один recovery winner. `ChatDatabaseActiveFinalizationTest`, `RequestDisplayPolicyTest`; нынешние narrow append/metadata race tests также прошли на `d0624e3`. Pixel UI и billing не следуют из SQLite.
+- [pure] **#126:** `ModelRequestPolicyTest` проверяет mode/effort independence и omission unsupported mode/configuration_update. Текущий unit step `d0624e3` Successful. Старый контракт наличия controls не подтверждал нижнее расположение, IME или три разных click outcomes; бывшие UI/normalization указания #126 заменены #133/#136 и уточнением владельца.
+- [instrumentation] **#128:** camera-result после switch/recreate остаётся в исходном OpenAI/OR draft; Cancel удаляет только temporary photo. `cameraResultAfterChatSwitchAndRecreateKeepsOpenAiSourceDraftWithoutUploading`, OR counterpart, `cancelledCameraAfterNavigationDeletesOnlyItsTempPhoto`; камера отдельно подтверждена владельцем, mock callback не доказывает весь Camera/picker UX.
+- [instrumentation] **#133:** APK 37967095171 на `73d9e435` Successful, включая Android lifecycle; исправленные #59/#60 owner-aware Stop/recreate confirmation-тесты прошли. HTTPS Send→body fixture, Stop/failed preparation/draft, исходный ZIP/copy owner проверены конкретными ActivityScenario; pure/SQLite гарантии перечислены ниже отдельно, общий CI не доказывает все F01–F20 на телефоне.
+- [instrumentation] **#136:** на `d0624e3` APK 37988996183 выполнил 34 теста с одним failed Drawer injector, значит остальные 33 завершились без failure/skip: `openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs` (async failure, zero HTTP, preserved draft/history), source picker/recreate и `realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory`. Это частичный proof конкретных сценариев; весь PR ещё не прошёл обязательный APK-гейт.
 
-Не подтверждено вообще (нет ни теста, ни наблюдения):
-1. Очень длинный ответ на реальном провайдере не наблюдался. OpenAI: source-аудит без app-side timeout, реального прогона не было. OpenRouter: #89 теперь покрывает transport-level SSE на JVM, но реальный long-running provider/mobile run всё ещё не наблюдался; Anthropic рекомендует streaming для long-running запросов, особенно при больших `max_tokens`, поскольку некоторые сети могут разрывать idle-соединения; «10 минут» — ориентир/ограничение SDK для non-streaming, а не универсальный лимит модели.
-2. Prompt caching (#55/#56): реальный cache hit не наблюдался; минимальный размер кэшируемого префикса для Opus 5.5 не выяснен; эффект 1-часового TTL на стоимость не проверялся. OpenRouter usage/cache telemetry доказана на уровне client (#76); показ в UI не подтверждён.
-3. IME/insets (#51): результат на реальном устройстве с Android 15 не подтверждён.
-4. Вложения Claude (#57, #83): чтение моделью картинки/PDF/текста и multi-select через `clipData` не подтверждены на реальной модели; JPEG с неидеальной геометрией или mirrored/transpose-ориентацией уходит как есть — трактовка EXIF-orientation провайдерами не проверена; память/время lossless-поворота на больших фото не измерялись. Для `ajpegtran:0.1.14` опубликованные license metadata и IJG attribution requirements проверены; `NOTICE.md` добавлен в #92, но отдельного runtime/публикационного аудита видимости notice внутри APK не проводилось.
-5. GitHub-инструменты: read подтверждён живым использованием; реальный write (комментарий, review, merge, запись файла, workflow dispatch) не выполнялся — проверены только подтверждение и отмена (#59/#60).
-6. Полный набор async-границ `MainActivity` не покрыт runtime. Повторный source-аудит 2026-10-09 выявил узкие пути потери OpenRouter result, stale recovery callback и отсутствующую onStart reconciliation (APP-04); новые production regressions ещё должен выполнить исполнитель. Аудит не называть доказательством отсутствия остальных ошибок.
+| Актуальный контракт APP-04/PHONE | Конкретное доказательство | Ограничение |
+| --- | --- | --- |
+| Stale snapshot не стирает новый Worker ответ/metadata; Stop/terminal имеет одного победителя | `ChatDatabaseActiveFinalizationTest`: sameLengthStaleUiSnapshotCannotOverwriteCommittedMetadata, terminalClaimPreservesDbRowsAndMetadataAddedAfterStaleSnapshot, concurrentStopAfterTerminalCannotEraseCommittedAssistant; Robolectric unit step `d0624e3` Successful | Это DB race/ownership, не полный набор UI callbacks |
+| xhigh/max не понижаются, unresolved auto не уходит в HTTP, Claude verbosity не перекрывает effort | `OpenRouterReasoningPolicyTest`, `OpenRouterChatClientTest.claudeXhighAndMaxSurviveEveryToolRoundWithoutVerbosityOverride`; JVM step `d0624e3` Successful | Wire JSON/tool rounds, не обещание поддержки любым upstream |
+| OR history replay в OpenAI использует реальные локальные bytes, typed input без чужих file_id | `OpenAiLocalContextEncoderTest`: realJpegPhotoSurvivesManifestPersistenceAndProviderReplay, mixedLocalContextEncodesAllWithoutForeignIds, missingLocalBytesStopBeforeProducingAnyInput; JVM step `d0624e3` Successful | Encoder, не живой запрос GPT; недоступный файл всё ещё требует понятного отказа |
+| OpenAI unavailable/stale history chain не запускает HTTP и не теряет D2/history | `MainActivityLifecycleTest.openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs`; instrumentation `d0624e3` passed | Ключ задан, async preflight дождались; это failure path, не доказательство live success replay |
+| Валидный большой JPEG (>6 MB) сохраняет wire bytes в Send и следующем текстовом history | `realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory`; instrumentation `d0624e3` passed, local HTTPS MockWebServer, decoded bytes сравниваются | Не исходное проблемное фото владельца и не настоящий Claude |
+| Picker-result после switch + recreate принадлежит source chat | `externalImagePickerResultAfterChatSwitchAndRecreateBelongsToSourceChat`; instrumentation `d0624e3` passed | Синтетический result; Photo Picker/MiXplorer вручную ещё не проверены |
+| Model/effort/advanced в одной composer row ниже header | `compactHeaderKeepsModelPickerAndComposerEffortAccessible`; instrumentation `d0624e3` passed, screen geometry + shared parent/listeners | Пока нет runtime проверки всех click outcomes, IME/малой высоты/large font; не объявлять полную UI-приёмку |
+| SSE/HTTP error сохраняет typed status/provider/type/body size; логи редактируют secrets/Base64 | `OpenRouterChatClientTest.streamingProviderErrorPreservesTypedMetadataAndRequestBodySize/httpErrorPreservesStatusProviderAndType`, `AstraDiagnosticsPrivacyTest`; JVM step `d0624e3` Successful | Не live upstream trace и не ручная проверка selection/export/log grouping |
+| Refusal/fragmented text сохраняются, rich text не теряет underscores/code/link destinations | ResponseEventReducer/OpenRouterChatClient/RichTextRenderer tests, unit step `d0624e3` Successful | Copy/TXT/UI на конкретном телефоне проверяются отдельно |
 
-**Не переоткрывай закрытые lifecycle/recovery контракты без нового доказательства регрессии.**
+**Пока не подтверждено / не повышать тег автоматически.**
+
+- Drawer open/close: на `d0624e3` failed injector; нынешнее window-dispatch исправление ещё ждёт нового CI. Даже успешный Activity window test не подтверждает системную инъекцию/жест на телефоне.
+- Source-only старые границы: полный direct OpenAI Stop wiring (#20), отдельный runtime adapter proof ActiveResponsePersistence (#37), reasoning callback (#40), все image/ZIP completion ветви (#42), бесконечно quiet 5h recovery stream/сквозной budget (#78/#84 → F21). Новые tests закрывают названные ветви, не всё семейство.
+- Настоящие Claude/OpenAI: проблемное большое фото, живой provider switch/long-running stream, upstream-specific image/effort limits, cache hit/TTL/реальная стоимость, EXIF-интерпретация non-ideal/mirrored фото. Маленькое фото и камера — ограниченные наблюдения владельца.
+- Телефон: три click outcomes, gesture/Back/selection/code scroll, IME/large font, настоящие Photo Picker и MiXplorer, previews/reopen, selectable Copy/share/latest logs, установленный build SHA. Читаемая ошибка и отсутствие нового выдуманного лимита важнее «mock accepted».
+- GitHub: read подтверждён прежним использованием; реальные write/review/merge/workflow от приложения не испытаны. Branch protection — отдельное серверное ограничение.
+- Полный async surface/heap/cleanup/vector-store/read >1 MB ещё не закрыт; APP-05 ниже. Не называть source audit или aggregate green доказательством отсутствия прочих ошибок.
+
+**Как поддерживать этот раздел:** после каждого изменённого контракта запиши утверждение, конкретный test/наблюдение, harness, SHA/run/attempt/result и границу. При новом успешном прогоне обнови также ранее Failed/«ещё ждёт» записи, а не добавляй противоречивую строку сверху. Исторический тег не переносится на изменённый runtime автоматически. Закрытый контракт переоткрывай только при новом доказательстве регрессии.
 
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
@@ -154,129 +160,117 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-**Редакция плана 10:** ближайший APP-04-PHONE — один PR с тремя связанными блоками ниже. #133 уже merged, его не «заканчивать» и не создавать отдельные PR для каждой кнопки. APP-05 F21–F26 остаётся одним будущим пакетом. Подробный передаваемый исполнителю план ведётся вне GitHub; этот handoff содержит весь обязательный scope. Цена отмены отложена, неизвестная сумма допустима.
+Редакция 11: существующий #136, затем один сохранённый APP-05 F21–F26. Отдельные SEND/UI/DIAG PR, новый финансовый ledger и Compose rewrite не входят в пакет.
 
 ### 1. Отправка, сохранность и повседневный интерфейс — **следующий**
 
-**APP-04-PHONE:** исправить ежедневные PHONE-сценарии и необходимые диагностические пробелы одним кодовым PR, без миграции v20, нового ledger, Compose/controller rewrite или новых платных retries. Три блока — внутренние части одного PR. Цель бюджета: одна финальная пара APK/Release; повтор допустим после разобранного падения или изменения кода.
+**APP-04-PHONE / #136. Первый шаг:** перечитать actual PR head и результаты новой пары push runs после текущего test-only fix. Если снова Failed — забрать named failure/stack/assert, сопоставить harness с кодом и исправить конкретную причину в той же ветке. Не повторять старые «нет API key»/«один MOVE» диагнозы: на d0624e3 OpenAI test passed, остался OS input injection. При зелёном гейте следующий агент снимает draft, мержит #136 и начинает APP-05 по указанию владельца.
 
-**Первый шаг:** сверить main/open PR/installed build identity; прочитать sendMessage/buildOpenRouterMessagesSnapshot/OpenRouter SSE error handler, renderUserAttachments/refreshAttachChips, chooseImage/chooseAny/handleActivityResult, buildUi/showQuickEffortPicker/showSettings/AstraDiagnostics. Записать падающие regressions с валидным большим JPEG, фактическим переходом провайдера, координатами нижних кнопок и MotionEvent Drawer. Воспроизведение mock/эмулятором не объявлять live provider proof.
+**Обязательный scope остаётся критерием приёмки, а не очередью переписывания уже внесённого кода.**
 
-| Один PR, три блока | Обязательный результат |
+| Блок одного PR | Наблюдаемое поведение / приёмка |
 | --- | --- |
-| **SEND** — доставка и работа с файлами (F01/F03/F08 + previews/pickers) | Большое/историческое фото проверено по wire/body; OR → GPT в том же чате передаёт доступные локальные вложения совместимым форматом; thumbnail до/после Send/reopen; Фото через Photo Picker, Файлы с совместимым выбранным менеджером; result остаётся у source-chat. |
-| **UI** — свободное место и простые действия (F18/F19) | Три разных controls внизу у ввода: модель, быстрый effort, дополнительные reasoning/response settings. Model row сверху отсутствует. Drawer реально открывается вправо и закрывается влево; IME/scroll/Back не сломаны. |
-| **DIAG** — объяснимые ошибки и доступные логи | Кнопка диагностики сразу под API keys, readable request groups, selectable/copy/share, открытие на последних событиях; build SHA и sanitized upstream error/attachment descriptors. Логи показывают причину/этап, а не только длинный exception message. |
+| SEND | Большое/историческое фото проходит MIME/body подготовку по настоящим bytes; OR→GPT replay совместимых локальных вложений в том же чате; понятная ошибка недоступного input до очистки draft. Thumbnail composer/bubble/reopen; Фото открывает native photo grid; Files выбирает совместимый handler; picker-result принадлежит source-chat после switch/recreate. |
+| UI | Только три controls внизу у ввода: model/provider; ⚡ quick effort; маленькая advanced button. Верхняя model row отсутствует. Quick выбор закрывается после уровня, advanced даёт полную панель. Drawer открывается вправо на chat surface, закрывается влево; vertical scroll, Back, selection/code scroll и IME работают. |
+| DIAG | Диагностика сразу под API keys; группы request с временем/model/provider/stage/outcome/reason. Выделение/Copy/share/export, старт на последних событиях и «В конец»; не ломать чтение старого. Git SHA; safe upstream/attachment descriptors без credentials/base64/body. |
 
-**SEND — точная приёмка.**
-- **Размер ещё не доказанная причина.** Телефон показывает media_type enum error, а не image_too_large; в коде MIME уже определяется по wire magic. Проверить весь outbound messages array, включая старые изображения: новый текст снова отправляет их. Для каждого image нужны source/wire MIME, размеры байтов/Base64, dimensions/hash и messages/content index. Валидные JPEG около 6–7 MB и маленькое около 143 KB проверить после persistence/reopen, в смешанной истории и следующем текстовом запросе. Mock HTTPS body декодируется обратно и совпадает с исходным hash; 4-байтовая «JPEG-сигнатура» не fixture.
-- Из SSE error сохранить code/error_type и metadata.provider_name/provider_code/raw (при наличии), request/round ID и стадию; redact credentials, не логировать full body/base64. Передача маленькой fixture в MockWebServer не доказывает большого фото настоящему Claude. По официальным документам прямой Claude допускает 10 MB base64/image, Bedrock/Google — 5 MB; OR routing/лимиты конкретного upstream не установлены. Не вводить универсальный предел 5 MB и не объяснять enum error одним размером без trace.
-- Неверный/неподдерживаемый input останавливается до потребления draft/HTTP с понятной причиной и конкретным вложением. Корректный payload, отклонённый upstream, фиксируется как upstream failure. При реальном лимите сохранять оригинал; уменьшенная wire-копия только по явному выбору пользователя, без скрытого lossy/downscale, публичной загрузки или оплачиваемого автоматического retry. Не удалять старые фото из контекста молча и не повторять ту же известную невалидную историю бесконечно.
-- **Смена provider:** нынешний запрет sendMessage не удалять без замены. Из локальных manifests/bytes строить typed context целевого API: изображения и поддерживаемые файлы OpenAI/OR, без чужих file_id и stale previous_response_id. Обычная смена OR → GPT с доступным фото не требует нового чата; проверить composer и исторические вложения, обратный переход и OpenAI full-history fallback. Для реально недоступного/unsupported файла — действие/объяснение до очистки draft, без тихого text-only fallback. Исходные metadata/messages и новый draft D2 сохраняются.
-- **Preview:** использовать bounded thumbnail loader и attachment identity для OR manifests в composer и user bubble, включая Send/reopen; не применять preview downscale к wire. Отсутствие thumbnail не удаляет вложение; кнопка просмотра доступна.
-- **Фото:** AndroidX PickMultipleVisualMedia/ImageOnly, native photo grid с совместимым fallback. ComponentActivity и activity-ktx 1.10.1 уже имеются, смена Activity base/обновление dependencies ради этого не нужны. Сохранить Camera/Photo/Files menu и multiselect.
-- **Файлы/MiXplorer:** chooser/preferred compatible file handler через Android intents; не угадывать package. MiXplorer используется, если установленная версия поддерживает запрос, иначе доступный выбор/fallback. Сразу копировать content:// в private storage; для GET_CONTENT нельзя требовать persistable grant. Photo Picker и Files — разные действия.
-- **Владелец picker:** source-chat/provider/operation захватывается до внешнего окна и переживает recreation. Возврат после switch сохраняет result в исходном draft, не в текущем; current chat и его D2 не меняются. Cancel убирает только temporary bytes своей операции. Старый early-return «повторите выбор» не является приёмкой.
+**SEND — сохраняемые точные условия.**
 
-**UI — точная компоновка вместо прежнего верхнего row/полной панели из ⚡.**
-- В composerOptions непосредственно у ввода, над клавиатурой: **model/provider picker**, **⚡ quick effort**, **отдельная маленькая кнопка дополнительных настроек мышления и ответа**. Быстрый effort — только одноразовый выбор уровня с немедленным сохранением/закрытием; full panel открывается третьей кнопкой. Модель убрать из верхнего header/root row и общих Settings, controls не дублировать.
-- Дополнительная панель переиспользует уже имеющиеся effort-compatible mode/summary/verbosity/max output/format/schema; keys/prefs/секреты не переименовывать и не сбрасывать. Сохранить #133 ручные xhigh/max без скрытого понижения, явный resolved auto и provider-specific omission. Неподдерживаемое не отправлять; выбор меняет следующий request, не captured active request. Temperature отдельно от reasoning.
-- Header: title, chats/new chat и основная gear; Drawer без Settings footer. Открытие вправо должно быть доступно реальным горизонтальным движением в области чата, не требовать попасть в микроскопический край. Закрытие влево и кнопка остаются; вертикальный scroll, selection, горизонтальный code scroll, Android Back и IME не перехватывать без основания. Точная причина телефонного gesture failure пока не доказана.
-- Tests проверяют screen bounds controls ниже chat/history и доступность при IME/малой высоте/крупном шрифте; отсутствие model control в header; три разных click outcomes. Для Drawer — реальные pointer/MotionEvent swipe open/close плюс отрицательный vertical-scroll/Back кейс. Старый test наличия кнопок compactHeaderKeepsModelPickerAndComposerEffortAccessible этого не доказывал.
-- Сохранить компактную цветную строку, bounded expanded history/Close и request-specific model labels из #133; не вернуть Astra в каждый bubble.
+- Проверяй все outbound messages/content, включая старые фото следующего текстового Send. Real decodable JPEG 6–7 MB, маленький image, persistence/reopen/mixed history; по каждому source/wire MIME, bytes/Base64 length, dimensions/hash/index. HTTPS mock декодирует payload и сравнивает с оригиналом. JPEG signature из четырёх байт не изображение.
+- media_type enum error не доказательство лимита размера. Сохрани provider/code/type, local request/round ID и стадию, sanitized attachment descriptors; никаких произвольных raw_error/full body в лог. Большое mock image не доказывает acceptance реальным Claude.
+- Не делать silent text-only fallback, удаления старых attachments, foreign file IDs/stale previous_response_id, lossy/downscale, публичной загрузки или оплачиваемого automatic retry. При недоступных bytes остановить до расходования draft/HTTP с конкретной причиной; уменьшенная wire-copy только по явному выбору пользователя, оригинал сохранить.
+- OR↔OpenAI replay: typed local context целевого API; проверить history + composer, stale response chain и full-history fallback. Доступное локальное фото не требует нового чата.
+- Preview bounded и отделён от wire; absence preview не удаляет attachment. Photo через AndroidX PickMultipleVisualMedia/ImageOnly + fallback; Files chooser/preferred **совместимый** installed handler без выдуманного MiXplorer package. content:// сразу private copy; GET_CONTENT не требует persistable grant.
+- Source-chat/provider/operation захватывается до picker и переживает recreation; Cancel очищает лишь свои temporary bytes; текущий чужой draft D2 не меняется.
 
-**DIAG — работающий просмотр и доказательства.**
-- В общем Settings диагностику поставить сразу под OpenAI/OpenRouter API keys, до GitHub/tools/прочих категорий; не прятать в advanced section.
-- Группировать по request: время, model/provider, стадия, исход, короткая причина; ниже читабельные поля и свернутые технические детали. Log text selectable; Copy selected/request/all и share/export берут исходный текст. При открытии показать последнюю запись (scroll в конец) и кнопку «В конец», не перематывать просмотр во время чтения старого или selection.
-- Сохранить rotation/bounded tail, читать/форматировать без большого I/O на UI. Старые log lines остаются читаемыми. Секреты/API tokens/полная Base64 не попадают в diagnostics; проверка redaction обязательна.
-- Добавить идентификатор Git/build SHA в BuildConfig/diagnostics, получать из CI GITHUB_SHA, local build помечать честно. versionName 4.17.0 сам по себе не подтверждает установленный commit. Поля error/attachment описаны в SEND; persist/log не зависит только от visible/current UI gate. Не создавать новую финансовую DB или общий tracing framework.
+**UI/DIAG — сохраняемые точные условия.**
 
-**Что не переоткрывать без новой регрессии (#133 / прежние F01–F20).** Snapshot/ownership/draft D2, одна upload/download operation, сериализованный source draft, ZIP Cancel, cache identity, narrow DB claim/append, Stop/terminal winner, recovery reconciliation/text+cursor, Edit/Delete/Repeat, GitHub owner/approval, refusal/OR deltas, model metadata и Copy/TXT/URL/code сохраняются. Проверить существующие contracts при затрагивании путей; исходное source description редакции 9 не доказательство, что дефект ещё есть. Новые регрессии SEND/UI/DIAG дополняют эти proof и меняют именно постоянный provider guard и неверную UI-приёмку.
+- Model/quick/advanced только composerOptions у ввода, prefs/keys не сбрасывать. Effort/compatible mode/summary/verbosity/max output/format/schema в advanced; ручные xhigh/max и resolved auto из #133 сохранить. Новый выбор меняет следующий, не captured активный request. Temperature не effort.
+- Header: title/chats/new-chat/gear; Drawer без duplicate Settings footer. Проверяй именно geometry и три click outcomes; small-height/IME/large font отдельно. Настоящее движение касаний проходит View dispatch; helper openDrawer вместо swipe не доказывает gesture.
+- Logs: bounded tail/rotation, main без большой I/O; выделение, исходный Copy/export, latest scroll без автопрыжка при чтении/selection. Error persist не зависит только от visible UI gate; новая financial DB/tracing framework не нужна.
+- Устройство: установленный Git SHA должен совпасть с tested code; local build честно local-unknown. Один итоговый APK владельцу для PHONE smoke; результаты и неизвестности записать, не смешивать mock/phone/live.
 
-**Неоднозначное требование автоматики:** последнее сообщение содержит «автоматического заканивания». Значение не установлено: скачивание готовых файлов, продолжение/завершение ответа или завершение работы агентом — разные задачи. Не обещать новую автоматику по догадке. Существующий auto-download касается container_file_citation; обычный file_citation требует действия. Уточнение не блокирует остальные три блока. Процесс исполнителя однозначен: закончить согласованный PR до проверенного merge, не заканчивать turn после каждого промежуточного CI-статуса.
-
-**Merge и короткая телефонная приёмка:** targeted offline/Android regressions готовы до [ci]; финальные APK + Release Successful на последнем кодовом SHA и Verify на final head. Handoff/описание PR прямо перечисляют исправленное/непроверенное. Один итоговый APK: владелец проверяет нижние три кнопки/gesture, Фото/MiXplorer/thumbs и тот же большой image, смену OR → GPT. Без реального upstream trace точную причину enum error не объявлять устранённой по одному mock. Платные API/реальная камера этим аудитором не запускались. APP-05 начинать после этого пакета и короткого владельческого smoke, а не автоматически по зелёному CI.
+**Не переоткрывать без новой регрессии:** #133 deep snapshot/D2, registry одной upload/download operation, serialized source draft, ZIP Cancel, file identity/cache, narrow DB claims/append, Stop/terminal winner, recovery reconciliation/text+cursor, Edit/Delete/Repeat, owner approvals, refusal/OR deltas, model metadata и Copy/TXT. Прежняя верхняя model row/full panel из ⚡ — отменённое ТЗ, не контракт.
 
 ### 2. Долгие операции, ресурсы и инструменты — следующим общим пакетом
 
-**APP-05:** один следующий пакет F21–F26, после APP-04-PHONE и короткой проверки того же APK владельцем. Не запускать Android CI для одного лишь обзора этих рисков и не смешивать их с ближайшим пакетом. Если измерения покажут независимое опасное изменение схемы/transport, отделить только его по конкретной причине, не дробить строки автоматически.
+**APP-05:** один следующий пакет F21–F26 после успешного #136 и разрешённого merge. По последнему указанию владельца начать его затем; телефонный smoke записать как отдельную остающуюся проверку, а не вводить новую паузу. Не расходовать Android CI лишь на обзор; отдельное изменение отделять только при конкретном независимом schema/transport риске.
 
-**Первый шаг:** fake-clock/blocked-stream regression для сквозного deadline, synthetic input для copy/cleanup и delayed Vector Store dialog fixture. Сначала воспроизвести конкретный предел/потерю, затем определить минимальные budgets и ownership; не ждать пять часов в CI и не вводить короткий timeout самого ответа.
+**Первый шаг:** воспроизвести F21 fake clock/blocked stream, F22 synthetic stream/heap, F23 operation cleanup и F24 delayed dialog fixture; затем выбрать узкие ownership/budget изменения. Не ждать 5 часов в CI и не вводить короткий response timeout.
 
-| Найденный путь | Доказательство и место | Проверяемый результат |
+| Задача | Установлено | Проверяемый результат |
 | --- | --- | --- |
-| F21 · P1 на уровне аварийного контракта: Пятчасовой recovery budget не сквозной | SOURCE. Recovery clock начинается заново на каждом Activity/Worker; quiet stream не прерывается по deadline. | Один durable remaining budget; fake clock/blocked stream, без короткого timeout ответа. |
-| F22 · P2, OOM/ANR ещё не измерены: Копирование больших файлов и heap | SOURCE. Raw copy без byte/cancel budget, whole-file text/Base64; OOM ещё не измерен. | Synthetic stream/heap measurement → bounded I/O/понятный budget, без silent compression/truncation. |
-| F23 · P2: Незавершённые файлы остаются на диске | SOURCE, новое. ZIP/copy/decode/download exceptions оставляют temporary/partial files. | Cleanup только своих operation paths; failure/retry не растят мусор и не удаляют READY. |
-| F24 · P2: Vector Store: старый callback, зависание и скрытая ошибка | SOURCE, новое. VS callbacks используют глобальный dialog view; unlimited metadata call, limit=100, delete error скрыт. | Dialog/store owner, finite control-call budget, Cancel/errors, pagination или явный неполный список. |
-| F25 · P2: GitHub read может сообщить успех с пустым файлом | SOURCE + API contract, новое. GitHub getFile возвращает ok=true/empty при encoding=none или decode failure. | Bounded raw/blob по разрешённой identity либо явный unsupported, отличать настоящий пустой файл. |
-| F26 · P2, CI/config отдельно: Docs gate и серверная защита | SOURCE + GitHub snapshot. Любой Markdown требует Verify в client gate, workflow покрывает только handoff/tools; main не protected. | Согласовать trigger/gate в APP-05; server protection отдельно у владельца/тарифа. |
+| F21 · P1: сквозной 5h recovery budget | SOURCE: новый clock у Activity/Worker, quiet stream не прерывается deadline | Один durable remaining budget через lifecycle/process hops; fake clock + blocked stream/cancellation |
+| F22 · P2: большие файлы/heap | SOURCE: raw copy без byte/cancel budget, whole-file text/Base64; OOM ещё не измерен | Synthetic streams/heap measurement → bounded I/O и понятные ограничения без silent compression/truncation |
+| F23 · P2: temporary/partial files | SOURCE: ZIP/copy/decode/download exceptions оставляют свои незавершённые файлы | Failure/Cancel/retry cleanup operation paths, READY/referenced bytes сохраняются |
+| F24 · P2: Vector Store | SOURCE: глобальный dialog callback owner, unlimited control call, limit=100/delete error скрыт | Dialog/store identity, finite metadata-call budget, Cancel/error, pagination/явный неполный список |
+| F25 · P2: GitHub getFile | SOURCE/API: encoding=none/decode failure могут дать ok=true/empty | Bounded разрешённый raw/blob или понятный unsupported; настоящий пустой файл отличается |
+| F26 · P2: docs gate | SOURCE: client требует Verify для любого Markdown, workflow только handoff/tools | Согласовать client gate/trigger; server branch protection отдельно у владельца/доступного тарифа |
 
-**Живые проверки:** использовать итоговый APK APP-04 для одного короткого списка: Claude фото/файл; реальная модель pending/error/restored; Repeat; Edit/Delete при запросе; background→return; нижние три controls/Drawer/IME; Copy/Save. Камера уже подтверждена владельцем, остальные результаты фиксировать по отдельности. Настоящие API/cache/long responses/web/GitHub и фактические суммы не доказываются CI. Новые платные вызовы без разрешения не выполнять; текущих сообщений/скриншотов достаточно для offline regressions.
-
-**Финансы в парковке, без нового PR сейчас.** Unknown после Stop/OpenAI допустим при отсутствии подтверждённой USD суммы; usage токенов не означает известную цену. Владелец подтвердил списания OpenAI и OpenRouter; $0.20 — приблизительная цифра, не точный результат. Сохранить #112–121. OpenRouter header/first error ID, уточнение round cost, durable lookup/retry, atomic accounting/event, nullable legacy tokens и реальный v19 ALTER fixture остаются в историческом финансовом приложении внешнего плана. BILL-04-H1/H2 и BILL-02-H1 не продолжать автоматически; фиксированные Astra rates не выдавать за фактическое списание всех GPT. При новом подтверждённом crash/потере данных пересмотреть очередь по доказательствам.
-
-**Будущие функции, не срочные дефекты:** search, fork/versions, undo edit/delete, profiles и context inspector сгруппированы в Product radar. Сейчас не делать их инфраструктуру. GH branch protection — действие владельца; F26 client/workflow mismatch можно исправлять в APP-05 без обещания серверной защиты.
+**Не делать сейчас:** полный financial reconciliation отмены, новые автогенерации/retries, controller/Compose rewrite, инфраструктуру product radar. «Расход неизвестен» допустим. Серверную защиту не обещать без проверки возможностей аккаунта.
 
 ## Репозиторий / branches
 
-Локальных feature branches накопилось много; удаление веток не удаляет коммиты и PR.
-PR #92 был stacked поверх старого snapshot #91; после merge #91 ветка была перепривязана к новому main и лишняя история #91 удалена из diff. #92 затем merged в `main` как `dc687591a642a48b87572197c673fad2a2951858`. Коннектор не умеет DELETE ref, `workflow_dispatch` и repository variables; можно читать runs/логи и перезапускать существующие runs.
+Репозиторий `luoecrt-pixel/OpenAIApiChat`; main только через PR. Продолжай actual open branch, не создавай stacked копию старого snapshot. Перед записью сверяй head и blob SHA; поддерживаемый lease при ref update, без blind force-push. Удаление старых веток не нужно для этой задачи. В текущем коннекторе можно читать push runs/jobs/logs и rerun существующий failed job; создание нового dispatch/repository variable недоступно.
 
 ## Контекстный режим для агента
 
-Работай от фактического состояния репозитория и проверяй утверждения по source, тестам и CI. План — это рабочая гипотеза, а не приказ: сначала установи, что проблема существует, и выбирай следующий шаг по реальной доказательной ценности.
-Не расширяй claim доказательств: уровень harness должен соответствовать конкретному утверждению. При конфликте между старым описанием и текущим кодом/логами доверяй текущему коду и фактическим проверкам.
+Существующая запись — гипотеза до сверки с current source/test/run. Историю ошибок и отменённое UI-ТЗ не выдавай за новый backlog. Источники доказательств не взаимозаменяемы: exact test assertion → выполненный harness → конкретный SHA/attempt; соседний test и общий summary не расширяют этот claim. Вне репозитория могут быть прежние планы/отчёты, но обязательный APP-05 scope сохранён здесь.
 
 ## Как проверять новую работу
 
-**Принцип для нового verifier/lint кода:** проверяй инварианты («ровно один», «ровно N»), а не конкретные текущие значения (какой пункт активного плана сейчас «следующий», какие PR — последние 5) — привязка к текущим значениям уже дважды ломала `tools/verify_handoff.py` на следующем же PR.
+**До первого изменения.**
 
-Перед изменением:
-- найти существующий invariant/test;
-- локализовать реальную границу риска;
-- понять, какой state владеет request;
-- определить, нужен ли runtime fix или только тест/документация.
+- Выпиши точные acceptance criteria с владельцем состояния/путём и негативным случаем. Для UI нужны положение и click/gesture outcome, для attachments — реальные декодируемые bytes и full historical payload, для async — matching source/request/generation + D2.
+- Environment preflight: рабочие JDK 17, Gradle 8.9, SDK 35/build-tools 35, adb и API34 emulator/KVM для instrumentation. Выполни `java -version`, `gradle --version`, `adb devices` и доступные targeted команды, не ограничивайся наличием executable. В этой среде 2026-10-10 launcher Java падает с missing libjli.so, Gradle/adb отсутствуют; настройка в writable workspace разрешена, если доступна, иначе честно «Android/Kotlin локально не запускались», доступные verifiers + один обоснованный CI.
+- Проверяй части пакета по мере изменения: изменённые JVM tests, compile Debug/AndroidTest, затем затронутые instrumentation до финального полного CI, если среда работает. Не откладывай все runtime дефекты на Actions.
+- Test fixture должен доходить до границы: задан isolated test API key, разрешённый owner, правильные prefs, controlled local HTTPS client (cleartext production не ослаблять), restore в finally, zero real paid calls. Async preflight/animation ждать по условию с bounded deadline, не fixed sleep вместо результата.
+- Жест: полная DOWN/несколько MOVE/UP, координаты того пространства, куда событие отправляется, после layout settle. Activity window dispatch проверяет View routing; системная injection дополнительно требует focus/IME/screen ownership. Это разные proof, именуй их честно. Assert actual open/fully closed/negative vertical; не вызывай openDrawer/closeDrawer как замену действия.
+- Новые test seams делай test-visible и узкими; существующие reflection fixtures не переписывай автоматически. Не добавляй fragile name-mangled private access. ContentProvider в androidTest уже приводил к Kotlin Intrinsics failure; пользуйся инжектируемым AttachmentInputStreamSource.
 
-После изменения:
-- поискать старые symbols/helpers;
-- реально запустить static verifier и любой новый/изменённый verifier-скрипт, дождаться фактического вывода команды; чтение кода вместо запуска не считается проверкой;
-- если менялся `NEXT_AGENT_HANDOFF.md` — `python3 tools/verify_handoff.py` (если среда позволяет) и обязательно Successful `Verify handoff` на PR; правки handoff без `[ci]`;
-- если PR меняет сам verifier/lint-скрипт — дополнительно намеренно воспроизвести целевую поломку и убедиться, что скрипт её ловит, затем вернуть корректное состояние и снова получить PASS (позитивный и негативный кейс обязательны оба);
-- для нового verifier/lint-инварианта негативная проверка — это **намеренная mutation matrix именно этого правила**: как минимум три целевых поломки (например, убрать gate, вынести защищаемую mutation за gate, вернуть прежний баг) должны быть отклонены verifier-ом; случайная syntax error/build failure не считается доказательством. Mutation harness хранится в репозитории и запускается в CI вместе с позитивным кейсом;
-- при падении CI/проверки приводить одну дословную строку из реального failing log (или явное `AssertionError:`/step output), а не только пересказ места остановки;
-- дождаться реального CI результата по «CI и merge-правила»;
-- тесты не лезут в `MainActivity` рефлексией (`by lazy`, `internal`, name mangling меняют имена) — нужен test-visible API; ContentProvider в androidTest не использовать (`NoClassDefFoundError: kotlin/jvm/internal/Intrinsics`) — инжектируемый источник, как `AttachmentInputStreamSource`;
-- тест обязан дойти до проверяемого пути: реальные предусловия (непустой API key, `beginUpload(...)` вместо прямой записи счётчика), иначе он ничего не доказывает;
-- обновить план и историю.
+**После изменения.**
+
+- Проверь diff, старые helpers/symbols и обработку failure/Cancel/Stop/delete/recreate. Не расширяй scope ради «поправить заодно».
+- Нужно реально запустить static verifier и любой новый/изменённый verifier-скрипт, дождаться вывода: чтение кода вместо запуска не считается проверкой. Source/static проверяют свой invariant; не объявляй compile, UI или API green на их основании.
+- Handoff: `python3 tools/verify_handoff.py`, затем Successful Verify на PR. Уровни заголовков/план/contract tag должны сохранять schema, а verifier проверять инварианты, не конкретный номер PR/текущий active пункт.
+- Новый verifier/lint: намеренно воспроизвести целевую поломку; позитивный и негативный кейс обязательны оба. Как минимум три релевантные mutations именно нового правила, затем restore/PASS; syntax error не substitute. Mutation harness хранить/запускать в CI.
+- Финальный CI один раз на собранном пакете + handoff; ожидай результат/следующий агент получает точные run links и обязан проверить их, когда поручено оставить прогон. Никакого «готово/исправлено полностью» до pass соответствующих assertions.
+
+**Если проверка упала.**
+
+1. Сверь SHA/event/attempt и failing step. Возьми named test, одну дословную failing line и короткий stack/assert; различай compile/test fixture/product/infrastructure. Warning/Skipped соседнего run не причина Failed.
+2. Установи, дошёл ли тест до целевой границы: key/owner/lifecycle/async settle/window coords/fixture/TLS. «Это тест» без доказательства не разрешает удалить assert или guard.
+3. Исправь установленную причину, прогоняй changed scenario и compile AndroidTest локально при рабочей среде; проверь, что исходный негативный случай ещё ловится. Пару повторяющихся failures разбирай вместе, чтобы не тратить отдельный full run на каждую строку.
+4. Повтор только после диагноза; тот же SHA rerun уместен при установленном transient infrastructure сбое. Если менялся тест/код — новая пара на новом code SHA, прежний Release не покрывает новый тест.
+5. После pass обнови исходный Failed/ожидание в top/baseline/contracts/PR body; contracts без exact evidence не повышать. Проверка на телефоне/платном API отдельно, без выдуманного завершения.
 
 ### Командная шпаргалка
 
-Debug:
-`gradle --no-daemon --stacktrace test lintDebug assembleDebug`
+В рабочем checkout из корня (Gradle установлен отдельно; wrapper отсутствует):
 
-Release:
-`gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease`
+- Handoff: `python3 tools/verify_handoff.py`
+- Source: `python3 tools/verify_v4_17_0.py`
+- Existing mutation matrix: `python3 tools/test_verify_v4_17_0_mutations.py`
+- Targeted JVM: `gradle --no-daemon :app:testDebugUnitTest --tests 'com.example.openaichat.<ChangedTest>'`
+- Compile app/test APK: `gradle --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest`
+- Targeted Android (подключён emulator): `gradle --no-daemon :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.openaichat.MainActivityLifecycleTest#<changedMethod>`
+- Full Debug: `gradle --no-daemon --stacktrace test lintDebug assembleDebug`, затем `gradle --no-daemon --stacktrace connectedDebugAndroidTest`
+- Full Release: `gradle --no-daemon --stacktrace test lintRelease assembleRelease bundleRelease`
 
-Static verifier:
-`python3 tools/verify_v4_17_0.py`
-
-
-
-Полный исторический реестр находится в GitHub PR/CI и финансовом приложении внешнего плана. Фактические суммы LIVE API не установлены; камера проверена владельцем, остальные телефонные результаты перечислены в baseline.
+Провайдерские лимиты и capabilities сверяй с официальным актуальным контрактом при изменении wire builder; offline mocks не доказывают acceptance/биллинг.
 
 ## История последних рабочих заходов — последние 5 PR
 
-Последние пять merged PR на проверенной базе #134, до этого docs PR. CI proof относится к соответствующему code/head SHA; phone proof отдельно.
+Последние пять merged PR на проверенной базе #135, до текущего code PR #136. CI proof относится к соответствующему code/head SHA; phone proof отдельно.
 
-- **#130:** docs/editorial plan revision 7, merge `181dca5cdaddcf0190bb446c5e161c0dfe1a501e`, head `877770bc8501e5d1a3dfa6f67a33c611ab49303c`; Verify `37931552848` — Successful. Android-код не менялся.
 - **#131:** широкий docs audit revision 8, merge `18c9cd23d7dbda0f09f5543bac93d66e83dc806e`, head `b22e6e434ee06fa7f1e7c6bd4c37ca11ba8df36f`; Verify `37935958150` — Successful.
 - **#132:** docs revision 9, merge `c9069333050d85bc1db6105c1c7ad4d9dd68c02d`, head `debd9ee6b77bf9bc66c3e638bbb0c63de2a11fc8`; DB writers/preflight/Repeat design уточнён без Android-кода.
 - **#133:** APP-04 A/B/C + F18 + FIN133, merge `8a4d019328c90745df4448bea5c5dc1e1a2d9351`. Final-code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`: APK `37967095171`, Release `37967095269`, Verify `37967102030` — Successful. Ошибки прежних тестовых прогонов исправлены; source guards/HTTPS policy не ослаблены. Phone acceptance остаётся частичной, новые находки включены в APP-04-PHONE.
 - **#134:** main push-trigger exclusion APK/Release при сохранённом branch [ci]/manual dispatch, merge `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, head `883d76ccc07b223b9f8a538d57d2f6e0343e390b`; Verify `37972109767` — Successful. YAML/routes/jobs неизменность проверены, Android CI ради trigger-only правки не запускался.
 
-## Product radar — идеи с реальной ценностью
+- **#135:** docs APP-04-PHONE revision 10, merge `c492e74e3aaed8f87752be41e8ad2618d8215afa`, head `54948e341c1c096e928c369b115a218f835f04a2`; Verify `37980410307` — Successful. Требования телефона объединены в SEND/UI/DIAG, прежний APP-05 F21–F26 сохранён.
 
+## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
@@ -306,10 +300,6 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 ### 8. Настройки генерации, зависящие от источника и модели
 **Системный промпт реализован в #98 (v1)**: глобальное поле, отделённое от существующего Developer instructions; OpenAI получает типизированные system/developer instructions, OpenRouter — отдельную пользовательскую часть в system text вместе с app контекстом. Не подтверждено живым API/UI. **«Градус» = temperature (sampling/randomness), а не reasoning effort**: это два независимых рычага; `top_p`, `top_k`, reasoning effort/summary, verbosity, tool-choice и structured output тоже зависят от API source + model, универсального набора нет. Сейчас `temperature`/`top_p` не экспонируются; старое silent xhigh/max → high устранено #133, manual/auto policy сохраняется. Совместимость конкретных моделей/upstream не выводить из одного общего списка уровней. OpenRouter model endpoint отдаёт `supported_parameters`, но реальная совместимость также зависит от upstream provider. Первый шаг: описать pure `ModelCapabilities`/`GenerationSettings` contract для обоих request builders, затем regression matrix для unsupported/omitted parameters, invalid ranges и неявной смены effort. Дальнейшие ползунки UI — только после этого; per-chat profiles — отдельная задача.
 
-### 9. Повседневный интерфейс и доставка вложений — уточнение владельца 2026-10-09
-
-Каноническое ТЗ — APP-04-PHONE выше: модель, быстрый effort и дополнительные настройки — три отдельных нижних controls у ввода; верхней model row нет. Одна основная gear, Drawer без Settings с реальными жестами; OR thumbnails, native Photo Picker, совместимый Files handler и диагностика сразу под API keys с readable/selectable logs, открывающимися в конце. Delivery/provider switch и сохранность выше цены отмены. **Первый шаг:** выполнить три блока одним кодовым PR с body/geometry/gesture/log regressions; это не очередь из отдельных PR.
-
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
 
@@ -323,23 +313,13 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 
 ## Документация
 
-**Актуальный план:** редакция 10, APP-04-PHONE одним PR SEND/UI/DIAG, затем APP-05 F21–F26 одним будущим пакетом. #133 завершён/merged; прежние планы редакции 9/FIN133 остаются историей. Не выдавать старое ТЗ model row сверху/полная панель из ⚡ за текущий запрос. Отдельный план исполнителю APP-04-PHONE ведётся вне GitHub; старые APP-04-FILE/SEND/LIFE/CONTEXT/MODEL/UI не продолжаются как шесть PR. `docs/audits/2026-10-08-live-and-independent-triage.md` — исторический аудит, его прежняя очередь/компоновка не переопределяет уточнения владельца 2026-10-09. **Пересылаемый отчёт независимому аудитору ведётся отдельно, не в репозитории**, без пользовательских UX-находок. README сейчас устарел (DB v15, baseline #42), не использовать как источник фактов. **По просьбе пользователя не трогать README в обозримом будущем**, включая чистку и переоформление: P0/P1 важнее. Отсутствие .gitignore/wrapper и архив notes — P3, не важнее риска потери данных.
+Операционная истина: top/baseline — текущий PR/CI; подтверждённые контракты — proof/границы; активный план — только незавершённое; история — последние 5 merged PR; Product radar — идеи без обещания реализации. Не повторяй один scope в каждом разделе и не сохраняй отменённые требования как активные.
 
-**README** = устаревший человекочитаемый snapshot; по просьбе владельца не редактировать в этом цикле.
+README устарел (v15/baseline #42); **по просьбе владельца не редактировать README**, включая косметику. Исторический `docs/audits/2026-10-08-live-and-independent-triage.md` не переопределяет нынешний PHONE/APP-05. Пересылаемый отчёт независимому аудитору ведётся отдельно от репозитория. Архивы notes/отсутствие wrapper не важнее data-loss/runtime bugs.
 
-**NEXT_AGENT_HANDOFF** = операционный контекст следующей модели.
-
-Жизненный цикл незавершённой работы:
-`plan → implementation → CI/check → merge → history`.
-
-Если идея признана ненужной/ошибочной/заменённой — удалить из плана. Не сохранять ради количества задач.
+Жизненный цикл: plan → implementation → check → merge → history. Контракты обновляются вместе с кодом: actual assertion/harness/SHA/run + что не доказано. Единственный новый текущий пункт не дублировать в radar; согласованный APP-05 не удалять при чистке.
 
 ## Короткий отчёт пользователю
 
-После рабочего захода достаточно 3–6 строк:
-- что изменено;
-- почему;
-- что подтвердили тесты/CI;
-- что осталось;
-- новый архитектурный вывод, если он появился.
+Достаточно 3–6 строк: что изменено и почему; что реально прошло (SHA/run/результат); что осталось; ссылка на PR/актуальный handoff. Если прогон оставлен running — скажи прямо, PR открыт/merge не выполнялся. Не выдавай компиляцию или 33 passed/1 failed за полностью проверенное приложение.
 

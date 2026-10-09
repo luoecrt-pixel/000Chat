@@ -122,6 +122,7 @@ class MainActivity : ComponentActivity() {
     private val currentGitHubToolOwner = ThreadLocal<Pair<String, Long>>()
     // Cancels an in-flight serialization before it can commit a user message or start HTTP.
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
+    private val pendingOpenAiPreparation = AtomicReference<String?>(null)
     @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
@@ -232,6 +233,7 @@ class MainActivity : ComponentActivity() {
     private var pendingImageSize: Long = 0L
     private var lastUserText: String = ""
     private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
+    private lateinit var photoPickerLauncher: ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>
     private var pendingActivityResultCode: Int? = null
     private var pendingCameraPath: String? = null
     private var pendingCameraChatId: String? = null
@@ -252,6 +254,7 @@ class MainActivity : ComponentActivity() {
     private val pickSaveGenerated = 5105
     private var pendingExportPath: String? = null
     private var pendingPickerChatId: String? = null
+    private var pendingPickerProvider: String? = null
     private var pendingSaveSourcePath: String? = null
     private var pendingSaveFilename: String? = null
     private var pendingSaveMime: String? = null
@@ -267,6 +270,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
         pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
         pendingPickerChatId = savedInstanceState?.getString("pending_picker_chat")
+        pendingPickerProvider = savedInstanceState?.getString("pending_picker_provider")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
@@ -275,8 +279,26 @@ class MainActivity : ComponentActivity() {
              } else if (requestCode != null) {
                  handleActivityResult(requestCode, result.resultCode, result.data)
                  pendingPickerChatId = null
+                 pendingPickerProvider = null
              }
          }
+        photoPickerLauncher = registerForActivityResult(
+            ActivityResultContracts.PickMultipleVisualMedia(OpenRouterAttachmentStore.MAX_ATTACHMENTS)
+        ) { uris ->
+            if (uris.isNotEmpty()) {
+                val result = Intent().apply {
+                    data = uris.first()
+                    if (uris.size > 1) {
+                        val clip = ClipData.newUri(contentResolver, "Photo Picker", uris.first())
+                        uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                        clipData = clip
+                    }
+                }
+                handleActivityResult(pickImage, RESULT_OK, result)
+            }
+            pendingPickerChatId = null
+            pendingPickerProvider = null
+        }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
         activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
@@ -286,7 +308,7 @@ class MainActivity : ComponentActivity() {
         buildUi()
         restoreCurrentChat()
         executor.execute { cleanupOrphanOpenRouterAttachments() }
-        diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
+        diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "git_sha" to BuildConfig.BUILD_GIT_SHA, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -299,6 +321,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveFilename?.let { outState.putString("pending_save_name", it) }
         pendingSaveMime?.let { outState.putString("pending_save_mime", it) }
         pendingPickerChatId?.let { outState.putString("pending_picker_chat", it) }
+        pendingPickerProvider?.let { outState.putString("pending_picker_provider", it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -326,7 +349,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        if (pendingOpenRouterPreparation.getAndSet(null) != null) {
+        if (pendingOpenRouterPreparation.getAndSet(null) != null ||
+            pendingOpenAiPreparation.getAndSet(null) != null) {
             setBusy(false)
             status.text = "Подготовка остановлена — черновик сохранён"
         }
@@ -507,10 +531,6 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Настройки"
         }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
-        // Full-width, always visible row belongs to the next-request model selection.
-        modelBadge.setPadding(dp(14), dp(8), dp(14), dp(8))
-        modelBadge.contentDescription = "Выбрать модель"
-        root.addView(modelBadge, LinearLayout.LayoutParams(-1, -2))
         updateModelBadge()
         root.addView(View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }, LinearLayout.LayoutParams(-1,dp(1)))
 
@@ -539,6 +559,25 @@ class MainActivity : ComponentActivity() {
             clipToPadding = false
             setPadding(dp(10), dp(6), dp(10), dp(12))
         }
+        // A deliberate horizontal swipe on the chat surface opens the drawer,
+        // without claiming vertical scroll or nested text/code interactions.
+        var swipeStartX = 0f
+        var swipeStartY = 0f
+        scroll.setOnTouchListener { _, motion ->
+            when (motion.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    swipeStartX = motion.x
+                    swipeStartY = motion.y
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dx = motion.x - swipeStartX
+                    val dy = motion.y - swipeStartY
+                    if (dx > dp(95) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.5f &&
+                        !drawerLayout.isDrawerOpen(GravityCompat.START)) showChats()
+                }
+            }
+            false
+        }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
@@ -562,7 +601,7 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(attachScroll)
 
-        // Effort stays near input; model selection moves to the compact header.
+        // All next-request controls stay in the composer above the keyboard.
         val composerOptions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -576,7 +615,17 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Усилие мышления"
             setOnClickListener { showQuickEffortPicker() }
         }
+        modelBadge.setPadding(dp(8), dp(6), dp(8), dp(6))
+        modelBadge.setTextColor(Color.rgb(190, 200, 220))
+        modelBadge.textSize = 12f
+        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, -2, 1f))
         composerOptions.addView(effortBadge)
+        composerOptions.addView(button("⚙") { showResponseSettings() }.apply {
+            contentDescription = "Дополнительные настройки мышления и ответа"
+            textSize = 16f
+            minWidth = 0
+            minimumWidth = 0
+        }, LinearLayout.LayoutParams(dp(42), dp(40)).apply { leftMargin = dp(4) })
         root.addView(composerOptions)
         updateEffortBadge()
 
@@ -1003,7 +1052,7 @@ class MainActivity : ComponentActivity() {
         if (!::modelBadge.isInitialized) return
         val source = ModelCatalog.source(normalizedProviderId())
         val modelLabel = ModelCatalog.displayName(source.id, normalizedModelId())
-        modelBadge.text = "Модель для следующего запроса: ${source.label} · ${modelLabel} ▾"
+        modelBadge.text = "${source.label} · ${modelLabel} ▾"
         modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}. Выбрать модель"
         updateEffortBadge()
     }
@@ -1098,6 +1147,22 @@ class MainActivity : ComponentActivity() {
     // ---------- Settings ----------
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun showQuickEffortPicker() {
+        val efforts = arrayOf("auto", "low", "medium", "high", "xhigh", "max")
+        val current = prefs.getString("reasoning", "high") ?: "high"
+        AlertDialog.Builder(this)
+            .setTitle("⚡ Усилие мышления")
+            .setSingleChoiceItems(efforts, efforts.indexOf(current).coerceAtLeast(0)) { dialog, position ->
+                prefs.edit().putString("reasoning", efforts[position]).apply()
+                updateEffortBadge()
+                status.text = "Усилие для следующего запроса: " + efforts[position]
+                dialog.dismiss()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun showResponseSettings() {
         val provider = normalizedProviderId()
         val model = normalizedModelId()
         val openAi = provider == "openai"
@@ -1184,6 +1249,87 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun showDiagnostics() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+        }
+        val buildLabel = TextView(this).apply {
+            text = "Версия " + BuildConfig.VERSION_NAME + " · Git " + BuildConfig.BUILD_GIT_SHA
+            setTextColor(Color.rgb(180,190,205))
+            textSize = 12f
+            setTextIsSelectable(true)
+        }
+        container.addView(buildLabel)
+        val events = TextView(this).apply {
+            text = "Загрузка последних событий…"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setTextIsSelectable(true)
+            setPadding(dp(4), dp(10), dp(4), dp(10))
+        }
+        val eventScroll = ScrollView(this).apply {
+            addView(events)
+            isFillViewport = true
+        }
+        container.addView(eventScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        var rawEvents = ""
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(button("Копировать всё") {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Astra diagnostics", rawEvents))
+            status.text = "Диагностика скопирована"
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(button("Экспорт") {
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, "Version: " + BuildConfig.VERSION_NAME +
+                    "\nGit: " + BuildConfig.BUILD_GIT_SHA + "\n" + rawEvents)
+            }, "Экспорт диагностики"))
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(button("В конец") {
+            eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        container.addView(actions)
+        AlertDialog.Builder(this)
+            .setTitle("Диагностика запросов")
+            .setView(container)
+            .setNegativeButton("Закрыть", null)
+            .show().window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.75).toInt())
+        executor.execute {
+            val read = diagnostics.tail(300)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                rawEvents = read
+                events.text = formatDiagnostics(read)
+                eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    private fun formatDiagnostics(raw: String): String {
+        val fieldPattern = Regex("""(?:^|\s)([A-Za-z][A-Za-z_0-9]*)=""")
+        return raw.lines().filter { it.isNotBlank() }.joinToString("\n\n") { line ->
+            if (line.length < 24) return@joinToString line
+            val stamp = line.take(23)
+            val rest = line.drop(24)
+            val event = rest.substringBefore(' ')
+            val body = rest.drop(event.length).trim()
+            val fields = fieldPattern.findAll(body).toList()
+            buildString {
+                append("● ").append(stamp).append(" · ").append(event.replace('_', ' '))
+                fields.forEachIndexed { index, match ->
+                    val from = match.range.last + 1
+                    val to = fields.getOrNull(index + 1)?.range?.first ?: body.length
+                    val value = body.substring(from, to).trim()
+                    append("\n   ").append(match.groupValues[1].replace('_', ' '))
+                        .append(": ").append(value)
+                }
+                if (fields.isEmpty() && body.isNotBlank()) append("\n   ").append(body)
+            }
+        }
+    }
+
     private fun showSettings() {
         val cardBg = Color.rgb(36,38,44)
         val accent = Color.rgb(138,180,248)
@@ -1229,6 +1375,9 @@ class MainActivity : ComponentActivity() {
         val currentProvider = normalizedProviderId()
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
+        spaced(button("🧪 Диагностика") { showDiagnostics() }.apply {
+            setTextColor(accent); background = rounded(Color.rgb(40,48,66))
+        })
 
         section("GitHub")
         fun chk(label:String,pref:String) = CheckBox(this).apply {
@@ -1321,15 +1470,6 @@ class MainActivity : ComponentActivity() {
         }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
-        spaced(button("🧪 Диагностика") {
-            AlertDialog.Builder(this)
-                .setTitle("Astra diagnostics")
-                .setMessage(diagnostics.tail())
-                .setPositiveButton("OK", null)
-                .show()
-        }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
 
         val note=TextView(this).apply {
             text="Astra: 1.05M context. Max output: пусто = ограничение API/модели; можно задать вручную. reasoning: auto/low/medium/high/xhigh/max."
@@ -1392,6 +1532,21 @@ class MainActivity : ComponentActivity() {
     private fun newChatId(): String = "chat_${System.currentTimeMillis()}_${System.nanoTime()}"
 
     private fun resolveOpenRouterAttachments(message: JSONObject): List<OpenRouterLocalAttachment> {
+        val remoteFiles = message.optJSONArray("file_ids")?.length() ?: 0
+        val localFiles = message.optJSONArray("file_paths")?.length() ?: 0
+        if (remoteFiles > localFiles) {
+            throw IOException("В истории OpenAI есть файл без локальных байтов. " +
+                "Восстановите исходное вложение перед отправкой в OpenRouter.")
+        }
+        val remoteImageId = message.optString("image_file_id")
+            .takeIf { it.isNotBlank() && it != "null" }
+        if (remoteImageId != null && message.optString("image_path").isBlank() &&
+            (message.optJSONArray("attachments")?.let { manifest ->
+                (0 until manifest.length()).any { manifest.optJSONObject(it)?.optString("kind") == "image" }
+            } != true)) {
+            throw IOException("В истории OpenAI есть фото без локальных байтов. " +
+                "Восстановите исходное фото перед отправкой в OpenRouter.")
+        }
         val manifest = message.optJSONArray("attachments")
         if (manifest != null && manifest.length() > 0) {
             val existing = (0 until manifest.length()).mapNotNull { i -> manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) } }
@@ -1495,7 +1650,29 @@ class MainActivity : ComponentActivity() {
             } else {
                 val content = JSONArray()
                 if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
-                attachments.forEach { content.put(OpenRouterAttachmentStore.toContentBlock(it)) }
+                attachments.forEach { attachment ->
+                    val index = content.length()
+                    val part = OpenRouterAttachmentStore.toContentBlock(attachment)
+                    content.put(part)
+                    if (attachment.kind == "image" || attachment.kind == "pdf") {
+                        val url = if (attachment.kind == "image") {
+                            part.optJSONObject("image_url")?.optString("url").orEmpty()
+                        } else part.optJSONObject("file")?.optString("file_data").orEmpty()
+                        diagnostics.log("openrouter_attachment_wire", mapOf(
+                            "request_id" to message.optString("request_id"),
+                            "message_index" to result.length(),
+                            "content_index" to index,
+                            "file" to attachment.name,
+                            "kind" to attachment.kind,
+                            "source_mime" to attachment.mime,
+                            "wire_mime" to url.substringBefore(",").removePrefix("data:").removeSuffix(";base64"),
+                            "source_bytes" to attachment.size,
+                            "wire_bytes" to File(attachment.wirePath ?: attachment.path).length(),
+                            "base64_chars" to url.substringAfter(",").length,
+                            "sha256" to attachment.sha256
+                        ))
+                    }
+                }
                 if (traceBlock.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", traceBlock))
                 result.put(JSONObject().put("role", role).put("content", content))
             }
@@ -1612,6 +1789,15 @@ class MainActivity : ComponentActivity() {
                     },
                     onTextDelta = { snapshot ->
                         postAssistantTextUpdate(chatId, generation, assistantItemId, snapshot)
+                    },
+                    onPayloadObserved = { round, bytes ->
+                        diagnostics.log("openrouter_http_payload", mapOf(
+                            "request_id" to requestId,
+                            "chat_id" to chatId,
+                            "round" to round,
+                            "model" to model,
+                            "json_bytes" to bytes
+                        ))
                     }
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
@@ -1750,6 +1936,21 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 clearOpenRouterActiveCallIfOwned(requestId)
+                val upstream = e as? OpenRouterUpstreamException
+                diagnostics.log("openrouter_failed", mapOf(
+                    "chat_id" to chatId,
+                    "request_id" to requestId,
+                    "provider" to "openrouter",
+                    "model" to model,
+                    "stage" to (upstream?.stage ?: "transport_or_tool"),
+                    "round" to upstream?.roundIndex,
+                    "http_status" to upstream?.httpStatus,
+                    "error_type" to (upstream?.errorType ?: e.javaClass.simpleName),
+                    "provider_name" to upstream?.providerName,
+                    "provider_code" to upstream?.providerCode,
+                    "raw_metadata" to upstream?.safeMetadata,
+                    "attachment_sha256" to preparedMessages.attachments.joinToString(",") { it.sha256.take(16) }
+                ))
                 val accumulatedText = (e as? OpenRouterCompletionException)?.partialText.orEmpty().trim()
                 val errorMessage = (e.message?.take(800) ?: "неизвестная ошибка") + openRouterAttachmentErrorSuffix(chatId)
                 val displayedError = if (accumulatedText.isNotBlank()) {
@@ -2023,7 +2224,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCurrentResponse(){
-        if (pendingOpenRouterPreparation.getAndSet(null) != null) {
+        if (pendingOpenRouterPreparation.getAndSet(null) != null ||
+            pendingOpenAiPreparation.getAndSet(null) != null) {
             activeResponseState.markUserStop()
             cancelOpenRouterRequest()
             setBusy(false)
@@ -2251,31 +2453,11 @@ class MainActivity : ComponentActivity() {
                 return
             }
         }
-        if (provider == "openai" && attachedOpenRouterAttachments.isNotEmpty() && !regenerate) {
-            status.text = "Есть локальные вложения OpenRouter. Выберите OpenRouter или начните новый чат — OpenAI не получил бы их."
-            return
-        }
-        if (provider == "openai" && chat.any { msg ->
-                msg.optString("role") == "user" &&
-                    (msg.optJSONArray("attachments")?.length() ?: 0) > 0 &&
-                    msg.optString("provider") == "openrouter"
-            }) {
-            status.text = "История содержит вложения OpenRouter: этот контекст нельзя незаметно переслать в OpenAI. Создайте новый чат."
-            return
-        }
         // An ID is only reusable when the last assistant belongs to OpenAI.
         // Otherwise reconstruct history, but never silently discard its typed files.
         val usableOpenAiChain = currentResponseId != null &&
             chat.lastOrNull { it.optString("role") == "assistant" }
                 ?.optString("provider") == "openai"
-        if (provider == "openai" && !usableOpenAiChain && chat.any { message ->
-                message.optString("role") == "user" &&
-                    ((message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
-                        message.optString("image_file_id").let { it.isNotBlank() && it != "null" })
-            }) {
-            status.text = "История содержит прежние вложения OpenAI, но цепочка ответов недоступна. Создайте новый чат, чтобы не потерять файлы из контекста."
-            return
-        }
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
@@ -2304,7 +2486,7 @@ class MainActivity : ComponentActivity() {
         val requestFileMimes = sourceToRepeat?.optJSONArray("file_mimes")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileMimes.toList()
         // Capture manifests, not files: legacy file_paths and image_path are classified
         // by the worker against the cloned message before any composer mutation.
-        val requestOpenRouterAttachments = if (provider == "openrouter") {
+        val requestOpenRouterAttachments = run {
             if (sourceToRepeat != null) {
                 sourceToRepeat.optJSONArray("attachments")?.let { manifest ->
                     (0 until manifest.length()).mapNotNull { i ->
@@ -2314,7 +2496,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 attachedOpenRouterAttachments.toList()
             }
-        } else emptyList()
+        }
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
         if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
@@ -2333,7 +2515,7 @@ class MainActivity : ComponentActivity() {
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
         val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId != null ||
-            (provider == "openrouter" && (requestFilePaths.isNotEmpty() || imagePath != null)) ||
+            requestFilePaths.isNotEmpty() || imagePath != null ||
             requestOpenRouterAttachments.isNotEmpty()
         val autoSelected = effortPref=="auto"
         val taskClass = classifyTask(text, hasAttachments)
@@ -2385,7 +2567,7 @@ class MainActivity : ComponentActivity() {
             pendingImageName?.takeIf{it.isNotBlank()}?.let{put("image_name",it)}
             pendingImageMime?.takeIf{it.isNotBlank()}?.let{put("image_mime",it)}
             put("image_size",pendingImageSize.coerceAtLeast(0L))
-            if (provider == "openrouter" && requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
+            if (requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
         }
 
         if (provider == "openrouter") {
@@ -2492,6 +2674,12 @@ class MainActivity : ComponentActivity() {
                             status.text = "Ошибка подготовки вложений: " +
                                 (e.message ?: "невозможно прочитать файлы")
                             setBusy(false)
+                            diagnostics.log("openrouter_preflight_failed", mapOf(
+                                "chat_id" to requestChatId,
+                                "request_id" to localRequestId,
+                                "stage" to "wire_prepare",
+                                "error_type" to e.javaClass.simpleName
+                            ))
                             // Nothing was sent or persisted: the complete draft remains.
                         }
                     }
@@ -2500,11 +2688,23 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val composerBeforePreparation = input.text.toString()
+        val openRouterIdsBeforePreparation = attachedOpenRouterAttachments.map { it.id }
+        val filePathsBeforePreparation = attachedFilePaths.toList()
+        val imagePathBeforePreparation = pendingImagePath
+        val pendingUrisBeforePreparation = pendingUploadUris.toList()
+        fun commitPreparedOpenAi(typedInput: JSONArray?) {
         // Repeat creates a new user request under current settings without touching a newer draft.
+        val shouldConsumeDraft = !regenerate &&
+            input.text.toString() == composerBeforePreparation &&
+            attachedOpenRouterAttachments.map { it.id } == openRouterIdsBeforePreparation &&
+            attachedFilePaths == filePathsBeforePreparation &&
+            pendingImagePath == imagePathBeforePreparation &&
+            pendingUploadUris == pendingUrisBeforePreparation
         addBubble("Ты",text,true, message=sentUserMessage)
         chat.add(sentUserMessage)
         persistCurrentChat()
-        if (!regenerate) {
+        if (shouldConsumeDraft) {
             input.setText("")
             clearComposerState(requestChatId)
         }
@@ -2560,8 +2760,8 @@ class MainActivity : ComponentActivity() {
         val reasoningObj = ModelRequestPolicy.openAiReasoning(model, effectiveEffort, reasoningMode, summary)
 
         val textObj=JSONObject().put("verbosity",verbosity)
-        val inputArr=JSONArray()
-        if (!usableOpenAiChain && chat.size > 1) {
+        val inputArr=typedInput ?: JSONArray()
+        if (typedInput == null && !usableOpenAiChain && chat.size > 1) {
             chat.dropLast(1).forEach { message ->
                 val role = message.optString("role")
                 val messageText = message.optString("text").trim()
@@ -2576,7 +2776,7 @@ class MainActivity : ComponentActivity() {
                 if(isRequestCurrent(requestChatId,requestGeneration)) toolLabel.text="⚙ мышление: $effectiveEffort → $newEffort (эта реплика)"
             }
         }
-        inputArr.put(JSONObject().put("role","user").put("content",content))
+        if (typedInput == null) inputArr.put(JSONObject().put("role","user").put("content",content))
 
         val body=JSONObject()
             .put("model",model)
@@ -2597,7 +2797,7 @@ class MainActivity : ComponentActivity() {
         if (configUpdateEffort == null) {
             body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",800000)))
         }
-        if (usableOpenAiChain) {
+        if (typedInput == null && usableOpenAiChain) {
             currentResponseId?.let { body.put("previous_response_id", it) }
         }
 
@@ -2642,7 +2842,7 @@ class MainActivity : ComponentActivity() {
         include.put("computer_call_output.output.image_url")
         body.put("include",include)
 
-        clearAttachedSelection()
+        if (shouldConsumeDraft) clearAttachedSelection()
         toolLabel.text=""
         refreshAttachChips()
 
@@ -3089,6 +3289,53 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        }
+
+        val typedHistoryNeeded = !usableOpenAiChain && chat.any { message ->
+            message.optString("role") == "user" && (
+                (message.optJSONArray("attachments")?.length() ?: 0) > 0 ||
+                (message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
+                (message.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
+                message.optString("image_file_id").isNotBlank() ||
+                message.optString("image_path").isNotBlank()
+            )
+        } || requestOpenRouterAttachments.isNotEmpty()
+        if (typedHistoryNeeded) {
+            val historySnapshot = chat.map { JSONObject(it.toString()) } +
+                JSONObject(sentUserMessage.toString())
+            pendingOpenAiPreparation.set(localRequestId)
+            setBusy(true)
+            status.text = "Проверяю локальные файлы и готовлю контекст OpenAI…"
+            executor.execute {
+                try {
+                    val prepared = OpenAiLocalContextEncoder.encode(historySnapshot)
+                    runOnUiThread {
+                        if (isRequestCurrent(requestChatId, requestGeneration) &&
+                            pendingOpenAiPreparation.compareAndSet(localRequestId, null)) {
+                            commitPreparedOpenAi(prepared)
+                        }
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        if (isRequestCurrent(requestChatId, requestGeneration) &&
+                            pendingOpenAiPreparation.compareAndSet(localRequestId, null)) {
+                            setBusy(false)
+                            status.text = "Не отправлено: " +
+                                (e.message ?: "недоступны локальные вложения") +
+                                ". Черновик и исходные файлы сохранены."
+                            diagnostics.log("openai_context_preflight_failed", mapOf(
+                                "chat_id" to requestChatId,
+                                "request_id" to localRequestId,
+                                "error_type" to e.javaClass.simpleName
+                            ))
+                        }
+                    }
+                }
+            }
+        } else {
+            commitPreparedOpenAi(null)
+        }
+
     }
 
     private fun JSONArray.toJsonArray(): JSONArray = JSONArray(toString())
@@ -4532,16 +4779,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun chooseAny() {
-        val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
-            type="*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
-        launchActivityForResult(i, pickAny)
+        // Chooser lists compatible handlers; GET_CONTENT grants are transient.
+        launchActivityForResult(Intent.createChooser(intent, "Файлы"), pickAny)
     }
     private fun chooseImage() {
-        val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
-            type="image/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+        pendingPickerChatId = currentChatId()
+        pendingPickerProvider = normalizedProviderId()
+        try {
+            photoPickerLauncher.launch(
+                androidx.activity.result.PickVisualMediaRequest(
+                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                )
+            )
+        } catch (e: Exception) {
+            pendingPickerChatId = null
+            pendingPickerProvider = null
+            status.text = "Фото недоступно: " + (e.message ?: "нет обработчика")
         }
-        launchActivityForResult(i, pickImage)
     }
     private fun chooseVoice() {
         val i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{
@@ -4719,13 +4978,6 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        if (r == pickVoice || r == pickImage || r == pickAny) {
-            val source = pendingPickerChatId
-            if (source != null && source != currentChatId()) {
-                status.text = "Действие относится к другому чату — откройте исходный чат и повторите"
-                return
-            }
-        }
         if(r==pickExportTxt){
             val uri=d.data ?: return
             val source=pendingExportPath
@@ -4789,14 +5041,15 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        val provider = prefs.getString("provider", "openai") ?: "openai"
+        val provider = pendingPickerProvider ?: normalizedProviderId()
+        val pickerSourceChatId = pendingPickerChatId ?: currentChatId()
 
         if (provider == "openrouter" && r != pickVectorStoreFile && r != pickExportTxt && r != pickSaveGenerated && r != pickVoice) {
             val selectedUris = urisFromIntent(d)
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
                     val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
-                    val uploadChatId = currentChatId()
+                    val uploadChatId = pickerSourceChatId
                     val uploadGeneration = activeResponseState.state.generation
                     beginUpload(uploadChatId, uploadGeneration)
                     executor.execute {
@@ -4873,7 +5126,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val uri = imageUris.first()
-            val uploadChatId=currentChatId()
+            val uploadChatId=pickerSourceChatId
             val uploadGeneration=activeResponseState.state.generation
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
@@ -4929,7 +5182,7 @@ class MainActivity : ComponentActivity() {
         uris.distinct().forEach{uri->
             val name=queryName(uri) ?: "attachment"
             val ext=name.substringAfterLast('.',"").lowercase()
-            val uploadChatId=currentChatId()
+            val uploadChatId=pickerSourceChatId
             val uploadGeneration=activeResponseState.state.generation
             val kind=if(ext=="zip")"zip" else "file"
             if(ext=="zip"){
@@ -5000,10 +5253,13 @@ class MainActivity : ComponentActivity() {
     private fun launchActivityForResult(intent: Intent, requestCode: Int) {
         pendingActivityResultCode = requestCode
         pendingPickerChatId = currentChatId()
+        pendingPickerProvider = normalizedProviderId()
         try {
             activityResultLauncher.launch(intent)
         } catch (e: Exception) {
             pendingActivityResultCode = null
+            pendingPickerChatId = null
+            pendingPickerProvider = null
             status.text = "Операция недоступна: ${e.message}"
         }
     }
@@ -6047,6 +6303,58 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderUserAttachments(message:JSONObject,card:LinearLayout){
+        // OpenRouter manifests provide local previews without transforming the wire image.
+        val localManifest = message.optJSONArray("attachments")
+        if (localManifest != null) {
+            for (index in 0 until localManifest.length()) {
+                val entry = localManifest.optJSONObject(index) ?: continue
+                val attachment = OpenRouterLocalAttachment.fromJson(entry)
+                val box = createAttachmentCard()
+                if (attachment.kind == "image") {
+                    if (File(attachment.path).isFile) {
+                        addCompactImagePreview(box, attachment.path, attachment.name)
+                    } else {
+                        box.addView(TextView(this).apply {
+                            text = "🖼 Нет локальной копии изображения"
+                            setTextColor(Color.LTGRAY)
+                        })
+                    }
+                } else if (attachment.kind == "pdf" && File(attachment.path).isFile) {
+                    addCompactPdfPreview(box, attachment.path, attachment.name)
+                } else if (attachment.kind == "text" && File(attachment.textPath ?: attachment.path).isFile) {
+                    addCompactTextPreview(box, attachment.textPath ?: attachment.path, attachment.name)
+                }
+                box.addView(TextView(this).apply {
+                    text = "📎 " + safeDisplayName(attachment.name)
+                    textSize = 13.5f
+                    setTextColor(Color.WHITE)
+                    setTypeface(null, Typeface.BOLD)
+                })
+                box.addView(TextView(this).apply {
+                    text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size)
+                    setTextColor(Color.rgb(165,170,180))
+                    textSize = 11.5f
+                })
+                if (File(attachment.path).isFile) {
+                    val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                    if (attachment.kind == "image") buttons.addView(
+                        fileActionButton("Просмотр") { showImagePreviewFromFile(attachment.path, attachment.name) }
+                    )
+                    buttons.addView(fileActionButton("Сохранить") {
+                        requestSaveLocalFile(attachment.path, attachment.name, attachment.mime)
+                    })
+                    box.addView(buttons)
+                }
+                card.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
+            if (localManifest.length() > 0) {
+                card.addView(TextView(this).apply {
+                    text = "Вложения OpenRouter"
+                    textSize = 11.5f
+                    setTextColor(Color.rgb(145,150,160))
+                }, 2)
+            }
+        }
         val fileIds=message.optJSONArray("file_ids") ?: JSONArray()
         val fileNames=message.optJSONArray("file_names") ?: JSONArray()
         val fileSizes=message.optJSONArray("file_sizes") ?: JSONArray()
@@ -6627,6 +6935,16 @@ class MainActivity : ComponentActivity() {
         }
         attachedOpenRouterAttachments.forEach { attachment ->
             val card = createAttachmentCard()
+            if (attachment.kind == "image") {
+                if (File(attachment.path).isFile) {
+                    addCompactImagePreview(card, attachment.path, attachment.name)
+                } else {
+                    card.addView(TextView(this).apply {
+                        text = "🖼 Локальная копия недоступна"
+                        setTextColor(Color.LTGRAY)
+                    })
+                }
+            }
             card.addView(TextView(this).apply {
                 text = "📎 " + safeDisplayName(attachment.name)
                 textSize = 13.5f

@@ -93,7 +93,8 @@ object OpenRouterAttachmentStore {
         val raw = File(dir, "or_" + UUID.randomUUID() + "_" + safeFileName(name))
         inputStreamSource.openInputStream(context, uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
             ?: throw IOException("Не удалось открыть файл: " + name)
-        return finalizeFile(context, dir, raw, name, mime)
+        return try { finalizeFile(context, dir, raw, name, mime) }
+        catch (e: Exception) { raw.delete(); throw e }
     }
 
     fun classifyLocalFile(file: File, displayName: String = file.name, mime: String = mimeForFilename(displayName)): OpenRouterLocalAttachment =
@@ -275,8 +276,9 @@ object OpenRouterAttachmentStore {
 
     private fun finalizeFile(context: Context?, dir: File, file: File, name: String, mime: String): OpenRouterLocalAttachment {
         val kind = classifyKind(file, name)
-        if (kind == "unsupported") { file.delete(); throw IOException("Формат '" + name + "' не поддерживается для OpenRouter. Поддерживаются: " + supportedFormatsText()) }
-        if (kind == "binary") { file.delete(); throw IOException("Файл '" + name + "' определён как бинарный и не входит в поддерживаемые форматы") }
+        // classifyLocalFile may inspect a READY/legacy original. Never delete it on failure.
+        if (kind == "unsupported") throw IOException("Формат '" + name + "' не поддерживается для OpenRouter. Поддерживаются: " + supportedFormatsText())
+        if (kind == "binary") throw IOException("Файл '" + name + "' определён как бинарный и не входит в поддерживаемые форматы")
         val size = file.length(); val sha = sha256(file)
         return if (kind == "text") {
             val decoded = decodeText(file, name)

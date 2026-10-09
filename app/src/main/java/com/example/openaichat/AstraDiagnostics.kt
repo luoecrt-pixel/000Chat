@@ -20,7 +20,7 @@ class AstraDiagnostics(context: Context) {
             append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date()))
             append(" ").append(event)
             fields.forEach { (k, v) ->
-                val value = v?.toString()?.replace("\n", " ")?.replace("\r", " ") ?: "null"
+                val value = sanitizedValue(k, v)
                 append(" ").append(k).append("=").append(value.take(512))
             }
             append('\n')
@@ -34,6 +34,27 @@ class AstraDiagnostics(context: Context) {
             }
         }
         Log.d("AstraDiagnostics", line.trimEnd())
+    }
+
+    private fun sanitizedValue(field: String, raw: Any?): String {
+        if (Regex("(?i)(token|secret|api.?key|authorization|password|credential)").containsMatchIn(field)) {
+            return "[REDACTED]"
+        }
+        if (field in setOf("arguments", "prompt", "body", "request_body")) return "[CONTENT OMITTED]"
+        var value = raw?.toString()?.replace("\n", " ")?.replace("\r", " ") ?: "null"
+        value = value.replace(
+            Regex("(?i)(Bearer\\s+)[A-Za-z0-9._-]+"),
+            "$1[REDACTED]"
+        )
+        value = value.replace(
+            Regex("(?i)([?&](?:api_key|token|access_token|key|secret)=)[^&\\s]+"),
+            "$1[REDACTED]"
+        )
+        value = value.replace(
+            Regex("(?i)(data:[a-z0-9.+/-]+;base64,)[A-Za-z0-9+/=]+"),
+            "$1[BASE64 OMITTED]"
+        )
+        return value
     }
 
     fun tail(maxLines: Int = 80): String = synchronized(lock) {

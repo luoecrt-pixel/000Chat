@@ -106,10 +106,24 @@ class MainActivityLifecycleTest {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
             val root = activity.window.decorView
-            assertTrue(find(root, "Выбрать модель") != null)
+            val model = find(root, "Выбрать модель")
+                ?: throw AssertionError("Bottom model selector missing")
             val effort = find(root, "Усилие мышления")
                 ?: throw AssertionError("Composer effort control missing")
+            val advanced = find(root, "Дополнительные настройки мышления и ответа")
+                ?: throw AssertionError("Advanced panel button missing")
+            val header = find(root, "Открыть чаты") ?: error("Header missing")
+            val modelLocation = IntArray(2)
+            val headerLocation = IntArray(2)
+            model.getLocationOnScreen(modelLocation)
+            header.getLocationOnScreen(headerLocation)
+            assertTrue("Model must be below header", modelLocation[1] > headerLocation[1] + header.height)
+            assertTrue("Bottom controls must share composer options row",
+                model.parent === effort.parent && model.parent === advanced.parent)
             assertTrue((effort as android.widget.TextView).text.toString().startsWith("⚡"))
+            assertTrue("Model picker should be clickable", model.hasOnClickListeners())
+            assertTrue("Quick effort picker should be clickable", effort.hasOnClickListeners())
+            assertTrue("Advanced settings should be clickable", advanced.hasOnClickListeners())
             assertTrue(find(root, "Добавить в чат") != null)
             assertTrue(find(root, "Настройки") != null)
         }
@@ -1014,52 +1028,111 @@ class MainActivityLifecycleTest {
     @Test
     fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
-        scenario.onActivity { activity ->
-            // Settings and the selected chat survive earlier instrumentation tests.
-            // This scenario must exercise the file-chain guard, not stale JSON mode
-            // or a request left by another test.
-            activity.newChat()
-            activity.prefs.edit().putString("provider", "openai")
-                .putString("text_format", "text").apply()
-            @Suppress("UNCHECKED_CAST")
-            val history = privateField(activity, "chat") as MutableList<JSONObject>
-            val oldSize = history.size
-            history.add(
-                JSONObject().put("role", "user").put("text", "Old photo")
-                    .put("provider", "openai")
-                    .put("image_file_id", "file-example")
-            )
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId(null)
-            val composer = privateField(activity, "input") as android.widget.EditText
-            composer.setText("Next question")
-            val generation = activeGeneration(activity)
+        val httpAttempts = AtomicInteger(0)
+        var originalApiKey: String? = null
+        var originalHistory = emptyList<JSONObject>()
+        var expectedHistorySize = 0
+        var preparationGeneration = 0L
 
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-
-            assertEquals("Unsafe fallback advanced generation", generation, activeGeneration(activity))
-            assertEquals("Next question", composer.text.toString())
-            assertEquals("Unsafe fallback appended to chat", oldSize + 1, history.size)
-            val status = privateField(activity, "status") as android.widget.TextView
-            assertTrue("Missing explanation for unavailable file history: ${status.text}",
-                status.text.toString().contains("вложения OpenAI"))
-
-            // A non-null ID is not a usable Responses chain if a different provider
-            // answered last; the same OpenAI file inputs must still block fallback.
-            history.add(JSONObject().put("role", "assistant")
-                .put("provider", "openrouter").put("text", "other provider"))
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId("resp_stale")
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-            assertEquals(generation, activeGeneration(activity))
-            assertEquals("Next question", composer.text.toString())
-            assertEquals(oldSize + 2, history.size)
-            history.removeAt(history.lastIndex)
-            history.removeAt(history.lastIndex)
-            (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
-                .setResponseId(null)
+        fun assertFailedPreparation() {
+            // Local history encoding now runs off-main. Wait for its owned failure
+            // before inspecting the draft, rather than assuming a synchronous guard.
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            var failed = false
+            while (!failed && SystemClock.uptimeMillis() < deadline) {
+                scenario.onActivity { activity ->
+                    val pending = privateField(activity, "pendingOpenAiPreparation")
+                        as AtomicReference<*>
+                    val status = privateField(activity, "status") as android.widget.TextView
+                    failed = pending.get() == null &&
+                        status.text.toString().startsWith("Не отправлено:")
+                }
+                if (!failed) SystemClock.sleep(20L)
+            }
+            scenario.onActivity { activity ->
+                val status = privateField(activity, "status") as android.widget.TextView
+                assertTrue("Local context failure did not settle: ${status.text}", failed)
+                assertTrue("Missing explanation for unavailable bytes: ${status.text}",
+                    status.text.toString().contains("локальных байтов"))
+                assertEquals("Failed preparation must not commit another generation",
+                    preparationGeneration, activeGeneration(activity))
+                assertEquals("Next question",
+                    (privateField(activity, "input") as android.widget.EditText).text.toString())
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                assertEquals("Unsafe fallback appended to chat", expectedHistorySize, history.size)
+                assertTrue("Remote-only file must remain in history",
+                    history.any { it.optString("image_file_id") == "file-example" })
+                assertEquals("Preflight failure must not start HTTP", 0, httpAttempts.get())
+                assertTrue("Failure must release Send", activity.send.isEnabled)
+                assertEquals("Failure must release Stop", android.view.View.GONE,
+                    (privateField(activity, "stop") as android.view.View).visibility)
+            }
         }
-        scenario.close()
+
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                activity.prefs.edit().putString("provider", "openai")
+                    .putString("model", "gpt-6-astra").putString("reasoning", "high")
+                    .putString("text_format", "text").apply()
+                val secrets = SecureStore(activity)
+                originalApiKey = secrets.getApiKey()
+                secrets.setApiKey("test-key")
+                // Reject any accidental real call, and prove both fallback cases
+                // finish before HTTP rather than merely failing authentication.
+                setPrivateField(activity, "client", OkHttpClient.Builder()
+                    .addInterceptor {
+                        httpAttempts.incrementAndGet()
+                        throw java.io.IOException("Unexpected HTTP during local context preflight")
+                    }.build())
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                originalHistory = history.map { JSONObject(it.toString()) }
+                history.add(
+                    JSONObject().put("role", "user").put("text", "Old photo")
+                        .put("provider", "openai").put("image_file_id", "file-example")
+                )
+                expectedHistorySize = history.size
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId(null)
+                (privateField(activity, "input") as android.widget.EditText).setText("Next question")
+                val previousGeneration = activeGeneration(activity)
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                preparationGeneration = activeGeneration(activity)
+                assertTrue("Test must enter owned local preparation",
+                    preparationGeneration > previousGeneration)
+            }
+            assertFailedPreparation()
+
+            scenario.onActivity { activity ->
+                // A stored ID is not usable after another provider answered.
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.add(JSONObject().put("role", "assistant")
+                    .put("provider", "openrouter").put("text", "other provider"))
+                expectedHistorySize = history.size
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId("resp_stale")
+                val previousGeneration = activeGeneration(activity)
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                preparationGeneration = activeGeneration(activity)
+                assertTrue("Stale chain must enter local preparation",
+                    preparationGeneration > previousGeneration)
+            }
+            assertFailedPreparation()
+        } finally {
+            scenario.onActivity { activity ->
+                originalApiKey?.let { SecureStore(activity).setApiKey(it) }
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.clear()
+                history.addAll(originalHistory)
+                (privateField(activity, "activeResponseState") as ActiveResponseStateStore)
+                    .setResponseId(null)
+            }
+            scenario.close()
+        }
     }
 
     @Test
@@ -1387,6 +1460,244 @@ class MainActivityLifecycleTest {
         method.isAccessible = true
         return method.invoke(activity, *args)
     }
+
+    @Test
+    fun externalImagePickerResultAfterChatSwitchAndRecreateBelongsToSourceChat() {
+        val png = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        )
+        val uri = Uri.parse("content://test-photo-picker/synthetic.png")
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var originalChatId = ""
+        var otherChatId = ""
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                originalChatId = activity.currentChatIdForTesting()
+                setPrivateField(activity, "pendingPickerChatId", originalChatId)
+                setPrivateField(activity, "pendingPickerProvider", "openrouter")
+                activity.newChat()
+                otherChatId = activity.currentChatIdForTesting()
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("D2 in another chat")
+            }
+            scenario.recreate()
+            scenario.onActivity { activity ->
+                activity.openRouterAttachmentInputStreamSource =
+                    AttachmentInputStreamSource { _, _ -> ByteArrayInputStream(png) }
+                assertEquals(originalChatId, privateField(activity, "pendingPickerChatId"))
+                activity.handleActivityResult(5101, Activity.RESULT_OK, Intent().setData(uri))
+            }
+            assertTrue("External picker result did not reach source draft",
+                waitForSourceAttachmentCount(scenario, originalChatId, 1))
+            scenario.onActivity { activity ->
+                assertEquals(otherChatId, activity.currentChatIdForTesting())
+                assertEquals("D2 in another chat",
+                    (privateField(activity, "input") as android.widget.EditText).text.toString())
+                assertEquals(0, composerAttachmentCount(activity, otherChatId))
+                val source = JSONObject(activity.prefs.getString("composer_state_" + originalChatId, "{}")!!)
+                val item = source.getJSONArray("openrouter_attachments").getJSONObject(0)
+                assertEquals("image", item.getString("kind"))
+                assertTrue(java.io.File(item.getString("path")).isFile)
+            }
+        } finally {
+            scenario.close()
+        }
+    }
+
+    @Test
+    fun deliberateHorizontalGestureOpensAndClosesChatDrawer() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+
+        fun visibleWindowBounds(view: android.view.View): android.graphics.Rect {
+            val bounds = android.graphics.Rect()
+            assertTrue("Gesture surface must be visible", view.getLocalVisibleRect(bounds))
+            val location = IntArray(2)
+            view.getLocationInWindow(location)
+            bounds.offset(location[0], location[1])
+            return bounds
+        }
+
+        fun swipe(x0: Float, y0: Float, x1: Float, y1: Float) {
+            // Exercise the Activity -> Window -> View touch path on main using
+            // window coordinates. System-wide sendPointerSync can hit the IME
+            // or another UID's window; that does not test this Activity's drawer.
+            // The first MOVE may capture the drag; later MOVEs must move it.
+            val down = SystemClock.uptimeMillis()
+            for (step in 0..12) {
+                if (step > 0) SystemClock.sleep(25L)
+                val fraction = step / 12f
+                val action = when (step) {
+                    0 -> android.view.MotionEvent.ACTION_DOWN
+                    12 -> android.view.MotionEvent.ACTION_UP
+                    else -> android.view.MotionEvent.ACTION_MOVE
+                }
+                val event = android.view.MotionEvent.obtain(
+                    down, SystemClock.uptimeMillis(), action,
+                    x0 + (x1 - x0) * fraction, y0 + (y1 - y0) * fraction, 0
+                ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+                scenario.onActivity { activity ->
+                    try {
+                        activity.dispatchTouchEvent(event)
+                    } finally {
+                        event.recycle()
+                    }
+                }
+            }
+            instrumentation.waitForIdleSync()
+        }
+
+        fun awaitDrawer(open: Boolean) {
+            val deadline = SystemClock.uptimeMillis() + 5_000L
+            var settled = false
+            while (!settled && SystemClock.uptimeMillis() < deadline) {
+                scenario.onActivity { activity ->
+                    val drawer = privateField(activity, "drawerLayout")
+                        as androidx.drawerlayout.widget.DrawerLayout
+                    settled = if (open) drawer.isDrawerOpen(androidx.core.view.GravityCompat.START)
+                        else !drawer.isDrawerVisible(androidx.core.view.GravityCompat.START)
+                }
+                if (!settled) SystemClock.sleep(20L)
+            }
+            assertTrue(if (open) "Swipe right must open drawer"
+                else "Swipe left must fully close drawer", settled)
+        }
+
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+            }
+            instrumentation.waitForIdleSync()
+            var chatBounds = android.graphics.Rect()
+            scenario.onActivity { activity ->
+                val scroll = privateField(activity, "scroll") as android.view.View
+                chatBounds = visibleWindowBounds(scroll)
+                assertTrue("Chat surface must be laid out", chatBounds.width() > 200)
+            }
+            // A vertical gesture must keep the drawer closed.
+            swipe(chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.25f,
+                chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.75f)
+            scenario.onActivity { activity ->
+                val drawer = privateField(activity, "drawerLayout")
+                    as androidx.drawerlayout.widget.DrawerLayout
+                assertFalse("Vertical scroll must not open drawer",
+                    drawer.isDrawerVisible(androidx.core.view.GravityCompat.START))
+            }
+            swipe(chatBounds.left + chatBounds.width() * 0.2f, chatBounds.exactCenterY(),
+                chatBounds.left + chatBounds.width() * 0.9f, chatBounds.exactCenterY())
+            awaitDrawer(true)
+
+            var panelBounds = android.graphics.Rect()
+            scenario.onActivity { activity ->
+                val drawer = privateField(activity, "drawerLayout")
+                    as androidx.drawerlayout.widget.DrawerLayout
+                val panel = (0 until drawer.childCount).map { drawer.getChildAt(it) }
+                    .first { (it.layoutParams as androidx.drawerlayout.widget.DrawerLayout.LayoutParams)
+                        .gravity == androidx.core.view.GravityCompat.START }
+                panelBounds = visibleWindowBounds(panel)
+            }
+            // Stay inside the actual drawer panel, independent of screen width.
+            swipe(panelBounds.left + panelBounds.width() * 0.85f, panelBounds.exactCenterY(),
+                panelBounds.left + panelBounds.width() * 0.1f, panelBounds.exactCenterY())
+            awaitDrawer(false)
+        } finally {
+            scenario.close()
+        }
+    }
+
+    @Test
+    fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {
+        val (server, testHttpClient) = createHttpsMockServer()
+        repeat(2) {
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        }
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var jpegBytes = ByteArray(0)
+        val model = "anthropic/claude-sonnet-5.5"
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", model).putString("reasoning", "high").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                val width = 3200
+                val height = 2700
+                val pixels = IntArray(width * height)
+                val random = java.util.Random(55555L)
+                for (i in pixels.indices) pixels[i] = 0xff000000.toInt() or random.nextInt(0x1000000)
+                val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+                val output = ByteArrayOutputStream()
+                assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, output))
+                bitmap.recycle()
+                jpegBytes = output.toByteArray()
+                assertTrue("JPEG must be a decodable 6+ MB image: " + jpegBytes.size,
+                    jpegBytes.size in 6_000_000..10_000_000)
+                val file = java.io.File(activity.filesDir, "test-large-photo.jpg").apply { writeBytes(jpegBytes) }
+                val attachment = OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "image/png")
+                @Suppress("UNCHECKED_CAST")
+                val attachments = privateField(activity, "attachedOpenRouterAttachments")
+                    as MutableList<OpenRouterLocalAttachment>
+                attachments.add(attachment)
+                @Suppress("UNCHECKED_CAST")
+                val modalities = privateField(activity, "openRouterModelModalities")
+                    as ConcurrentHashMap<String, Set<String>>
+                modalities[model] = setOf("text", "image")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                (privateField(activity, "input") as android.widget.EditText).setText("Read the image")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            fun assertJpeg(request: okhttp3.mockwebserver.RecordedRequest) {
+                val body = JSONObject(request.body.readUtf8())
+                val messages = body.getJSONArray("messages")
+                val content = (0 until messages.length()).map { messages.getJSONObject(it) }
+                    .first { it.optString("role") == "user" }.getJSONArray("content")
+                val image = (0 until content.length()).map { content.getJSONObject(it) }
+                    .first { it.optString("type") == "image_url" }
+                val url = image.getJSONObject("image_url").getString("url")
+                assertTrue("Wrong actual data URL MIME", url.startsWith("data:image/jpeg;base64,"))
+                assertTrue("Original JPEG bytes changed during HTTP serialization",
+                    java.util.Base64.getDecoder().decode(url.substringAfter(","))
+                        .contentEquals(jpegBytes))
+            }
+            assertJpeg(server.takeRequest(30, TimeUnit.SECONDS) ?: error("First HTTPS Send missing"))
+            var completed = false
+            repeat(120) {
+                scenario.onActivity { activity ->
+                    completed = (privateField(activity, "status") as android.widget.TextView)
+                        .text.toString().startsWith("Готово")
+                }
+                if (completed) return@repeat
+                SystemClock.sleep(50L)
+            }
+            assertTrue("First Send must commit before next message", completed)
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("And one more text request")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            val second = server.takeRequest(30, TimeUnit.SECONDS) ?: error("Second HTTPS Send missing")
+            val secondBody = JSONObject(second.body.readUtf8())
+            assertTrue(secondBody.getJSONArray("messages").toString().contains("And one more text request"))
+            val secondContent = secondBody.getJSONArray("messages").getJSONObject(0).optJSONArray("content")
+                ?: secondBody.getJSONArray("messages").getJSONObject(1).optJSONArray("content")
+                ?: error("Image context missing")
+            val imageBlock = (0 until secondContent.length()).map { secondContent.optJSONObject(it) }
+                .firstOrNull { it?.optString("type") == "image_url" }
+                ?: error("Historical image missing from second HTTP request")
+            val historical = imageBlock.getJSONObject("image_url").getString("url")
+            assertTrue(historical.startsWith("data:image/jpeg;base64,"))
+            assertTrue(java.util.Base64.getDecoder().decode(historical.substringAfter(",")).contentEquals(jpegBytes))
+        } finally {
+            scenario.onActivity { SecureStore(it).setOpenRouterApiKey("") }
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
     private class BlockingAttachmentInputStreamSource : AttachmentInputStreamSource {
         private val opened = ConcurrentHashMap.newKeySet<String>()
         private val releases = ConcurrentHashMap<String, CountDownLatch>()
@@ -1427,3 +1738,4 @@ class MainActivityLifecycleTest {
     }
 
 }
+

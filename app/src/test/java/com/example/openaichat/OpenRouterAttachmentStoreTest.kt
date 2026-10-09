@@ -8,6 +8,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenRouterAttachmentStoreTest {
+
+    @Test
+    fun unsupportedLegacyClassificationNeverDeletesOriginalBytes() {
+        val source = File(createTempDir(), "persistent-ready.exe").apply {
+            writeBytes(byteArrayOf(0, 1, 2, 3, 4, 5, 6))
+        }
+        var rejected = false
+        try {
+            OpenRouterAttachmentStore.classifyLocalFile(source, source.name)
+        } catch (_: java.io.IOException) {
+            rejected = true
+        }
+        assertTrue("Unsupported binary must fail clearly", rejected)
+        assertTrue("READY/legacy originals must not be deleted on failure", source.isFile)
+        assertEquals(7L, source.length())
+    }
+
     @Test
     fun ktOctetStreamClassifiesAsTextAndPersistsUtf8Artifact() {
         val dir = createTempDir()
