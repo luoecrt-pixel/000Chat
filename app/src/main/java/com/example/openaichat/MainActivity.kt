@@ -2800,37 +2800,42 @@ class MainActivity : ComponentActivity() {
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
                 }
-                if(!canContinueInBackground || userStopped){
-                    // Local Stop was persisted atomically above. A cancelled HTTP
-                    // stream is not evidence that OpenAI actually cancelled
-                    // or billed the response; the /cancel + GET path owns that.
-                    if (!userStopped) {
+                var durablePartial: JSONObject? = null
+                if (!canContinueInBackground && !userStopped) {
+                    val failureStatus = if (completionState == "disconnected" || cancelled)
+                        "disconnected" else "failed"
+                    val partial = responseState.text.trim().ifBlank {
+                        "Ответ завершился без полученного текста: " + (e.message ?: failureStatus).take(250)
+                    }
+                    val assistant = JSONObject().put("role", "assistant")
+                        .put("text", partial)
+                        .put("status", failureStatus)
+                        .put("incomplete", true)
+                        .put("error", (e.message ?: failureStatus).take(1200))
+                        .put("provider", "openai")
+                        .put("requested_model", model)
+                        .put("request_id", localRequestId)
+                    newId?.let { assistant.put("response_id", it) }
+                    val claimed = chatDb.finalizeCurrentChatIfActiveRequest(
+                        requestChatId, "", null, null, listOf(assistant), localRequestId
+                    )
+                    if (claimed) {
+                        durablePartial = assistant
                         chatDb.recordRequestAccounting(
-                            chatId = requestChatId,
-                            localRequestId = localRequestId,
-                            status = if (completionState == "disconnected") "disconnected" else "failed",
-                            responseId = newId,
-                            httpRequestId = requestId,
-                            usage = responseState.usage,
+                            chatId = requestChatId, localRequestId = localRequestId,
+                            status = failureStatus, responseId = newId,
+                            httpRequestId = requestId, usage = responseState.usage,
+                            error = (e.message ?: e.toString()).take(1200)
+                        )
+                        chatDb.recordRequestEvent(
+                            chatId = requestChatId, eventType = "request_failed",
+                            requestId = requestId ?: localRequestId, provider = "openai",
+                            requestedModel = model, responseModel = null,
+                            modelMatch = ModelCatalog.Match.UNKNOWN,
+                            status = failureStatus, latencyMs = latency,
                             error = (e.message ?: e.toString()).take(1200)
                         )
                     }
-                    if (!userStopped) chatDb.recordRequestEvent(
-                        chatId = requestChatId,
-                        eventType = "request_failed",
-                        requestId = requestId ?: localRequestId,
-                        provider = "openai",
-                        requestedModel = model,
-                        responseModel = null,
-                        modelMatch = ModelCatalog.Match.UNKNOWN,
-                        status = when {
-                            userStopped -> "cancelled"
-                            cancelled || completionState == "disconnected" -> "disconnected"
-                            else -> "failed"
-                        },
-                        latencyMs = latency,
-                        error = (e.message ?: e.toString()).take(1200)
-                    )
                 }
                 diagnostics.log(
                     when {
@@ -2887,13 +2892,21 @@ class MainActivity : ComponentActivity() {
                     activeAssistantItemId=null
                     renderRequestTelemetry()
                     currentCall=null
-                    if(!userStopped && responseState.text.isNotBlank() && isRequestCurrent(requestChatId,requestGeneration)) {
-                        val partialStatus = if (completionState == "disconnected") "disconnected" else "failed"
-                        val partial=JSONObject().put("role","assistant").put("text",responseState.text).put("incomplete",true).put("status",partialStatus).put("error", (e.message ?: "").take(1200))
-                        newId?.let{partial.put("response_id",it)}
-                        requestId?.let{partial.put("request_id",it)}
-                        chat.add(partial)
-                        persistCurrentChat()
+                    durablePartial?.let { saved ->
+                        chat.add(saved)
+                        val item = activeAssistantItemId ?: assistantItemId
+                        messageAdapter.replaceItem(
+                            item,
+                            ChatBubbleItem.create(
+                                id = item,
+                                label = AssistantModelLabel.text(saved),
+                                text = saved.optString("text"),
+                                user = false,
+                                message = saved,
+                                chatIndex = chat.lastIndex
+                            )
+                        )
+                        status.text = "Ответ сохранён как неполный · " + saved.optString("status")
                     }
                     if(cancelled && userStopped){
                         activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
