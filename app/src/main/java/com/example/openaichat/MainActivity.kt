@@ -1532,6 +1532,21 @@ class MainActivity : ComponentActivity() {
     private fun newChatId(): String = "chat_${System.currentTimeMillis()}_${System.nanoTime()}"
 
     private fun resolveOpenRouterAttachments(message: JSONObject): List<OpenRouterLocalAttachment> {
+        val remoteFiles = message.optJSONArray("file_ids")?.length() ?: 0
+        val localFiles = message.optJSONArray("file_paths")?.length() ?: 0
+        if (remoteFiles > localFiles) {
+            throw IOException("В истории OpenAI есть файл без локальных байтов. " +
+                "Восстановите исходное вложение перед отправкой в OpenRouter.")
+        }
+        val remoteImageId = message.optString("image_file_id")
+            .takeIf { it.isNotBlank() && it != "null" }
+        if (remoteImageId != null && message.optString("image_path").isBlank() &&
+            (message.optJSONArray("attachments")?.let { manifest ->
+                (0 until manifest.length()).any { manifest.optJSONObject(it)?.optString("kind") == "image" }
+            } != true)) {
+            throw IOException("В истории OpenAI есть фото без локальных байтов. " +
+                "Восстановите исходное фото перед отправкой в OpenRouter.")
+        }
         val manifest = message.optJSONArray("attachments")
         if (manifest != null && manifest.length() > 0) {
             val existing = (0 until manifest.length()).mapNotNull { i -> manifest.optJSONObject(i)?.let { OpenRouterLocalAttachment.fromJson(it) } }
