@@ -10,9 +10,9 @@ object AssistantModelLabel {
         val requested = message.optString("requested_model").takeIf { it.isNotBlank() && it != "null" }
             ?: message.optString("model").takeIf { it.isNotBlank() && it != "null" }
         return when {
-            response != null -> "Astra · " + ModelCatalog.displayName(provider, response)
-            requested != null -> "Astra · запрошена " + ModelCatalog.displayName(provider, requested)
-            else -> "Astra · модель неизвестна"
+            response != null -> ModelCatalog.displayName(provider, response)
+            requested != null -> "Запрошена: " + ModelCatalog.displayName(provider, requested)
+            else -> "Ассистент · модель неизвестна"
         }
     }
 }

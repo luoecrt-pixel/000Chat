@@ -1514,7 +1514,9 @@ class MainActivity : ComponentActivity() {
         messagesSnapshot: JSONArray
     ) {
         beginOpenRouterRequestOwnership(requestId)
-        val assistantItemId = addBubble("Astra", "", false)
+        val pendingModel = JSONObject().put("role", "assistant").put("provider", "openrouter")
+            .put("requested_model", model)
+        val assistantItemId = addBubble(AssistantModelLabel.text(pendingModel), "", false)
         activeAssistantItemId = assistantItemId
         executor.execute {
             try {
@@ -1591,6 +1593,42 @@ class MainActivity : ComponentActivity() {
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
+                chatDb.sealOpenRouterRounds(chatId, requestId)
+                reconcileOpenRouterGenerations(chatId, requestId)
+                val assistantMessage = JSONObject()
+                    .put("role", "assistant")
+                    .put("text", finalText)
+                    .put("request_id", requestId)
+                    .put("provider", "openrouter")
+                    .put("model", model)
+                    .put("requested_model", model)
+                    .put("response_model", result.responseModel ?: JSONObject.NULL)
+                    .apply {
+                        val toolArray = JSONArray()
+                        result.toolNames.distinct().forEach { toolArray.put(it) }
+                        put("tools", toolArray)
+                        if (githubEnabled && toolTrace.length() > 0) {
+                            put("tool_trace", JSONArray(toolTrace.toString()))
+                        }
+                        if (localArtifacts.isNotEmpty()) {
+                            put("annotations", JSONArray().apply {
+                                localArtifacts.forEach { artifact ->
+                                    put(JSONObject().put("type", "local_file")
+                                        .put("state", "READY")
+                                        .put("filename", artifact.optString("filename"))
+                                        .put("local_path", artifact.optString("path"))
+                                        .put("mime_type", artifact.optString("mime_type", "text/plain"))
+                                        .put("size_bytes", artifact.optLong("size_bytes", 0L)))
+                                }
+                            })
+                        }
+                    }
+                result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
+
+                val finalized = chatDb.finalizeCurrentChatIfActiveRequest(
+                    chatId, "", null, null, listOf(assistantMessage), requestId
+                )
+                if (!finalized) return@execute
                 OpenRouterCompletionTelemetry.record(
                     usage = result.usage,
                     recordMetric = { totals ->
@@ -1643,39 +1681,8 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 )
-                chatDb.sealOpenRouterRounds(chatId, requestId)
-                reconcileOpenRouterGenerations(chatId, requestId)
-                val assistantMessage = JSONObject()
-                    .put("role", "assistant")
-                    .put("text", finalText)
-                    .put("request_id", requestId)
-                    .put("provider", "openrouter")
-                    .put("model", model)
-                    .put("requested_model", model)
-                    .put("response_model", result.responseModel ?: JSONObject.NULL)
-                    .apply {
-                        val toolArray = JSONArray()
-                        result.toolNames.distinct().forEach { toolArray.put(it) }
-                        put("tools", toolArray)
-                        if (githubEnabled && toolTrace.length() > 0) {
-                            put("tool_trace", JSONArray(toolTrace.toString()))
-                        }
-                        if (localArtifacts.isNotEmpty()) {
-                            put("annotations", JSONArray().apply {
-                                localArtifacts.forEach { artifact ->
-                                    put(JSONObject().put("type", "local_file")
-                                        .put("state", "READY")
-                                        .put("filename", artifact.optString("filename"))
-                                        .put("local_path", artifact.optString("path"))
-                                        .put("mime_type", artifact.optString("mime_type", "text/plain"))
-                                        .put("size_bytes", artifact.optLong("size_bytes", 0L)))
-                                }
-                            })
-                        }
-                    }
-                result.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
 
-                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
+                // SQLite has committed the assistant before any Activity callback is posted.
                 runOnUiThread {
                     if (isRequestCurrent(chatId, generation)) {
                         chat.add(assistantMessage)
@@ -1987,6 +1994,13 @@ class MainActivity : ComponentActivity() {
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val stopped = activeRequestId?.let { chatDb.stopActiveRequestOnce(chatId, it) } ?: false
+        if (activeRequestId != null && !stopped) {
+            // A terminal transaction already won: Stop must not remove its committed bubble.
+            restoreCurrentChat()
+            status.text = "Ответ уже завершён"
+            renderRequestTelemetry()
+            return
+        }
         if (activeRequestId == null) {
             activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
         }
@@ -2660,6 +2674,10 @@ class MainActivity : ComponentActivity() {
                     val cacheWriteTok=usageObj?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens",0L) ?: 0L
                     val reasoningTok=usageObj?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+                    val finalized = chatDb.finalizeCurrentChatIfActiveRequest(
+                        requestChatId, "", newId, actualEffort, listOf(assistantMessage), localRequestId
+                    )
+                    if (!finalized) return@execute
                     chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
 
                     chatDb.recordRequestAccounting(
@@ -2702,7 +2720,7 @@ class MainActivity : ComponentActivity() {
                             finalItemId,
                             ChatBubbleItem.create(
                                 id = finalItemId,
-                                label = "Astra",
+                                label = AssistantModelLabel.text(assistantMessage),
                                 text = assistantMessage.optString("text"),
                                 user = false,
                                 annotations = assistantMessage.optJSONArray("annotations"),
@@ -5490,7 +5508,7 @@ class MainActivity : ComponentActivity() {
             val first=chat.firstOrNull{it.optString("role")=="user"}?.optString("text").orEmpty()
             chatTitle=first.take(36).ifBlank{"Новый чат"}
         }
-        chatDb.upsertCurrentChat(id,chatTitle,currentResponseId,baselineEffort,chat)
+        chatDb.upsertUiSnapshotPreservingTail(id,chatTitle,currentResponseId,baselineEffort,chat)
         if(::title.isInitialized) title.text=chatTitle
     }
     private fun restoreCurrentChat(){
@@ -5531,7 +5549,14 @@ class MainActivity : ComponentActivity() {
         val active=activeResponsePersistence.getActiveResponse(currentChatId())
         if(active!=null && active.optString("response_id").isNotBlank()){
             val partial=active.optString("text")
-            activeAssistantItemId=addBubble("Astra",partial,false)
+            val pendingModel = chatDb.getChat(currentChatId())?.optJSONArray("messages")?.let { rows ->
+                (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
+                    .firstOrNull { it.optString("request_id") == active.optString("request_id") }
+            }
+            activeAssistantItemId=addBubble(AssistantModelLabel.text(
+                pendingModel?.let { JSONObject().put("provider", it.optString("provider"))
+                    .put("requested_model", it.optString("requested_model")) } ?: JSONObject()
+            ),partial,false)
             status.text=if(active.optString("status")=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
             setBusy(true)
         }else{
@@ -5580,8 +5605,8 @@ class MainActivity : ComponentActivity() {
             chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
             BackgroundResponseWorkScheduler.cancel(applicationContext, editingChatId, editingRequestId)
             activeResumeCalls.remove(editingChatId)?.cancel()
-            val activeId = active.optString("response_id").takeIf { it.isNotBlank() && it != "null" }
-            if (activeId != null && active.optBoolean("background_enabled", false)) {
+            val activeId = active?.optString("response_id")?.takeIf { it.isNotBlank() && it != "null" }
+            if (activeId != null && active?.optBoolean("background_enabled", false) == true) {
                 cancelRemoteResponse(editingChatId, activeId)
             }
         }
@@ -5601,7 +5626,8 @@ class MainActivity : ComponentActivity() {
         currentResponseId=chat.lastOrNull{it.optString("role")=="assistant"}
             ?.optString("response_id")?.takeIf{it.isNotBlank() && it!="null"}
         if(chat.isEmpty()) baselineEffort=null
-        persistCurrentChat()
+        // An explicit Edit is the only operation allowed to delete a history suffix.
+        chatDb.upsertCurrentChat(currentChatId(), currentChatTitleSafe(), currentResponseId, baselineEffort, chat)
         input.setText(text)
         input.setSelection(input.text.length)
         refreshAttachChips()
