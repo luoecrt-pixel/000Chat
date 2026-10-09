@@ -1,7 +1,6 @@
 package com.example.openaichat
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -315,10 +314,7 @@ object OpenRouterAttachmentStore {
                 String(magic, 8, 4, Charsets.US_ASCII) == "WEBP" -> "image/webp"
             else -> return null
         }
-        if (!hasImageContainerEnding(file, magic, type)) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        return type.takeIf { bounds.outWidth > 0 && bounds.outHeight > 0 }
+        return type.takeIf { hasImageContainerEnding(file, magic, it) }
     }
 
     private fun hasImageContainerEnding(file: File, header: ByteArray, mime: String): Boolean {
