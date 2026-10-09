@@ -3,8 +3,13 @@ package com.example.openaichat
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class AstraDiagnosticsPrivacyTest {
     @Test
     fun secretsAndBase64AreRedactedWithoutDiscardingDiagnosticFields() {
