@@ -142,6 +142,30 @@ class OpenAiCancelReconcilerTest {
         }
     }
 
+    @Test fun intermediateUsageCannotPretendToBeTerminalUsage() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200)
+                .setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            server.enqueue(MockResponse().setResponseCode(200)
+                .setBody("""{"id":"resp_one","status":"in_progress","usage":{"input_tokens":3,"output_tokens":1}}"""))
+            server.enqueue(MockResponse().setResponseCode(200)
+                .setBody("""{"id":"resp_one","status":"cancelled","usage":{"input_tokens":12,"output_tokens":4}}"""))
+            ChatDatabase(context).use { db ->
+                makeStopped(db)
+                val result = cancel(server, db)
+                assertEquals(2, result.retrievals)
+                assertEquals(3, result.acceptedSnapshots)
+                assertEquals("cancelled", result.terminalStatus)
+                val row = db.listRequestAccounting("chat").single()
+                assertEquals("stopped", row.getString("local_status"))
+                assertEquals(12L, row.getLong("input_tokens"))
+                assertEquals(4L, row.getLong("output_tokens"))
+                assertEquals("unknown", row.getString("cost_kind"))
+            }
+            assertEquals(3, server.requestCount)
+        }
+    }
+
     @Test fun terminalMissingUsageNeverBecomesZeroAndGetFailureIsBounded() {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(200)
@@ -156,6 +180,24 @@ class OpenAiCancelReconcilerTest {
                 assertFalse(row.has("input_tokens"))
                 assertFalse(row.has("output_tokens"))
                 assertFalse(row.has("cost_usd"))
+            }
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun acceptedEmptyCancelBodyUsesSingleRetrieve() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(202))
+            server.enqueue(MockResponse().setResponseCode(200)
+                .setBody("""{"id":"resp_one","status":"cancelled","usage":{"input_tokens":1,"output_tokens":0}}"""))
+            ChatDatabase(context).use { db ->
+                makeStopped(db)
+                val result = cancel(server, db)
+                assertEquals(202, result.cancelStatus)
+                assertEquals(1, result.retrievals)
+                assertEquals("cancelled", result.terminalStatus)
+                assertEquals(1L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
+                assertEquals("unknown", db.listRequestAccounting("chat").single().getString("cost_kind"))
             }
             assertEquals(2, server.requestCount)
         }

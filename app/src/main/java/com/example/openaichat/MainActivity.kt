@@ -1883,7 +1883,9 @@ class MainActivity : ComponentActivity() {
             activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
         }
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
-        if (stopped && responseId != null && activeRequestId != null) {
+        // OpenAI only permits /cancel for background=true Responses.
+        if (stopped && active?.optBoolean("background_enabled", false) == true &&
+            responseId != null && activeRequestId != null) {
             // Reconciliation has no UI callback and cannot resurrect chat messages.
             // Capture only the request identity; no API keys enter SQLite or logs.
             executor.execute {

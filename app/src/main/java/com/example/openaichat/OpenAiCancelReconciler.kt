@@ -39,6 +39,7 @@ class OpenAiCancelReconciler(
         var accepted = 0
         var terminal: String? = null
         var hasUsage = false
+        var terminalWithUsage = false
         fun observe(body: String?) {
             if (body.isNullOrBlank()) return
             val json = try { JSONObject(body) } catch (_: Exception) { return }
@@ -49,9 +50,12 @@ class OpenAiCancelReconciler(
             accepted++
             if (state in setOf("completed", "cancelled", "failed", "incomplete")) terminal = state
             val usage = json.optJSONObject("usage")
-            if (usage != null && !usage.isNull("input_tokens") && !usage.isNull("output_tokens") &&
-                (usage.has("input_tokens") || usage.has("output_tokens"))) {
+            if (usage != null && usage.has("input_tokens") && usage.has("output_tokens") &&
+                !usage.isNull("input_tokens") && !usage.isNull("output_tokens")) {
                 hasUsage = true
+                if (state in setOf("completed", "cancelled", "failed", "incomplete")) {
+                    terminalWithUsage = true
+                }
             }
         }
         val cancel = Request.Builder()
@@ -68,7 +72,7 @@ class OpenAiCancelReconciler(
         if (code !in 200..299 && code != 404 && code != 409) {
             return Outcome(code, 0, accepted, terminal, hasUsage)
         }
-        if (terminal != null && hasUsage) return Outcome(code, 0, accepted, terminal, hasUsage)
+        if (terminalWithUsage) return Outcome(code, 0, accepted, terminal, hasUsage)
         var count = 0
         for (attempt in 0 until maxRetrieves.coerceIn(0, 2)) {
             val get = Request.Builder().url(endpoint).header("Authorization", "Bearer $apiKey").get().build()
@@ -78,7 +82,7 @@ class OpenAiCancelReconciler(
                 status
             }
             count++
-            if (responseCode !in 200..299 || (terminal != null && hasUsage)) break
+            if (responseCode !in 200..299 || terminalWithUsage) break
         }
         return Outcome(code, count, accepted, terminal, hasUsage)
     }
