@@ -91,8 +91,9 @@ object OpenRouterAttachmentStore {
         val mime = runCatching { context.contentResolver.getType(uri).orEmpty() }.getOrDefault("").ifBlank { mimeForFilename(name) }
         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
         val raw = File(dir, "or_" + UUID.randomUUID() + "_" + safeFileName(name))
-        inputStreamSource.openInputStream(context, uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
-            ?: throw IOException("Не удалось открыть файл: " + name)
+        inputStreamSource.openInputStream(context, uri)?.use { input ->
+            BoundedAttachmentCopy.copy(input, raw)
+        } ?: throw IOException("Не удалось открыть файл: " + name)
         return try { finalizeFile(context, dir, raw, name, mime) }
         catch (e: Exception) { raw.delete(); throw e }
     }
@@ -258,6 +259,9 @@ object OpenRouterAttachmentStore {
         if (!wireFile.isFile || wireFile.length() == 0L) {
             throw IOException("Локальные байты вложения недоступны: " + a.name)
         }
+        if (wireFile.length() > BoundedAttachmentCopy.MAX_INPUT_BYTES) {
+            throw IOException("Вложение превышает лимит 25 МБ для безопасной сериализации: " + a.name)
+        }
         // A name, picker MIME or legacy manifest is not evidence of the actual wire type.
         val wireMime = when (a.kind) {
             "image" -> detectImageMime(wireFile)
@@ -272,7 +276,13 @@ object OpenRouterAttachmentStore {
         return "data:" + wireMime + ";base64," + Base64.getEncoder().encodeToString(wireFile.readBytes())
     }
 
-    fun textContent(a: OpenRouterLocalAttachment): String = File(a.textPath ?: a.path).readText(Charsets.UTF_8)
+    fun textContent(a: OpenRouterLocalAttachment): String {
+        val source = File(a.textPath ?: a.path)
+        if (!source.isFile || source.length() > BoundedAttachmentCopy.MAX_INPUT_BYTES) {
+            throw IOException("Текстовое вложение недоступно или превышает 25 МБ: " + a.name)
+        }
+        return source.readText(Charsets.UTF_8)
+    }
 
     private fun finalizeFile(context: Context?, dir: File, file: File, name: String, mime: String): OpenRouterLocalAttachment {
         val kind = classifyKind(file, name)
