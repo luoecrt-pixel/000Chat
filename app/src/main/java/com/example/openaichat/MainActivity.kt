@@ -2621,11 +2621,23 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val composerBeforePreparation = input.text.toString()
+        val openRouterIdsBeforePreparation = attachedOpenRouterAttachments.map { it.id }
+        val filePathsBeforePreparation = attachedFilePaths.toList()
+        val imagePathBeforePreparation = pendingImagePath
+        val pendingUrisBeforePreparation = pendingUploadUris.toList()
+        fun commitPreparedOpenAi(typedInput: JSONArray?) {
         // Repeat creates a new user request under current settings without touching a newer draft.
+        val shouldConsumeDraft = !regenerate &&
+            input.text.toString() == composerBeforePreparation &&
+            attachedOpenRouterAttachments.map { it.id } == openRouterIdsBeforePreparation &&
+            attachedFilePaths == filePathsBeforePreparation &&
+            pendingImagePath == imagePathBeforePreparation &&
+            pendingUploadUris == pendingUrisBeforePreparation
         addBubble("Ты",text,true, message=sentUserMessage)
         chat.add(sentUserMessage)
         persistCurrentChat()
-        if (!regenerate) {
+        if (shouldConsumeDraft) {
             input.setText("")
             clearComposerState(requestChatId)
         }
@@ -2681,8 +2693,8 @@ class MainActivity : ComponentActivity() {
         val reasoningObj = ModelRequestPolicy.openAiReasoning(model, effectiveEffort, reasoningMode, summary)
 
         val textObj=JSONObject().put("verbosity",verbosity)
-        val inputArr=JSONArray()
-        if (!usableOpenAiChain && chat.size > 1) {
+        val inputArr=typedInput ?: JSONArray()
+        if (typedInput == null && !usableOpenAiChain && chat.size > 1) {
             chat.dropLast(1).forEach { message ->
                 val role = message.optString("role")
                 val messageText = message.optString("text").trim()
@@ -2697,7 +2709,7 @@ class MainActivity : ComponentActivity() {
                 if(isRequestCurrent(requestChatId,requestGeneration)) toolLabel.text="⚙ мышление: $effectiveEffort → $newEffort (эта реплика)"
             }
         }
-        inputArr.put(JSONObject().put("role","user").put("content",content))
+        if (typedInput == null) inputArr.put(JSONObject().put("role","user").put("content",content))
 
         val body=JSONObject()
             .put("model",model)
@@ -2718,7 +2730,7 @@ class MainActivity : ComponentActivity() {
         if (configUpdateEffort == null) {
             body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",800000)))
         }
-        if (usableOpenAiChain) {
+        if (typedInput == null && usableOpenAiChain) {
             currentResponseId?.let { body.put("previous_response_id", it) }
         }
 
@@ -2763,7 +2775,7 @@ class MainActivity : ComponentActivity() {
         include.put("computer_call_output.output.image_url")
         body.put("include",include)
 
-        clearAttachedSelection()
+        if (shouldConsumeDraft) clearAttachedSelection()
         toolLabel.text=""
         refreshAttachChips()
 
@@ -3210,6 +3222,53 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        }
+
+        val typedHistoryNeeded = !usableOpenAiChain && chat.any { message ->
+            message.optString("role") == "user" && (
+                (message.optJSONArray("attachments")?.length() ?: 0) > 0 ||
+                (message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
+                (message.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
+                message.optString("image_file_id").isNotBlank() ||
+                message.optString("image_path").isNotBlank()
+            )
+        } || requestOpenRouterAttachments.isNotEmpty()
+        if (typedHistoryNeeded) {
+            val historySnapshot = chat.map { JSONObject(it.toString()) } +
+                JSONObject(sentUserMessage.toString())
+            pendingOpenAiPreparation.set(localRequestId)
+            setBusy(true)
+            status.text = "Проверяю локальные файлы и готовлю контекст OpenAI…"
+            executor.execute {
+                try {
+                    val prepared = OpenAiLocalContextEncoder.encode(historySnapshot)
+                    runOnUiThread {
+                        if (isRequestCurrent(requestChatId, requestGeneration) &&
+                            pendingOpenAiPreparation.compareAndSet(localRequestId, null)) {
+                            commitPreparedOpenAi(prepared)
+                        }
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        if (isRequestCurrent(requestChatId, requestGeneration) &&
+                            pendingOpenAiPreparation.compareAndSet(localRequestId, null)) {
+                            setBusy(false)
+                            status.text = "Не отправлено: " +
+                                (e.message ?: "недоступны локальные вложения") +
+                                ". Черновик и исходные файлы сохранены."
+                            diagnostics.log("openai_context_preflight_failed", mapOf(
+                                "chat_id" to requestChatId,
+                                "request_id" to localRequestId,
+                                "error_type" to e.javaClass.simpleName
+                            ))
+                        }
+                    }
+                }
+            }
+        } else {
+            commitPreparedOpenAi(null)
+        }
+
     }
 
     private fun JSONArray.toJsonArray(): JSONArray = JSONArray(toString())
