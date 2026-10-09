@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 (FIN133 final CI подтверждён)
+**Last updated:** 2026-10-09 20:49 +03:00
 **Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — APP-04 F01–F20 в едином PR #133 с F18-патчем владельца (xhigh/max, resolved auto, без Anthropic verbosity). FIN133: unit/lint/APK instrumentation/Release/Verify Successful на `73d9e4357838fbd55f6564b11e3806bb3f65bd65`; APP-05 F21–F26 после APP-04, финансовая отмена отложена.
 **Внесённый код и приёмка:** #125 APP-01, #126 APP-02 и camera fix #128 merged после Successful APK/Release/Verify. Владелец подтвердил камеру, но выявил нарушения доставки фото и UI; эти требования не считать закрытыми по CI. База повторной проверки #131 `18c9cd23d7dbda0f09f5543bac93d66e83dc806e` (Android-код тот же #128), SQLite v20; подробности ниже.
 
