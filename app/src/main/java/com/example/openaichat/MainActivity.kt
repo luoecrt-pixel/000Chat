@@ -535,6 +535,25 @@ class MainActivity : ComponentActivity() {
             clipToPadding = false
             setPadding(dp(10), dp(6), dp(10), dp(12))
         }
+        // A deliberate horizontal swipe on the chat surface opens the drawer,
+        // without claiming vertical scroll or nested text/code interactions.
+        var swipeStartX = 0f
+        var swipeStartY = 0f
+        scroll.setOnTouchListener { _, motion ->
+            when (motion.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    swipeStartX = motion.x
+                    swipeStartY = motion.y
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dx = motion.x - swipeStartX
+                    val dy = motion.y - swipeStartY
+                    if (dx > dp(95) && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.5f &&
+                        !drawerLayout.isDrawerOpen(GravityCompat.START)) showChats()
+                }
+            }
+            false
+        }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
@@ -1265,7 +1284,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun formatDiagnostics(raw: String): String {
-        val fieldPattern = Regex("""(?:^|\\s)([A-Za-z][A-Za-z_0-9]*)=""")
+        val fieldPattern = Regex("""(?:^|\s)([A-Za-z][A-Za-z_0-9]*)=""")
         return raw.lines().filter { it.isNotBlank() }.joinToString("\n\n") { line ->
             if (line.length < 24) return@joinToString line
             val stamp = line.take(23)
@@ -6144,6 +6163,58 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderUserAttachments(message:JSONObject,card:LinearLayout){
+        // OpenRouter manifests provide local previews without transforming the wire image.
+        val localManifest = message.optJSONArray("attachments")
+        if (localManifest != null) {
+            for (index in 0 until localManifest.length()) {
+                val entry = localManifest.optJSONObject(index) ?: continue
+                val attachment = OpenRouterLocalAttachment.fromJson(entry)
+                val box = createAttachmentCard()
+                if (attachment.kind == "image") {
+                    if (File(attachment.path).isFile) {
+                        addCompactImagePreview(box, attachment.path, attachment.name)
+                    } else {
+                        box.addView(TextView(this).apply {
+                            text = "🖼 Нет локальной копии изображения"
+                            setTextColor(Color.LTGRAY)
+                        })
+                    }
+                } else if (attachment.kind == "pdf" && File(attachment.path).isFile) {
+                    addCompactPdfPreview(box, attachment.path, attachment.name)
+                } else if (attachment.kind == "text" && File(attachment.textPath ?: attachment.path).isFile) {
+                    addCompactTextPreview(box, attachment.textPath ?: attachment.path, attachment.name)
+                }
+                box.addView(TextView(this).apply {
+                    text = "📎 " + safeDisplayName(attachment.name)
+                    textSize = 13.5f
+                    setTextColor(Color.WHITE)
+                    setTypeface(null, Typeface.BOLD)
+                })
+                box.addView(TextView(this).apply {
+                    text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size)
+                    setTextColor(Color.rgb(165,170,180))
+                    textSize = 11.5f
+                })
+                if (File(attachment.path).isFile) {
+                    val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                    if (attachment.kind == "image") buttons.addView(
+                        fileActionButton("Просмотр") { showImagePreviewFromFile(attachment.path, attachment.name) }
+                    )
+                    buttons.addView(fileActionButton("Сохранить") {
+                        requestSaveLocalFile(attachment.path, attachment.name, attachment.mime)
+                    })
+                    box.addView(buttons)
+                }
+                card.addView(box, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            }
+            if (localManifest.length() > 0) {
+                card.addView(TextView(this).apply {
+                    text = "Вложения OpenRouter"
+                    textSize = 11.5f
+                    setTextColor(Color.rgb(145,150,160))
+                }, 2)
+            }
+        }
         val fileIds=message.optJSONArray("file_ids") ?: JSONArray()
         val fileNames=message.optJSONArray("file_names") ?: JSONArray()
         val fileSizes=message.optJSONArray("file_sizes") ?: JSONArray()
@@ -6724,6 +6795,16 @@ class MainActivity : ComponentActivity() {
         }
         attachedOpenRouterAttachments.forEach { attachment ->
             val card = createAttachmentCard()
+            if (attachment.kind == "image") {
+                if (File(attachment.path).isFile) {
+                    addCompactImagePreview(card, attachment.path, attachment.name)
+                } else {
+                    card.addView(TextView(this).apply {
+                        text = "🖼 Локальная копия недоступна"
+                        setTextColor(Color.LTGRAY)
+                    })
+                }
+            }
             card.addView(TextView(this).apply {
                 text = "📎 " + safeDisplayName(attachment.name)
                 textSize = 13.5f
