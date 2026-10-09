@@ -164,13 +164,14 @@ class MainActivityLifecycleTest {
         scenario.onActivity { activity ->
             activity.newChat()
             val sourceChatId = activity.currentChatIdForTesting()
-            val originalState = activity.prefs.getString("composer_state_$sourceChatId", null)
             val photoPath = createCameraFixture(activity)
             activity.setPendingCameraCaptureForTesting(photoPath, sourceChatId, "openai")
             activity.newChat()
+            // newChat() saves the source composer; Cancellation must not change that saved state.
+            val savedAfterNavigation = activity.prefs.getString("composer_state_$sourceChatId", null)
             activity.completePendingCameraCapture(Activity.RESULT_CANCELED)
             assertFalse(java.io.File(photoPath).exists())
-            assertEquals(originalState, activity.prefs.getString("composer_state_$sourceChatId", null))
+            assertEquals(savedAfterNavigation, activity.prefs.getString("composer_state_$sourceChatId", null))
         }
         scenario.close()
     }
