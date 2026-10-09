@@ -112,6 +112,7 @@ object OpenRouterAttachmentStore {
 
     private fun extractZipStream(context: Context, source: InputStream, zipName: String, report: (String) -> Unit): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
+        try {
         var entries = 0
         var total = 0L
         ZipInputStream(source.buffered()).use { zin ->
@@ -144,7 +145,11 @@ object OpenRouterAttachmentStore {
                             }
                         }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else {
+                            try {
+                                result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                            } catch (e: Exception) { local.delete(); throw e }
+                        }
                     } else {
                         drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n -> total += n }
                         if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
@@ -157,6 +162,15 @@ object OpenRouterAttachmentStore {
         if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
         report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
         return result
+        } catch (e: Exception) {
+            // Delete only freshly extracted artifacts belonging to this operation.
+            result.forEach { item ->
+                File(item.path).delete()
+                item.textPath?.let { File(it).delete() }
+                item.wirePath?.let { File(it).delete() }
+            }
+            throw e
+        }
     }
 
     internal fun isUnsafeZipPath(path: String): Boolean {
@@ -183,6 +197,7 @@ object OpenRouterAttachmentStore {
         inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
     ): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
+        try {
         var entries = 0
         var total = 0L
         inputStreamSource.openInputStream(context, uri)?.use { source -> ZipInputStream(source.buffered()).use { zin ->
@@ -222,7 +237,11 @@ object OpenRouterAttachmentStore {
                             }
                         }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else {
+                            try {
+                                result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                            } catch (e: Exception) { local.delete(); throw e }
+                        }
                     } else {
                         val buffer = ByteArray(64 * 1024); var entryBytes = 0L
                         while (true) {
@@ -240,6 +259,15 @@ object OpenRouterAttachmentStore {
         if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
         report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
         return result
+        } catch (e: Exception) {
+            // Delete only freshly extracted artifacts belonging to this operation.
+            result.forEach { item ->
+                File(item.path).delete()
+                item.textPath?.let { File(it).delete() }
+                item.wirePath?.let { File(it).delete() }
+            }
+            throw e
+        }
     }
 
     fun toContentBlock(a: OpenRouterLocalAttachment): JSONObject = when (a.kind) {
