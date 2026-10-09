@@ -232,6 +232,7 @@ class MainActivity : ComponentActivity() {
     private var pendingImageSize: Long = 0L
     private var lastUserText: String = ""
     private lateinit var activityResultLauncher: ActivityResultLauncher<Intent>
+    private lateinit var photoPickerLauncher: ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>
     private var pendingActivityResultCode: Int? = null
     private var pendingCameraPath: String? = null
     private var pendingCameraChatId: String? = null
@@ -252,6 +253,7 @@ class MainActivity : ComponentActivity() {
     private val pickSaveGenerated = 5105
     private var pendingExportPath: String? = null
     private var pendingPickerChatId: String? = null
+    private var pendingPickerProvider: String? = null
     private var pendingSaveSourcePath: String? = null
     private var pendingSaveFilename: String? = null
     private var pendingSaveMime: String? = null
@@ -267,6 +269,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
         pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
         pendingPickerChatId = savedInstanceState?.getString("pending_picker_chat")
+        pendingPickerProvider = savedInstanceState?.getString("pending_picker_provider")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
@@ -275,8 +278,26 @@ class MainActivity : ComponentActivity() {
              } else if (requestCode != null) {
                  handleActivityResult(requestCode, result.resultCode, result.data)
                  pendingPickerChatId = null
+                 pendingPickerProvider = null
              }
          }
+        photoPickerLauncher = registerForActivityResult(
+            ActivityResultContracts.PickMultipleVisualMedia(OpenRouterAttachmentStore.MAX_ATTACHMENTS)
+        ) { uris ->
+            if (uris.isNotEmpty()) {
+                val result = Intent().apply {
+                    data = uris.first()
+                    if (uris.size > 1) {
+                        val clip = ClipData.newUri(contentResolver, "Photo Picker", uris.first())
+                        uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                        clipData = clip
+                    }
+                }
+                handleActivityResult(pickImage, RESULT_OK, result)
+            }
+            pendingPickerChatId = null
+            pendingPickerProvider = null
+        }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
         activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
@@ -299,6 +320,7 @@ class MainActivity : ComponentActivity() {
         pendingSaveFilename?.let { outState.putString("pending_save_name", it) }
         pendingSaveMime?.let { outState.putString("pending_save_mime", it) }
         pendingPickerChatId?.let { outState.putString("pending_picker_chat", it) }
+        pendingPickerProvider?.let { outState.putString("pending_picker_provider", it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -4648,16 +4670,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun chooseAny() {
-        val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
-            type="*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
-        launchActivityForResult(i, pickAny)
+        // Chooser lists compatible handlers; GET_CONTENT grants are transient.
+        launchActivityForResult(Intent.createChooser(intent, "Файлы"), pickAny)
     }
     private fun chooseImage() {
-        val i=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
-            type="image/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+        pendingPickerChatId = currentChatId()
+        pendingPickerProvider = normalizedProviderId()
+        try {
+            photoPickerLauncher.launch(
+                androidx.activity.result.PickVisualMediaRequest(
+                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                )
+            )
+        } catch (e: Exception) {
+            pendingPickerChatId = null
+            pendingPickerProvider = null
+            status.text = "Фото недоступно: " + (e.message ?: "нет обработчика")
         }
-        launchActivityForResult(i, pickImage)
     }
     private fun chooseVoice() {
         val i=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply{
