@@ -1492,10 +1492,10 @@ class MainActivityLifecycleTest {
     @Test
     fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {
         val (server, testHttpClient) = createHttpsMockServer()
-        val response = MockResponse().setHeader("Content-Type", "text/event-stream")
-            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-        server.enqueue(response.clone())
-        server.enqueue(response.clone())
+        repeat(2) {
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        }
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         var jpegBytes = ByteArray(0)
         val model = "anthropic/claude-sonnet-5.5"
