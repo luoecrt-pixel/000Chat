@@ -4650,6 +4650,7 @@ class MainActivity : ComponentActivity() {
             val uploadGeneration=activeResponseState.state.generation
             val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
             val key=attachmentKey(uri,"image")
+            if (!activePendingUploadKeys.add(key)) return
             rememberUploadUri(uri,"image")
             refreshAttachChips()
             startPendingPreview(uri,"image")
@@ -4690,7 +4691,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }catch(e:Exception){
                     if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка изображения: ${e.message}"}
-                }finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key) }
+                }finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key) }
             }
             return
         }
@@ -4715,6 +4716,7 @@ class MainActivity : ComponentActivity() {
                 return@forEach
             }
             val key=attachmentKey(uri,kind)
+            if (!activePendingUploadKeys.add(key)) return@forEach
             rememberUploadUri(uri,"file")
             refreshAttachChips()
             if(contentResolver.getType(uri).orEmpty().startsWith("image/")) startPendingPreview(uri,"file")
@@ -4756,7 +4758,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
-                finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key) }
+                finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key) }
             }
         }
     }
