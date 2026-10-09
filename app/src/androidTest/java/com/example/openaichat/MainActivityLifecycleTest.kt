@@ -1488,6 +1488,99 @@ class MainActivityLifecycleTest {
         }
     }
 
+
+    @Test
+    fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val response = MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+        server.enqueue(response.clone())
+        server.enqueue(response.clone())
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var jpegBytes = ByteArray(0)
+        val model = "anthropic/claude-sonnet-5.5"
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", model).putString("reasoning", "high").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                val width = 3200
+                val height = 2700
+                val pixels = IntArray(width * height)
+                val random = java.util.Random(55555L)
+                for (i in pixels.indices) pixels[i] = 0xff000000.toInt() or random.nextInt(0x1000000)
+                val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+                val output = ByteArrayOutputStream()
+                assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, output))
+                bitmap.recycle()
+                jpegBytes = output.toByteArray()
+                assertTrue("JPEG must be a decodable 6+ MB image: " + jpegBytes.size,
+                    jpegBytes.size in 6_000_000..10_000_000)
+                val file = java.io.File(activity.filesDir, "test-large-photo.jpg").apply { writeBytes(jpegBytes) }
+                val attachment = OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "image/png")
+                @Suppress("UNCHECKED_CAST")
+                val attachments = privateField(activity, "attachedOpenRouterAttachments")
+                    as MutableList<OpenRouterLocalAttachment>
+                attachments.add(attachment)
+                @Suppress("UNCHECKED_CAST")
+                val modalities = privateField(activity, "openRouterModelModalities")
+                    as ConcurrentHashMap<String, Set<String>>
+                modalities[model] = setOf("text", "image")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                (privateField(activity, "input") as android.widget.EditText).setText("Read the image")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            fun assertJpeg(request: okhttp3.mockwebserver.RecordedRequest) {
+                val body = JSONObject(request.body.readUtf8())
+                val messages = body.getJSONArray("messages")
+                val content = (0 until messages.length()).map { messages.getJSONObject(it) }
+                    .first { it.optString("role") == "user" }.getJSONArray("content")
+                val image = (0 until content.length()).map { content.getJSONObject(it) }
+                    .first { it.optString("type") == "image_url" }
+                val url = image.getJSONObject("image_url").getString("url")
+                assertTrue("Wrong actual data URL MIME", url.startsWith("data:image/jpeg;base64,"))
+                assertTrue("Original JPEG bytes changed during HTTP serialization",
+                    java.util.Base64.getDecoder().decode(url.substringAfter(","))
+                        .contentEquals(jpegBytes))
+            }
+            assertJpeg(server.takeRequest(30, TimeUnit.SECONDS) ?: error("First HTTPS Send missing"))
+            var completed = false
+            repeat(120) {
+                scenario.onActivity { activity ->
+                    completed = (privateField(activity, "status") as android.widget.TextView)
+                        .text.toString().startsWith("Готово")
+                }
+                if (completed) return@repeat
+                SystemClock.sleep(50L)
+            }
+            assertTrue("First Send must commit before next message", completed)
+            scenario.onActivity { activity ->
+                val composer = privateField(activity, "input") as android.widget.EditText
+                composer.setText("And one more text request")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            val second = server.takeRequest(30, TimeUnit.SECONDS) ?: error("Second HTTPS Send missing")
+            val secondBody = JSONObject(second.body.readUtf8())
+            assertTrue(secondBody.getJSONArray("messages").toString().contains("And one more text request"))
+            val secondContent = secondBody.getJSONArray("messages").getJSONObject(0).optJSONArray("content")
+                ?: secondBody.getJSONArray("messages").getJSONObject(1).optJSONArray("content")
+                ?: error("Image context missing")
+            val imageBlock = (0 until secondContent.length()).map { secondContent.optJSONObject(it) }
+                .firstOrNull { it?.optString("type") == "image_url" }
+                ?: error("Historical image missing from second HTTP request")
+            val historical = imageBlock.getJSONObject("image_url").getString("url")
+            assertTrue(historical.startsWith("data:image/jpeg;base64,"))
+            assertTrue(java.util.Base64.getDecoder().decode(historical.substringAfter(",")).contentEquals(jpegBytes))
+        } finally {
+            scenario.onActivity { SecureStore(it).setOpenRouterApiKey("") }
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
     private class BlockingAttachmentInputStreamSource : AttachmentInputStreamSource {
         private val opened = ConcurrentHashMap.newKeySet<String>()
         private val releases = ConcurrentHashMap<String, CountDownLatch>()
