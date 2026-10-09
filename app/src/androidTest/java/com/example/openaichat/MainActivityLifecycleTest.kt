@@ -67,6 +67,30 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun compactHeaderKeepsModelPickerAndComposerEffortAccessible() {
+        fun find(v: android.view.View, term: String): android.view.View? {
+            if (v.contentDescription?.toString()?.contains(term) == true) return v
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) {
+                    find(v.getChildAt(i), term)?.let { return it }
+                }
+            }
+            return null
+        }
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            val root = activity.window.decorView
+            assertTrue(find(root, "Выбрать модель") != null)
+            val effort = find(root, "Усилие мышления")
+                ?: throw AssertionError("Composer effort control missing")
+            assertTrue((effort as android.widget.TextView).text.toString().startsWith("⚡"))
+            assertTrue(find(root, "Добавить в чат") != null)
+            assertTrue(find(root, "Настройки") != null)
+        }
+        scenario.close()
+    }
+
+    @Test
     fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->

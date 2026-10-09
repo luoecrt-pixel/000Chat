@@ -2219,9 +2219,10 @@ class MainActivity : ComponentActivity() {
         val baselineAutoEffort = autoEffortHeuristic(text,hasAttachments)
         val effort=if(autoSelected) chatDb.autoEffortHint(taskClass, baselineAutoEffort) else effortPref
         val reasoningMode=prefs.getString("reasoning_mode","standard") ?: "standard"
+        val supportedReasoningMode = ModelRequestPolicy.supportedMode(provider, model, reasoningMode)
         var configUpdateEffort:String? = null
         val effectiveEffort:String
-        if(reasoningMode=="standard"){
+        if(supportedReasoningMode != "pro"){
             val baseline=baselineEffort
             when {
                 baseline==null -> { baselineEffort=effort; effectiveEffort=effort }
@@ -2236,7 +2237,12 @@ class MainActivity : ComponentActivity() {
         val summary=prefs.getString("reasoning_summary","auto") ?: "auto"
         val maxOut=configuredMaxOutputTokens()
         val backgroundEnabled = provider == "openai" && prefs.getBoolean("background_responses",true)
-        val preflightWarning = buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort)
+        val preflightWarning = listOfNotNull(
+            buildPreflightWarning(text, knownFileBytes, maxOut, actualEffort),
+            if (reasoningMode == "pro" && provider == "openai" && supportedReasoningMode == null)
+                "Режим pro для модели не подтверждён — параметр режима не отправлен"
+            else null
+        ).joinToString(" · ").takeIf { it.isNotBlank() }
 
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
             put("provider", provider)
@@ -2341,8 +2347,7 @@ class MainActivity : ComponentActivity() {
 
         // Keep the request-level effort stable in standard mode; Astra's configuration_update
         // changes the conversation effort while preserving the original prompt prefix for caching.
-        val reasoningObj=JSONObject().put("effort",effectiveEffort).put("mode",reasoningMode)
-        if(summary!="null") reasoningObj.put("summary",summary)
+        val reasoningObj = ModelRequestPolicy.openAiReasoning(model, effectiveEffort, reasoningMode, summary)
 
         val textObj=JSONObject().put("verbosity",verbosity)
         val inputArr=JSONArray()
