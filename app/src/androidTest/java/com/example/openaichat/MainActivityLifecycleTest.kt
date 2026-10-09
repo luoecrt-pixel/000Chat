@@ -1510,9 +1510,20 @@ class MainActivityLifecycleTest {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
 
+        fun visibleWindowBounds(view: android.view.View): android.graphics.Rect {
+            val bounds = android.graphics.Rect()
+            assertTrue("Gesture surface must be visible", view.getLocalVisibleRect(bounds))
+            val location = IntArray(2)
+            view.getLocationInWindow(location)
+            bounds.offset(location[0], location[1])
+            return bounds
+        }
+
         fun swipe(x0: Float, y0: Float, x1: Float, y1: Float) {
-            // Send real touchscreen events through the window. The first MOVE may
-            // only capture DrawerLayout's drag; subsequent MOVEs must move it.
+            // Exercise the Activity -> Window -> View touch path on main using
+            // window coordinates. System-wide sendPointerSync can hit the IME
+            // or another UID's window; that does not test this Activity's drawer.
+            // The first MOVE may capture the drag; later MOVEs must move it.
             val down = SystemClock.uptimeMillis()
             for (step in 0..12) {
                 if (step > 0) SystemClock.sleep(25L)
@@ -1526,10 +1537,12 @@ class MainActivityLifecycleTest {
                     down, SystemClock.uptimeMillis(), action,
                     x0 + (x1 - x0) * fraction, y0 + (y1 - y0) * fraction, 0
                 ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
-                try {
-                    instrumentation.sendPointerSync(event)
-                } finally {
-                    event.recycle()
+                scenario.onActivity { activity ->
+                    try {
+                        activity.dispatchTouchEvent(event)
+                    } finally {
+                        event.recycle()
+                    }
                 }
             }
             instrumentation.waitForIdleSync()
@@ -1552,14 +1565,14 @@ class MainActivityLifecycleTest {
         }
 
         try {
-            val chatBounds = android.graphics.Rect()
             scenario.onActivity { activity ->
                 activity.newChat()
+            }
+            instrumentation.waitForIdleSync()
+            var chatBounds = android.graphics.Rect()
+            scenario.onActivity { activity ->
                 val scroll = privateField(activity, "scroll") as android.view.View
-                assertTrue("Chat surface must be visible", scroll.getGlobalVisibleRect(chatBounds))
-                val rootLocation = IntArray(2)
-                scroll.rootView.getLocationOnScreen(rootLocation)
-                chatBounds.offset(rootLocation[0], rootLocation[1])
+                chatBounds = visibleWindowBounds(scroll)
                 assertTrue("Chat surface must be laid out", chatBounds.width() > 200)
             }
             // A vertical gesture must keep the drawer closed.
@@ -1575,18 +1588,14 @@ class MainActivityLifecycleTest {
                 chatBounds.left + chatBounds.width() * 0.9f, chatBounds.exactCenterY())
             awaitDrawer(true)
 
-            val panelBounds = android.graphics.Rect()
+            var panelBounds = android.graphics.Rect()
             scenario.onActivity { activity ->
                 val drawer = privateField(activity, "drawerLayout")
                     as androidx.drawerlayout.widget.DrawerLayout
                 val panel = (0 until drawer.childCount).map { drawer.getChildAt(it) }
                     .first { (it.layoutParams as androidx.drawerlayout.widget.DrawerLayout.LayoutParams)
                         .gravity == androidx.core.view.GravityCompat.START }
-                assertTrue("Open drawer panel must be visible",
-                    panel.getGlobalVisibleRect(panelBounds))
-                val rootLocation = IntArray(2)
-                panel.rootView.getLocationOnScreen(rootLocation)
-                panelBounds.offset(rootLocation[0], rootLocation[1])
+                panelBounds = visibleWindowBounds(panel)
             }
             // Stay inside the actual drawer panel, independent of screen width.
             swipe(panelBounds.left + panelBounds.width() * 0.85f, panelBounds.exactCenterY(),
@@ -1729,3 +1738,4 @@ class MainActivityLifecycleTest {
     }
 
 }
+
