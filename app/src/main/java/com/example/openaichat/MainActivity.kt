@@ -221,6 +221,7 @@ class MainActivity : ComponentActivity() {
     private var pendingActivityResultCode: Int? = null
     private var pendingCameraPath: String? = null
     private var pendingCameraChatId: String? = null
+    private var pendingCameraProvider: String? = null
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     var attachmentSheetDialog: Dialog? = null
 
@@ -245,25 +246,12 @@ class MainActivity : ComponentActivity() {
         pendingActivityResultCode = savedInstanceState?.getInt("pending_result_code", -1)?.takeIf { it >= 0 }
         pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
         pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
+        pendingCameraProvider = savedInstanceState?.getString("pending_camera_provider")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
              if (requestCode == pickCamera) {
-                 val capturedPath = pendingCameraPath
-                 val sourceChatId = pendingCameraChatId
-                 pendingCameraPath = null
-                 pendingCameraChatId = null
-                 val file = capturedPath?.let(::File)
-                 if (result.resultCode == RESULT_OK && file?.isFile == true && file.length() > 0L &&
-                     sourceChatId == currentChatId()) {
-                     val capturedUri = FileProvider.getUriForFile(
-                         this, BuildConfig.APPLICATION_ID + ".fileprovider", file
-                     )
-                     handleActivityResult(pickImage, RESULT_OK, Intent().setData(capturedUri))
-                 } else {
-                     file?.delete()
-                     if (result.resultCode == RESULT_OK) status.text = "Фото не получено или чат изменился"
-                 }
+                 completePendingCameraCapture(result.resultCode)
              } else if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
          }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
@@ -282,6 +270,7 @@ class MainActivity : ComponentActivity() {
         pendingActivityResultCode?.let { outState.putInt("pending_result_code", it) }
         pendingCameraPath?.let { outState.putString("pending_camera_path", it) }
         pendingCameraChatId?.let { outState.putString("pending_camera_chat_id", it) }
+        pendingCameraProvider?.let { outState.putString("pending_camera_provider", it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -1901,6 +1890,7 @@ class MainActivity : ComponentActivity() {
         persistCurrentChat()
         prefs.edit().putString("current_chat",id).apply()
         restoreCurrentChat()
+        resumePendingUploads()
         resumeBackgroundResponses()
         requestTelemetryExpanded = false
         renderRequestTelemetry()
@@ -4205,18 +4195,107 @@ class MainActivity : ComponentActivity() {
             }
             pendingCameraPath = captured.absolutePath
             pendingCameraChatId = currentChatId()
+            pendingCameraProvider = prefs.getString("provider", "openai")
             launchActivityForResult(intent, pickCamera)
             if (pendingActivityResultCode != pickCamera) {
                 pendingCameraPath = null
                 pendingCameraChatId = null
+                pendingCameraProvider = null
                 captured.delete()
             }
         } catch (e: Exception) {
             pendingCameraPath = null
             pendingCameraChatId = null
+            pendingCameraProvider = null
             captured.delete()
             status.text = "Камера недоступна: ${e.message}"
         }
+    }
+
+    /** The camera activity can return after the user switched chats or this Activity was recreated. */
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun completePendingCameraCapture(resultCode: Int) {
+        val capturedPath = pendingCameraPath
+        val sourceChatId = pendingCameraChatId
+        val sourceProvider = pendingCameraProvider ?: prefs.getString("provider", "openai")
+        pendingCameraPath = null
+        pendingCameraChatId = null
+        pendingCameraProvider = null
+
+        val file = capturedPath?.let(::File)
+        if (resultCode != RESULT_OK || file == null || !file.isFile || file.length() <= 0L ||
+            sourceChatId.isNullOrBlank()) {
+            file?.delete()
+            if (resultCode == RESULT_OK) status.text = "Фото не получено"
+            return
+        }
+        val uri = try {
+            FileProvider.getUriForFile(this, BuildConfig.APPLICATION_ID + ".fileprovider", file)
+        } catch (e: Exception) {
+            status.text = "Фото недоступно: ${e.message}"
+            return
+        }
+        if (sourceChatId == currentChatId()) {
+            handleActivityResult(pickImage, RESULT_OK, Intent().setData(uri))
+            return
+        }
+
+        if (sourceProvider == "openrouter") {
+            // Classify the private camera file for the source draft, never the current composer.
+            executor.execute {
+                try {
+                    val attachment = OpenRouterAttachmentStore.classifyLocalFile(this, file, file.name, "image/jpeg")
+                    saveOpenRouterAttachmentsToComposer(sourceChatId, listOf(attachment))
+                    runOnUiThread { status.text = "Фото сохранено в исходном чате" }
+                } catch (e: Exception) {
+                    diagnostics.log("camera_source_chat_save_failed", mapOf(
+                        "chat_id" to sourceChatId,
+                        "error" to (e.message ?: e.toString()).take(300)
+                    ))
+                }
+            }
+        } else {
+            // OpenAI's file_id is created only when the user reopens the source draft.
+            // Persist both local path (orphan cleanup protection) and a resumable upload URI.
+            if (savePendingCameraImageToComposer(sourceChatId, file, uri)) {
+                status.text = "Фото сохранено в исходном чате — загрузится при его открытии"
+            } else {
+                status.text = "Не удалось сохранить фото в исходном чате"
+            }
+        }
+    }
+
+    private fun savePendingCameraImageToComposer(chatId: String, file: File, uri: Uri): Boolean {
+        if (chatId.isBlank()) return false
+        return try {
+            val key = composerPrefsKey(chatId)
+            val state = try { JSONObject(prefs.getString(key, null).orEmpty()) } catch (_: Exception) { JSONObject() }
+            val pending = state.optJSONArray("pending_uploads") ?: JSONArray()
+            val rawUri = uri.toString()
+            val found = (0 until pending.length()).any { i ->
+                val item = pending.optJSONObject(i)
+                item?.optString("uri") == rawUri && item.optString("kind") == "image"
+            }
+            if (!found) pending.put(JSONObject().put("uri", rawUri).put("kind", "image"))
+            state.put("image_path", file.absolutePath)
+                .remove("image_file_id")
+            state.put("image_name", file.name)
+                .put("image_mime", "image/jpeg")
+                .put("image_size", file.length())
+                .put("pending_uploads", pending)
+                .put("saved_at", System.currentTimeMillis())
+            prefs.edit().putString(key, state.toString()).commit()
+        } catch (e: Exception) {
+            diagnostics.log("camera_source_draft_save_failed", mapOf("chat_id" to chatId, "error" to e.javaClass.simpleName))
+            false
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun setPendingCameraCaptureForTesting(path: String, chatId: String, provider: String) {
+        pendingCameraPath = path
+        pendingCameraChatId = chatId
+        pendingCameraProvider = provider
     }
 
     private fun chooseAny() {

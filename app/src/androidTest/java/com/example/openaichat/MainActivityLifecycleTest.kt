@@ -91,6 +91,106 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun cameraResultAfterChatSwitchAndRecreateKeepsOpenAiSourceDraftWithoutUploading() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var originalChatId = ""
+        var otherChatId = ""
+        var photoPath = ""
+        scenario.onActivity { activity ->
+            activity.newChat()
+            originalChatId = activity.currentChatIdForTesting()
+            photoPath = createCameraFixture(activity)
+            activity.setPendingCameraCaptureForTesting(photoPath, originalChatId, "openai")
+            activity.newChat()
+            otherChatId = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString(
+                "composer_state_$originalChatId", JSONObject().put("text", "Исходный текст").toString()
+            ).apply()
+        }
+        scenario.recreate()
+        scenario.onActivity { activity ->
+            activity.completePendingCameraCapture(Activity.RESULT_OK)
+            val source = JSONObject(activity.prefs.getString("composer_state_$originalChatId", "{}")!!)
+            val other = JSONObject(activity.prefs.getString("composer_state_$otherChatId", "{}")!!)
+            assertEquals("Исходный текст", source.getString("text"))
+            assertEquals(photoPath, source.getString("image_path"))
+            assertEquals("image/jpeg", source.getString("image_mime"))
+            assertFalse(source.has("image_file_id")) // Upload is deferred: no API calls in the test.
+            assertEquals(1, source.getJSONArray("pending_uploads").length())
+            assertEquals("image", source.getJSONArray("pending_uploads").getJSONObject(0).getString("kind"))
+            assertFalse(other.has("image_path"))
+            assertTrue(java.io.File(photoPath).isFile)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun cameraResultAfterChatSwitchAndRecreateKeepsOpenRouterSourceDraft() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var originalChatId = ""
+        var otherChatId = ""
+        scenario.onActivity { activity ->
+            activity.newChat()
+            originalChatId = activity.currentChatIdForTesting()
+            val photoPath = createCameraFixture(activity)
+            activity.setPendingCameraCaptureForTesting(photoPath, originalChatId, "openrouter")
+            activity.newChat()
+            otherChatId = activity.currentChatIdForTesting()
+            activity.prefs.edit().putString(
+                "composer_state_$originalChatId", JSONObject().put("text", "Старый черновик").toString()
+            ).apply()
+        }
+        scenario.recreate()
+        scenario.onActivity { it.completePendingCameraCapture(Activity.RESULT_OK) }
+        assertTrue(
+            "Camera result was not saved to original OpenRouter draft",
+            waitForSourceAttachmentCount(scenario, originalChatId, 1)
+        )
+        scenario.onActivity { activity ->
+            val source = JSONObject(activity.prefs.getString("composer_state_$originalChatId", "{}")!!)
+            val entry = source.getJSONArray("openrouter_attachments").getJSONObject(0)
+            assertEquals("Старый черновик", source.getString("text"))
+            assertEquals("image", entry.getString("kind"))
+            assertTrue(java.io.File(entry.getString("path")).isFile)
+            val other = JSONObject(activity.prefs.getString("composer_state_$otherChatId", "{}")!!)
+            assertEquals(0, other.optJSONArray("openrouter_attachments")?.length() ?: 0)
+        }
+        scenario.close()
+    }
+
+    @Test
+    fun cancelledCameraAfterNavigationDeletesOnlyItsTempPhoto() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            activity.newChat()
+            val sourceChatId = activity.currentChatIdForTesting()
+            val photoPath = createCameraFixture(activity)
+            activity.setPendingCameraCaptureForTesting(photoPath, sourceChatId, "openai")
+            activity.newChat()
+            // newChat() saves the source composer; Cancellation must not change that saved state.
+            val savedAfterNavigation = activity.prefs.getString("composer_state_$sourceChatId", null)
+            activity.completePendingCameraCapture(Activity.RESULT_CANCELED)
+            assertFalse(java.io.File(photoPath).exists())
+            assertEquals(savedAfterNavigation, activity.prefs.getString("composer_state_$sourceChatId", null))
+        }
+        scenario.close()
+    }
+
+    private fun createCameraFixture(activity: MainActivity): String {
+        val dir = java.io.File(activity.filesDir, "attachments").apply { mkdirs() }
+        val image = java.io.File(dir, "camera_test_${System.nanoTime()}.jpg")
+        val bitmap = android.graphics.Bitmap.createBitmap(8, 8, android.graphics.Bitmap.Config.ARGB_8888)
+        try {
+            image.outputStream().use { output ->
+                assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, output))
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        return image.absolutePath
+    }
+
+    @Test
     fun callbackMutationPassesWhileResumed() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->

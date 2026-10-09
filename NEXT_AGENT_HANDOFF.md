@@ -1,6 +1,6 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 12:47 +03:00
+**Last updated:** 2026-10-09 13:08 +03:00
 **Следующий рабочий срез:** Проверка приложения и подтверждённые регрессии — APP-03: начать с готового APK #126, физического телефона и диагностики LIVE/risks без новых платных запросов без согласия. Кодовый PR только для доказанных регрессий; полный financial backlog отложен.
 **Завершённые пакеты:** APP-01 — PR #125, merge `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`, Successful APK `37908225095`, Release `37908225079`, Verify `37908229012`. APP-02 — PR #126, exact code head `a2d8de607606c7ec4213d73705b39393d0b83cf1`, merge `3e9cbf2c03a12d6f8a005b995e5c35d0d4c77f55`, Successful push APK `37911721448` (instrumentation + Upload APK), push Release `37911721472`, Verify handoff `37911728484`. Composer quick effort, compact header model picker, regrouped settings and capability-guarded standard/pro delivered. README, secrets storage, DB v20 unchanged. APP-03: physical phone, LIVE and source-risk reproduction **not verified**; no paid API calls made.
 
@@ -160,6 +160,15 @@
 
 **APP-03 = LIVE-01 + UI-03 + RISK-01/02/03 + GH-01/02 + DOC-01. Сначала проверки; новый кодовый PR не обязателен.**
 
+**Промежуточные доказательства APP-03 (2026-10-09, до полного CI этого среза):**
+- **UI-03 — source-proven data loss:** camera RESULT_OK ранее удалял валидный снимок при `pendingCameraChatId != currentChatId()`. Подготовлен ограниченный fix: сохранение OpenRouter-снимка в исходном `openrouter_attachments`; OpenAI-снимка как `image_path` + `pending_uploads` исходного черновика с отложенной загрузкой при возврате. Учитываются recreation, исходный provider и camera Cancel; подготовлены три Android instrumentation tests. **Сборка, emulator и phone на новом коде ещё не подтверждены.**
+- **RISK-01 — source diagnosis, не runtime reproduction:** `streamBackgroundResponse` (Activity) и `BackgroundResponseWorker.doWork` оба используют новый `SystemClock.elapsedRealtime()` при входе вместо устойчивой исходной отметки из persisted active `started_at`; `ResumableResponseStreamClient.stream` имеет `readTimeout(0)`/`callTimeout(0)`. Непрерывный 5ч deadline и quiet-stream stop пока не доказаны. Изменений без узкого теста не делать.
+- **RISK-02 — частичные emulator contracts:** прежний `MainActivityLifecycleTest` проверяет blocked OpenRouter picker-copy и blocked ZIP после смены чата, а preflight Call отменяется на Stop. Полный send-preflight ownership через blocked HTTP + chat switch не доказан — не записывать как успешный.
+- **RISK-03 — source diagnosis, heap ещё не измерен:** `OpenRouterAttachmentStore.toDataUrl` вызывает `wireFile.readBytes()` и `Base64.encodeToString`; memory amplification возможна, но реального OOM/замера heap нет. Не менять wire layout без оценки устройства.
+- **GH-01/GH-02 — источники:** `verify-handoff.yml` срабатывает на PR с `NEXT_AGENT_HANDOFF.md` либо `tools/**`, а не на произвольный markdown; docs-only #127 получил Successful Verify, но негативный GitHub gate для произвольного markdown не пройден. В API `main.protected=false`; server-side mandatory checks не обеспечены branch protection. Не изменять политику без решения владельца.
+- **LIVE-01 и device smoke:** в этой сессии не выполнялись физический Android, Camera app, OpenAI/OpenRouter вызовы, замеры памяти или тарификации; ранее успешный APK #126 по-прежнему доступен. Нельзя считать это полным закрытием APP-03.
+
+
 Первый шаг: использовать готовый Successful APK #121 `37895662110` (attempt 2) либо APP-01/02; до телефона/API выполнены только source/CI проверки. Не собирать новый APK ради каждого smoke-теста. Телефон: `+`/Camera/Photo/Files, camera Cancel и RESULT_OK после chat switch/recreate, IME, Drawer свайпы в обе стороны. DrawerLayout уже поддерживает gestures. В разрешённом объёме API: OpenAI/OpenRouter completion/Stop, затем нужные long/web/GitHub read/confirmation/cache scenarios; новых оплачиваемых запросов без согласования не выполнять. Сохранять обезличенные IDs, время/таймзону, outcome и источник usage/cost; задержку сайта считать pending, а не нулём.
 
 Диагностические source findings требуют воспроизведения: RISK-01 — непрерывный 5h deadline Activity↔Worker/restart и quiet recovery stream; UI-03 — сохранность фото исходного draft; RISK-02 — immutable ownership при blocked OpenRouter attachment preflight/chat switch; RISK-03 — замер heap больших файлов/base64. OpenRouter per-Call timeout по remaining 5h уже есть. Исправлять только доказанные нарушения; связанные регрессии одного участка собирать в один PR с одной финальной парой CI. Потерю данных/краш поднимать по фактическому доказательству, не начинать общий rewrite.
@@ -218,11 +227,11 @@ Static verifier:
 ## История последних рабочих заходов — последние 5 PR
 
 
-- **#122:** docs-only handoff BILL-04: merged `ba11422a3bd9ea9d2ea8b56cb336825fdaa5f7f5`; final head `a27f0a41bf2f9e21d4db4b918b7b9a3510df91c0`; Verify handoff `37899366370` — **Successful**.
 - **#123:** docs-only ограничение стоимости после Stop до BILL-01-MIN и фиксация бюджета Actions; merged `8a532e2b1e0a8b67007f45cde7bafe1ccabc140d`; final head `1059654f16715e5436f123209245c8ac38d297ea`; Verify `37903090821` — **Successful**. История — snapshot перед текущим документационным PR.
 - **#124:** docs-only перегруппировка задач в APP-01/02/03; merged `eaa324720e227dcc5d33148e84bd375ea69dd021`, Verify handoff `37905260657` — **Successful**; Android-код не менялся.
 - **#125:** APP-01 (BILL-01-MIN + UI-01 + MODEL-01) merged `3fe630b5cdc3d4fc6a0f6c9f8dd6fa49eec5ef6e`, exact head `6aa069be89500a86bf4907cc90205e640af628e9`; push Build APK `37908225095` — **Successful** c instrumentation, Release `37908225079` — **Successful**, Verify handoff `37908229012` — **Successful**. LIVE/телефон не проверены.
 - **#126:** APP-02 UI-02/MODEL-02/SET-01 merged `3e9cbf2c03a12d6f8a005b995e5c35d0d4c77f55`; final head `a2d8de607606c7ec4213d73705b39393d0b83cf1`; push APK `37911721448` **Successful** включая instrumentation, Release `37911721472` **Successful**, Verify handoff `37911728484` **Successful**. Model capability policy and settings preserved; телефон/LIVE не проверены.
+- **#127:** docs-only handoff после APP-02: merged `fc1bc66ee2f9ac973a83f61e625a1d4ea0830a3c`, exact head `b1207a95d5f48565287d0c1408ef5372d4863ef0`, Verify handoff `37913526595` **Successful**; код APP-02 не менялся.
 
 ## Product radar — идеи с реальной ценностью
 
