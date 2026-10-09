@@ -354,6 +354,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Billing-only reconciliation; never posts to UI or reopens an active chat. */
+    private fun reconcileOpenRouterGenerations(chatId: String, localRequestId: String) {
+        executor.execute {
+            try {
+                val rounds = chatDb.listOpenRouterRounds(chatId, localRequestId)
+                if (rounds.none { it.optString("generation_id").isNotBlank() &&
+                        it.optString("cost_kind", "unknown") != "provider_reported" }) return@execute
+                val key = secure.getOpenRouterApiKey()
+                if (key.isBlank()) return@execute
+                val lookedUp = OpenRouterGenerationReconciler(pollingClient).reconcile(rounds, key) {
+                    generationId, metadata ->
+                    chatDb.reconcileOpenRouterGeneration(chatId, localRequestId, generationId, metadata)
+                }
+                diagnostics.log("openrouter_generation_reconciled", mapOf(
+                    "chat_id" to chatId, "local_request_id" to localRequestId,
+                    "lookup_count" to lookedUp
+                ))
+            } catch (e: Exception) {
+                diagnostics.log("openrouter_generation_reconcile_failed", mapOf(
+                    "chat_id" to chatId, "local_request_id" to localRequestId,
+                    "error_type" to e.javaClass.simpleName
+                ))
+            }
+        }
+    }
+
     private fun cancelOpenRouterRequest() {
         synchronized(openRouterCallLock) {
             openRouterCallOwnerToken.set(null)
@@ -1497,7 +1523,10 @@ class MainActivity : ComponentActivity() {
                             toolResult
                         }
                     },
-                    onCallCreated = { call -> registerOpenRouterCallIfOwned(requestId, chatId, generation, call) }
+                    onCallCreated = { call -> registerOpenRouterCallIfOwned(requestId, chatId, generation, call) },
+                    onRoundObserved = { roundIndex, generationId, usage ->
+                        chatDb.observeOpenRouterRound(chatId, requestId, roundIndex, generationId, usage)
+                    }
                 )
                 clearOpenRouterActiveCallIfOwned(requestId)
                 val finalText = result.text.ifBlank { "Готово. Ответ не содержит текста." }
@@ -1553,6 +1582,8 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 )
+                chatDb.sealOpenRouterRounds(chatId, requestId)
+                reconcileOpenRouterGenerations(chatId, requestId)
                 val assistantMessage = JSONObject()
                     .put("role", "assistant")
                     .put("text", finalText)
@@ -1624,12 +1655,19 @@ class MainActivity : ComponentActivity() {
                 } else {
                     "Ошибка OpenRouter: $errorMessage"
                 }
-                chatDb.recordRequestAccounting(
-                    chatId = chatId, localRequestId = requestId,
-                    status = if (e is CancellationException) "cancelled" else "failed",
-                    error = errorMessage
-                )
-                chatDb.recordRequestEvent(
+                val wasStopped = chatDb.listRequestAccounting(chatId).any {
+                    it.optString("local_request_id") == requestId && it.optString("local_status") == "stopped"
+                }
+                if (!wasStopped) {
+                    chatDb.recordRequestAccounting(
+                        chatId = chatId, localRequestId = requestId,
+                        status = if (e is CancellationException) "cancelled" else "failed",
+                        error = errorMessage
+                    )
+                }
+                chatDb.sealOpenRouterRounds(chatId, requestId)
+                reconcileOpenRouterGenerations(chatId, requestId)
+                if (!wasStopped) chatDb.recordRequestEvent(
                     chatId = chatId,
                     eventType = "request_failed",
                     requestId = requestId,
@@ -1883,6 +1921,13 @@ class MainActivity : ComponentActivity() {
             activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
         }
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
+        if (stopped && activeRequestId != null &&
+            chatDb.listRequestAccounting(chatId).any {
+                it.optString("local_request_id") == activeRequestId && it.optString("provider") == "openrouter"
+            }) {
+            chatDb.sealOpenRouterRounds(chatId, activeRequestId)
+            reconcileOpenRouterGenerations(chatId, activeRequestId)
+        }
         // OpenAI only permits /cancel for background=true Responses.
         if (stopped && active?.optBoolean("background_enabled", false) == true &&
             responseId != null && activeRequestId != null) {
