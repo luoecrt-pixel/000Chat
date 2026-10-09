@@ -25,6 +25,84 @@ import java.util.concurrent.atomic.AtomicReference
 class OpenRouterChatClientTest {
 
     @Test
+    fun streamingProviderErrorPreservesTypedMetadataAndRequestBodySize() {
+        val server = MockWebServer()
+        server.start()
+        val transport = OpenRouterChatClient(server.url("/api/v1").toString())
+        val observedBytes = AtomicInteger(0)
+        try {
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+                .setBody(
+                    "data: {\"error\":{\"code\":422,\"type\":\"invalid_request_error\"," +
+                        "\"message\":\"media_type rejected\",\"metadata\":{" +
+                        "\"provider_name\":\"Anthropic\",\"provider_code\":\"BAD_IMAGE\"}}}\n\n"
+                ))
+            try {
+                transport.complete(
+                    apiKey = "secret-test-key",
+                    model = "anthropic/claude-sonnet-5.5",
+                    messages = JSONArray().put(JSONObject().put("role", "user")
+                        .put("content", "Send")),
+                    tools = JSONArray(),
+                    maxTokens = null,
+                    reasoningEffort = "high",
+                    verbosity = null,
+                    parallelToolCalls = false,
+                    executeTool = { _, _ -> fail("No tools") ; "" },
+                    onPayloadObserved = { _, bytes -> observedBytes.set(bytes) }
+                )
+                fail("Must fail on upstream SSE error")
+            } catch (e: OpenRouterUpstreamException) {
+                assertEquals("SSE", e.stage)
+                assertEquals("invalid_request_error", e.errorType)
+                assertEquals("Anthropic", e.providerName)
+                assertEquals("BAD_IMAGE", e.providerCode)
+                assertEquals(0, e.roundIndex)
+                assertTrue(e.safeMetadata.orEmpty().contains("provider_name"))
+            }
+            val recorded = server.takeRequest(2, TimeUnit.SECONDS)
+                ?: throw AssertionError("Missing HTTP request")
+            assertEquals(recorded.body.size.toInt(), observedBytes.get())
+            assertFalse("Secret should be excluded from exception", recorded.body.readUtf8()
+                .contains("secret-test-key"))
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun httpErrorPreservesStatusProviderAndType() {
+        val server = MockWebServer()
+        server.start()
+        val transport = OpenRouterChatClient(server.url("/api/v1").toString())
+        try {
+            server.enqueue(MockResponse().setResponseCode(400).setBody(
+                "{\"error\":{\"message\":\"Invalid image type\",\"type\":\"validation_error\"," +
+                    "\"code\":400,\"metadata\":{\"provider_name\":\"Anthropic\"}}}"
+            ))
+            try {
+                transport.complete(
+                    apiKey = "mock", model = "anthropic/claude-opus-5.5",
+                    messages = JSONArray().put(JSONObject().put("role", "user").put("content", "hi")),
+                    tools = null, maxTokens = null, reasoningEffort = null, verbosity = null,
+                    parallelToolCalls = false, executeTool = { _, _ -> "" }
+                )
+                fail("Invalid upstream response must throw")
+            } catch (e: OpenRouterUpstreamException) {
+                assertEquals("HTTP", e.stage)
+                assertEquals(400, e.httpStatus)
+                assertEquals("validation_error", e.errorType)
+                assertEquals("Anthropic", e.providerName)
+            }
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+
+    @Test
     fun validImageWithWrongFilenameAndPickerMimeReachesHttpWithOriginalBytes() {
         val original = java.util.Base64.getDecoder().decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
