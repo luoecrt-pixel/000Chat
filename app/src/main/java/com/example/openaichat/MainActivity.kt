@@ -1010,7 +1010,9 @@ class MainActivity : ComponentActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val source = sources[position]
-                refreshModels(source.id, null, preserveUnknown = false)
+                refreshModels(source.id,
+                    if (source.id == normalizedProviderId()) normalizedModelId() else null,
+                    preserveUnknown = source.id == normalizedProviderId())
             }
         }
 

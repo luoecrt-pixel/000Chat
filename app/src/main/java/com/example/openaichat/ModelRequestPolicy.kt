@@ -7,7 +7,7 @@ object ModelRequestPolicy {
     private val supportedOpenAiModels = setOf("gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna")
 
     fun supportsReasoningMode(provider: String?, model: String?): Boolean =
-        provider == "openai" && model?.trim()?.removePrefix("~") in supportedOpenAiModels
+        provider == "openai" && model?.trim()?.removePrefix("~")?.let { it in supportedOpenAiModels } == true
 
     fun supportedMode(provider: String?, model: String?, mode: String?): String? =
         mode?.takeIf { it == "standard" || it == "pro" }
