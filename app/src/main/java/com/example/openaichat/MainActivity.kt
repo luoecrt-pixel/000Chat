@@ -122,6 +122,7 @@ class MainActivity : ComponentActivity() {
     private val currentGitHubToolOwner = ThreadLocal<Pair<String, Long>>()
     // Cancels an in-flight serialization before it can commit a user message or start HTTP.
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
+    private val pendingOpenAiPreparation = AtomicReference<String?>(null)
     @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
@@ -348,7 +349,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        if (pendingOpenRouterPreparation.getAndSet(null) != null) {
+        if (pendingOpenRouterPreparation.getAndSet(null) != null ||
+            pendingOpenAiPreparation.getAndSet(null) != null) {
             setBusy(false)
             status.text = "Подготовка остановлена — черновик сохранён"
         }
@@ -2161,7 +2163,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopCurrentResponse(){
-        if (pendingOpenRouterPreparation.getAndSet(null) != null) {
+        if (pendingOpenRouterPreparation.getAndSet(null) != null ||
+            pendingOpenAiPreparation.getAndSet(null) != null) {
             activeResponseState.markUserStop()
             cancelOpenRouterRequest()
             setBusy(false)
@@ -2389,31 +2392,11 @@ class MainActivity : ComponentActivity() {
                 return
             }
         }
-        if (provider == "openai" && attachedOpenRouterAttachments.isNotEmpty() && !regenerate) {
-            status.text = "Есть локальные вложения OpenRouter. Выберите OpenRouter или начните новый чат — OpenAI не получил бы их."
-            return
-        }
-        if (provider == "openai" && chat.any { msg ->
-                msg.optString("role") == "user" &&
-                    (msg.optJSONArray("attachments")?.length() ?: 0) > 0 &&
-                    msg.optString("provider") == "openrouter"
-            }) {
-            status.text = "История содержит вложения OpenRouter: этот контекст нельзя незаметно переслать в OpenAI. Создайте новый чат."
-            return
-        }
         // An ID is only reusable when the last assistant belongs to OpenAI.
         // Otherwise reconstruct history, but never silently discard its typed files.
         val usableOpenAiChain = currentResponseId != null &&
             chat.lastOrNull { it.optString("role") == "assistant" }
                 ?.optString("provider") == "openai"
-        if (provider == "openai" && !usableOpenAiChain && chat.any { message ->
-                message.optString("role") == "user" &&
-                    ((message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
-                        message.optString("image_file_id").let { it.isNotBlank() && it != "null" })
-            }) {
-            status.text = "История содержит прежние вложения OpenAI, но цепочка ответов недоступна. Создайте новый чат, чтобы не потерять файлы из контекста."
-            return
-        }
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
@@ -2442,7 +2425,7 @@ class MainActivity : ComponentActivity() {
         val requestFileMimes = sourceToRepeat?.optJSONArray("file_mimes")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: attachedFileMimes.toList()
         // Capture manifests, not files: legacy file_paths and image_path are classified
         // by the worker against the cloned message before any composer mutation.
-        val requestOpenRouterAttachments = if (provider == "openrouter") {
+        val requestOpenRouterAttachments = run {
             if (sourceToRepeat != null) {
                 sourceToRepeat.optJSONArray("attachments")?.let { manifest ->
                     (0 until manifest.length()).mapNotNull { i ->
@@ -2452,7 +2435,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 attachedOpenRouterAttachments.toList()
             }
-        } else emptyList()
+        }
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
         if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
@@ -2471,7 +2454,7 @@ class MainActivity : ComponentActivity() {
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
         val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId != null ||
-            (provider == "openrouter" && (requestFilePaths.isNotEmpty() || imagePath != null)) ||
+            requestFilePaths.isNotEmpty() || imagePath != null ||
             requestOpenRouterAttachments.isNotEmpty()
         val autoSelected = effortPref=="auto"
         val taskClass = classifyTask(text, hasAttachments)
@@ -2523,7 +2506,7 @@ class MainActivity : ComponentActivity() {
             pendingImageName?.takeIf{it.isNotBlank()}?.let{put("image_name",it)}
             pendingImageMime?.takeIf{it.isNotBlank()}?.let{put("image_mime",it)}
             put("image_size",pendingImageSize.coerceAtLeast(0L))
-            if (provider == "openrouter" && requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
+            if (requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
         }
 
         if (provider == "openrouter") {
