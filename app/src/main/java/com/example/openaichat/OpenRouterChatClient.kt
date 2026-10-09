@@ -68,7 +68,7 @@ class OpenRouterChatClient(
         // Never record a whole provider payload. The diagnostic logger redacts secrets.
         val safeMeta = metadata?.let {
             JSONObject().apply {
-                listOf("provider_name", "provider_code", "raw_error").forEach { key ->
+                listOf("provider_name", "provider_code").forEach { key ->
                     if (it.has(key)) put(key, it.optString(key).take(180))
                 }
             }.toString().take(420)
