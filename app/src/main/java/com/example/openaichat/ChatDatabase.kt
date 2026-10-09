@@ -480,11 +480,26 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (id.isBlank()) return false
         var committed = false
         writableDatabase.transaction { db ->
-            val persistedCount = db.rawQuery(
+            // UI snapshots can be older than Worker/async metadata, even when they have
+            // the same number of messages. Never rewrite existing rows here.
+            val existing = db.rawQuery(
                 "SELECT COUNT(*) FROM $MESSAGE_TABLE WHERE chat_id=?", arrayOf(id)
-            ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-            if (persistedCount > messages.size) return@transaction
-            upsertCurrentChatInDb(db, id, title, responseId, baselineEffort, messages)
+            ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+            if (existing > messages.size) return@transaction
+            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?",
+                arrayOf(id), null,null,null,"1").use { it.moveToFirst() }
+            if (!exists) return@transaction
+            for (position in existing until messages.size) {
+                val msg = JSONObject(messages[position].toString())
+                db.insertOrThrow(MESSAGE_TABLE, null,
+                    messageContentValues(id, position, msg, ChatMessageFingerprint.of(msg)))
+            }
+            val values = ContentValues().apply {
+                if (title.isNotBlank()) put("title", title)
+                // Response/effort metadata is owned by terminal writer, not stale UI.
+                put("updated_at", System.currentTimeMillis())
+            }
+            db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
             committed = true
         }
         return committed

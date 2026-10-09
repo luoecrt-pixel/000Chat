@@ -209,6 +209,22 @@ class ChatDatabaseActiveFinalizationTest {
             }
         }
     }
+    @Test fun sameLengthStaleUiSnapshotCannotOverwriteCommittedMetadata() {
+        ChatDatabase(context).use { db ->
+            prepare(db)
+            val enriched = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            enriched.put("feedback", -1).put("text", "latest persisted text")
+            db.upsertCurrentChat("chat", "Original", null, "high", listOf(enriched))
+            val oldSnapshot = listOf(
+                JSONObject().put("role","user").put("request_id","local_1")
+                    .put("text","stale").put("feedback",1))
+            assertTrue(db.upsertUiSnapshotPreservingTail("chat","Original",null,"high",oldSnapshot))
+            val actual = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(0)
+            assertEquals(-1, actual.getInt("feedback"))
+            assertEquals("latest persisted text",actual.getString("text"))
+        }
+    }
+
     @Test fun terminalClaimPreservesDbRowsAndMetadataAddedAfterStaleSnapshot() {
         ChatDatabase(context).use { db ->
             prepare(db)
