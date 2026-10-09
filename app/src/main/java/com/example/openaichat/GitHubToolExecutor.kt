@@ -16,7 +16,8 @@ class GitHubToolExecutor(
     private val allowedRepository: () -> String,
     private val allowedBranches: () -> Set<String>,
     private val confirmWrite: (toolName: String, arguments: JSONObject) -> Boolean,
-    private val auditWrite: (toolName: String, arguments: JSONObject) -> Unit
+    private val auditWrite: (toolName: String, arguments: JSONObject) -> Unit,
+    private val canExecute: () -> Boolean = { true }
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -76,6 +77,7 @@ class GitHubToolExecutor(
         var code = 0
         var body = ""
         while (attempt < 3) {
+            if (!canExecute()) throw IOException("GitHub request owner is no longer current")
             httpClient.newCall(request).execute().use { httpResponse ->
                 code = httpResponse.code
                 body = httpResponse.body?.string().orEmpty()
@@ -269,7 +271,8 @@ class GitHubToolExecutor(
     }
 
     private fun requireConfirmation(name: String, args: JSONObject) {
-        if (!confirmWrite(name, args)) throw IOException("User declined or confirmation is unavailable")
+        if (!canExecute() || !confirmWrite(name, args) || !canExecute())
+            throw IOException("User declined or request owner is no longer current")
     }
 
     private fun sanitized(input: JSONObject): JSONObject = JSONObject(input.toString()).apply {

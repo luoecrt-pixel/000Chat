@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
     private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
+    private val currentGitHubToolOwner = ThreadLocal<Pair<String, Long>>()
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
             secureStore = secure,
@@ -139,6 +140,11 @@ class MainActivity : ComponentActivity() {
                     "tool" to toolName,
                     "arguments" to arguments.toString()
                 ))
+            },
+            canExecute = {
+                currentGitHubToolOwner.get()?.let { (chatId, generation) ->
+                    isRequestCurrent(chatId, generation)
+                } == true
             }
         )
     }
@@ -1531,7 +1537,11 @@ class MainActivity : ComponentActivity() {
                             }
                             toolResult
                         } else {
-                            val toolResult = if (githubEnabled) githubToolExecutor.execute(name, arguments) else "GitHub-инструменты отключены"
+                            val toolResult = if (githubEnabled) {
+                                currentGitHubToolOwner.set(chatId to generation)
+                                try { githubToolExecutor.execute(name, arguments) }
+                                finally { currentGitHubToolOwner.remove() }
+                            } else "GitHub-инструменты отключены"
                             if (githubEnabled) {
                                 toolTrace.put(JSONObject().put("name", name).put("arguments", JSONObject(arguments.toString())).put("result", toolResult.take(300)))
                             }
@@ -1778,11 +1788,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun confirmGitHubWrite(name: String, arguments: JSONObject): Boolean {
-        if (!activityVisible || isFinishing) return false
+        val owner = currentGitHubToolOwner.get() ?: return false
+        fun stillCurrent() = isRequestCurrent(owner.first, owner.second)
+        if (!activityVisible || isFinishing || !stillCurrent()) return false
         val decision = CompletableFuture<Boolean>()
         if (!pendingGitHubConfirmation.compareAndSet(null, decision)) return false
         runOnUiThread {
-            if (!activityVisible || isFinishing || pendingGitHubConfirmation.get() !== decision || decision.isDone) {
+            if (!activityVisible || isFinishing || !stillCurrent() ||
+                pendingGitHubConfirmation.get() !== decision || decision.isDone) {
                 completePendingGitHubConfirmation(decision, false)
                 return@runOnUiThread
             }
@@ -1793,7 +1806,7 @@ class MainActivity : ComponentActivity() {
                     completePendingGitHubConfirmation(decision, false)
                 }
                 .setPositiveButton("Подтвердить") { _, _ ->
-                    completePendingGitHubConfirmation(decision, true)
+                    completePendingGitHubConfirmation(decision, stillCurrent())
                 }
                 .create()
             pendingGitHubConfirmationDialog.set(dialog)
@@ -1806,7 +1819,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         return try {
-            decision.get(10, TimeUnit.MINUTES)
+            decision.get(10, TimeUnit.MINUTES) && stillCurrent()
         } catch (_: Exception) {
             completePendingGitHubConfirmation(decision, false)
             false
@@ -1830,6 +1843,7 @@ class MainActivity : ComponentActivity() {
     fun newChat() {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
+        cancelPendingGitHubConfirmation()
         currentCall?.cancel()
         cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
@@ -1860,6 +1874,7 @@ class MainActivity : ComponentActivity() {
     private fun switchChat(id:String) {
         persistComposerStateNow()
         activeResponseState.nextGeneration()
+        cancelPendingGitHubConfirmation()
         currentCall?.cancel()
         cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
