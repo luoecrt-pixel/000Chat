@@ -324,6 +324,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        if (pendingOpenRouterPreparation.getAndSet(null) != null) {
+            setBusy(false)
+            status.text = "Подготовка остановлена — черновик сохранён"
+        }
         cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activityVisible = false
@@ -2432,7 +2436,7 @@ class MainActivity : ComponentActivity() {
                             credentialSource = "openrouter_api_key"
                         )
                         status.text = if (preflightWarning.isNullOrBlank()) "Astra думает…"
-                            else "⚠ $preflightWarning\\nAstra думает…"
+                            else "⚠ $preflightWarning\nAstra думает…"
                         toolStates.clear()
                         renderToolActivity()
                         diagnostics.log("request_start", mapOf(
