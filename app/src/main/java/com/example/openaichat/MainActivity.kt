@@ -111,7 +111,8 @@ class MainActivity : ComponentActivity() {
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
-    private val openRouterClient by lazy { OpenRouterChatClient() }
+    @Volatile private var openRouterClientFactory: () -> OpenRouterChatClient = { OpenRouterChatClient() }
+    private val openRouterClient by lazy { openRouterClientFactory() }
     private val openRouterActiveCall = AtomicReference<Call?>()
     private val openRouterCallOwnerToken = AtomicReference<String?>()
     private val openRouterCallLock = Any()
