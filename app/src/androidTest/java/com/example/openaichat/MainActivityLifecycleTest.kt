@@ -748,6 +748,80 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun missingHistoricalOpenRouterFileKeepsUnsentComposerAndNeverStartsHttp() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var beforeSize = 0
+        scenario.onActivity { activity ->
+            activity.prefs.edit().putString("provider", "openrouter").apply()
+            SecureStore(activity).setOpenRouterApiKey("test-key")
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            beforeSize = history.size
+            val missing = OpenRouterLocalAttachment(
+                "deleted-file", "old.png", "image",
+                java.io.File(activity.filesDir, "no-such-attachment.png").absolutePath,
+                "image/png", 128L, "removed"
+            )
+            history.add(
+                JSONObject().put("role", "user").put("text", "previous image")
+                    .put("provider", "openrouter")
+                    .put("attachments", JSONArray().put(missing.toJson()))
+            )
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("New message that must stay a draft")
+            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+        }
+
+        var failed = false
+        for (attempt in 0 until 100) {
+            scenario.onActivity { activity ->
+                val status = privateField(activity, "status") as android.widget.TextView
+                failed = status.text.toString().contains("Ошибка подготовки вложений")
+                if (failed) {
+                    val composer = privateField(activity, "input") as android.widget.EditText
+                    assertEquals("New message that must stay a draft", composer.text.toString())
+                    assertTrue("Send stayed locked after failed preparation", activity.send.isEnabled)
+                    @Suppress("UNCHECKED_CAST")
+                    val history = privateField(activity, "chat") as MutableList<JSONObject>
+                    assertEquals("Failed send was committed to history", beforeSize + 1, history.size)
+                    @Suppress("UNCHECKED_CAST")
+                    val call = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
+                    assertEquals("HTTP call started despite missing file", null, call.get())
+                    history.removeAt(history.lastIndex)
+                    SecureStore(activity).setOpenRouterApiKey("")
+                }
+            }
+            if (failed) break
+            SystemClock.sleep(25L)
+        }
+        assertTrue("Missing historical file did not reach controlled failure path", failed)
+        scenario.close()
+    }
+
+    @Test
+    fun stopDuringOpenRouterPreparationPreservesDraftAndPreviousHistory() {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        scenario.onActivity { activity ->
+            @Suppress("UNCHECKED_CAST")
+            val token = privateField(activity, "pendingOpenRouterPreparation")
+                as AtomicReference<String?>
+            val composer = privateField(activity, "input") as android.widget.EditText
+            composer.setText("Keep this during Stop")
+            @Suppress("UNCHECKED_CAST")
+            val history = privateField(activity, "chat") as MutableList<JSONObject>
+            val size = history.size
+            token.set("in-flight-test")
+            invoke(activity, "setBusy", Boolean::class.javaPrimitiveType!!, true)
+            invoke(activity, "stopCurrentResponse")
+            assertEquals(null, token.get())
+            assertEquals("Keep this during Stop", composer.text.toString())
+            assertEquals(size, history.size)
+            assertTrue(activity.send.isEnabled)
+        }
+        scenario.close()
+    }
+
+    @Test
     fun openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->
