@@ -1,8 +1,16 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-09 18:12 +03:00
+**Last updated:** 2026-10-09 19:34 +03:00
 **Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — APP-04 F01–F20 в едином PR #133 с F18-патчем владельца (xhigh/max, resolved auto, без Anthropic verbosity). Kotlin/Android/full CI ещё не успешны; APP-05 F21–F26 после APP-04, финансовая отмена отложена.
 **Внесённый код и приёмка:** #125 APP-01, #126 APP-02 и camera fix #128 merged после Successful APK/Release/Verify. Владелец подтвердил камеру, но выявил нарушения доставки фото и UI; эти требования не считать закрытыми по CI. База повторной проверки #131 `18c9cd23d7dbda0f09f5543bac93d66e83dc806e` (Android-код тот же #128), SQLite v20; подробности ниже.
+
+**Прогресс FIN133 в существующем PR #133, 2026-10-09 (после c077f1d7, до нового CI).** На базе аудита PR #133 внесены фиксы в ту же ветку: 
+- **FIN133-A:** два старых confirmation instrumentation-сценария теперь выставляют `currentGitHubToolOwner` в вызывающем Thread и снимают его в finally; отдельный test отклоняет missing/stale owner. Production guard не ослаблен.
+- **FIN133-B/F02:** история/user JSON копируются до отправки, прежние локальные файлы и Base64 сериализуются в executor до persisted Send; preparation owner/token отменяется Stop/onStop/new chat, повреждённая история оставляет UI draft/Send доступными; captured settings/tool config и MockWebServer seam. `MainActivityLifecycleTest` содержит broken-history, delayed-preparation/Stop и реальный Send→MockWebServer с введённым во время подготовки вторым черновиком.
+- **FIN133-B/F01:** `detectImageMime` проверяет header+простейшее завершение контейнера ограниченным чтением, отвергает очевидно обрезанные JPEG/PNG/GIF/WebP; валидные 2×2 fixtures и data URL→HTTP body test без перекодировки. Это **не** полный image decoder или доказательство ответа Claude на телефоне.
+- **FIN133-B/F03:** OpenAI без пригодной response chain не отбрасывает предыдущие OpenAI image/file IDs: отправка явно запрещена до очистки черновика. Ненулевой ID при последнем assistant другого провайдера не считается действующей цепочкой.
+- **Статус:** Kotlin/Android/unit tests нового кода ещё **не запускались**; прежняя APK instrumentation c077f1d7 упала с двумя confirmation-тестами. Следом проверить source verifier, exact targeted/total JVM, full Android instrumented и Release на одном заключительном code SHA. Ни одну новую правку не считать подтверждённой до Successful.
+- **Долги приёмки:** учесть мультимодальный OpenAI fallback с реальным upstream, совместимость легальных JPEG с trailing data, исторические manifest/смену чата во время delayed prep и device/Claude smoke. Схема SQLite v20 неизменна, платные вызовы не выполнялись.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -97,6 +105,7 @@
 - [robolectric] **#57:** миграция ChatDatabase до v16 сохраняет active-response ownership/cursor и добавляет `messages.attachments` без поломки истории; lifecycle DB tests прошли на PR head.
 - [instrumentation] **#59:** pending GitHub confirmation имеет одного владельца (future/dialog); Stop/onStop/onDestroy завершают решение как `false`; ActivityScenario проверяет Stop против подтверждения.
 - [instrumentation] **#60:** ActivityScenario `recreate()` при открытом GitHub-диалоге закрывает старое решение и оставляет новую Activity без pending confirmation.
+**Уточнение доказательств #59/#60 на APP-04:** эти теги относятся к успешной исторической версии. На PR #133 SHA `c077f1d7` оба `MainActivityLifecycleTest` confirmation-сценария **упали**: в тестовых потоках отсутствовал обязательный owner. Test-contract обновлён, но успешного instrumentation на новой версии кода пока нет; после CI обновить статус и exact SHA.
 - [instrumentation] **#61:** Stop отменяет сохранённый `Call` model-capability preflight; helper сохранения вложения в исходный chat работает после навигации. Executor → copy/ZIP → policy отдельно подтверждён #68.
 - [instrumentation] **#62:** новое OpenRouter-сообщение отменяет предыдущий active Call и pending GitHub confirmation; request-ownership проверяется до/после HTTP и вокруг tool boundaries.
 - [instrumentation] **#67:** stale `onCallCreated` не публикует Call старого request; active Call принадлежит текущему request на Activity boundary.
@@ -198,6 +207,31 @@
 | F18 · P2: Выбор модели и полная панель мышления | PHONE + SOURCE. Header subtitle заменил отдельную model row; thinking controls/Drawer Settings дублируются; патч пользователя 2026-10-09 выявил недопустимый silent xhigh/max → high и Claude verbosity conflict. | APP-04 branch: явная model row, полная панель ⚡, prefs сохранены. F18 patch интегрирован в APP-04: manual xhigh/max без понижения, auto разрешается Activity по конкретному запросу и отображается как ⚡ auto → resolved, неразрешённый auto отбрасывается до HTTP, verbosity для Anthropic не отправляется и UI-контрол отключён без удаления pref; OpenAI mode стандарт/pro не менялся. Новые pure + local MockWebServer fixtures для трёх Claude/двух tool rounds. **До CI/эмулятора это реализация, не доказанная приёмка.** |
 | F19 · P2: Drawer и полезная площадь экрана | PHONE, root cause gesture не установлен. Телефон: Drawer не открывается свайпом; expanded events вытесняют чат. | Opening/closing gestures, bounded history/Close, IME/insets/малый экран; phone отдельно. |
 | F20 · P2: Отображение меняет копируемый текст и ссылки | SOURCE, новое. Renderer меняет snake_case/URL; Copy/TXT берут rendered text; stats содержат literal backslash-n. | Буквальный code/URL, корректные fences/escapes; Copy/TXT исходного сообщения. |
+
+**Матрица F01–F20 на текущем незапущенном code HEAD.** В колонке «проверка» перечислены точные известные тесты или отсутствие отдельного проверенного теста; наличие файла/теста ≠ его successful запуск.
+
+| Finding | Проверка и честный статус на текущем коде |
+| --- | --- |
+| F01 | Новые `OpenRouterAttachmentStoreTest.validPngGifAndWebpWireBytesMatchDetectedMime`, `correctMagicWithTruncatedTailIsRejectedForAllSupportedImages`, `OpenRouterChatClientTest.validImageWithWrongFilenameAndPickerMimeReachesHttpWithOriginalBytes`, Android `realOpenRouterSendKeepsNewDraftAndSendsOriginalPngBytes`; **не запускались**. |
+| F02 | Новые Android `missingHistoricalOpenRouterFileKeepsUnsentComposerAndNeverStartsHttp`, `realOpenRouterSendKeepsNewDraftAndSendsOriginalPngBytes`, `stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp`, `stopDuringOpenRouterPreparationPreservesDraftAndPreviousHistory`; **не запускались**. |
+| F03 | Новый Android `openAiHistoryWithoutResponseChainNeverSilentlyDropsFileInputs`; старые OpenRouter→OpenAI guards сохранены; **не запускался**. |
+| F04 | Реестр ownership/cancel в APP-04 production, per-finding Android harness **не сопоставлен**; текущий full instrumentation обязателен. |
+| F05 | Изменения composer merge из предыдущего кода PR; per-finding CI proof **не сопоставлен**. |
+| F06 | Existing ZIP/cancel lifecycle tests в `MainActivityLifecycleTest`; после новых Send-преобразований всё ещё нужна проверка. |
+| F07 | Production file identity/cache изменения уже в PR; same-name regression нужно сверить на final SHA. |
+| F08 | Existing ActivityScenario picker/ZIP/save path; manual recreate/device smoke остаётся. |
+| F09 | `ChatDatabaseActiveFinalizationTest` и фактическая DB finalization; новые результаты ещё не получены. |
+| F10 | Reconcile при возврате: per-finding runtime test на final SHA **не подтверждён**. |
+| F11 | `OpenAiSseStreamReaderTest` и SQLite checkpoint paths; результаты final SHA ещё не получены. |
+| F12 | Lifecycle generation/edit/delete assertions предыдущего PR; re-run instrumentation обязателен. |
+| F13 | Repeat source path в `MainActivity`; body+draft runtime acceptance отдельно **не подтверждена**. |
+| F14 | `MainActivityLifecycleTest.stopCancelsOpenRouterCallAndPendingGitHubConfirmation`, `recreateCancelsOpenGitHubConfirmationDecision`, новый `githubConfirmationRejectsMissingAndStaleOwnerWithoutOpeningDialog`; old HEAD падал, new HEAD **не запускался**. |
+| F15 | `ResponseEventReducerTest`, `OpenAiSseStreamReaderTest`; actual runtime callback на final SHA **не подтверждён**. |
+| F16 | `OpenRouterChatClientTest` stream/tool rounds; Android incremental visual path отдельно **не подтверждён**. |
+| F17 | `RequestDisplayPolicyTest` и `AssistantModelLabel`; UI/runtime/reopen final SHA ещё не проверены. |
+| F18 | `ModelRequestPolicyTest`, `OpenRouterReasoningPolicyTest`, `OpenRouterChatClientTest` MockWebServer Claude xhigh/max; final SHA ещё не проверен. |
+| F19 | `MainActivityLifecycleTest.compactHeaderKeepsModelPickerAndComposerEffortAccessible`; drawer/IME на физическом экране пока не подтверждён. |
+| F20 | `RichTextRendererTest`; Android Copy/TXT/links smoke ещё не подтверждён. |
 
 **Закрытие APP-04:** все условия выполнимости редакции 9 проверены на production paths; production regressions для трёх блоков проходят; сохраняются guards #101/#103/#105/#107/#109/#128 и неизвестный расход вместо ложного нуля. Предварительная диагностика фото должна отделить неверный app payload от отказа корректного payload upstream; точная причина телефонного MIME error ещё открыта. Не вводить скрытое сжатие, публичную загрузку, платный OCR/retry. Полный APK instrumentation и Release Successful на окончательном кодовом SHA, Verify на final head. Код + handoff готовить до [ci]; промежуточные коммиты без метки. После merge один итоговый отчёт с APK и компактной матрицей пройдено/открыто. Если live root cause не установлен, прямо указать это, не объявлять Claude проверенным по mock. Не останавливать реализацию после каждого внутреннего подпункта.
 
