@@ -246,7 +246,8 @@ class MainActivity : ComponentActivity() {
     private val pickVectorStoreFile = 5103
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
-    private var pendingExportBytes: ByteArray? = null
+    private var pendingExportPath: String? = null
+    private var pendingPickerChatId: String? = null
     private var pendingSaveSourcePath: String? = null
     private var pendingSaveFilename: String? = null
     private var pendingSaveMime: String? = null
@@ -257,12 +258,20 @@ class MainActivity : ComponentActivity() {
         pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
         pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
         pendingCameraProvider = savedInstanceState?.getString("pending_camera_provider")
+        pendingExportPath = savedInstanceState?.getString("pending_export_path")
+        pendingSaveSourcePath = savedInstanceState?.getString("pending_save_path")
+        pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
+        pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
+        pendingPickerChatId = savedInstanceState?.getString("pending_picker_chat")
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
              if (requestCode == pickCamera) {
                  completePendingCameraCapture(result.resultCode)
-             } else if (requestCode != null) handleActivityResult(requestCode, result.resultCode, result.data)
+             } else if (requestCode != null) {
+                 handleActivityResult(requestCode, result.resultCode, result.data)
+                 pendingPickerChatId = null
+             }
          }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
         chatDb = ChatDatabase(this)
@@ -281,6 +290,11 @@ class MainActivity : ComponentActivity() {
         pendingCameraPath?.let { outState.putString("pending_camera_path", it) }
         pendingCameraChatId?.let { outState.putString("pending_camera_chat_id", it) }
         pendingCameraProvider?.let { outState.putString("pending_camera_provider", it) }
+        pendingExportPath?.let { outState.putString("pending_export_path", it) }
+        pendingSaveSourcePath?.let { outState.putString("pending_save_path", it) }
+        pendingSaveFilename?.let { outState.putString("pending_save_name", it) }
+        pendingSaveMime?.let { outState.putString("pending_save_mime", it) }
+        pendingPickerChatId?.let { outState.putString("pending_picker_chat", it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -4523,33 +4537,55 @@ class MainActivity : ComponentActivity() {
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun handleActivityResult(r:Int,c:Int,d:Intent?){
-        if(c!=RESULT_OK || d==null)return
+        if(c!=RESULT_OK || d==null) {
+            if (r == pickExportTxt) {
+                pendingExportPath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+                pendingExportPath = null
+            }
+            return
+        }
+        if (r == pickVoice || r == pickImage || r == pickAny) {
+            val source = pendingPickerChatId
+            if (source != null && source != currentChatId()) {
+                status.text = "Действие относится к другому чату — откройте исходный чат и повторите"
+                return
+            }
+        }
         if(r==pickExportTxt){
             val uri=d.data ?: return
-            val bytes=pendingExportBytes
-            if(bytes==null){ status.text="Нечего сохранять"; return }
-            try{
-                val out=contentResolver.openOutputStream(uri) ?: throw IOException("Не удалось открыть файл для записи")
-                out.use{it.write(bytes)}
-                status.text="Сохранено в файл"
-            }catch(e:Exception){ status.text="Ошибка экспорта: ${e.message}" }
-            pendingExportBytes=null
+            val source=pendingExportPath
+            pendingExportPath=null
+            if(source.isNullOrBlank()){ status.text="Экспорт больше недоступен"; return }
+            executor.execute {
+                try {
+                    val snapshot=File(source)
+                    if(!snapshot.isFile) throw IOException("Снимок экспорта не найден")
+                    val out=contentResolver.openOutputStream(uri)
+                        ?: throw IOException("Не удалось открыть файл для записи")
+                    snapshot.inputStream().use { input -> out.use { output -> input.copyTo(output, 64*1024) } }
+                    runOnUiThread { status.text="Экспорт сохранён" }
+                } catch(e:Exception) {
+                    runOnUiThread { status.text="Ошибка экспорта: ${e.message}" }
+                } finally { try { File(source).delete() } catch (_: Exception) {} }
+            }
             return
         }
         if(r==pickSaveGenerated){
             val uri=d.data ?: return
             val source=pendingSaveSourcePath
             if(source.isNullOrBlank()){ status.text="Файл больше недоступен"; return }
-            try{
-                val sourceFile=File(source)
-                if(!sourceFile.isFile) throw IOException("Локальная копия файла не найдена")
-                val out=contentResolver.openOutputStream(uri) ?: throw IOException("Не удалось открыть файл для записи")
-                sourceFile.inputStream().use{input->out.use{output->input.copyTo(output,64*1024)}}
-                status.text="Сохранено в файл"
-            }catch(e:Exception){status.text="Ошибка сохранения: ${e.message}"}
             pendingSaveSourcePath=null
             pendingSaveFilename=null
             pendingSaveMime=null
+            executor.execute {
+                try {
+                    val sourceFile=File(source)
+                    if(!sourceFile.isFile) throw IOException("Локальная копия файла не найдена")
+                    val out=contentResolver.openOutputStream(uri) ?: throw IOException("Не удалось открыть файл для записи")
+                    sourceFile.inputStream().use{input->out.use{output->input.copyTo(output,64*1024)}}
+                    runOnUiThread { status.text="Файл сохранён" }
+                }catch(e:Exception){runOnUiThread { status.text="Ошибка сохранения: ${e.message}" }}
+            }
             return
         }
         if(r==pickVoice){
@@ -4788,6 +4824,7 @@ class MainActivity : ComponentActivity() {
 
     private fun launchActivityForResult(intent: Intent, requestCode: Int) {
         pendingActivityResultCode = requestCode
+        pendingPickerChatId = currentChatId()
         try {
             activityResultLauncher.launch(intent)
         } catch (e: Exception) {
@@ -6582,14 +6619,25 @@ class MainActivity : ComponentActivity() {
                         status.text="Скопировано"
                     }
                     1->{
-                        pendingExportBytes=currentSource.toByteArray(Charsets.UTF_8)
-                        val i=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type="text/plain"
-                            putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
+                        val snapshotText = currentSource
+                        executor.execute {
+                            try {
+                                val directory = File(filesDir, "exports").apply { mkdirs() }
+                                val file = File(directory, "message_${UUID.randomUUID()}.txt")
+                                file.writeText(snapshotText, Charsets.UTF_8)
+                                runOnUiThread {
+                                    pendingExportPath = file.absolutePath
+                                    val i=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                        type="text/plain"
+                                        putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
+                                    }
+                                    launchActivityForResult(i, pickExportTxt)
+                                }
+                            } catch (e: Exception) {
+                                runOnUiThread { status.text="Экспорт недоступен: ${e.message}" }
+                            }
                         }
-                        try{launchActivityForResult(i, pickExportTxt)}
-                        catch(e:Exception){status.text="Экспорт недоступен: ${e.message}"}
                     }
                     2->if(item.user){
                         item.chatIndex?.let(::editMessage)
