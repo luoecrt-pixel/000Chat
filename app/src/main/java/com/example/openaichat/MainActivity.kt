@@ -4913,8 +4913,10 @@ class MainActivity : ComponentActivity() {
                 try {
                     val listed = listVectorStoreFiles(vsId)
                     runOnUiThread {
-                        if (vsUiGeneration.get() != generation || vsDialog?.isShowing != true ||
-                            vectorStoreId() != vsId || vsListArea !== area) return@runOnUiThread
+                        if (!VectorStoreUiOwnershipPolicy.mayCommit(
+                                generation, vsUiGeneration.get(), vsId, vectorStoreId(),
+                                vsDialog?.isShowing == true
+                            ) || vsListArea !== area) return@runOnUiThread
                         area.removeAllViews()
                         if (listed.entries.isEmpty()) area.addView(TextView(this).apply {
                             text = "Файлов пока нет"; setTextColor(Color.GRAY); textSize = 13f
