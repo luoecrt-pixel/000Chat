@@ -113,7 +113,11 @@ class MainActivityLifecycleTest {
             val advanced = find(root, "Дополнительные настройки мышления и ответа")
                 ?: throw AssertionError("Advanced panel button missing")
             val header = find(root, "Открыть чаты") ?: error("Header missing")
-            assertTrue("Model must not be in header", model.top > header.bottom)
+            val modelLocation = IntArray(2)
+            val headerLocation = IntArray(2)
+            model.getLocationOnScreen(modelLocation)
+            header.getLocationOnScreen(headerLocation)
+            assertTrue("Model must be below header", modelLocation[1] > headerLocation[1] + header.height)
             assertTrue("Bottom controls must share composer options row",
                 model.parent === effort.parent && model.parent === advanced.parent)
             assertTrue((effort as android.widget.TextView).text.toString().startsWith("⚡"))
@@ -1461,15 +1465,21 @@ class MainActivityLifecycleTest {
         }
         try {
             scenario.onActivity { activity ->
-                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
                 val scroll = privateField(activity, "scroll") as androidx.recyclerview.widget.RecyclerView
                 val width = scroll.width.toFloat()
                 assertTrue("RecyclerView must be laid out", width > 200f)
                 swipe(scroll, width * 0.2f, width * 0.9f, scroll.height / 2f)
+            }
+            SystemClock.sleep(450L)
+            scenario.onActivity { activity ->
+                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
                 assertTrue("Swipe right must open drawer",
                     drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
-                // DrawerLayout handles the standard close gesture from the drawer surface.
                 swipe(drawer, drawer.width * 0.65f, drawer.width * 0.1f, drawer.height / 2f)
+            }
+            SystemClock.sleep(450L)
+            scenario.onActivity { activity ->
+                val drawer = privateField(activity, "drawerLayout") as androidx.drawerlayout.widget.DrawerLayout
                 assertFalse("Swipe left must close drawer",
                     drawer.isDrawerOpen(androidx.core.view.GravityCompat.START))
             }
