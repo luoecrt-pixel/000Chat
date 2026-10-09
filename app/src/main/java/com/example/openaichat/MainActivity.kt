@@ -4903,8 +4903,9 @@ class MainActivity : ComponentActivity() {
         else renderVectorStoreList(vsId)
     }
 
-    private fun renderVectorStoreList(vsId: String) {
-        runOnUiThread {
+    private fun renderVectorStoreList(vsId:String){
+        runOnUiThread{
+            vsStatusLine?.text="Загрузка списка файлов…"
             val generation = vsUiGeneration.get()
             val statusLine = vsStatusLine ?: return@runOnUiThread
             val area = vsListArea ?: return@runOnUiThread
