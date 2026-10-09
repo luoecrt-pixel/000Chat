@@ -32,3 +32,15 @@ object VectorStorePagePolicy {
 
     fun shouldFetchNext(pageIndex: Int, hasMore: Boolean) = hasMore && pageIndex < MAX_PAGES
 }
+
+/** Delayed network callbacks may only alter their original visible dialog/store. */
+object VectorStoreUiOwnershipPolicy {
+    fun mayCommit(
+        capturedGeneration: Int,
+        currentGeneration: Int,
+        capturedStore: String?,
+        selectedStore: String?,
+        dialogVisible: Boolean
+    ): Boolean = capturedGeneration == currentGeneration &&
+        capturedStore != null && capturedStore == selectedStore && dialogVisible
+}
