@@ -40,7 +40,7 @@ class OpenRouterAttachmentStoreTest {
     @Test
     fun imageUsesOriginalBytesForDataUrl() {
         val dir = createTempDir()
-        val original = byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),1,2,3)
+        val original = realImageBytes("jpeg")
         val file = File(dir, "x.jpg").apply { writeBytes(original) }
         val a = OpenRouterLocalAttachment("1", "x.jpg", "image", file.absolutePath, "image/jpeg", original.size.toLong(), "hash")
         val data = OpenRouterAttachmentStore.toDataUrl(a)
@@ -52,8 +52,8 @@ class OpenRouterAttachmentStoreTest {
     @Test
     fun legacyPngWireIsDetectedOnlyWhenOriginalIsJpeg() {
         val dir = createTempDir()
-        val jpeg = File(dir, "camera.jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) }
-        val png = File(dir, "camera.png").apply { writeBytes(byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4E.toByte(), 0x47.toByte())) }
+        val jpeg = File(dir, "camera.jpg").apply { writeBytes(realImageBytes("jpeg")) }
+        val png = File(dir, "camera.png").apply { writeBytes(realImageBytes("png")) }
 
         val legacy = OpenRouterLocalAttachment(
             "legacy", "camera.jpg", "image", jpeg.absolutePath, "image/jpeg", jpeg.length(), "sha",
@@ -99,7 +99,7 @@ class OpenRouterAttachmentStoreTest {
     fun mismatchedFilenameAndPickerMimeUseActualJpegBytes() {
         val dir = createTempDir()
         val jpg = File(dir, "wrong.png").apply {
-            writeBytes(byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),42))
+            writeBytes(realImageBytes("jpeg"))
         }
         val attachment = OpenRouterAttachmentStore.classifyLocalFile(jpg, "wrong.png", "image/png")
         assertEquals("image", attachment.kind)
@@ -114,7 +114,7 @@ class OpenRouterAttachmentStoreTest {
     fun legacyNullWireFieldsRoundTripAsAbsent() {
         val dir = createTempDir()
         val jpeg = File(dir, "camera.jpg").apply {
-            writeBytes(byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte(),7))
+            writeBytes(realImageBytes("jpeg"))
         }
         val a = OpenRouterLocalAttachment.fromJson(
             org.json.JSONObject()
@@ -140,5 +140,54 @@ class OpenRouterAttachmentStoreTest {
         val a = OpenRouterLocalAttachment("id","x.png","image","/missing/app04-image.png","image/png",12L,"sha")
         OpenRouterAttachmentStore.toDataUrl(a)
     }
+
+    @Test
+    fun validPngGifAndWebpWireBytesMatchDetectedMime() {
+        val dir = createTempDir()
+        for ((format, mime) in listOf(
+            "png" to "image/png", "gif" to "image/gif", "webp" to "image/webp"
+        )) {
+            val original = realImageBytes(format)
+            val file = File(dir, "wrong.jpeg").apply { writeBytes(original) }
+            val attachment = OpenRouterAttachmentStore.classifyLocalFile(file, "wrong.jpeg", "image/jpeg")
+            assertEquals(mime, attachment.mime)
+            val url = OpenRouterAttachmentStore.toDataUrl(attachment)
+            assertTrue(url.startsWith("data:$mime;base64,"))
+            assertTrue(Base64.getDecoder().decode(url.substringAfter(",")).contentEquals(original))
+        }
+    }
+
+    @Test
+    fun correctMagicWithTruncatedTailIsRejectedForAllSupportedImages() {
+        val dir = createTempDir()
+        for (format in listOf("jpeg", "png", "gif", "webp")) {
+            val original = realImageBytes(format)
+            val broken = File(dir, "broken.$format").apply {
+                writeBytes(original.copyOf(original.size - 2))
+            }
+            val attachment = OpenRouterLocalAttachment(
+                "bad", "broken.$format", "image", broken.absolutePath, "image/$format",
+                broken.length(), "sha"
+            )
+            var rejected = false
+            try {
+                OpenRouterAttachmentStore.toDataUrl(attachment)
+            } catch (_: java.io.IOException) {
+                rejected = true
+            }
+            assertTrue("Truncated $format must not be sent", rejected)
+        }
+    }
+
+    private fun realImageBytes(format: String): ByteArray = Base64.getDecoder().decode(
+        when (format) {
+            "jpeg" -> "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDlqKKK8E/aT//Z"
+            "png" -> "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+            "gif" -> "R0lGODdhAgACAIEAAP0OGwAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7"
+            "webp" -> "UklGRjwAAABXRUJQVlA4IDAAAADwAQCdASoCAAIAAUAmJaACdLoB+AAETAAA/vCbQ/8WcjEdnm//PaPz2j89o/88IAA="
+            else -> error("Unknown test image format: $format")
+        }
+    )
+
 
 }
