@@ -25,6 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Call
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.MockResponse
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
+import okhttp3.OkHttpClient
 import java.lang.reflect.Proxy
 import java.util.concurrent.CompletableFuture
 import java.io.ByteArrayInputStream
