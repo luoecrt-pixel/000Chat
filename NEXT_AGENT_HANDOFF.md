@@ -1,12 +1,12 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-10 00:35 +03:00
-**Следующий рабочий срез:** Отправка, сохранность и повседневный интерфейс — завершить существующий draft PR #136 (APP-04-PHONE), проверить новый APK после test-only коррекции, затем следующий агент объединяет PR по гейту и начинает сохранённый APP-05 F21–F26.
-**Текущая работа:** `main c492e74e3aaed8f87752be41e8ad2618d8215afa`; PR [#136](https://github.com/luoecrt-pixel/OpenAIApiChat/pull/136), ветка `agent/app-04-phone-send-ui-diag`. Проверенный исходный head перед этой коррекцией: `d0624e318fc8cc14b96d8879f6d55c7c87201b3c`. Не создавать заменяющий PR и не накладывать F18-патч повторно.
-**Последний завершённый прогон:** APK [37988996183](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37988996183) — Failure: выполнены 34 tests, один сбой в `deliberateHorizontalGestureOpensAndClosesChatDrawer`; Release [37988996250](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37988996250) и Verify [37989003185](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37989003185) — Successful, все на `d0624e3`. JVM/compile/lint/build успешны; APK не загружен, поскольку instrumentation не прошла.
-**Точная ошибка:** `java.lang.IllegalArgumentException: Targeted input event injection from pid 4815 was not directed at a window owned by uid 10192.` Это отказ OS input injection в тесте, не AssertionError закрытия Drawer и не crash эмулятора. Какое именно чужое окно получило координаты, лог не устанавливает.
-**Эта коррекция:** тест посылает полную DOWN/MOVE/UP последовательность через `Activity.dispatchTouchEvent` на main с `getLocalVisibleRect + getLocationInWindow`; сохраняет отрицательный vertical gesture и ожидание полного открытия/закрытия. Это проверяет Activity→Window→View routing, а не системный injector/физический телефон. Производственный код и workflow не меняются. Один новый полный branch `[ci]` нужен из-за изменения instrumentation; его исход ещё не установлен этим текстом.
-**Указание владельца:** текущий исправляющий агент оставляет PR открытым и проверки запущенными. Следующий агент дожидается обязательных Successful, объединяет #136 и начинает APP-05. Телефонный smoke/реальные API остаются отдельно отмеченными; они не являются новым запретом начать APP-05 после разрешённого merge. Финансовое расширение отмены отложено. Автосборки после merge в main отключены в #134; запуск агентами в рабочих ветках сохранён.
+**Last updated:** 2026-10-10 00:56 +03:00
+**Следующий рабочий срез:** Долгие операции, ресурсы и инструменты — APP-05 F21–F26, одна ветка/PR после успешного merge APP-04-PHONE #136. Начата реализация, сборки APP-05 ещё не подтверждены.
+**Текущая работа:** `main 0308fd67b4445d886c966fb5836d9f45db2de4ff` (#136 merged, verified head `613bff2155838b5b1988df4b478d3bf601a83882`), ветка `agent/app-05-runtime-resources-tools`. До PR/merge APP-05 требуется code/test review и CI.
+**Последний завершённый прогон APP-04:** APK [37994461394](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37994461394) — Successful (включая Android instrumentation), Release [37994461425](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37994461425) — Successful, Verify handoff [37994465824](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37994465824) — Successful, все на `613bff2`; merge `0308fd67`.
+**APP-05 прогресс:** F21 общий срок от сохранённого `started_at` в первичном запросе, Activity и Worker с bounded quiet SSE; F22/F23 ограниченное копирование 25 MiB и удаление operation-owned partial/ZIP; F24 Vector Store session/store ownership, до 3 страниц/300 файлов, 10 ограниченных попыток metadata, видимая неполнота; F25 строгий `get_file` без ложного пустого успеха; F26 Verify запускается на Markdown. Добавлены targeted тесты, но **локальный Android/Gradle недоступен, CI нового кода ещё не запускался**.
+**Указание владельца:** APP-04 проверен и объединён; продолжить APP-05. Телефонный smoke/реальные Claude/OpenAI и оплачиваемые запросы не выполнялись; не приравнивать MockWebServer/CI к реальному upstream. Main только через PR, Android Actions в main отключены по #134. Не прерывать выполняющиеся CI и не делать merge до matching SHA gate.
+
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -160,41 +160,13 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-Редакция 11: существующий #136, затем один сохранённый APP-05 F21–F26. Отдельные SEND/UI/DIAG PR, новый финансовый ledger и Compose rewrite не входят в пакет.
+Редакция 12: #136 merged; активен один APP-05 F21–F26. Новый финансовый ledger и Compose rewrite не входят в пакет.
 
-### 1. Отправка, сохранность и повседневный интерфейс — **следующий**
+**APP-04-PHONE (#136) завершён:** проверенный head `613bff2`, зелёные APK/Release/Verify, merge `0308fd67`. Физический телефон, исходные проблемные большие фотографии и реальные платные ответы провайдера остаются непроверенными; код этого пакета не переоткрывать без воспроизведения регрессии.
 
-**APP-04-PHONE / #136. Первый шаг:** перечитать actual PR head и результаты новой пары push runs после текущего test-only fix. Если снова Failed — забрать named failure/stack/assert, сопоставить harness с кодом и исправить конкретную причину в той же ветке. Не повторять старые «нет API key»/«один MOVE» диагнозы: на d0624e3 OpenAI test passed, остался OS input injection. При зелёном гейте следующий агент снимает draft, мержит #136 и начинает APP-05 по указанию владельца.
+### 1. Долгие операции, ресурсы и инструменты — **следующий**
 
-**Обязательный scope остаётся критерием приёмки, а не очередью переписывания уже внесённого кода.**
-
-| Блок одного PR | Наблюдаемое поведение / приёмка |
-| --- | --- |
-| SEND | Большое/историческое фото проходит MIME/body подготовку по настоящим bytes; OR→GPT replay совместимых локальных вложений в том же чате; понятная ошибка недоступного input до очистки draft. Thumbnail composer/bubble/reopen; Фото открывает native photo grid; Files выбирает совместимый handler; picker-result принадлежит source-chat после switch/recreate. |
-| UI | Только три controls внизу у ввода: model/provider; ⚡ quick effort; маленькая advanced button. Верхняя model row отсутствует. Quick выбор закрывается после уровня, advanced даёт полную панель. Drawer открывается вправо на chat surface, закрывается влево; vertical scroll, Back, selection/code scroll и IME работают. |
-| DIAG | Диагностика сразу под API keys; группы request с временем/model/provider/stage/outcome/reason. Выделение/Copy/share/export, старт на последних событиях и «В конец»; не ломать чтение старого. Git SHA; safe upstream/attachment descriptors без credentials/base64/body. |
-
-**SEND — сохраняемые точные условия.**
-
-- Проверяй все outbound messages/content, включая старые фото следующего текстового Send. Real decodable JPEG 6–7 MB, маленький image, persistence/reopen/mixed history; по каждому source/wire MIME, bytes/Base64 length, dimensions/hash/index. HTTPS mock декодирует payload и сравнивает с оригиналом. JPEG signature из четырёх байт не изображение.
-- media_type enum error не доказательство лимита размера. Сохрани provider/code/type, local request/round ID и стадию, sanitized attachment descriptors; никаких произвольных raw_error/full body в лог. Большое mock image не доказывает acceptance реальным Claude.
-- Не делать silent text-only fallback, удаления старых attachments, foreign file IDs/stale previous_response_id, lossy/downscale, публичной загрузки или оплачиваемого automatic retry. При недоступных bytes остановить до расходования draft/HTTP с конкретной причиной; уменьшенная wire-copy только по явному выбору пользователя, оригинал сохранить.
-- OR↔OpenAI replay: typed local context целевого API; проверить history + composer, stale response chain и full-history fallback. Доступное локальное фото не требует нового чата.
-- Preview bounded и отделён от wire; absence preview не удаляет attachment. Photo через AndroidX PickMultipleVisualMedia/ImageOnly + fallback; Files chooser/preferred **совместимый** installed handler без выдуманного MiXplorer package. content:// сразу private copy; GET_CONTENT не требует persistable grant.
-- Source-chat/provider/operation захватывается до picker и переживает recreation; Cancel очищает лишь свои temporary bytes; текущий чужой draft D2 не меняется.
-
-**UI/DIAG — сохраняемые точные условия.**
-
-- Model/quick/advanced только composerOptions у ввода, prefs/keys не сбрасывать. Effort/compatible mode/summary/verbosity/max output/format/schema в advanced; ручные xhigh/max и resolved auto из #133 сохранить. Новый выбор меняет следующий, не captured активный request. Temperature не effort.
-- Header: title/chats/new-chat/gear; Drawer без duplicate Settings footer. Проверяй именно geometry и три click outcomes; small-height/IME/large font отдельно. Настоящее движение касаний проходит View dispatch; helper openDrawer вместо swipe не доказывает gesture.
-- Logs: bounded tail/rotation, main без большой I/O; выделение, исходный Copy/export, latest scroll без автопрыжка при чтении/selection. Error persist не зависит только от visible UI gate; новая financial DB/tracing framework не нужна.
-- Устройство: установленный Git SHA должен совпасть с tested code; local build честно local-unknown. Один итоговый APK владельцу для PHONE smoke; результаты и неизвестности записать, не смешивать mock/phone/live.
-
-**Не переоткрывать без новой регрессии:** #133 deep snapshot/D2, registry одной upload/download operation, serialized source draft, ZIP Cancel, file identity/cache, narrow DB claims/append, Stop/terminal winner, recovery reconciliation/text+cursor, Edit/Delete/Repeat, owner approvals, refusal/OR deltas, model metadata и Copy/TXT. Прежняя верхняя model row/full panel из ⚡ — отменённое ТЗ, не контракт.
-
-### 2. Долгие операции, ресурсы и инструменты — следующим общим пакетом
-
-**APP-05:** один следующий пакет F21–F26 после успешного #136 и разрешённого merge. По последнему указанию владельца начать его затем; телефонный smoke записать как отдельную остающуюся проверку, а не вводить новую паузу. Не расходовать Android CI лишь на обзор; отдельное изменение отделять только при конкретном независимом schema/transport риске.
+**APP-05:** один пакет F21–F26 уже начат после успешного merge #136. Телефонный smoke остаётся отдельной проверкой. Блоки кода и тесты не считать Successful до фактических Android Actions по финальному SHA.
 
 **Первый шаг:** воспроизвести F21 fake clock/blocked stream, F22 synthetic stream/heap, F23 operation cleanup и F24 delayed dialog fixture; затем выбрать узкие ownership/budget изменения. Не ждать 5 часов в CI и не вводить короткий response timeout.
 
