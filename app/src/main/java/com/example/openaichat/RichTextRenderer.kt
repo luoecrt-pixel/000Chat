@@ -32,6 +32,28 @@ object RichTextRenderer {
         }
 
         while (i < source.length) {
+            if (source[i] == '\\' && i + 1 < source.length && "*_~`[]\\<>".contains(source[i + 1])) {
+                appendPlain(i + 1, i + 2)
+                i += 2
+                continue
+            }
+            if (source.startsWith("```", i)) {
+                val end = source.indexOf("```", i + 3)
+                if (end >= i + 3) {
+                    val start = out.length
+                    appendPlain(i + 3, end)
+                    out.setSpan(TypefaceSpan("monospace"), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    i = end + 3
+                    continue
+                }
+            }
+            if (source.startsWith("https://", i) || source.startsWith("http://", i)) {
+                var end = i
+                while (end < source.length && !source[end].isWhitespace() && source[end] != '<' && source[end] != '"') end++
+                appendPlain(i, end)
+                i = end
+                continue
+            }
             if (source[i] == '[') {
                 val close = source.indexOf("](", i + 1)
                 if (close > i + 1) {
@@ -93,7 +115,10 @@ object RichTextRenderer {
             if (source[i] == '*' || source[i] == '_') {
                 val marker = source[i]
                 val end = source.indexOf(marker, i + 1)
-                if (end > i + 1 && !source.startsWith("**", i)) {
+                val intrawordUnderscore = marker == '_' &&
+                    ((i > 0 && source[i - 1].isLetterOrDigit()) ||
+                        (end + 1 < source.length && source[end + 1].isLetterOrDigit()))
+                if (end > i + 1 && !intrawordUnderscore && !source.startsWith("**", i)) {
                     val outStart = out.length
                     appendPlain(i + 1, end)
                     out.setSpan(StyleSpan(Typeface.ITALIC), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)

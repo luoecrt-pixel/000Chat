@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var requestTelemetryCard: LinearLayout
     private lateinit var requestTelemetrySummary: TextView
     private lateinit var requestTelemetryHistory: LinearLayout
+    private lateinit var requestTelemetryScroll: ScrollView
     private var requestTelemetryExpanded = false
     private val localArtifactToolExecutor by lazy { LocalArtifactToolExecutor(this) }
 
@@ -734,7 +735,13 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
-        card.addView(requestTelemetryHistory)
+        requestTelemetryScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            visibility = View.GONE
+            isFillViewport = false
+            addView(requestTelemetryHistory)
+        }
+        card.addView(requestTelemetryScroll, LinearLayout.LayoutParams(-1, dp(176)))
         return card.apply {
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
                 leftMargin = dp(10)
@@ -758,6 +765,7 @@ class MainActivity : ComponentActivity() {
             requestTelemetrySummary.text = "● Нет запросов для этой сессии"
             requestTelemetrySummary.setTextColor(Color.rgb(130,135,145))
             requestTelemetryHistory.visibility = View.GONE
+            requestTelemetryScroll.visibility = View.GONE
             return
         }
         val latest = events.first()
@@ -765,6 +773,7 @@ class MainActivity : ComponentActivity() {
         requestTelemetrySummary.setTextColor(requestEventColor(RequestEventFormatter.match(latest)))
         requestTelemetrySummary.background = rippleRounded(Color.TRANSPARENT, 9)
         requestTelemetryHistory.visibility = if (requestTelemetryExpanded) View.VISIBLE else View.GONE
+        requestTelemetryScroll.visibility = if (requestTelemetryExpanded) View.VISIBLE else View.GONE
         if (!requestTelemetryExpanded) return
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -4007,15 +4016,15 @@ class MainActivity : ComponentActivity() {
             val reasoning=o.optLong("reasoning_tokens")
             // Historical aggregate estimates are not verified provider charges.
             return buildString{
-                append("$title\\n")
-                append("Запросов: $requests (успешных $success)\\n")
-                append("Input: ${fmtTokens(input)} · cache: ${fmtTokens(cached)}\\n")
-                append("Cache write: ${fmtTokens(writes)}\\n")
-                append("Output: ${fmtTokens(output)} · reasoning: ${fmtTokens(reasoning)}\\n")
+                append("$title\n")
+                append("Запросов: $requests (успешных $success)\n")
+                append("Input: ${fmtTokens(input)} · cache: ${fmtTokens(cached)}\n")
+                append("Cache write: ${fmtTokens(writes)}\n")
+                append("Output: ${fmtTokens(output)} · reasoning: ${fmtTokens(reasoning)}\n")
                 append("Расход: неизвестен (исторические оценки не подтверждены)\n")
             }
         }
-        return block("Сегодня",today)+"\\n"+block("Последние 7 дней",seven)+"\\n"+block("За всё время",all)+
+        return block("Сегодня",today)+"\n"+block("Последние 7 дней",seven)+"\n"+block("За всё время",all)+
             "\nИсторические оценки до журнала не входят в подтверждённые суммы. Неизвестные расходы не равны нулю."
     }
 
@@ -6445,11 +6454,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderChatBubbleBody(item:ChatBubbleItem):CharSequence{
-        return if(!item.user && item.message!=null) {
-            RichTextRenderer.render(AstraResponseModel.fromChatJson(item.message))
-        } else {
-            markdown(item.text,item.annotations)
-        }
+        // item.text is the live adapter snapshot. Persisted message JSON can lag SSE deltas.
+        return markdown(item.text, item.annotations ?: item.message?.optJSONArray("annotations"))
     }
 
     private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
@@ -6503,14 +6509,17 @@ class MainActivity : ComponentActivity() {
             val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
             else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
             AlertDialog.Builder(this).setItems(menu){_,which->
+                // Read the newest adapter snapshot, not the transformed TextView or stale binding.
+                val currentSource = messageAdapter.indexOfId(item.id).takeIf { it >= 0 }
+                    ?.let { messageAdapter.itemAt(it)?.text } ?: item.text
                 when(which){
                     0->{
                         val cm=getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("Astra",body.text?.toString().orEmpty()))
+                        cm.setPrimaryClip(ClipData.newPlainText("Сообщение",currentSource))
                         status.text="Скопировано"
                     }
                     1->{
-                        pendingExportBytes=body.text?.toString().orEmpty().toByteArray()
+                        pendingExportBytes=currentSource.toByteArray(Charsets.UTF_8)
                         val i=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type="text/plain"
