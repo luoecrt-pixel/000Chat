@@ -44,6 +44,7 @@ class ResumableResponseStreamClient(
         responseId: String,
         startingAfter: Long,
         onCallCreated: (Call) -> Unit = {},
+        startedAtEpochMs: Long? = null,
         onEvent: (JSONObject) -> Unit = {}
     ): ResumableStreamResult {
         if (responseId.isBlank()) throw IllegalArgumentException("responseId is blank")
@@ -59,6 +60,7 @@ class ResumableResponseStreamClient(
             .build()
 
         val call = httpClient.newCall(request)
+        startedAtEpochMs?.let { ResponseDeadlinePolicy.boundCall(call, it, System.currentTimeMillis()) }
         onCallCreated(call)
 
         val sequenceCursor = ResponseStreamSequenceCursor(startingAfter)

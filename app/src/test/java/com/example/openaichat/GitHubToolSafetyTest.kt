@@ -45,6 +45,7 @@ class GitHubToolSafetyTest {
 
     @Test fun sourceAndWorkflowPathsDetermineRequiredChecks() {
         assertEquals(setOf("Verify handoff"), GitHubMergeCheckPolicy.required(listOf("README.md")))
+        assertEquals(setOf("Verify handoff"), GitHubMergeCheckPolicy.required(listOf("docs/guides/notes.md")))
         assertEquals(setOf("Verify handoff"), GitHubMergeCheckPolicy.required(listOf("NEXT_AGENT_HANDOFF.md")))
         assertEquals(setOf("Build Android APK", "Build Android Release"),
             GitHubMergeCheckPolicy.required(listOf("app/src/main/MainActivity.kt")))

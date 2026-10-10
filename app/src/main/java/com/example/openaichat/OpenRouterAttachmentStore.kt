@@ -91,8 +91,9 @@ object OpenRouterAttachmentStore {
         val mime = runCatching { context.contentResolver.getType(uri).orEmpty() }.getOrDefault("").ifBlank { mimeForFilename(name) }
         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
         val raw = File(dir, "or_" + UUID.randomUUID() + "_" + safeFileName(name))
-        inputStreamSource.openInputStream(context, uri)?.use { input -> raw.outputStream().use { input.copyTo(it, 64 * 1024) } }
-            ?: throw IOException("Не удалось открыть файл: " + name)
+        inputStreamSource.openInputStream(context, uri)?.use { input ->
+            BoundedAttachmentCopy.copy(input, raw)
+        } ?: throw IOException("Не удалось открыть файл: " + name)
         return try { finalizeFile(context, dir, raw, name, mime) }
         catch (e: Exception) { raw.delete(); throw e }
     }
@@ -111,6 +112,7 @@ object OpenRouterAttachmentStore {
 
     private fun extractZipStream(context: Context, source: InputStream, zipName: String, report: (String) -> Unit): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
+        try {
         var entries = 0
         var total = 0L
         ZipInputStream(source.buffered()).use { zin ->
@@ -132,6 +134,7 @@ object OpenRouterAttachmentStore {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
                         val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
                         var entryBytes = 0L
+                        try {
                         local.outputStream().use { out ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
@@ -142,8 +145,13 @@ object OpenRouterAttachmentStore {
                                 out.write(buffer, 0, n)
                             }
                         }
+                        } catch (e: Exception) { local.delete(); throw e }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else {
+                            try {
+                                result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                            } catch (e: Exception) { local.delete(); throw e }
+                        }
                     } else {
                         drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n -> total += n }
                         if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
@@ -156,6 +164,15 @@ object OpenRouterAttachmentStore {
         if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
         report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
         return result
+        } catch (e: Exception) {
+            // Delete only freshly extracted artifacts belonging to this operation.
+            result.forEach { item ->
+                File(item.path).delete()
+                item.textPath?.let { File(it).delete() }
+                item.wirePath?.let { File(it).delete() }
+            }
+            throw e
+        }
     }
 
     internal fun isUnsafeZipPath(path: String): Boolean {
@@ -182,6 +199,7 @@ object OpenRouterAttachmentStore {
         inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
     ): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
+        try {
         var entries = 0
         var total = 0L
         inputStreamSource.openInputStream(context, uri)?.use { source -> ZipInputStream(source.buffered()).use { zin ->
@@ -210,6 +228,7 @@ object OpenRouterAttachmentStore {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
                         val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
                         var entryBytes = 0L
+                        try {
                         local.outputStream().use { out ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
@@ -220,8 +239,13 @@ object OpenRouterAttachmentStore {
                                 out.write(buffer, 0, n)
                             }
                         }
+                        } catch (e: Exception) { local.delete(); throw e }
                         if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                        else {
+                            try {
+                                result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
+                            } catch (e: Exception) { local.delete(); throw e }
+                        }
                     } else {
                         val buffer = ByteArray(64 * 1024); var entryBytes = 0L
                         while (true) {
@@ -239,6 +263,15 @@ object OpenRouterAttachmentStore {
         if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
         report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
         return result
+        } catch (e: Exception) {
+            // Delete only freshly extracted artifacts belonging to this operation.
+            result.forEach { item ->
+                File(item.path).delete()
+                item.textPath?.let { File(it).delete() }
+                item.wirePath?.let { File(it).delete() }
+            }
+            throw e
+        }
     }
 
     fun toContentBlock(a: OpenRouterLocalAttachment): JSONObject = when (a.kind) {
@@ -258,6 +291,9 @@ object OpenRouterAttachmentStore {
         if (!wireFile.isFile || wireFile.length() == 0L) {
             throw IOException("Локальные байты вложения недоступны: " + a.name)
         }
+        if (wireFile.length() > BoundedAttachmentCopy.MAX_INPUT_BYTES) {
+            throw IOException("Вложение превышает лимит 25 МБ для безопасной сериализации: " + a.name)
+        }
         // A name, picker MIME or legacy manifest is not evidence of the actual wire type.
         val wireMime = when (a.kind) {
             "image" -> detectImageMime(wireFile)
@@ -272,7 +308,13 @@ object OpenRouterAttachmentStore {
         return "data:" + wireMime + ";base64," + Base64.getEncoder().encodeToString(wireFile.readBytes())
     }
 
-    fun textContent(a: OpenRouterLocalAttachment): String = File(a.textPath ?: a.path).readText(Charsets.UTF_8)
+    fun textContent(a: OpenRouterLocalAttachment): String {
+        val source = File(a.textPath ?: a.path)
+        if (!source.isFile || source.length() > BoundedAttachmentCopy.MAX_INPUT_BYTES) {
+            throw IOException("Текстовое вложение недоступно или превышает 25 МБ: " + a.name)
+        }
+        return source.readText(Charsets.UTF_8)
+    }
 
     private fun finalizeFile(context: Context?, dir: File, file: File, name: String, mime: String): OpenRouterLocalAttachment {
         val kind = classifyKind(file, name)
