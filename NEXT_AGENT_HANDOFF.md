@@ -1,9 +1,9 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-10 08:39 +03:00
+**Last updated:** 2026-10-10 08:50 +03:00
 **Следующий рабочий срез:** Проверка на телефоне и выбор следующего среза — подтверждение реального поведения APP-04/APP-05, затем обязательный обзор архитектуры и приоритетов.
-**Текущая работа:** PR [#137](https://github.com/luoecrt-pixel/OpenAIApiChat/pull/137) APP-05 F21–F26, ветка `agent/app-05-runtime-resources-tools`; main перед merge `0308fd67b4445d886c966fb5836d9f45db2de4ff` (PR #136 merged). Финальный **кодовый** SHA `fe0b5b2597226f5690b502dc462474d07a25292b`. Этот handoff обновляется docs-only коммитом: кодовые APK/Release остаются валидны, а Verify должен быть Successful на новом финальном PR head. Фактический merged status и main перепроверь в GitHub.
-**Точные APP-05 проверки:** [APK push 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416) **Successful**, включая source verifier, mutation matrix, JVM unit, lint, assembleDebug, Android lifecycle instrumentation и Upload APK; [Release push 37998337154](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337154) **Successful**, включая release build и Upload release artifacts; [Verify PR 37998347081](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998347081) **Successful** — все на `fe0b5b2`. Артефакты: debug `11648259445` и release `11647807945`. Skipped PR-event APK/Release не считать сборкой.
+**Текущая работа:** PR [#137](https://github.com/luoecrt-pixel/OpenAIApiChat/pull/137) APP-05 F21–F26 **merged 2026-10-10**, проверенный squash merge `e330497967503ef781767ca49e0f2668a805dda6` = текущий `main` при создании docs-only ветки `agent/app-05-postmerge-handoff`. Финальный кодовый SHA до squash `fe0b5b2597226f5690b502dc462474d07a25292b`; docs-only head #137 `a3d3f0df7af6b76b7c59b8dfc55b2ffe567aa6ab` прошёл Verify `38028778105`. PR #138 (этот файл) только корректирует handoff после merge; Verify нужен на его финальном head. Следующий агент перечитывает actual main/PR state, а не предполагает постоянство SHA.
+**Точные APP-05 проверки:** [APK push 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416) **Successful**, включая source verifier, mutation matrix, JVM unit, lint, assembleDebug, Android lifecycle instrumentation и Upload APK; [Release push 37998337154](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337154) **Successful**, включая release build и Upload release artifacts; [Verify PR 37998347081](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998347081) **Successful** — все на `fe0b5b2`. Артефакты: debug `11648259445` и release `11647807945`. Дополнительный Verify `38028778105` Successful на итоговом docs-only head PR #137 `a3d3f0d`; PR #137 merged как `e3304979`. Skipped PR-event APK/Release не считать сборкой.
 **APP-05 итог:** F21 durable 5h remaining budget от persisted `started_at` через initial Send/Activity resumed/Worker SSE, включая blocked-socket timeout; F22 bounded/cancellable attachment copy (25 MiB для OpenRouter, 50 MiB для VS upload), F23 очистка operation-owned partial/ZIP/upload при exception; F24 Vector Store dialog/store ownership, до 3 страниц × 100, максимум 10 filename-lookups и видимое incomplete; F25 GitHub `get_file` fail-closed при non-base64, bad UTF-8, absent/oversized content (только UTF-8 base64 ≤256 KiB, отображение до 40000 знаков); F26 Verify при root/nested Markdown. Тесты подтверждают названные pure/Robolectric/ActivityScenario границы, а не всё семейство async/heap/live API.
 **Устранённые старые failures:** на `ce55889b` verifier ожидал неизменённый UI gate, `cd8aa0d` Kotlin не нашёл импорт Base64 writer, `9bc2d66` lint поймал неправильный отступ; новые APK/Release на `fe0b5b2` все Successful.
 **Оставшиеся границы:** физический телефон и исходные большие фотографии, реальные Claude/OpenAI, 5 часов реального SSE, MiXplorer/Photo Picker/IME/gesture, Vector Store provider/dialog races и биллинг не проверены. Платных вызовов и доступа к телефону не делать без разрешения владельца; README не менять. По #134 автосборка Android на push в main выключена; ручной workflow и branch [ci] сохранены. GitHub Actions не отменять вручную.
@@ -55,9 +55,9 @@
 
 | Срез | Подтверждение | Граница |
 | --- | --- | --- |
-| main перед APP-05 | `0308fd67b4445d886c966fb5836d9f45db2de4ff`; #136 уже merged; SQLite v20 | При следующем заходе сверить фактический main и merge #137 |
+| main после APP-05 #137 | `e330497967503ef781767ca49e0f2668a805dda6` — подтверждённый squash merge #137, SQLite v20 | Новый docs-only #138 не меняет Android-код; фактический main на каждом новом заходе сверять |
 | #136 APP-04 final | `613bff2155838b5b1988df4b478d3bf601a83882`; APK `37994461394`, Release `37994461425`, Verify `37994465824` — Successful; merge `0308fd67` | Android emulator/HTTPS mock, не физический swipe, live provider или проблемное исходное фото |
-| #137 APP-05 final code | `fe0b5b2597226f5690b502dc462474d07a25292b`; push APK `37998337416` включая instrumentation, push Release `37998337154`, PR Verify `37998347081` — Successful | Docs-only final head требует собственного Verify; тесты не покрывают реальную 5h сессию или весь heap |
+| #137 APP-05 final code | `fe0b5b2597226f5690b502dc462474d07a25292b`; push APK `37998337416` включая instrumentation, push Release `37998337154` — Successful; final docs-only head `a3d3f0d`/Verify `38028778105` — Successful; merge `e3304979` | Тесты не покрывают реальную 5h сессию, весь heap/физический телефон |
 | APK/Release artifacts | Debug artifact `11648259445`, Release artifact `11647807945` в соответствующих runs | CI upload, не доказательство установки на телефон; срок хранения artifacts конечен |
 | Физический телефон | Ранее владелец подтвердил камеру и распознавание маленького фото | Большое реальное фото, OR→GPT, picker, drawer/IME, diagnostics, VS и live API ещё не приняты вручную |
 
@@ -168,11 +168,11 @@
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-Редакция 13: #136 merged; #137 APP-05 F21–F26 прошёл exact-code APK/Release/Verify и закрыт в implementation scope, но physical phone/provider smoke остаётся не пройденным. Статус actual merge #137 проверять отдельно. Compose rewrite, финансовый ledger и autoretry не включены.
+Редакция 14: #136 и #137 merged, APP-05 F21–F26 получил exact-code APK/Release/Verify. Physical phone/provider smoke всё ещё не пройден. Этот docs-only #138 уточняет финальный handoff, не меняя scope и runtime. Compose rewrite, финансовый ledger и autoretry не включены.
 
 ### 1. Проверка на телефоне и выбор следующего среза — **следующий**
 
-**Первый шаг:** проверить actual merged state PR #137 и финальный Verify head, затем передать владельцу debug APK из [run 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416), artifact `11648259445`. В диагностике установленного APK ожидать именно `BuildConfig.BUILD_GIT_SHA = fe0b5b2597226f5690b502dc462474d07a25292b` (кодовая сборка), **не** будущий squash merge SHA.
+**Первый шаг:** убедиться, что docs-only PR #138 завершился успешным Verify и merged, затем предложить владельцу установить debug APK из [run 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416), artifact `11648259445`. В диагностике установленного APK ожидать именно `BuildConfig.BUILD_GIT_SHA = fe0b5b2597226f5690b502dc462474d07a25292b` (кодовая сборка), **не** squash merge SHA `e3304979`. Если артефакт истёк — не выдумывать ссылку.
 
 | Приоритет | Ручная/следующая проверка | CI-подтверждённая граница |
 | --- | --- | --- |
@@ -190,7 +190,7 @@
 
 ## Контекстный режим для агента
 
-Существующая запись — гипотеза до сверки с current source/test/run. Историю ошибок и отменённое UI-ТЗ не выдавай за новый backlog. Источники доказательств не взаимозаменяемы: exact test assertion → выполненный harness → конкретный SHA/attempt; соседний test и общий summary не расширяют этот claim. Вне репозитория могут быть прежние планы/отчёты, но обязательный APP-05 scope сохранён здесь.
+Существующая запись — гипотеза до сверки с current source/test/run. Историю ошибок и отменённое UI-ТЗ не выдавай за новый backlog. Источники доказательств не взаимозаменяемы: exact test assertion → выполненный harness → конкретный SHA/attempt; соседний test и общий summary не расширяют claim. Выполненный APP-05 F21–F26 и его ограничения сохранены выше как proof, а не незавершённый backlog.
 
 ## Как проверять новую работу
 
@@ -236,13 +236,13 @@
 
 ## История последних рабочих заходов — последние 5 PR
 
-На момент документа: последние пять merged PR #132–#136, #137 — в процессе документирования перед merge. После объединения #137 обновить здесь verified merge SHA и окно #133–#137 (документ может попасть в same PR, поэтому status брать из GitHub).
+Окно последних пяти рабочих PR при планируемом merge docs-only #138: #134–#138. Для #134–#137 статус merged подтверждён, #138 — этот документационный PR; перед следующей работой убедиться, что #138 merged, и прочитать его фактический merge SHA в GitHub. Никакой кодовой Android-сборки для docs-only #138 не требуется, только Verify на финальном head.
 
-- **#132:** docs revision 9, merge `c9069333050d85bc1db6105c1c7ad4d9dd68c02d`; DB writers/Repeat plan, без Android-кода.
-- **#133:** APP-04 A/B/C + F18/FIN133, final code `73d9e4357838fbd55f6564b11e3806bb3f65bd65`, APK `37967095171`, Release `37967095269`, Verify `37967102030` Successful; merge `8a4d019328c90745df4448bea5c5dc1e1a2d9351`.
 - **#134:** отключение main push APK/Release при сохранении branch [ci]/manual; merge `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, Verify `37972109767` Successful, YAML-only.
 - **#135:** docs PHONE plan, merge `c492e74e3aaed8f87752be41e8ad2618d8215afa`, Verify `37980410307` Successful.
-- **#136:** APP-04-PHONE final `613bff2155838b5b1988df4b478d3bf601a83882`, APK `37994461394`, Release `37994461425`, Verify `37994465824` Successful; merge `0308fd67b4445d886c966fb5836d9f45db2de4ff`. Mock/local/photo/UI proof, physical phone/live provider остаются.
+- **#136:** APP-04-PHONE final `613bff2155838b5b1988df4b478d3bf601a83882`, APK `37994461394`, Release `37994461425`, Verify `37994465824` Successful; merge `0308fd67b4445d886c966fb5836d9f45db2de4ff`. Manual phone/live upstream отдельно.
+- **#137:** APP-05 F21–F26, final code `fe0b5b2597226f5690b502dc462474d07a25292b`, APK `37998337416`, Release `37998337154` Successful; final docs head `a3d3f0d`, Verify `38028778105` Successful; merge `e330497967503ef781767ca49e0f2668a805dda6`. Оставшиеся phone/live/heap границы перечислены в baseline/контракте.
+- **#138:** post-merge handoff reconciliation (только `NEXT_AGENT_HANDOFF.md`), вносит подтверждённый merge #137, обновляет history и следующий срез; Verify/merge state надо получить из фактического PR, не придумывать наперёд.
 
 ## Product radar — идеи с реальной ценностью
 
