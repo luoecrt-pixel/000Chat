@@ -436,8 +436,11 @@ class OpenRouterChatClient(
                 JsonProtocol.nonBlank(responseJson, "model")?.let { responseModel = it }
                 val finishReason = JsonProtocol.nonBlank(responseJson, "finish_reason")
                 val calls = message.optJSONArray("tool_calls")
+                // A complete SSE [DONE] frame may omit finish_reason even after a
+                // fully formed tool call. The per-tool id/name/JSON checks below
+                // still reject incomplete or malformed tool execution requests.
                 if (calls == null || calls.length() == 0 ||
-                    finishReason == null || finishReason !in setOf("tool_calls", "stop")) {
+                    finishReason != null && finishReason !in setOf("tool_calls", "stop")) {
                     val tail = JSONArray()
                     for (i in inputCount until history.length()) tail.put(JsonProtocol.copy(history.get(i)))
                     val replayMessage = JsonProtocol.objectCopy(message)

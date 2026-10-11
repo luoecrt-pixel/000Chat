@@ -242,8 +242,16 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 21) {
-            db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN finish_reason TEXT")
-            db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openrouter_protocol TEXT")
+            // A legacy or partially upgraded DB can already contain these columns.
+            // Do not turn an unchanged historic message into a destructive migration.
+            val columns = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names.add(c.getString(nameIndex))
+                names
+            }
+            if ("finish_reason" !in columns) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN finish_reason TEXT")
+            if ("openrouter_protocol" !in columns) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openrouter_protocol TEXT")
             ensureLocalArtifactsTable(db)
         }
         if (oldVersion < 2) {
@@ -358,7 +366,13 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ensureOpenRouterRoundsTable(db)
         }
         if (oldVersion < 22) {
-            db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN protocol_context_state TEXT")
+            val hasProtocolContext = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                var found = false
+                while (c.moveToNext()) if (c.getString(nameIndex) == "protocol_context_state") found = true
+                found
+            }
+            if (!hasProtocolContext) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN protocol_context_state TEXT")
         }
     }
 

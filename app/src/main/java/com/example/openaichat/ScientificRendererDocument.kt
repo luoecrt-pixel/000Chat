@@ -24,7 +24,7 @@ object ScientificRendererDocument {
         Regex("<[A-Za-z!/][^>]*>").containsMatchIn(source) -> "HTML внутри диаграммы не разрешён в превью."
         else -> null
     }
-    private fun scriptData(value: String) = value.replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    private fun scriptData(value: String) = value.replace("\\/", "/").replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     fun math(formulas: List<MathDelimiterScanner.Formula>): String {
         require(formulas.isNotEmpty() && formulas.sumOf { it.latex.length.toLong() } <= MAX_MATH_CHARACTERS)
         val data = JSONArray(formulas.map { JSONObject().put("source", it.source).put("latex", it.latex).put("display", it.display) })
