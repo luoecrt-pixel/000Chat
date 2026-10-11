@@ -1,0 +1,29 @@
+# Android / Gradle: generated and machine-local files
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+
+# Credentials, signing material and machine-local secrets
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.p8
+*.kdbx
+*.pem
+*.b64
+keystore.properties
+signing.properties
+google-services.json
+*.credentials.json
+
+# Local audit output and editor files
+publication-audit-*.json
+.DS_Store
+Thumbs.db
