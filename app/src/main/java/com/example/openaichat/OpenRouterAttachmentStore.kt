@@ -14,9 +14,6 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.charset.Charset
-import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipInputStream
@@ -32,23 +29,25 @@ data class OpenRouterLocalAttachment(
     val textPath: String? = null,
     val textEncoding: String? = null,
     val wirePath: String? = null,
-    val wireMime: String? = null
+    val wireMime: String? = null,
+    val encodingGuessed: Boolean = textEncoding.equals("windows-1251", ignoreCase = true)
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("kind", kind).put("path", path).put("mime", mime).put("size", size).put("sha256", sha256).apply {
         textPath?.let { put("text_path", it) }
-        textEncoding?.let { put("text_encoding", it) }
+        textEncoding?.let { put("text_encoding", it); put("encoding_guessed", encodingGuessed) }
         wirePath?.let { put("wire_path", it) }
         wireMime?.let { put("wire_mime", it) }
     }
     companion object {
         private fun optional(o: JSONObject, key: String): String? =
-            o.optString(key).takeIf { it.isNotBlank() && it != "null" && !o.isNull(key) }
+            JsonProtocol.nonBlank(o, key)?.takeIf { it != "null" }
 
         fun fromJson(o: JSONObject) = OpenRouterLocalAttachment(
-            o.optString("id"), o.optString("name", "attachment"), o.optString("kind", "unknown"),
-            o.optString("path"), o.optString("mime", "application/octet-stream"), o.optLong("size", 0L),
-            o.optString("sha256"), optional(o, "text_path"), optional(o, "text_encoding"),
-            optional(o, "wire_path"), optional(o, "wire_mime")
+            JsonProtocol.string(o, "id"), JsonProtocol.string(o, "name", "attachment"), JsonProtocol.string(o, "kind", "unknown"),
+            JsonProtocol.string(o, "path"), JsonProtocol.string(o, "mime", "application/octet-stream"), o.optLong("size", 0L),
+            JsonProtocol.string(o, "sha256"), optional(o, "text_path"), optional(o, "text_encoding"),
+            optional(o, "wire_path"), optional(o, "wire_mime"),
+            o.optBoolean("encoding_guessed", optional(o, "text_encoding").equals("windows-1251", ignoreCase = true))
         )
     }
 }
@@ -68,10 +67,10 @@ object OpenRouterAttachmentStore {
     const val MAX_ZIP_ENTRIES = 100
     const val MAX_ZIP_ENTRY_BYTES = 25L * 1024L * 1024L
     const val MAX_ZIP_TOTAL_BYTES = 200L * 1024L * 1024L
-    private val textExtensions = setOf("txt","md","kt","java","json","csv","xml","yaml","yml","log")
+    private val textExtensions = TextFileFormatPolicy.extensions
     private val imageExtensions = setOf("png","jpg","jpeg","webp","gif")
 
-    fun supportedFormatsText() = "txt, md, kt, java, json, csv, xml, yaml, yml, log, png, jpg, jpeg, webp, gif, pdf, zip"
+    fun supportedFormatsText() = (textExtensions.sorted() + TextFileFormatPolicy.office.sorted() + listOf("png", "jpg", "jpeg", "webp", "gif", "pdf", "zip")).joinToString(", ")
 
     fun queryName(context: Context, uri: Uri): String? = try {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
@@ -85,7 +84,8 @@ object OpenRouterAttachmentStore {
         context: Context,
         uri: Uri,
         forcedName: String? = null,
-        inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
+        inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource,
+        allowOpenAiContainer: Boolean = false
     ): OpenRouterLocalAttachment {
         val name = sanitizeDisplayName(forcedName ?: queryName(context, uri) ?: "attachment")
         val mime = runCatching { context.contentResolver.getType(uri).orEmpty() }.getOrDefault("").ifBlank { mimeForFilename(name) }
@@ -95,7 +95,15 @@ object OpenRouterAttachmentStore {
             BoundedAttachmentCopy.copy(input, raw)
         } ?: throw IOException("Не удалось открыть файл: " + name)
         return try { finalizeFile(context, dir, raw, name, mime) }
-        catch (e: Exception) { raw.delete(); throw e }
+        catch (e: Exception) {
+            if (allowOpenAiContainer && TextFileFormatPolicy.extension(name) in setOf("doc", "ppt", "xls", "zip")) {
+                val sha = sha256(raw)
+                return OpenRouterLocalAttachment("container_" + sha, name,
+                    if (TextFileFormatPolicy.extension(name) in setOf("doc", "ppt")) "container_document" else "container",
+                    raw.absolutePath, mime, raw.length(), sha)
+            }
+            raw.delete(); throw e
+        }
     }
 
     fun classifyLocalFile(file: File, displayName: String = file.name, mime: String = mimeForFilename(displayName)): OpenRouterLocalAttachment =
@@ -128,7 +136,7 @@ object OpenRouterAttachmentStore {
                     if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
                 } else if (!entry.isDirectory && entryName.isNotBlank()) {
                     val ext = entryName.substringAfterLast('.', "").lowercase()
-                    val supported = ext in textExtensions || ext in imageExtensions || ext == "pdf"
+                    val supported = TextFileFormatPolicy.knownText(entryName) || ext in TextFileFormatPolicy.office || ext in imageExtensions || ext == "pdf"
                     val nested = ext == "zip" || ext == "apk" || ext == "jar"
                     if (supported) {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
@@ -222,7 +230,7 @@ object OpenRouterAttachmentStore {
                     report("Небезопасный путь ZIP пропущен: " + entry.name)
                 } else if (!entry.isDirectory && entryName.isNotBlank()) {
                     val ext = entryName.substringAfterLast('.', "").lowercase()
-                    val supported = ext in textExtensions || ext in imageExtensions || ext == "pdf"
+                    val supported = TextFileFormatPolicy.knownText(entryName) || ext in TextFileFormatPolicy.office || ext in imageExtensions || ext == "pdf"
                     val nested = ext == "zip" || ext == "apk" || ext == "jar"
                     if (supported) {
                         val dir = File(context.filesDir, "attachments").apply { mkdirs() }
@@ -275,9 +283,9 @@ object OpenRouterAttachmentStore {
     }
 
     fun toContentBlock(a: OpenRouterLocalAttachment): JSONObject = when (a.kind) {
-        "text" -> JSONObject().put("type", "text").put("text", "<file name=\"" + a.name.replace("\"", "&quot;") + "\">\n" + textContent(a).replace("</file>", "<\\/file>") + "\n</file>")
-        "image" -> JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", toDataUrl(a)))
-        "pdf" -> JSONObject().put("type", "file").put("file", JSONObject().put("filename", a.name).put("file_data", toDataUrl(a)))
+        "text", "document", "table" -> JSONObject().put("type", "text").put("text", LocalFileTools.descriptor(a).toString())
+        "image" -> JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", streamingDataUrl(a)))
+        "pdf" -> JSONObject().put("type", "file").put("file", JSONObject().put("filename", a.name).put("file_data", streamingDataUrl(a)))
         else -> throw IOException("Вложение " + a.name + " нельзя отправить напрямую")
     }
     internal fun shouldRefreshLegacyPngWire(attachment: OpenRouterLocalAttachment): Boolean {
@@ -286,7 +294,7 @@ object OpenRouterAttachmentStore {
         return source.isFile && isJpegFile(source)
     }
 
-    fun toDataUrl(a: OpenRouterLocalAttachment): String {
+    private fun checkedWire(a: OpenRouterLocalAttachment): Pair<File, String> {
         val wireFile = File(a.wirePath ?: a.path)
         if (!wireFile.isFile || wireFile.length() == 0L) {
             throw IOException("Локальные байты вложения недоступны: " + a.name)
@@ -305,7 +313,35 @@ object OpenRouterAttachmentStore {
                 else throw IOException("Повреждённый PDF: " + a.name)
             else -> a.wireMime ?: a.mime
         }
-        return "data:" + wireMime + ";base64," + Base64.getEncoder().encodeToString(wireFile.readBytes())
+        return wireFile to wireMime
+    }
+    internal fun streamingDataUrl(a: OpenRouterLocalAttachment): FileBackedDataUrl {
+        val (file, mime) = checkedWire(a)
+        return FileBackedDataUrl(file, mime)
+    }
+    // Compatibility helper for the separate OpenAI encoder; OpenRouter uses disk-backed wire values.
+    fun toDataUrl(a: OpenRouterLocalAttachment): String {
+        val (wireFile, wireMime) = checkedWire(a)
+        val encoded = StringBuilder()
+        val ascii = object : java.io.OutputStream() {
+            override fun write(b: Int) { encoded.append((b and 255).toChar()) }
+            override fun write(b: ByteArray, off: Int, len: Int) { encoded.append(String(b, off, len, Charsets.US_ASCII)) }
+        }
+        Base64.getEncoder().wrap(ascii).use { output ->
+            wireFile.inputStream().use { input -> input.copyTo(output, 64 * 1024) }
+        }
+        return "data:" + wireMime + ";base64," + encoded
+    }
+
+    fun withTextEncoding(a: OpenRouterLocalAttachment, encoding: String): OpenRouterLocalAttachment {
+        if (a.kind != "text" || encoding !in TextFileFormatPolicy.selectableEncodings) throw IOException("Недоступная кодировка")
+        val source = File(a.path)
+        if (!source.isFile || (a.sha256.isNotBlank() && sha256(source) != a.sha256)) throw IOException("Оригинал отсутствует или изменён")
+        val normalized = PreparedAttachmentFiles.derivative(source.parentFile ?: throw IOException("Нет каталога оригинала"), ".utf8")
+        try {
+            TextFileFormatPolicy.normalize(source, normalized, false, encoding)
+            return a.copy(textPath = normalized.absolutePath, textEncoding = encoding, encodingGuessed = false)
+        } catch (e: Exception) { normalized.delete(); throw e }
     }
 
     fun textContent(a: OpenRouterLocalAttachment): String {
@@ -322,26 +358,33 @@ object OpenRouterAttachmentStore {
         if (kind == "unsupported") throw IOException("Формат '" + name + "' не поддерживается для OpenRouter. Поддерживаются: " + supportedFormatsText())
         if (kind == "binary") throw IOException("Файл '" + name + "' определён как бинарный и не входит в поддерживаемые форматы")
         val size = file.length(); val sha = sha256(file)
+        val stableId = sha + "_" + java.security.MessageDigest.getInstance("SHA-256")
+            .digest(name.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it) }
         return if (kind == "text") {
-            val decoded = decodeText(file, name)
-            val textFile = File(dir, "txt_" + UUID.randomUUID() + ".utf8")
-            textFile.writeText(decoded.first, Charsets.UTF_8)
-            OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, decoded.second)
+            val textFile = PreparedAttachmentFiles.derivative(dir, ".utf8")
+            val encoding = TextFileFormatPolicy.normalize(file, textFile, TextFileFormatPolicy.knownText(name))
+            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, encoding)
+        } else if (kind == "document" || kind == "table") {
+            val textFile = PreparedAttachmentFiles.derivative(dir, ".utf8")
+            try { StructuredDocumentExtractor.extract(file, textFile, TextFileFormatPolicy.extension(name)) }
+            catch (e: Exception) { textFile.delete(); throw e }
+            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, mime, size, sha, textFile.absolutePath, "UTF-8")
         } else if (kind == "image") {
             val actualMime = detectImageMime(file)
                 ?: throw IOException("Изображение не соответствует JPEG, PNG, GIF или WebP: " + name)
             val normalized = context?.let { normalizeImageOrientation(it, file, dir, name) }
-            OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath,
+            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath,
                 actualMime, size, sha, null, null, normalized?.absolutePath,
                 if (normalized != null) "image/jpeg" else actualMime)
         } else {
-            OpenRouterLocalAttachment(UUID.randomUUID().toString(), name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
+            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
         }
     }
 
     /**
      * Cheap container-level validation: a signature alone accepts 3-byte "JPEGs".
-     * Only the header and file trailer are inspected; this is not a full decode.
+     * JPEG markers are scanned through EOI in blocks; other formats inspect header/trailer.
+     * This is not a full decode; byte integrity is checked separately with SHA.
      */
     internal fun detectImageMime(file: File): String? {
         if (!file.isFile) return null
@@ -366,8 +409,8 @@ object OpenRouterAttachmentStore {
                 when (mime) {
                     "image/jpeg" -> {
                         if (length < 64L) return false
-                        source.seek(length - 2L)
-                        source.readUnsignedByte() == 0xFF && source.readUnsignedByte() == 0xD9
+                        // Motion photos / vendor metadata may follow EOI, even by many MB.
+                        JpegContainerReader.complete(file)
                     }
                     "image/png" -> {
                         if (length < 45L) return false
@@ -409,8 +452,12 @@ object OpenRouterAttachmentStore {
         if (magic.copyOfRange(0,3).contentEquals(byteArrayOf(0xFF.toByte(),0xD8.toByte(),0xFF.toByte()))) return "image"
         if (magic.copyOfRange(0,3).contentEquals("GIF".toByteArray())) return "image"
         if (magic.copyOfRange(0,4).contentEquals("RIFF".toByteArray()) && magic.copyOfRange(8,12).contentEquals("WEBP".toByteArray())) return "image"
-        if (magic.copyOfRange(0,4).contentEquals(byteArrayOf(0x50,0x4B,0x03,0x04))) return "zip"
-        if (ext in textExtensions) return "text"
+        if (magic.copyOfRange(0,4).contentEquals(byteArrayOf(0x50,0x4B,0x03,0x04))) {
+            if (ext == "xlsx") return "table"
+            if (ext in TextFileFormatPolicy.office) return "document"
+            return "zip"
+        }
+        if (TextFileFormatPolicy.knownText(name)) return "text"
         if (ext in imageExtensions) return "image"
         if (ext == "pdf") return "pdf"
         return "unsupported"
@@ -461,7 +508,7 @@ object OpenRouterAttachmentStore {
             var transformed: File? = null
             try {
                 transformed = transformer.rotate(rotationDegree, trim = false)
-                val owned = File(dir, "wire_" + UUID.randomUUID() + ".jpg")
+                val owned = PreparedAttachmentFiles.derivative(dir, ".jpg")
                 transformed.copyTo(owned, overwrite = true)
                 return owned
             } finally {
@@ -479,18 +526,6 @@ object OpenRouterAttachmentStore {
             input.read() == 0xFF && input.read() == 0xD8 && input.read() == 0xFF
         }
     }
-
-    private fun decodeText(file: File, name: String): Pair<String,String> {
-        val bytes = file.readBytes()
-        if (bytes.any { it.toInt() == 0 }) throw IOException("Файл '" + name + "' содержит нулевые байты и не считается текстом")
-        decodeStrict(bytes, Charsets.UTF_8)?.let { return it to "UTF-8" }
-        decodeStrict(bytes, Charset.forName("windows-1251"))?.let { return it to "windows-1251" }
-        throw IOException("Не удалось определить кодировку '" + name + "': UTF-8 и windows-1251 не подошли")
-    }
-
-    private fun decodeStrict(bytes: ByteArray, charset: java.nio.charset.Charset): String? = try {
-        charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
-    } catch (_: Exception) { null }
 
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")

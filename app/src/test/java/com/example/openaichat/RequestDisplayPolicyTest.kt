@@ -38,7 +38,7 @@ class RequestDisplayPolicyTest {
             .put("response_model", "anthropic/claude-opus-5.5")
         assertEquals("Claude Opus 5.5", AssistantModelLabel.text(m))
         m.remove("response_model")
-        assertEquals("Запрошена: Claude Sonnet 5.5", AssistantModelLabel.text(m))
+        assertEquals("Claude Sonnet 5.5", AssistantModelLabel.text(m))
         assertEquals("Ассистент · модель неизвестна", AssistantModelLabel.text(JSONObject()))
     }
 }

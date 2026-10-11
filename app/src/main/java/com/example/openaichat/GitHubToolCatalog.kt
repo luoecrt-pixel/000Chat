@@ -56,6 +56,12 @@ object GitHubToolCatalog {
         out.put(schema("get_file", "Read one repository file as UTF-8 text.",
             commonRepoProperties().put("path", stringProp("Repository-relative file path"))
                 .put("ref", stringProp("Explicit allowed branch/ref required")), required("owner", "repo", "path", "ref")))
+        out.put(schema("get_file_range", "Stream a UTF-8 repository file in bounded pages. Read next_offset until eof, passing the first page's etag on later pages to detect changes while reading.",
+            commonRepoProperties().put("path", stringProp("Repository-relative file path"))
+                .put("ref", stringProp("Explicit allowed branch/ref required"))
+                .put("offset", intProp("UTF-16 character offset, default 0"))
+                .put("limit", intProp("Characters per call, 2..40000, default 24000"))
+                .put("etag", stringProp("Required when offset > 0: exact ETag returned by the first page. A changed file requires restarting at offset 0.")), required("owner", "repo", "path", "ref")))
         out.put(schema("list_directory", "List files/directories at a repository path.",
             commonRepoProperties().put("path", stringProp("Repository-relative directory path; empty for root"))
                 .put("ref", stringProp("Explicit allowed branch/ref required")), required("owner", "repo", "path", "ref")))

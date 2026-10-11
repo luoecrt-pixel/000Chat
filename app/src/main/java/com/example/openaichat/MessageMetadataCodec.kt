@@ -10,15 +10,14 @@ import org.json.JSONObject
 object MessageMetadataCodec {
     val textKeys = listOf(
         "provider", "model", "requested_model", "response_model",
-        "reasoning_summary", "error"
+        "reasoning_summary", "error", "finish_reason", "protocol_context_state"
     )
     val arrayKeys = listOf("tool_trace")
-    val objectKeys = listOf("usage")
+    val objectKeys = listOf("usage", "openrouter_protocol")
     val allKeys: List<String> = textKeys + arrayKeys + objectKeys
 
     fun serialized(message: JSONObject, key: String): String? = when (key) {
-        in textKeys -> message.optString(key)
-            .takeIf { message.has(key) && !message.isNull(key) && it.isNotBlank() && it != "null" }
+        in textKeys -> JsonProtocol.nonBlank(message, key)
         in arrayKeys -> message.optJSONArray(key)?.toString()
         in objectKeys -> message.optJSONObject(key)?.toString()
         else -> null

@@ -35,7 +35,7 @@ assert 'file_citation' in main
 assert 'url_citation' in main
 assert 'put("type","web_search")' in main
 assert 'configuration_update' in main
-assert 'if (configUpdateEffort == null)' in main
+assert 'configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", true)' in main
 assert 'background' in main
 assert 'streamBackgroundResponse' in main
 assert 'response.reasoning_summary_text.delta' in main
@@ -82,7 +82,7 @@ assert "ensureRequestEventsTable(db)" in upgrade_v18
 assert "PRAGMA table_info($REQUEST_EVENT_TABLE)" in upgrade_v18
 assert 'if ("cost_kind" !in columns)' in upgrade_v18
 assert 'if ("cost_usd" !in columns)' in upgrade_v18
-assert 'MessageMetadataCodec.allKeys.forEach' in db
+assert 'MessageMetadataCodec.allKeys.filter' in db and 'finish_reason' in db and 'openrouter_protocol' in db
 assert 'MessageMetadataCodec.decodeInto' in db
 codec = (ROOT / 'app/src/main/java/com/example/openaichat/MessageMetadataCodec.kt').read_text()
 for key in ['provider', 'model', 'requested_model', 'response_model', 'reasoning_summary', 'error', 'tool_trace', 'usage']:
@@ -347,3 +347,7 @@ assert 'name="attachments" path="attachments/"' in file_paths_xml
 assert 'cache-path name="cache" path="."' not in file_paths_xml
 
 print('Astra v4.17.0 static verification: PASS')
+
+# Runs inside the existing CI step; no extra workflow or Actions run is needed.
+import runpy
+runpy.run_path(str(ROOT / 'tools/verify_implementation.py'), run_name='__main__')

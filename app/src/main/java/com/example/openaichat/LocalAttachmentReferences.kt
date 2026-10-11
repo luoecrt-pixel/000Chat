@@ -14,7 +14,7 @@ object LocalAttachmentReferences {
         for (i in 0 until manifest.length()) {
             val item = manifest.optJSONObject(i) ?: continue
             for (key in listOf("path", "text_path", "wire_path")) {
-                item.optString(key).takeIf { it.isNotBlank() }?.let(result::add)
+                JsonProtocol.nonBlank(item, key)?.let(result::add)
             }
         }
         return result
@@ -24,10 +24,10 @@ object LocalAttachmentReferences {
         val result = linkedSetOf<String>()
         json.optJSONArray("file_paths")?.let { paths ->
             for (i in 0 until paths.length()) {
-                paths.optString(i).takeIf { it.isNotBlank() }?.let(result::add)
+                JsonProtocol.string(paths, i).takeIf { it.isNotBlank() }?.let(result::add)
             }
         }
-        json.optString("image_path").takeIf { it.isNotBlank() }?.let(result::add)
+        JsonProtocol.string(json, "image_path").takeIf { it.isNotBlank() }?.let(result::add)
         result.addAll(openRouterPaths(json.optJSONArray("openrouter_attachments")))
         return result
     }

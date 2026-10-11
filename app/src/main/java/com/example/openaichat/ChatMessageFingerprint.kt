@@ -25,13 +25,13 @@ object ChatMessageFingerprint {
             }
             when (key) {
                 "role", "text" -> normalized.put(
-                    message.optString(key)
+                    JsonProtocol.string(message, key)
                 )
                 "feedback" -> normalized.put(
                     if (message.has(key) && !message.isNull(key)) message.optInt(key) else JSONObject.NULL
                 )
                 "response_id", "request_id", "image_path", "image_file_id", "image_name", "image_mime", "status" ->
-                    normalized.put(message.optString(key).takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                    normalized.put(JsonProtocol.string(message, key).takeIf { it.isNotBlank() } ?: JSONObject.NULL)
                 "image_size" ->
                     normalized.put(message.optLong(key, 0L).coerceAtLeast(0L))
                 else ->

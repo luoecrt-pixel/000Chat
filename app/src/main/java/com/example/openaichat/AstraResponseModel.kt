@@ -72,7 +72,7 @@ data class AstraResponseModel(
                             for(j in 0 until summary.length()){
                                 val s=summary.optJSONObject(j) ?: continue
                                 if(s.optString("type")=="summary_text"){
-                                    s.optString("text").trim().takeIf{it.isNotBlank()}?.let(reasoningSummaryParts::add)
+                                    JsonProtocol.string(s, "text").trim().takeIf{it.isNotBlank()}?.let(reasoningSummaryParts::add)
                                 }
                             }
                         }
@@ -82,7 +82,7 @@ data class AstraResponseModel(
                     "code_interpreter_call" -> tools.add("🐍 Code Interpreter")
                     "image_generation_call" -> {
                         tools.add("🎨 Image Generation")
-                        item.optString("result").takeIf { it.isNotBlank() }?.let(generatedImages::add)
+                        JsonProtocol.nonBlank(item, "result")?.let(generatedImages::add)
                     }
                     "computer_call" -> tools.add("🖥 Computer Use")
                 }
@@ -100,14 +100,14 @@ data class AstraResponseModel(
                     }
                 }
             }
-            val status = forcedStatus ?: r.optString("status").ifBlank { "completed" }
+            val status = forcedStatus ?: JsonProtocol.nonBlank(r, "status") ?: "completed"
             val error = forcedError
-                ?: r.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
-                ?: r.optJSONObject("incomplete_details")?.optString("reason")?.takeIf { it.isNotBlank() }
+                ?: r.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
+                ?: r.optJSONObject("incomplete_details")?.let { JsonProtocol.nonBlank(it, "reason") }
             return AstraResponseModel(
-                id = r.optString("id").takeIf { it.isNotBlank() },
+                id = JsonProtocol.nonBlank(r, "id"),
                 requestId = requestId,
-                model = r.optString("model").takeIf { it.isNotBlank() },
+                model = JsonProtocol.nonBlank(r, "model"),
                 text = fallbackText,
                 annotations = annotations,
                 tools = tools.distinct(),
@@ -124,7 +124,7 @@ data class AstraResponseModel(
                 id = obj.optString("response_id").takeIf { it.isNotBlank() && it != "null" },
                 requestId = obj.optString("request_id").takeIf { it.isNotBlank() && it != "null" },
                 model = obj.optString("response_model").takeIf { it.isNotBlank() && it != "null" },
-                text = obj.optString("text"),
+                text = JsonProtocol.string(obj, "text"),
                 annotations = JSONArray(obj.optJSONArray("annotations")?.toString() ?: "[]"),
                 tools = buildList {
                     val arr = obj.optJSONArray("tools")

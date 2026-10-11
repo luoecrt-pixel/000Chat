@@ -29,7 +29,7 @@ object BackgroundRequestFailureRecorder {
             .ifBlank { userMessage?.optString("model").orEmpty() }
             .takeIf { it.isNotBlank() }
 
-        val partial = active.optString("text")
+        val partial = JsonProtocol.string(active, "text")
         if (partial.isNotBlank() && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {

@@ -39,6 +39,18 @@ class OpenRouterCachePolicyTest {
         assertFalse(body.has("cache_control"))
     }
 
+    @Test fun fiveMinutesUsesDocumentedDefaultAndOffClearsPreviousMarker() {
+        val body = JSONObject()
+        OpenRouterCachePolicy.configureRequest(body, "anthropic/claude-opus-5.5", "5m")
+        assertEquals("ephemeral", body.getJSONObject("cache_control").getString("type"))
+        assertFalse(body.getJSONObject("cache_control").has("ttl"))
+        OpenRouterCachePolicy.configureRequest(body, "anthropic/claude-opus-5.5", "off")
+        assertFalse(body.has("cache_control"))
+        OpenRouterCachePolicy.configureRequest(body, "anthropic/claude-opus-5.5", "1h")
+        OpenRouterCachePolicy.configureRequest(body, "openai/gpt-6")
+        assertFalse(body.has("cache_control"))
+    }
+
     @Test
     fun systemTextIsNotSplitIntoImplicitFiveMinuteCacheBlocks() {
         val system = OpenRouterCachePolicy.systemMessage("Prompt")

@@ -12,6 +12,15 @@ data class ApiSourceOption(
 )
 
 object ModelCatalog {
+    // https://developers.openai.com/api/docs/models (verified 2026-10-10).
+    // This is a context-window capability, never a client-side output-token cap.
+    fun openAiContextWindow(model: String): Int? = when (model.removePrefix("~")) {
+        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna" -> 1_050_000
+        else -> null
+    }
+    fun compactionThreshold(model: String): Int? = openAiContextWindow(model)?.let { window ->
+        minOf(800_000, window - 16_384).takeIf { it > 0 }
+    }
     val sources: List<ApiSourceOption> = listOf(
         ApiSourceOption(
             id = "openai",

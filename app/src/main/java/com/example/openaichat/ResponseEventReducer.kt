@@ -3,10 +3,7 @@ package com.example.openaichat
 import org.json.JSONObject
 
 enum class ResponseTerminalState(val wireStatus: String) {
-    COMPLETED("completed"),
-    FAILED("failed"),
-    INCOMPLETE("incomplete"),
-    CANCELLED("cancelled")
+    COMPLETED("completed"), FAILED("failed"), INCOMPLETE("incomplete"), CANCELLED("cancelled")
 }
 
 data class ResponseEventState(
@@ -25,121 +22,58 @@ data class ResponseEventDecision(
     val reasoningChanged: Boolean = false,
     val responseIdChanged: Boolean = false
 ) {
-    val terminal: Boolean
-        get() = state.terminalState != null
+    val terminal: Boolean get() = state.terminalState != null
 }
 
+/** Reject non-string SSE protocol fields, especially Android JSONObject.NULL. */
 object ResponseEventReducer {
     fun reduce(current: ResponseEventState, event: JSONObject): ResponseEventDecision {
-        return when (event.optString("type")) {
+        return when (JsonProtocol.string(event, "type")) {
             "response.created" -> {
-                val response = event.optJSONObject("response")
-                val responseId = response?.optString("id")?.takeIf { it.isNotBlank() }
-                val state = if (responseId == null || responseId == current.responseId) {
-                    current
-                } else {
-                    current.copy(responseId = responseId)
-                }
-                ResponseEventDecision(
-                    state = state,
-                    responseIdChanged = state.responseId != current.responseId
-                )
+                val responseId = event.optJSONObject("response")?.let { JsonProtocol.nonBlank(it, "id") }
+                val state = if (responseId == null || responseId == current.responseId) current
+                    else current.copy(responseId = responseId)
+                ResponseEventDecision(state, responseIdChanged = state.responseId != current.responseId)
             }
-
-            "response.output_text.delta" -> {
-                val delta = event.optString("delta")
-                if (delta.isEmpty()) {
-                    ResponseEventDecision(current)
-                } else {
-                    ResponseEventDecision(
-                        state = current.copy(text = current.text + delta),
-                        textChanged = true
-                    )
-                }
-            }
-
-            "response.refusal.delta" -> {
-                val delta = event.optString("delta")
+            "response.output_text.delta", "response.refusal.delta" -> {
+                val delta = JsonProtocol.string(event, "delta")
                 if (delta.isEmpty()) ResponseEventDecision(current)
-                else ResponseEventDecision(
-                    state = current.copy(text = current.text + delta),
-                    textChanged = true
-                )
+                else ResponseEventDecision(current.copy(text = current.text + delta), textChanged = true)
             }
-
             "response.refusal.done" -> {
-                val full = event.optString("refusal")
+                val full = JsonProtocol.string(event, "refusal")
                 if (full.isBlank() || full == current.text) ResponseEventDecision(current)
                 else ResponseEventDecision(current.copy(text = full), textChanged = true)
             }
-
             "response.reasoning_summary_text.delta" -> {
-                val delta = event.optString("delta")
-                if (delta.isEmpty()) {
-                    ResponseEventDecision(current)
-                } else {
-                    ResponseEventDecision(
-                        state = current.copy(reasoningSummary = current.reasoningSummary + delta),
-                        reasoningChanged = true
-                    )
-                }
+                val delta = JsonProtocol.string(event, "delta")
+                if (delta.isEmpty()) ResponseEventDecision(current)
+                else ResponseEventDecision(current.copy(reasoningSummary = current.reasoningSummary + delta), reasoningChanged = true)
             }
-
-            "response.completed" -> terminal(
-                current = current,
-                event = event,
-                terminalState = ResponseTerminalState.COMPLETED
-            )
-
-            "response.failed" -> terminal(
-                current = current,
-                event = event,
+            "response.completed" -> terminal(current, event, ResponseTerminalState.COMPLETED)
+            "response.failed" -> terminal(current, event, ResponseTerminalState.FAILED,
+                event.optJSONObject("response")?.let { response ->
+                    response.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
+                        ?: JsonProtocol.nonBlank(response, "error")
+                })
+            "response.incomplete" -> terminal(current, event, ResponseTerminalState.INCOMPLETE,
+                event.optJSONObject("response")?.optJSONObject("incomplete_details")?.let {
+                    JsonProtocol.nonBlank(it, "reason")
+                })
+            "response.cancelled" -> terminal(current, event, ResponseTerminalState.CANCELLED)
+            "error", "response.error" -> ResponseEventDecision(current.copy(
                 terminalState = ResponseTerminalState.FAILED,
-                completionError = event.optJSONObject("response")
-                    ?.optJSONObject("error")
-                    ?.optString("message")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: event.optJSONObject("response")?.optString("error")?.takeIf { it.isNotBlank() }
-            )
-
-            "response.incomplete" -> terminal(
-                current = current,
-                event = event,
-                terminalState = ResponseTerminalState.INCOMPLETE,
-                completionError = event.optJSONObject("response")
-                    ?.optJSONObject("incomplete_details")
-                    ?.optString("reason")
-                    ?.takeIf { it.isNotBlank() }
-            )
-
-            "response.cancelled" -> terminal(
-                current = current,
-                event = event,
-                terminalState = ResponseTerminalState.CANCELLED
-            )
-
-            "error", "response.error" -> ResponseEventDecision(
-                current.copy(
-                    terminalState = ResponseTerminalState.FAILED,
-                    completionError = event.optJSONObject("error")?.optString("message")
-                        ?.takeIf { it.isNotBlank() }
-                        ?: event.optString("message").takeIf { it.isNotBlank() }
-                        ?: "Responses streaming error"
-                )
-            )
-
+                completionError = event.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
+                    ?: JsonProtocol.nonBlank(event, "message") ?: "Responses streaming error"
+            ))
             else -> ResponseEventDecision(current)
         }
     }
 
-    private fun terminal(
-        current: ResponseEventState,
-        event: JSONObject,
-        terminalState: ResponseTerminalState,
-        completionError: String? = null
-    ): ResponseEventDecision {
+    private fun terminal(current: ResponseEventState, event: JSONObject,
+                         terminalState: ResponseTerminalState, completionError: String? = null): ResponseEventDecision {
         val response = event.optJSONObject("response")
-        val responseId = response?.optString("id")?.takeIf { it.isNotBlank() }
+        val responseId = response?.let { JsonProtocol.nonBlank(it, "id") }
         val canonical = OpenAiSseStreamReader.terminalOutputText(response)
         val state = current.copy(
             responseId = responseId ?: current.responseId,
@@ -149,10 +83,8 @@ object ResponseEventReducer {
             completionError = completionError,
             usage = response?.optJSONObject("usage") ?: current.usage
         )
-        return ResponseEventDecision(
-            state = state,
+        return ResponseEventDecision(state,
             textChanged = state.text != current.text,
-            responseIdChanged = state.responseId != current.responseId
-        )
+            responseIdChanged = state.responseId != current.responseId)
     }
 }
