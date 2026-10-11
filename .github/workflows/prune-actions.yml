@@ -1,0 +1,31 @@
+name: Prune obsolete Android artifacts
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/prune-actions.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: 000chat-artifact-cleanup
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: github.repository == 'luoecrt-pixel/000Chat' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit-test cleanup planner
+        run: python3 -m unittest discover -s tools -p 'test_prune_actions_artifacts.py' -v
+      - name: Remove obsolete Android APK and AAB archives (preserve latest four of each)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/prune_actions_artifacts.py --apply --keep-latest 4 --min-age-hours 24 --max-deletions 300
