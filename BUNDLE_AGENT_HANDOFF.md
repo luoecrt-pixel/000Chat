@@ -1,31 +1,24 @@
 # BUNDLE_AGENT_HANDOFF — дополнительный контекст пакета
 
-**Этот документ не заменяет `NEXT_AGENT_HANDOFF.md` в репозитории, который остаётся главным.**
+**Главный источник истины — `NEXT_AGENT_HANDOFF.md` из актуального main. Этот файл его не заменяет.**
 
-## Где мы
+## Фактический результат
 
-Продукт: Android `000Chat` (бывший OpenAIApiChat), публичный GitHub репозиторий `luoecrt-pixel/000Chat`. Накопительный patch этого пакета построен от **старого** base `4111b83a215da03af544e8c0477246962c43395b`. `main` на момент подготовки пакета: `120ac217c2a9f06a8b0b062b8571800c52682f33` (поздние коммиты в основном security/CI/artifact cleanup); сначала сверить HEAD и дерево, затем переносить код безопасно. пакета содержит только изменённые/new файлы, не полный checkout.
+Релиз 4.17.0 (`versionCode=64`) интегрирован в PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141), код `cceacdd8c392b2a69338f2313c6db137d210f307`. Исходный ZIP был частичным cumulative patch: 111 путей от старой базы `4111b83a215da03af544e8c0477246962c43395b`, перенесённых на main `120ac217c2a9f06a8b0b062b8571800c52682f33`. Повторно применять ZIP не нужно. README, workflows, .gitignore и SECURITY сохранены из main; канонический handoff актуализирован после проверок.
 
-## Что написано, но не доказано полной Android сборкой
+- Исправления request-aware OpenAI terminal persistence, SQLite v22, JSON null/SSE, file/attachment processing, локальных файловых инструментов, уведомлений и rich renderer прошли полный CI.
+- Научное превью обслуживает принадлежащий конкретному WebView HTML из памяти по точному HTTPS URL; остальные main frames, data/file/content и внешние запросы блокируются. SHA ресурсов, TLS, Android image/JPEG validation и ownership не ослаблялись.
+- Device fixture отдельно проверяет безопасный HTML-like текст, отсутствие script execution/elements и сохранность полного исходника при неизвестной LaTeX-команде.
 
-- Исправления обзоров 34–40, файловых кэшей A–F, renderer assets и streaming presentation.
-- Исправлена потеря OpenAI terminal assistant при несовпадении HTTP `x-request-id` и локального request ID; сохранение SQLite дополнительно защищено CAS от чужого ID. Добавлен device-регрессионный тест.
-- Данные `org.json` null/number/object перестали попадать в text/response-id/error через SSE и модель; пустые/ошибочные статусы показываются в UI, не сохраняются как ответ модели. Добавлен Robolectric-тест.
-- XLSX пустая shared-formula остаётся формулой без cached value; исправлены корректность JPEG test fixtures, не production JPEG-validation.
-- Источник README и pinned SHA рендерера не менялись. `RENDERER_DISTRIBUTIONS.md` сохраняет правила расследования mismatch.
+## Выполненные проверки
 
-## Что реально проверяли (старый этап)
+- Debug push [38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456): Successful, JVM tests/lint/assembleDebug и 39/39 device tests, artifact [11716107416](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416).
+- Release push [38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458): Successful, tests/lintRelease/assembleRelease/bundleRelease, artifact [11714939668](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458/artifacts/11714939668).
+- Verify [38175702106](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175702106): Successful на кодовом SHA. Final docs-only head требует отдельного Successful Verify.
+- Локально: source/handoff verifiers, positive/negative mutation matrices, Python fixtures, pinned Maven bytes и inventory 82 modules/fonts/licenses; host Kotlin генерация и Node syntax/KaTeX probes. Локального Android/WebView runtime не было: Android assertions выполнены в Actions.
 
-Python `verify_implementation.py`, отдельные Kotlin host-пробы JSON-null и JPEG; верность base Git blobs и apply patch в **частичной синтетической базе**. Нет подтверждения полного Android Gradle/JVM/Robolectric/lint/instrumentation, реальных API, Xamarin/Xiaomi device или релизного APK.
+Оба push runs и кодовый Verify: `cceacdd8c392b2a69338f2313c6db137d210f307`, attempt 1. PR-event Skipped не считать сборкой. Debug APK подписан; Release APK/AAB без release signing config. Артефакты хранятся 5 дней; Build SHA сборки отличается от последующего squash SHA.
 
-## Что делать сейчас
+## Продолжение и границы
 
-1. Читать `NEXT_AGENT_HANDOFF.md` из текущего `main`, затем `AGENTS.md` и `AGENT_IMPLEMENTATION_RULES.md`. Не исполнять старые устаревшие чек-листы из прежних отчётов.
-2. Сверить текущий `main` и текущие PR/ветки, определить конфликты и не переписывать security/Actions изменения, появившиеся после base.
-3. Восстановить полный checkout старой базы; запускать `verify_bundle.py` строго на чистом checkout; `git apply --check` от базы, затем переносить 111 подготовленных файлов/изменения на новую ветку актуального `main` с сравнением контекста.
-4. Реально выполнить Gradle compileDebugKotlin, compileDebugUnitTestKotlin, testDebugUnitTest, lintDebug, compileDebugAndroidTestKotlin; решить инфраструктуру Robolectric SDK, а не отключать тесты. Затем рассмотреть instrumented tests, renderer assets и release.
-5. Документировать фактические команды, ошибки и пробелы. Не говорить, что release готов, без нужных проверок. Соблюдать 35-минутные рабочие этапы пользователя.
-
-## Что было исключено из архива
-
-Исторические REVIEW_*, AUDIT_RESPONSE, VALIDATION, FILE_CAPABILITIES, RESPONSE_PRESENTATION_PLAN и многостраничный WORK_CHECKPOINT. Они содержали исторические диалоги и повторяющиеся статусы, которые путали исполнителя. Технические constraints, исходный код, тесты, pinned hashes, применение patch и короткие правила сохранены. Подробная история остаётся в старых пакетах/коммитах; этот архив намеренно короткий.
+Сначала сверить actual main, PR merged/merged_at и final-head Verify по GitHub. Затем выполнять только выбранный владельцем следующий срез из канонического handoff. Физический телефон, реальные большие фото, live provider acceptance/биллинг и 5h реальный SSE не проверены; платных вызовов и доступа к телефону не было. Следовать последнему ограничению времени владельца (в текущем этапе — 40 минут); перед незавершённой остановкой сохранять короткий фактический checkpoint.

@@ -1,12 +1,13 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-10 08:50 +03:00
-**Следующий рабочий срез:** Проверка на телефоне и выбор следующего среза — подтверждение реального поведения APP-04/APP-05, затем обязательный обзор архитектуры и приоритетов.
-**Текущая работа:** PR [#137](https://github.com/luoecrt-pixel/OpenAIApiChat/pull/137) APP-05 F21–F26 **merged 2026-10-10**, проверенный squash merge `e330497967503ef781767ca49e0f2668a805dda6` = текущий `main` при создании docs-only ветки `agent/app-05-postmerge-handoff`. Финальный кодовый SHA до squash `fe0b5b2597226f5690b502dc462474d07a25292b`; docs-only head #137 `a3d3f0df7af6b76b7c59b8dfc55b2ffe567aa6ab` прошёл Verify `38028778105`. PR #138 (этот файл) только корректирует handoff после merge; Verify нужен на его финальном head. Следующий агент перечитывает actual main/PR state, а не предполагает постоянство SHA.
-**Точные APP-05 проверки:** [APK push 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416) **Successful**, включая source verifier, mutation matrix, JVM unit, lint, assembleDebug, Android lifecycle instrumentation и Upload APK; [Release push 37998337154](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337154) **Successful**, включая release build и Upload release artifacts; [Verify PR 37998347081](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998347081) **Successful** — все на `fe0b5b2`. Артефакты: debug `11648259445` и release `11647807945`. Дополнительный Verify `38028778105` Successful на итоговом docs-only head PR #137 `a3d3f0d`; PR #137 merged как `e3304979`. Skipped PR-event APK/Release не считать сборкой.
-**APP-05 итог:** F21 durable 5h remaining budget от persisted `started_at` через initial Send/Activity resumed/Worker SSE, включая blocked-socket timeout; F22 bounded/cancellable attachment copy (25 MiB для OpenRouter, 50 MiB для VS upload), F23 очистка operation-owned partial/ZIP/upload при exception; F24 Vector Store dialog/store ownership, до 3 страниц × 100, максимум 10 filename-lookups и видимое incomplete; F25 GitHub `get_file` fail-closed при non-base64, bad UTF-8, absent/oversized content (только UTF-8 base64 ≤256 KiB, отображение до 40000 знаков); F26 Verify при root/nested Markdown. Тесты подтверждают названные pure/Robolectric/ActivityScenario границы, а не всё семейство async/heap/live API.
-**Устранённые старые failures:** на `ce55889b` verifier ожидал неизменённый UI gate, `cd8aa0d` Kotlin не нашёл импорт Base64 writer, `9bc2d66` lint поймал неправильный отступ; новые APK/Release на `fe0b5b2` все Successful.
-**Оставшиеся границы:** физический телефон и исходные большие фотографии, реальные Claude/OpenAI, 5 часов реального SSE, MiXplorer/Photo Picker/IME/gesture, Vector Store provider/dialog races и биллинг не проверены. Платных вызовов и доступа к телефону не делать без разрешения владельца; README не менять. По #134 автосборка Android на push в main выключена; ручной workflow и branch [ci] сохранены. GitHub Actions не отменять вручную.
+**Last updated:** 2026-10-12 00:28 +03:00
+**Следующий рабочий срез:** Проверка на телефоне и выбор следующего среза — ручное подтверждение релиза 4.17.0, затем выбор одной задачи по наблюдениям.
+**Текущая работа:** релиз 4.17.0 (`versionCode=64`) подготовлен в PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141). Финальный кодовый SHA `cceacdd8c392b2a69338f2313c6db137d210f307`; Android push-проверки завершены успешно. Канонический handoff сохранён и актуализирован после проверок; копия из ZIP никогда не заменяла этот файл. Фактический статус merge и новый main SHA читать в GitHub, а не выводить из этой записи.
+**Точные проверки релиза:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) **Successful**: source/mutation verifiers, JVM tests, lintDebug, assembleDebug, **39/39 Android instrumentation tests**, Upload APK. [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful**: JVM tests, lintRelease, assembleRelease, bundleRelease, Upload release artifacts. [Verify PR 38175702106](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175702106) **Successful**. Все три на `cceacdd8c392b2a69338f2313c6db137d210f307`, attempt 1. Последующий docs-only head требует собственного Successful Verify; skipped PR-event Android jobs не являются сборками.
+**Артефакты:** подписанный Debug APK — [artifact 11716107416](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416); Release APK/AAB — [artifact 11714939668](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458/artifacts/11714939668). Для Release не настроена release-подпись. `BuildConfig.BUILD_GIT_SHA` этих сборок = `cceacdd8c392b2a69338f2313c6db137d210f307`, не будущий squash merge SHA. Retention — 5 дней; перед скачиванием сверять expired.
+**Итог пакета:** request-aware terminal persistence и SQLite v22, типизированный JSON/SSE, файловые кэши/инструменты и сохранность оригиналов, очередь уведомлений, native rich response и pinned офлайн KaTeX/Mermaid. Сам HTML научного превью теперь выдаётся из памяти через точный локальный HTTPS URL: прежний `loadDataWithBaseURL` попадал под запрет `data:`. Изоляция WebView, SHA, TLS и request ownership сохранены.
+**Закрытые failures:** Debug на `26024559` и диагностическом `63da201e` выявил 403 для `data:` main frame; на `34cdf699` загрузка заработала, но тест ошибочно считал строку с HTML некорректным LaTeX. `cceacdd8c392b2a69338f2313c6db137d210f307` отдельно проверяет безопасный markup, отсутствие выполнения/создания script и полный fallback для действительно неизвестной LaTeX-команды. Последняя полная пара CI прошла.
+**Оставшиеся границы:** физический телефон, исходные большие фотографии, живые Claude/OpenAI/OR, реальная 5h сессия, биллинг и системный picker/IME/gesture не проверены этим релизом. Платных API-вызовов и работы с телефоном не было. README/workflows/.gitignore/SECURITY из main не изменены; Android push на main отключён, branch [ci] и ручной запуск сохранены.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -44,7 +45,7 @@
 
 - Локальный multi-chat Android-клиент: OpenAI Responses и отдельный OpenRouter Chat Completions/SSE + local tool loop. GitHub API исполняет приложение, с repo/ref allow-list и подтверждением write/review/merge.
 - Ownership: generation → immutable request/UI snapshot → request-aware persisted active response → WorkManager recovery. Поля `active_request_id/active_response_id/active_text/active_status/active_background_enabled/active_last_sequence_number`; устаревший request не финализирует новый.
-- SQLite v20: messages attachments/metadata, request_events, независимый request_accounting и openrouter_request_rounds/rounds_sealed. Metadata и активные данные не стирать broad stale UI snapshot.
+- SQLite v22: сохранены messages attachments/metadata, request_events, request_accounting и openrouter_request_rounds/rounds_sealed; добавлены поля вложений и очередь answer_notifications с FK cleanup. Metadata и активные данные не стирать broad stale UI snapshot.
 - MainActivity остаётся монолитом. Pure seams: ResponseEventReducer, ResponseCheckpointPolicy, BackgroundResponseUiOwnershipPolicy, AttachmentUploadCompletionPolicy; persisted boundary ActiveResponsePersistence. Foreground checkpoint cadence 750 ms.
 - Нет общего короткого timeout для самой генерации, неявного output-token cap или fixed tool-round count. APP-05 F21 ввёл persisted 5h response deadline для OpenAI initial/resumed/Worker SSE; Vector Store metadata отдельно использует короткий 12s call timeout. OpenRouter имеет 5h cycle и 5M accumulated usage tokens; fake-clock proof не заменяет live 5h.
 - Вложения: content:// копируется в private storage; text/image/pdf/zip manifests + wire bytes. Оригиналы без скрытого lossy/downscale; preview отдельно. EXIF strict lossless по #83 при допустимой геометрии, иначе оригинал. Provider/upstream limits нельзя выводить из одного общего числа.
@@ -55,11 +56,12 @@
 
 | Срез | Подтверждение | Граница |
 | --- | --- | --- |
-| main после APP-05 #137 | `e330497967503ef781767ca49e0f2668a805dda6` — подтверждённый squash merge #137, SQLite v20 | Новый docs-only #138 не меняет Android-код; фактический main на каждом новом заходе сверять |
-| #136 APP-04 final | `613bff2155838b5b1988df4b478d3bf601a83882`; APK `37994461394`, Release `37994461425`, Verify `37994465824` — Successful; merge `0308fd67` | Android emulator/HTTPS mock, не физический swipe, live provider или проблемное исходное фото |
-| #137 APP-05 final code | `fe0b5b2597226f5690b502dc462474d07a25292b`; push APK `37998337416` включая instrumentation, push Release `37998337154` — Successful; final docs-only head `a3d3f0d`/Verify `38028778105` — Successful; merge `e3304979` | Тесты не покрывают реальную 5h сессию, весь heap/физический телефон |
-| APK/Release artifacts | Debug artifact `11648259445`, Release artifact `11647807945` в соответствующих runs | CI upload, не доказательство установки на телефон; срок хранения artifacts конечен |
-| Физический телефон | Ранее владелец подтвердил камеру и распознавание маленького фото | Большое реальное фото, OR→GPT, picker, drawer/IME, diagnostics, VS и live API ещё не приняты вручную |
+| main до интеграции #141 | `120ac217c2a9f06a8b0b062b8571800c52682f33`: #138 handoff, #139 security, #140 artifact retention | Новый main после merge сверять через API; merge SHA отличается от build SHA |
+| #141 релиз 4.17.0 / SQLite v22 | Код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` (39/39 device tests), push Release `38175698458`, Verify `38175702106` — Successful, attempt 1 | Полный Android CI на API34 и JVM/Robolectric; телефон и live provider отдельно |
+| Артефакты #141 | Debug `11716107416`, Release `11714939668` в соответствующих runs, загрузки Successful | Debug подписан; release signing config отсутствует; retention 5 дней |
+| #136 APP-04 historical proof | Код `613bff2155838b5b1988df4b478d3bf601a83882`; APK `37994461394`, Release `37994461425`, Verify `37994465824` Successful; merge `0308fd67` | HTTPS mock/ActivityScenario, не физический swipe или исходное проблемное фото |
+| #137 APP-05 historical proof | Код `fe0b5b2597226f5690b502dc462474d07a25292b`; APK `37998337416`, Release `37998337154` Successful; final docs Verify `38028778105`; merge `e3304979` | Fake-clock/blocked socket, не 5h live upstream или полный heap smoke |
+| Физический телефон | Ранее владелец подтвердил камеру и распознавание маленького фото | Большое фото, picker, drawer/IME, новые превью, VS и live API ещё не приняты вручную |
 
 Ошибки промежуточных коммитов `d0624e3`, `ce55889b`, `cd8aa0d`, `9bc2d66` — история исправленных failures, не действующие блокеры финального кода. Везде сохраняй distinction: exact test assertion → harness → SHA/run → scope of proof.
 
@@ -155,6 +157,8 @@
 
 **Как поддерживать этот раздел:** после каждого изменённого контракта запиши утверждение, конкретный test/наблюдение, harness, SHA/run/attempt/result и границу. При новом успешном прогоне обнови также ранее Failed/«ещё ждёт» записи, а не добавляй противоречивую строку сверху. Исторический тег не переносится на изменённый runtime автоматически. Закрытый контракт переоткрывай только при новом доказательстве регрессии.
 
+- [instrumentation] **#141:** `ScientificRendererDeviceTest.packagedKatexAndMermaidRenderWithoutExposingAnAndroidBridge` прошёл в Debug `38175698456` на `cceacdd8c392b2a69338f2313c6db137d210f307`: реальные pinned APK assets, локальный HTTPS origin, KaTeX в отдельном блоке/тексте и Mermaid SVG; hostile markup не исполняется и не создаёт script, invalid LaTeX сохраняет полный source. Это emulator proof, не проверка всего форматирования на телефоне.
+
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
 - `ResponseEventReducer` — response semantics; `ResumableResponseStreamClient` — transport + sequence cursor; `ActiveResponsePersistence` — persisted active-response boundary. `ResponseCheckpointPolicy`, `BackgroundResponseUiOwnershipPolicy` и `AttachmentUploadCompletionPolicy` остаются pure decision seams.
@@ -166,17 +170,20 @@
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
+**Архитектурный обзор 4.17.0:** UI/stream/persistence остаются связаны в MainActivity (~7.5 тыс. строк) и ChatDatabase (~2.2 тыс.). Новые renderer views изолируют JS, сохраняют native source и отбрасывают stale callbacks по экземпляру WebView. Следующий безопасный шаг после ручных наблюдений — одна воспроизводимая lifecycle/persistence граница; широкое controller/Compose переписывание не включать в релиз.
+
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-Редакция 14: #136 и #137 merged, APP-05 F21–F26 получил exact-code APK/Release/Verify. Physical phone/provider smoke всё ещё не пройден. Этот docs-only #138 уточняет финальный handoff, не меняя scope и runtime. Compose rewrite, финансовый ledger и autoretry не включены.
+Редакция 15: релиз #141 получил exact-code Debug/Release/Verify, включая все 39 device tests. Последующий docs-only head проверяется отдельным Verify. Ручной телефон/provider smoke остаётся следующей задачей; Compose rewrite, финансовый ledger и autoretry не включены.
 
 ### 1. Проверка на телефоне и выбор следующего среза — **следующий**
 
-**Первый шаг:** убедиться, что docs-only PR #138 завершился успешным Verify и merged, затем предложить владельцу установить debug APK из [run 37998337416](https://github.com/luoecrt-pixel/OpenAIApiChat/actions/runs/37998337416), artifact `11648259445`. В диагностике установленного APK ожидать именно `BuildConfig.BUILD_GIT_SHA = fe0b5b2597226f5690b502dc462474d07a25292b` (кодовая сборка), **не** squash merge SHA `e3304979`. Если артефакт истёк — не выдумывать ссылку.
+**Первый шаг:** сверить merged/merged_at PR #141, final-head Successful Verify и actual main. Для разрешённой владельцем ручной проверки использовать [Debug APK из run 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416), artifact `11716107416`. В диагностике ожидать `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`. Если artifact expired — не выдавать старую ссылку за доступную сборку. Без отдельного поручения не работать с телефоном и не вызывать платные API.
 
 | Приоритет | Ручная/следующая проверка | CI-подтверждённая граница |
 | --- | --- | --- |
 | P1 телефонные вложения | Native Photo Picker и Files/MiXplorer, оригинальное большое JPEG, preview/reopen, историческое OR→OpenAI, сохранность D2 при сбое | Android mock HTTPS bytes/picker ownership на `613bff2`; реальный Claude/OpenAI без разрешения не вызывать |
+| P1 научное превью | Формулы в тексте/отдельном блоке, Mermaid, переключение source/preview и повторное открытие | Pinned APK engines прошли на API34; размеры/шрифты/прокрутка физического телефона отдельно |
 | P1 UI/diagnostics | Нижние model, ⚡ quick effort и advanced отдельно; drawer gesture vs scroll/Back/IME/large font; Copy/share logs и Build SHA | Activity window dispatch/geometry тесты и JVM redaction, не полноценный phone UX |
 | P1 APP-05 long request | persisted 5h deadline, background/resume, Stop/cancel/error без воскрешения stale request | Fake clock/blocked socket, не 5h live upstream |
 | P2 attachments/VS | Partial temp cleanup при Cancel/overflow; выбранный Vector Store, поздние dialog callbacks и >100 files, явное incomplete | JVM/Robolectric ownership/parser/ZIP; real VS server и delayed dialog UI ещё без proof |
@@ -186,7 +193,7 @@
 
 ## Репозиторий / branches
 
-Репозиторий `luoecrt-pixel/OpenAIApiChat`; main только через PR. Продолжай actual open branch, не создавай stacked копию старого snapshot. Перед записью сверяй head и blob SHA; поддерживаемый lease при ref update, без blind force-push. Удаление старых веток не нужно для этой задачи. В текущем коннекторе можно читать push runs/jobs/logs и rerun существующий failed job; создание нового dispatch/repository variable недоступно.
+Репозиторий `luoecrt-pixel/000Chat` (переименован из `luoecrt-pixel/OpenAIApiChat`); main только через PR. Продолжай actual open branch, не создавай stacked копию старого snapshot. Перед записью сверяй head и blob SHA; поддерживаемый lease при ref update, без blind force-push. Удаление старых веток не нужно для этой задачи. В текущем коннекторе можно читать push runs/jobs/logs и rerun существующий failed job; создание нового dispatch/repository variable недоступно.
 
 ## Контекстный режим для агента
 
@@ -236,13 +243,13 @@
 
 ## История последних рабочих заходов — последние 5 PR
 
-Окно последних пяти рабочих PR при планируемом merge docs-only #138: #134–#138. Для #134–#137 статус merged подтверждён, #138 — этот документационный PR; перед следующей работой убедиться, что #138 merged, и прочитать его фактический merge SHA в GitHub. Никакой кодовой Android-сборки для docs-only #138 не требуется, только Verify на финальном head.
+Окно #137–#141. Merge #137–#140 подтверждён API; статус #141 и его squash SHA сверять по merged/merged_at. Кодовые проверки #141 и docs-only head различать.
 
-- **#134:** отключение main push APK/Release при сохранении branch [ci]/manual; merge `a5a99f3cd1c6dba60cba0235bb9995df25fe4195`, Verify `37972109767` Successful, YAML-only.
-- **#135:** docs PHONE plan, merge `c492e74e3aaed8f87752be41e8ad2618d8215afa`, Verify `37980410307` Successful.
-- **#136:** APP-04-PHONE final `613bff2155838b5b1988df4b478d3bf601a83882`, APK `37994461394`, Release `37994461425`, Verify `37994465824` Successful; merge `0308fd67b4445d886c966fb5836d9f45db2de4ff`. Manual phone/live upstream отдельно.
-- **#137:** APP-05 F21–F26, final code `fe0b5b2597226f5690b502dc462474d07a25292b`, APK `37998337416`, Release `37998337154` Successful; final docs head `a3d3f0d`, Verify `38028778105` Successful; merge `e330497967503ef781767ca49e0f2668a805dda6`. Оставшиеся phone/live/heap границы перечислены в baseline/контракте.
-- **#138:** post-merge handoff reconciliation (только `NEXT_AGENT_HANDOFF.md`), вносит подтверждённый merge #137, обновляет history и следующий срез; Verify/merge state надо получить из фактического PR, не придумывать наперёд.
+- **#137:** APP-05 F21–F26; код `fe0b5b2597226f5690b502dc462474d07a25292b`, APK `37998337416`, Release `37998337154` Successful; docs Verify `38028778105`; merge `e330497967503ef781767ca49e0f2668a805dda6`. Phone/live границы сохранены выше.
+- **#138:** docs-only reconciliation после APP-05; merged `4111b83a215da03af544e8c0477246962c43395b`, 2026-10-10. Это база исходного partial ZIP, не актуальный релизный code SHA.
+- **#139:** security/public-visibility preparation; merged `8ac41908222baf91d76e4456b494779263d0e41d`, 2026-10-11. Security и ignore изменения сохранены при интеграции пакета.
+- **#140:** очистка устаревших Android artifacts и retention 5 дней; merged `120ac217c2a9f06a8b0b062b8571800c52682f33`, 2026-10-11. Workflows при релизной интеграции не менялись.
+- **#141:** интеграция 111 файлов partial bundle с последующими code/test fixes и актуализацией канонического handoff. Финальный код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` и Release `38175698458`, Verify `38175702106` Successful, attempt 1. Артефакты `11716107416`/`11714939668`; final docs Verify и merge SHA читать в GitHub.
 
 ## Product radar — идеи с реальной ценностью
 
