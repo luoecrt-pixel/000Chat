@@ -112,6 +112,9 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_MOVE -> {
                 if (canCapture(event)) {
                     dragging = true
+                    // Android may deliver the capture MOVE only as CANCEL to the
+                    // previous child. Update the panel here, not on the next MOVE.
+                    move(startFraction + (event.x - downX) / panelWidth)
                     parent?.requestDisallowInterceptTouchEvent(true)
                     return true
                 }

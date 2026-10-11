@@ -439,8 +439,21 @@ class OpenRouterChatClient(
                 // A complete SSE [DONE] frame may omit finish_reason even after a
                 // fully formed tool call. The per-tool id/name/JSON checks below
                 // still reject incomplete or malformed tool execution requests.
+                // Missing finish_reason does not authorize an incomplete tool.
+                // A closed SSE stream may legitimately omit it, but every tool
+                // must have an ID, function name, and complete JSON arguments.
+                val completeUnconfirmedCalls = finishReason == null && calls != null &&
+                    (0 until calls.length()).all { index ->
+                        val candidate = calls.optJSONObject(index) ?: return@all false
+                        val function = candidate.optJSONObject("function") ?: return@all false
+                        val arguments = JsonProtocol.text(function, "arguments")
+                        !JsonProtocol.nonBlank(candidate, "id").isNullOrBlank() &&
+                            !JsonProtocol.nonBlank(function, "name").isNullOrBlank() &&
+                            arguments != null && runCatching { JSONObject(arguments) }.isSuccess
+                    }
                 if (calls == null || calls.length() == 0 ||
-                    finishReason != null && finishReason !in setOf("tool_calls", "stop")) {
+                    (finishReason == null && !completeUnconfirmedCalls) ||
+                    (finishReason != null && finishReason !in setOf("tool_calls", "stop"))) {
                     val tail = JSONArray()
                     for (i in inputCount until history.length()) tail.put(JsonProtocol.copy(history.get(i)))
                     val replayMessage = JsonProtocol.objectCopy(message)
