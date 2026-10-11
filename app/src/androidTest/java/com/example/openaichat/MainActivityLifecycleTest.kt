@@ -16,6 +16,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Before
+import org.junit.After
 import org.junit.runner.RunWith
 import android.net.Uri
 import java.util.concurrent.CountDownLatch
@@ -39,6 +41,49 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityLifecycleTest {
+    @Test fun largeAnswersAndSignedProtocolSurviveHistoryAndCheckpointReopen() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val chatId = "large-protocol-" + java.util.UUID.randomUUID()
+        val text = "Длинный ответ 😀\n".repeat(150000)
+        val opaque = "signed-data-".repeat(260000)
+        val protocol = JSONObject().put("version", 1).put("tail", JSONArray().put(JSONObject()
+            .put("role", "assistant").put("content", "visible")
+            .put("reasoning_details", JSONArray().put(JSONObject().put("type", "reasoning.encrypted").put("data", opaque)))))
+        try {
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Large regression")
+                db.upsertCurrentChat(chatId, "Large regression", null, null, listOf(JSONObject()
+                    .put("role", "assistant").put("text", text).put("request_id", "r").put("openrouter_protocol", protocol)))
+                db.setActiveResponse(chatId, null, "active", text, "in_progress", 1, "max", "max", false, 0, 0, true)
+                db.saveOpenRouterCheckpoint(chatId, "active", protocol)
+            }
+            ChatDatabase(context).use { db ->
+                val restored = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+                assertEquals(text, restored.getString("text"))
+                assertEquals(opaque, restored.getJSONObject("openrouter_protocol").getJSONArray("tail")
+                    .getJSONObject(0).getJSONArray("reasoning_details").getJSONObject(0).getString("data"))
+                assertEquals(text, db.getActiveResponse(chatId)!!.getString("text"))
+                assertTrue(db.isActiveRequest(chatId, "active")); assertFalse(db.isActiveRequest(chatId, "old"))
+                assertEquals(opaque, db.getOpenRouterCheckpoint(chatId, "active")!!.getJSONArray("tail")
+                    .getJSONObject(0).getJSONArray("reasoning_details").getJSONObject(0).getString("data"))
+                assertEquals(text, db.listActiveResponses().first { it.getString("chat_id") == chatId }.getString("text"))
+            }
+        } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
+    }
+
+    private var savedNotificationPreference: Boolean? = null
+    @Before fun suppressUnrelatedNotificationPermissionDialog() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val preferences = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        savedNotificationPreference = if (preferences.contains("response_notifications")) preferences.getBoolean("response_notifications", true) else null
+        preferences.edit().putBoolean("response_notifications", false).commit()
+    }
+    @After fun restoreNotificationPreference() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val edit = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE).edit()
+        savedNotificationPreference?.let { edit.putBoolean("response_notifications", it) } ?: edit.remove("response_notifications")
+        edit.commit()
+    }
     // Production blocks cleartext HTTP. Exercise real Send over an isolated local HTTPS
     // server with a certificate trusted only by this test client's OkHttp instance.
     private fun createHttpsMockServer(): Pair<MockWebServer, OkHttpClient> {
@@ -807,6 +852,8 @@ class MainActivityLifecycleTest {
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
         )
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"picture received\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         val entered = CountDownLatch(1)
@@ -823,16 +870,20 @@ class MainActivityLifecycleTest {
                 @Suppress("UNCHECKED_CAST")
                 val attachments = privateField(activity, "attachedOpenRouterAttachments")
                     as MutableList<OpenRouterLocalAttachment>
+                // Keep intentionally misleading filename/MIME while verifying the true
+                // digest; stale or forged digests must be rejected by production.
+                val sha = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(original).joinToString("") { "%02x".format(it) }
                 attachments.add(OpenRouterLocalAttachment(
                     "photo", "photo-with-wrong-jpg-name.jpeg", "image", file.absolutePath,
-                    "image/jpeg", file.length(), "sha"
+                    "image/jpeg", file.length(), sha
                 ))
                 @Suppress("UNCHECKED_CAST")
                 val modalities = privateField(activity, "openRouterModelModalities")
                     as ConcurrentHashMap<String, Set<String>>
                 modalities[model] = setOf("text", "image")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
@@ -903,8 +954,69 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun claudeRouteAndFormatAreCapturedBeforePreparationPreferencesChange() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val preferences = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val saved = listOf("openrouter_claude_route", "openrouter_text_format", "openrouter_json_schema")
+            .associateWith { preferences.getString(it, null) }
+        val oldKey = SecureStore(context).getOpenRouterApiKey()
+        val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer host before the factory is called by MainActivity UI.
+        val endpoint = server.url("/api/v1").toString()
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"answer\\\":\\\"ok\\\"}\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var createdChat: String? = null
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat(); createdChat = activity.currentChatIdForTesting()
+                activity.prefs.edit().putString("provider", "openrouter")
+                    .putString("model", "anthropic/claude-sonnet-5.5")
+                    .putString("openrouter_claude_route", "anthropic")
+                    .putString("openrouter_text_format", "json_schema")
+                    .putString("openrouter_json_schema", "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"],\"additionalProperties\":false}").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
+                setPrivateField(activity, "openRouterPreparationHook", {
+                    entered.countDown(); release.await(5, TimeUnit.SECONDS); Unit
+                })
+                (privateField(activity, "input") as android.widget.EditText).setText("Return JSON")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("Production Send did not reach preparation", entered.await(3, TimeUnit.SECONDS))
+            scenario.onActivity { activity ->
+                activity.prefs.edit().putString("openrouter_claude_route", "auto")
+                    .putString("openrouter_text_format", "text").apply()
+            }
+            release.countDown()
+            val body = JSONObject((server.takeRequest(20, TimeUnit.SECONDS) ?: error("Captured Send did not reach local HTTPS")).body.readUtf8())
+            val provider = body.getJSONObject("provider")
+            assertEquals("anthropic", provider.getJSONArray("order").getString(0))
+            assertFalse(provider.getBoolean("allow_fallbacks"))
+            assertTrue(provider.getBoolean("require_parameters"))
+            assertEquals("json_schema", body.getJSONObject("response_format").getString("type"))
+        } finally {
+            release.countDown()
+            scenario.onActivity { activity ->
+                setPrivateField(activity, "openRouterPreparationHook", null)
+                invoke(activity, "stopCurrentResponse")
+                val edit = activity.prefs.edit()
+                saved.forEach { (key, value) -> if (value == null) edit.remove(key) else edit.putString(key, value) }
+                edit.apply(); SecureStore(activity).setOpenRouterApiKey(oldKey)
+            }
+            scenario.close()
+            createdChat?.let { chatId -> ChatDatabase(context).use { it.deleteChat(chatId) } }
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp() {
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -914,7 +1026,7 @@ class MainActivityLifecycleTest {
                     .putString("model", "anthropic/claude-sonnet-5.5").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
@@ -1554,7 +1666,7 @@ class MainActivityLifecycleTest {
             while (!settled && SystemClock.uptimeMillis() < deadline) {
                 scenario.onActivity { activity ->
                     val drawer = privateField(activity, "drawerLayout")
-                        as androidx.drawerlayout.widget.DrawerLayout
+                        as FingerDrawerLayout
                     settled = if (open) drawer.isDrawerOpen(androidx.core.view.GravityCompat.START)
                         else !drawer.isDrawerVisible(androidx.core.view.GravityCompat.START)
                 }
@@ -1580,7 +1692,7 @@ class MainActivityLifecycleTest {
                 chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.75f)
             scenario.onActivity { activity ->
                 val drawer = privateField(activity, "drawerLayout")
-                    as androidx.drawerlayout.widget.DrawerLayout
+                    as FingerDrawerLayout
                 assertFalse("Vertical scroll must not open drawer",
                     drawer.isDrawerVisible(androidx.core.view.GravityCompat.START))
             }
@@ -1591,9 +1703,9 @@ class MainActivityLifecycleTest {
             var panelBounds = android.graphics.Rect()
             scenario.onActivity { activity ->
                 val drawer = privateField(activity, "drawerLayout")
-                    as androidx.drawerlayout.widget.DrawerLayout
+                    as FingerDrawerLayout
                 val panel = (0 until drawer.childCount).map { drawer.getChildAt(it) }
-                    .first { (it.layoutParams as androidx.drawerlayout.widget.DrawerLayout.LayoutParams)
+                    .first { (it.layoutParams as android.widget.FrameLayout.LayoutParams)
                         .gravity == androidx.core.view.GravityCompat.START }
                 panelBounds = visibleWindowBounds(panel)
             }
@@ -1609,21 +1721,28 @@ class MainActivityLifecycleTest {
     @Test
     fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         repeat(2) {
             server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         }
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         var jpegBytes = ByteArray(0)
+        // 10 MB encoded image is supported on direct Anthropic, not on auto partner routes.
+        val prefs = androidx.test.platform.app.InstrumentationRegistry
+            .getInstrumentation().targetContext.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val previousRoute = prefs.getString("openrouter_claude_route", null)
         val model = "anthropic/claude-sonnet-5.5"
         try {
             scenario.onActivity { activity ->
                 activity.newChat()
                 activity.prefs.edit().putString("provider", "openrouter")
-                    .putString("model", model).putString("reasoning", "high").apply()
+                    .putString("model", model).putString("reasoning", "high")
+                    .putString("openrouter_claude_route", "anthropic").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
-                val width = 3200
-                val height = 2700
+                val width = 2600
+                val height = 2300
                 val pixels = IntArray(width * height)
                 val random = java.util.Random(55555L)
                 for (i in pixels.indices) pixels[i] = 0xff000000.toInt() or random.nextInt(0x1000000)
@@ -1633,8 +1752,8 @@ class MainActivityLifecycleTest {
                 assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, output))
                 bitmap.recycle()
                 jpegBytes = output.toByteArray()
-                assertTrue("JPEG must be a decodable 6+ MB image: " + jpegBytes.size,
-                    jpegBytes.size in 6_000_000..10_000_000)
+                assertTrue("JPEG must be a large decodable image within Claude's encoded limit: " + jpegBytes.size,
+                    jpegBytes.size >= 4_500_000 && OpenRouterAttachmentPreflight.encodedBytes(jpegBytes.size.toLong()) <= 10_000_000L)
                 val file = java.io.File(activity.filesDir, "test-large-photo.jpg").apply { writeBytes(jpegBytes) }
                 val attachment = OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "image/png")
                 @Suppress("UNCHECKED_CAST")
@@ -1646,7 +1765,7 @@ class MainActivityLifecycleTest {
                     as ConcurrentHashMap<String, Set<String>>
                 modalities[model] = setOf("text", "image")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 (privateField(activity, "input") as android.widget.EditText).setText("Read the image")
                 invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
             }
@@ -1663,7 +1782,14 @@ class MainActivityLifecycleTest {
                     java.util.Base64.getDecoder().decode(url.substringAfter(","))
                         .contentEquals(jpegBytes))
             }
-            assertJpeg(server.takeRequest(30, TimeUnit.SECONDS) ?: error("First HTTPS Send missing"))
+            val firstRequest = server.takeRequest(30, TimeUnit.SECONDS) ?: run {
+                var diagnostic = ""
+                scenario.onActivity { activity ->
+                    diagnostic = (privateField(activity, "status") as android.widget.TextView).text.toString()
+                }
+                error("First HTTPS Send missing; status=$diagnostic")
+            }
+            assertJpeg(firstRequest)
             var completed = false
             repeat(120) {
                 scenario.onActivity { activity ->
@@ -1693,6 +1819,10 @@ class MainActivityLifecycleTest {
             assertTrue(java.util.Base64.getDecoder().decode(historical.substringAfter(",")).contentEquals(jpegBytes))
         } finally {
             scenario.onActivity { SecureStore(it).setOpenRouterApiKey("") }
+            prefs.edit().apply {
+                if (previousRoute == null) remove("openrouter_claude_route")
+                else putString("openrouter_claude_route", previousRoute)
+            }.commit()
             scenario.close()
             server.shutdown()
         }

@@ -60,7 +60,8 @@ data class ChatBubbleItem(
 class ChatMessageAdapter(
     private val createCard: (ViewGroup) -> LinearLayout,
     private val bindCard: (LinearLayout, ChatBubbleItem) -> TextView,
-    private val renderBody: (ChatBubbleItem) -> CharSequence
+    private val renderBody: (ChatBubbleItem) -> CharSequence,
+    private val renderExtras: (LinearLayout, ChatBubbleItem, TextView) -> Unit = { _, _, _ -> }
 ) : RecyclerView.Adapter<ChatMessageAdapter.ViewHolder>() {
 
     companion object {
@@ -120,6 +121,7 @@ class ChatMessageAdapter(
         val item = itemForBoundPosition(position)
         if (payloads.contains(PAYLOAD_TEXT)) {
             holder.body?.text = renderBody(item)
+            holder.body?.let { renderExtras(holder.card, item, it) }
             bindHolder(item.id, holder)
             return
         }
@@ -141,6 +143,7 @@ class ChatMessageAdapter(
         val body = bindCard(holder.card, item)
         holder.body = body
         body.text = renderBody(item)
+        renderExtras(holder.card, item, body)
         bindHolder(item.id, holder)
     }
 

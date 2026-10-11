@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
@@ -16,7 +17,9 @@ data class OpenRouterCompletionResult(
     val usage: JSONObject?,
     val responseModel: String?,
     val assistantMessage: JSONObject,
-    val toolNames: List<String>
+    val toolNames: List<String>,
+    val finishReason: String? = null,
+    val protocol: JSONObject? = null
 )
 
 class OpenRouterCompletionException(
@@ -45,8 +48,10 @@ private data class OpenRouterStreamToolCall(
 
 class OpenRouterChatClient(
     private val baseUrl: String = "https://openrouter.ai/api/v1",
-    httpClientOverride: OkHttpClient? = null
+    httpClientOverride: OkHttpClient? = null,
+    internal val reconcileGenerations: Boolean = true
 ) {
+    internal val metadataBaseUrl get() = (baseUrl.trimEnd('/') + "/").toHttpUrl()
     private companion object {
         // Safety ceiling for one OpenRouter task. Do not add smaller per-response
         // time/iteration caps here: this ceiling is the emergency stop.
@@ -58,24 +63,32 @@ class OpenRouterChatClient(
         error: JSONObject, stage: String, roundIndex: Int, status: Int? = null
     ): OpenRouterUpstreamException {
         val metadata = error.optJSONObject("metadata")
-        val provider = metadata?.optString("provider_name")
-            ?.takeIf { it.isNotBlank() } ?: error.optString("provider_name").takeIf { it.isNotBlank() }
-        val providerCode = metadata?.optString("provider_code")
-            ?.takeIf { it.isNotBlank() } ?: error.optString("provider_code").takeIf { it.isNotBlank() }
-        val code = error.optString("code").takeIf { it.isNotBlank() }
-        val errorType = error.optString("type").takeIf { it.isNotBlank() } ?: code
-        val message = error.optString("message").ifBlank { "Unknown upstream error" }.take(480)
+        fun scalar(o: JSONObject?, key: String): String? = when (val value = o?.opt(key)) {
+            is String -> value.takeIf { it.isNotBlank() }; is Number -> value.toString(); else -> null
+        }
+        val provider = scalar(metadata, "provider_name") ?: scalar(error, "provider_name")
+        val raw = metadata?.opt("raw")
+        val providerError = (if (raw is JSONObject) raw else if (raw is String && raw.length <= 32_000)
+            try { JSONObject(raw) } catch (_: Exception) { null } else null)?.optJSONObject("error")
+        val providerCode = scalar(metadata, "provider_code") ?: scalar(error, "provider_code") ?: scalar(providerError, "code")
+        val code = scalar(error, "code")
+        val errorType = scalar(error, "type") ?: code
+        val message = JsonProtocol.nonBlank(error, "message")?.take(480) ?: "Unknown upstream error"
+        val detail = JsonProtocol.nonBlank(providerError ?: JSONObject(), "message")?.take(300)
         // Never record a whole provider payload. The diagnostic logger redacts secrets.
         val safeMeta = metadata?.let {
             JSONObject().apply {
                 listOf("provider_name", "provider_code").forEach { key ->
-                    if (it.has(key)) put(key, it.optString(key).take(180))
+                    scalar(it, key)?.let { value -> put(key, value.take(180)) }
                 }
+                scalar(providerError, "type")?.let { put("upstream_type", it.take(100)) }
+                scalar(providerError, "param")?.let { put("upstream_param", it.take(100)) }
+                detail?.let { put("upstream_message", it) }
             }.toString().take(420)
         }
         return OpenRouterUpstreamException(
-            "OpenRouter " + stage + " error: " + message,
-            stage, roundIndex, status, errorType, provider, providerCode, safeMeta
+            "OpenRouter " + stage + " error: " + message + (detail?.let { " · $it" } ?: ""),
+            stage, roundIndex, status ?: code?.toIntOrNull()?.takeIf { it in 400..599 }, errorType, provider, providerCode, safeMeta
         )
     }
 
@@ -100,11 +113,25 @@ class OpenRouterChatClient(
         shouldContinue: () -> Boolean = { true },
         onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
         onTextDelta: (String) -> Unit = {},
-        onPayloadObserved: (roundIndex: Int, jsonBytes: Int) -> Unit = { _, _ -> }
+        onPayloadObserved: (roundIndex: Int, jsonBytes: Int) -> Unit = { _, _ -> },
+        cacheMode: String = "1h",
+        onProtocolWarning: (String) -> Unit = {},
+        onProtocolCheckpoint: (JSONObject) -> Unit = {},
+        pdfEngine: String? = null,
+        responseFormat: JSONObject? = null,
+        claudeRoute: OpenRouterClaudeRoute = OpenRouterClaudeRoute.AUTO,
+        onFileIoObserved: (roundIndex: Int, stats: JSONObject) -> Unit = { _, _ -> }
     ): OpenRouterCompletionResult {
         // Resolve once before HTTP and all tool rounds; Activity already resolves auto.
         val requestEffort = OpenRouterReasoningPolicy.requestEffort(model, reasoningEffort)
-        val history = JSONArray(messages.toString())
+        val history = JsonProtocol.arrayCopy(messages)
+        val inputCount = history.length()
+        val binding = OpenRouterProtocolCodec.binding(model, tools, apiKey, responseFormat, claudeRoute)
+        val sourceInputHash = OpenRouterProtocolCodec.fingerprint(history)
+        if (OpenRouterProtocolCodec.checkBinding(history, binding)) {
+            onProtocolWarning("Изменён подписанный контекст Claude. История сообщений сохранена; прежние служебные блоки мышления нельзя повторно использовать с этим запросом.")
+        }
+        val inputHash = StreamingJsonRequestBody.sha256(history)
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
         val accumulatedUsage = JSONObject()
@@ -158,7 +185,7 @@ class OpenRouterChatClient(
                 throw budgetException("Лимит времени OpenRouter complete() (5 часов) исчерпан.")
             }
             if (accumulatedTotalTokens >= MAX_ACCUMULATED_TOTAL_TOKENS) {
-                throw budgetException("Мягкий лимит накопленных токенов OpenRouter (5 млн) исчерпан.")
+                throw budgetException("Аварийный бюджет одного ответа OpenRouter (5 млн usage-токенов) исчерпан. Он суммирует вход каждого раунда, включая повторную историю и кэш, и выход с мышлением; история чата сохранена.")
             }
         }
 
@@ -172,6 +199,15 @@ class OpenRouterChatClient(
                 .put("parallel_tool_calls", parallelToolCalls)
                 .put("usage", JSONObject().put("include", true))
             maxTokens?.takeIf { it > 0 }?.let { body.put("max_tokens", it) }
+            responseFormat?.let {
+                body.put("response_format", JsonProtocol.objectCopy(it))
+            }
+            claudeRoute.provider(model, responseFormat != null)?.let { body.put("provider", it) }
+            pdfEngine?.let { engine ->
+                require(engine in setOf("native", "auto", "cloudflare-ai", "mistral-ocr"))
+                if (engine != "auto") body.put("plugins", JSONArray().put(JSONObject()
+                    .put("id", "file-parser").put("pdf", JSONObject().put("engine", engine))))
+            }
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
@@ -179,7 +215,7 @@ class OpenRouterChatClient(
             sessionId?.trim()?.takeIf { it.isNotBlank() }?.let {
                 body.put("session_id", it)
             }
-            OpenRouterCachePolicy.configureRequest(body, model)
+            OpenRouterCachePolicy.configureRequest(body, model, cacheMode)
             requestEffort?.let {
                 body.put("reasoning", JSONObject().put("effort", it))
             }
@@ -189,8 +225,9 @@ class OpenRouterChatClient(
 
             val roundIndex = nextRoundIndex++
             onRoundObserved(roundIndex, null, null)
-            val wireBody = body.toString()
-            onPayloadObserved(roundIndex, wireBody.toByteArray(Charsets.UTF_8).size)
+            val wireBody = StreamingJsonRequestBody(body)
+            OpenRouterAttachmentPreflight.validateRequestBytes(model, wireBody.contentLength(), claudeRoute)
+            onPayloadObserved(roundIndex, wireBody.contentLength().coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
             val request = Request.Builder()
                 .url(baseUrl.trimEnd('/') + "/chat/completions")
                 .addHeader("Authorization", "Bearer $apiKey")
@@ -198,7 +235,7 @@ class OpenRouterChatClient(
                 .addHeader("Accept", "text/event-stream")
                 .addHeader("HTTP-Referer", "com.example.openaichat")
                 .addHeader("X-Title", "OpenAIApiChat")
-                .post(wireBody.toRequestBody("application/json".toMediaType()))
+                .post(wireBody)
                 .build()
 
             val call = httpClient.newCall(request)
@@ -217,13 +254,24 @@ class OpenRouterChatClient(
 
             var role = "assistant"
             var sawDone = false
+            var finishReason: String? = null
             var roundResponseModel: String? = null
             var roundReportedCost: Double? = null
             var roundUsage: JSONObject? = null
             var generationId: String? = null
             val contentParts = StringBuilder()
-            val reasoningDetails = JSONArray()
+            var lastTextSnapshot = 0L
+            var emittedTextLength = 0
+            val reasoningDetails = ReasoningDetailAccumulator()
             val toolCallsByIndex = sortedMapOf<Int, OpenRouterStreamToolCall>()
+
+            fun emitTextSnapshot(force: Boolean = false) {
+                if (contentParts.length == emittedTextLength) return
+                val now = System.nanoTime()
+                if (!force && lastTextSnapshot != 0L && now - lastTextSnapshot < 75_000_000L) return
+                lastTextSnapshot = now; emittedTextLength = contentParts.length
+                onTextDelta((accumulatedText + contentParts.toString()).filter { it.isNotEmpty() }.joinToString("\n\n"))
+            }
 
             fun consume(data: String) {
                 if (data == "[DONE]") {
@@ -238,12 +286,12 @@ class OpenRouterChatClient(
                 json.optJSONObject("error")?.let { error ->
                     throw upstreamError(error, "SSE", roundIndex)
                 }
-                val candidateId = json.optString("id").takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
+                val candidateId = JsonProtocol.nonBlank(json, "id")?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
                 if (candidateId != null && generationId == null) {
                     generationId = candidateId
                     onRoundObserved(roundIndex, candidateId, null)
                 }
-                json.optString("model").takeIf { it.isNotBlank() }?.let { roundResponseModel = it }
+                JsonProtocol.nonBlank(json, "model")?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
                     // Repeated final usage frames are snapshots, not billable deltas.
                     roundUsage = JSONObject(usage.toString())
@@ -257,31 +305,27 @@ class OpenRouterChatClient(
                 val choices = json.optJSONArray("choices")
                 if (choices == null || choices.length() == 0) return
                 val choice = choices.optJSONObject(0) ?: return
+                JsonProtocol.nonBlank(choice, "finish_reason")?.let { finishReason = it }
                 val delta = choice.optJSONObject("delta") ?: return
 
-                delta.optString("role").takeIf { it.isNotBlank() }?.let { role = it }
-                delta.optString("content", "").takeIf { it.isNotEmpty() }?.let { chunk ->
+                JsonProtocol.nonBlank(delta, "role")?.let { role = it }
+                JsonProtocol.text(delta, "content")?.takeIf { it.isNotEmpty() }?.let { chunk ->
                     contentParts.append(chunk)
-                    onTextDelta((accumulatedText + contentParts.toString())
-                        .filter { it.isNotEmpty() }.joinToString("\n\n"))
+                    emitTextSnapshot()
                 }
 
-                delta.optJSONArray("reasoning_details")?.let { details ->
-                    for (i in 0 until details.length()) {
-                        details.opt(i)?.let { reasoningDetails.put(it) }
-                    }
-                }
+                delta.optJSONArray("reasoning_details")?.let(reasoningDetails::accept)
 
                 delta.optJSONArray("tool_calls")?.let { calls ->
                     for (i in 0 until calls.length()) {
                         val call = calls.optJSONObject(i) ?: continue
                         val index = call.optInt("index", i)
                         val target = toolCallsByIndex.getOrPut(index) { OpenRouterStreamToolCall() }
-                        call.optString("id").takeIf { it.isNotBlank() }?.let { target.id = it }
-                        call.optString("type").takeIf { it.isNotBlank() }?.let { target.type = it }
+                        JsonProtocol.nonBlank(call, "id")?.let { target.id = it }
+                        JsonProtocol.nonBlank(call, "type")?.let { target.type = it }
                         call.optJSONObject("function")?.let { function ->
-                            function.optString("name").takeIf { it.isNotBlank() }?.let { target.name += it }
-                            function.optString("arguments", "").takeIf { it.isNotEmpty() }?.let { target.arguments.append(it) }
+                            JsonProtocol.nonBlank(function, "name")?.let { target.name += it }
+                            JsonProtocol.text(function, "arguments")?.takeIf { it.isNotEmpty() }?.let { target.arguments.append(it) }
                         }
                     }
                 }
@@ -310,6 +354,7 @@ class OpenRouterChatClient(
                     if (!sawDone) throw IOException("OpenRouter SSE ended before [DONE]")
                 }
             } catch (e: Exception) {
+                emitTextSnapshot(force = true)
                 if (e is CancellationException) throw e
                 if (e is OpenRouterCompletionException) {
                     val partial = buildList {
@@ -326,11 +371,26 @@ class OpenRouterChatClient(
                     accumulatedText += contentParts.toString()
                 }
                 throw e
+            } finally {
+                // Optional diagnostics must not replace the result, cancellation or upstream error.
+                try {
+                    val stats = FileBackedIoTelemetry.snapshot(body)
+                    onFileIoObserved(roundIndex, JSONObject().put("files", stats.files)
+                        .put("source_read_passes", stats.readPasses).put("source_read_bytes", stats.readBytes)
+                        .put("file_work_ms", stats.workNanos / 1_000_000L))
+                } catch (_: Exception) {
+                    // Diagnostics are best-effort. Never swallow VM/heap Errors.
+                }
             }
 
+            emitTextSnapshot(force = true)
             ensureActive()
             accumulateUsage(roundUsage)
-            roundUsage?.optLong("total_tokens", 0L)?.takeIf { it > 0L }?.let { accumulatedTotalTokens += it }
+            roundUsage?.let { u ->
+                val total = u.optLong("total_tokens", 0L).takeIf { it > 0L }
+                    ?: (u.optLong("prompt_tokens", 0L).coerceAtLeast(0L) + u.optLong("completion_tokens", 0L).coerceAtLeast(0L))
+                accumulatedTotalTokens += total
+            }
             val completedRoundCost = roundReportedCost
             if (completedRoundCost == null) {
                 everyRoundCostKnown = false
@@ -340,13 +400,14 @@ class OpenRouterChatClient(
             val message = JSONObject()
                 .put("role", role)
                 .put("content", contentParts.toString())
-            if (reasoningDetails.length() > 0) {
-                message.put("reasoning_details", reasoningDetails)
+            val completeDetails = reasoningDetails.array()
+            if (completeDetails.length() > 0) {
+                message.put("reasoning_details", completeDetails)
             }
             if (toolCallsByIndex.isNotEmpty()) {
                 val toolCalls = JSONArray()
                 toolCallsByIndex.forEach { (_, call) ->
-                    if (call.id.isBlank() || call.name.isBlank()) {
+                    if (finishReason in setOf("tool_calls", "stop") && (call.id.isBlank() || call.name.isBlank())) {
                         throw IOException("Malformed streamed tool call")
                     }
                     toolCalls.put(
@@ -365,17 +426,43 @@ class OpenRouterChatClient(
             }
             return JSONObject()
                 .put("stream", true)
+                .put("finish_reason", finishReason ?: JSONObject.NULL)
                 .put("model", roundResponseModel ?: JSONObject.NULL) to message
         }
         try {
             while (true) {
                 ensureWithinBudget()
                 val (responseJson, message) = requestMessage("auto")
-                responseJson.optString("model").takeIf { it.isNotBlank() }?.let { responseModel = it }
+                JsonProtocol.nonBlank(responseJson, "model")?.let { responseModel = it }
+                val finishReason = JsonProtocol.nonBlank(responseJson, "finish_reason")
                 val calls = message.optJSONArray("tool_calls")
-                if (calls == null || calls.length() == 0) {
+                // A complete SSE [DONE] frame may omit finish_reason even after a
+                // fully formed tool call. The per-tool id/name/JSON checks below
+                // still reject incomplete or malformed tool execution requests.
+                // Missing finish_reason does not authorize an incomplete tool.
+                // A closed SSE stream may legitimately omit it, but every tool
+                // must have an ID, function name, and complete JSON arguments.
+                val completeUnconfirmedCalls = finishReason == null && calls != null &&
+                    (0 until calls.length()).all { index ->
+                        val candidate = calls.optJSONObject(index) ?: return@all false
+                        val function = candidate.optJSONObject("function") ?: return@all false
+                        val arguments = JsonProtocol.text(function, "arguments")
+                        !JsonProtocol.nonBlank(candidate, "id").isNullOrBlank() &&
+                            !JsonProtocol.nonBlank(function, "name").isNullOrBlank() &&
+                            arguments != null && runCatching { JSONObject(arguments) }.isSuccess
+                    }
+                if (calls == null || calls.length() == 0 ||
+                    (finishReason == null && !completeUnconfirmedCalls) ||
+                    (finishReason != null && finishReason !in setOf("tool_calls", "stop"))) {
+                    val tail = JSONArray()
+                    for (i in inputCount until history.length()) tail.put(JsonProtocol.copy(history.get(i)))
+                    val replayMessage = JsonProtocol.objectCopy(message)
+                    if (finishReason != "stop") {
+                        replayMessage.remove("tool_calls"); replayMessage.remove("reasoning_details"); replayMessage.remove("reasoning")
+                    }
+                    tail.put(replayMessage)
                     return OpenRouterCompletionResult(
-                        text = (accumulatedText + message.optString("content"))
+                        text = (accumulatedText + JsonProtocol.string(message, "content"))
                             .filter { it.isNotBlank() }.joinToString("\n\n").trim(),
                         usage = JSONObject(accumulatedUsage.toString()).apply {
                             // Never present a tool-loop subtotal as a complete charge.
@@ -383,10 +470,16 @@ class OpenRouterChatClient(
                         }.takeIf { it.length() > 0 },
                         responseModel = responseModel,
                         assistantMessage = JSONObject(message.toString()),
-                        toolNames = toolNames.distinct()
+                        toolNames = toolNames.distinct(),
+                        finishReason = finishReason,
+                        protocol = JSONObject().put("version", 1).put("input_sha256", sourceInputHash)
+                            .put("wire_input_sha256", inputHash)
+                            .put("binding_sha256", binding).put("tail", tail).apply {
+                                if (finishReason != "stop") put("interrupted_assistant", JsonProtocol.objectCopy(message))
+                            }
                     )
                 }
-                message.optString("content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
+                JsonProtocol.string(message, "content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
                 history.put(JSONObject(message.toString()))
                 for (i in 0 until calls.length()) {
                     ensureWithinBudget()
@@ -400,7 +493,7 @@ class OpenRouterChatClient(
                         throw IOException("Unexpected OpenRouter server-side tool call: $name")
                     }
                     val arguments = try {
-                        JSONObject(function.optString("arguments", "{}"))
+                        JSONObject(JsonProtocol.string(function, "arguments", "{}"))
                     } catch (e: Exception) {
                         throw IOException("Invalid tool arguments for $name", e)
                     }
@@ -416,6 +509,10 @@ class OpenRouterChatClient(
                             .put("content", toolResult)
                     )
                 }
+                val checkpointTail = JSONArray()
+                for (i in inputCount until history.length()) checkpointTail.put(JsonProtocol.copy(history.get(i)))
+                onProtocolCheckpoint(JSONObject().put("version", 1).put("input_sha256", sourceInputHash)
+                    .put("wire_input_sha256", inputHash).put("binding_sha256", binding).put("tail", checkpointTail))
             }
         } catch (e: Exception) {
             if (e is OpenRouterCompletionException) throw e

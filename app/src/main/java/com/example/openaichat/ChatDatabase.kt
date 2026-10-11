@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 20
+        private const val DB_VERSION = 22
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -114,6 +114,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         ensureRequestEventsTable(db)
         ensureRequestAccountingTable(db)
         ensureOpenRouterRoundsTable(db)
+        ensureLocalArtifactsTable(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -172,6 +173,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 error TEXT,
                 tool_trace TEXT,
                 usage TEXT,
+                finish_reason TEXT,
+                openrouter_protocol TEXT,
+                protocol_context_state TEXT,
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
         """.trimIndent())
@@ -233,9 +237,23 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX idx_request_events_chat_created ON $REQUEST_EVENT_TABLE(chat_id, created_at DESC, id DESC)")
         ensureRequestAccountingTable(db)
         ensureOpenRouterRoundsTable(db)
+        ensureLocalArtifactsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 21) {
+            // A legacy or partially upgraded DB can already contain these columns.
+            // Do not turn an unchanged historic message into a destructive migration.
+            val columns = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names.add(c.getString(nameIndex))
+                names
+            }
+            if ("finish_reason" !in columns) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN finish_reason TEXT")
+            if ("openrouter_protocol" !in columns) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openrouter_protocol TEXT")
+            ensureLocalArtifactsTable(db)
+        }
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN image_file_id TEXT")
         }
@@ -311,7 +329,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
         }
         if (oldVersion < 17) {
-            MessageMetadataCodec.allKeys.forEach { key ->
+            MessageMetadataCodec.allKeys.filter { it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state") }.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
             }
         }
@@ -346,6 +364,15 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 db.execSQL("ALTER TABLE $REQUEST_ACCOUNTING_TABLE ADD COLUMN rounds_sealed INTEGER NOT NULL DEFAULT 0")
             }
             ensureOpenRouterRoundsTable(db)
+        }
+        if (oldVersion < 22) {
+            val hasProtocolContext = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                var found = false
+                while (c.moveToNext()) if (c.getString(nameIndex) == "protocol_context_state") found = true
+                found
+            }
+            if (!hasProtocolContext) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN protocol_context_state TEXT")
         }
     }
 
@@ -383,7 +410,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     fun getChat(id: String): JSONObject? {
         val d = readableDatabase
-        d.query(CHAT_TABLE, null, "id=?", arrayOf(id), null, null, null, "1").use { c ->
+        SqliteLargeTextQuery.query(d, CHAT_TABLE, null, "id=?", arrayOf(id), null, null, null, "1").use { c ->
             if (!c.moveToFirst()) return null
             val chat = JSONObject()
                 .put("id", c.getString(c.getColumnIndexOrThrow("id")))
@@ -399,14 +426,14 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     fun getChatTitle(id: String): String? {
         if (id.isBlank()) return null
-        readableDatabase.query(CHAT_TABLE, arrayOf("title"), "id=?", arrayOf(id), null, null, null, "1").use { c ->
+        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE, arrayOf("title"), "id=?", arrayOf(id), null, null, null, "1").use { c ->
             return if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow("title")) else null
         }
     }
 
     fun listChats(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        readableDatabase.query(CHAT_TABLE, null, null, null, null, null, "updated_at DESC, id DESC").use { c ->
+        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE, null, null, null, null, null, "updated_at DESC, id DESC").use { c ->
             while (c.moveToNext()) {
                 val id = c.getString(c.getColumnIndexOrThrow("id"))
                 val obj = JSONObject()
@@ -426,8 +453,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     /** Lightweight list for the chat picker; never loads full message histories. */
     fun listChatSummaries(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        readableDatabase.query(
-            CHAT_TABLE,
+        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
             arrayOf("id", "title", "response_id", "baseline_effort", "updated_at"),
             null, null, null, null, "updated_at DESC, id DESC"
         ).use { c ->
@@ -486,6 +512,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
             if (!exists) return@transaction
             val known = mutableSetOf<String>()
+            val stoppedRequests = mutableSetOf<String>()
+            db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("local_request_id"),
+                "chat_id=? AND local_status='stopped'", arrayOf(id), null, null, null).use { c ->
+                while (c.moveToNext()) stoppedRequests.add(c.getString(0))
+            }
             var nextPosition = 0
             var existingCount = 0
             db.query(MESSAGE_TABLE, arrayOf("role","request_id","position"),
@@ -503,7 +534,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             val hasNewUser = messages.any { item ->
                 val requestId = item.optString("request_id")
                 item.optString("role") == "user" && requestId.isNotBlank() &&
-                    requestId != "null" && "user|$requestId" !in known
+                    requestId != "null" && requestId !in stoppedRequests && "user|$requestId" !in known
             }
             if (!hasNewUser && messages.size < existingCount) return@transaction
             // A Worker may have inserted an assistant at position N while the UI
@@ -514,6 +545,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 val requestId = snapshot.optString("request_id")
                 val identity = "$role|$requestId"
                 if (role == "user" && requestId.isNotBlank() && requestId != "null" &&
+                    requestId !in stoppedRequests &&
                     known.add(identity)) {
                     val copy = JSONObject(snapshot.toString())
                     db.insertOrThrow(MESSAGE_TABLE, null,
@@ -547,9 +579,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (id.isBlank() || expectedRequestId.isBlank()) return false
         var committed = false
         writableDatabase.transaction { db ->
-            val activeRequest = db.query(
-                CHAT_TABLE,
-                arrayOf("active_request_id"),
+            val activeRequest = db.query(CHAT_TABLE, arrayOf("active_request_id"),
                 "id=?",
                 arrayOf(id),
                 null, null, null, "1"
@@ -576,15 +606,21 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         baselineEffort: String?,
         messages: List<JSONObject>,
         expectedRequestId: String
-    ): Boolean = completeActiveRequestOnce(id, expectedRequestId) { db ->
+    ): Boolean {
+        // Reject a single terminal assistant with a foreign/missing local request_id.
+        // Otherwise a provider HTTP request ID can consume the active claim while
+        // silently persisting no assistant. Multi-message snapshots may legitimately
+        // contain other requests, or be empty during an explicit failure claim.
+        if (messages.size == 1 && JsonProtocol.string(messages[0], "role") == "assistant" &&
+            JsonProtocol.string(messages[0], "request_id") != expectedRequestId) return false
+        return completeActiveRequestOnce(id, expectedRequestId) { db ->
         // This callback may hold an older full-chat snapshot. Commit only the assistant
         // belonging to the winning request, preserving newer messages/feedback/files.
         val assistant = messages.lastOrNull { item ->
             item.optString("role") == "assistant" && item.optString("request_id") == expectedRequestId
         }
         if (assistant != null) {
-            val existingId = db.query(
-                MESSAGE_TABLE, arrayOf("id"),
+            val existingId = db.query(MESSAGE_TABLE, arrayOf("id"),
                 "chat_id=? AND request_id=? AND role='assistant'",
                 arrayOf(id, expectedRequestId), null, null, "position DESC", "1"
             ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
@@ -599,8 +635,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     messageContentValues(id, nextPosition, copy, ChatMessageFingerprint.of(copy))
                 )
             } else {
-                val position = db.query(
-                    MESSAGE_TABLE, arrayOf("position"), "id=?", arrayOf(existingId.toString()),
+                val position = db.query(MESSAGE_TABLE, arrayOf("position"), "id=?", arrayOf(existingId.toString()),
                     null,null,null,"1"
                 ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
                 db.update(MESSAGE_TABLE,
@@ -608,6 +643,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     "id=?", arrayOf(existingId.toString())
                 )
             }
+            queueAnswerNotification(db, id, expectedRequestId, assistant.optString("status") == "completed")
         }
         if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank()) {
             db.update(CHAT_TABLE, ContentValues().apply {
@@ -616,23 +652,23 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 put("updated_at", System.currentTimeMillis())
             }, "id=?", arrayOf(id))
         }
+        }
     }
 
     /** Fatal recovery with no new messages still consumes its one-shot claim. */
     fun claimActiveRequestFailure(chatId: String, expectedRequestId: String): Boolean =
-        completeActiveRequestOnce(chatId, expectedRequestId) { }
+        completeActiveRequestOnce(chatId, expectedRequestId) { db -> queueAnswerNotification(db, chatId, expectedRequestId, false) }
 
     /**
      * Stop and active-cursor release are a single SQLite transaction. A Worker
      * finalizer either wins the ownership claim first or observes Stop; the
      * two cannot both persist a terminal assistant message.
      */
-    fun stopActiveRequestOnce(chatId: String, expectedRequestId: String): Boolean {
+    fun stopActiveRequestOnce(chatId: String, expectedRequestId: String, removeUserMessage: Boolean = false): Boolean {
         if (chatId.isBlank() || expectedRequestId.isBlank()) return false
         var stopped = false
         writableDatabase.transaction { db ->
-            val active = db.query(
-                CHAT_TABLE, arrayOf("active_request_id", "active_response_id"), "id=?",
+            val active = db.query(CHAT_TABLE, arrayOf("active_request_id", "active_response_id"), "id=?",
                 arrayOf(chatId), null, null, null, "1"
             ).use { cursor ->
                 if (cursor.moveToFirst()) Pair(cursor.getString(0), cursor.getString(1)) else null
@@ -640,6 +676,13 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if (!ActiveResponseWritePolicy.shouldCommit(active?.first, expectedRequestId)) {
                 return@transaction
             }
+            // A tombstone also covers legacy requests with no accounting row.
+            db.insertWithOnConflict(REQUEST_ACCOUNTING_TABLE, null, ContentValues().apply {
+                put("chat_id", chatId); put("local_request_id", expectedRequestId)
+                put("provider", "unknown"); put("credential_source", "unknown")
+                put("created_at", System.currentTimeMillis()); put("updated_at", System.currentTimeMillis())
+                put("local_status", "running")
+            }, SQLiteDatabase.CONFLICT_IGNORE)
             db.update(
                 REQUEST_ACCOUNTING_TABLE,
                 ContentValues().apply {
@@ -670,6 +713,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 arrayOf(chatId, expectedRequestId)
             ) == 1
             if (stopped) {
+                if (removeUserMessage) db.delete(MESSAGE_TABLE,
+                    "chat_id=? AND request_id=? AND role='user'", arrayOf(chatId, expectedRequestId))
                 // One event for this exact stopped local request, within the CAS transaction.
                 val now = System.currentTimeMillis()
                 db.execSQL("""
@@ -705,8 +750,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.transaction { db ->
             // CAS inside an SQLite write transaction serializes simultaneous
             // Worker/Activity claims even when they use separate helpers.
-            val activeId = db.query(
-                CHAT_TABLE, arrayOf("active_request_id"), "id=?",
+            val activeId = db.query(CHAT_TABLE, arrayOf("active_request_id"), "id=?",
                 arrayOf(chatId), null, null, null, "1"
             ).use { cursor ->
                 if (cursor.moveToFirst()) cursor.getString(0) else null
@@ -759,9 +803,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
         val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
         val existingRows = mutableListOf<ExistingMessageRow>()
-        db.query(
-            MESSAGE_TABLE,
-            arrayOf("id", "position", "request_id", "content_hash"),
+        db.query(MESSAGE_TABLE, arrayOf("id", "position", "request_id", "content_hash"),
             "chat_id=?",
             arrayOf(id),
             null, null, "position ASC"
@@ -825,7 +867,7 @@ data class ExistingMessageRow(
         put("chat_id", chatId)
         put("position", position)
         put("role", message.optString("role"))
-        put("text", message.optString("text"))
+        put("text", JsonProtocol.string(message, "text"))
         putStringOrNull("request_id", message.optString("request_id").takeIf { it.isNotBlank() && it != "null" })
         putStringOrNull("response_id", message.optString("response_id").takeIf { it.isNotBlank() && it != "null" })
         putStringOrNull("file_ids", message.optJSONArray("file_ids")?.toString())
@@ -834,10 +876,10 @@ data class ExistingMessageRow(
         putStringOrNull("file_paths", message.optJSONArray("file_paths")?.toString())
         putStringOrNull("file_mimes", message.optJSONArray("file_mimes")?.toString())
         putStringOrNull("attachments", message.optJSONArray("attachments")?.toString())
-        putStringOrNull("image_path", message.optString("image_path").takeIf { it.isNotBlank() })
-        putStringOrNull("image_file_id", message.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
-        putStringOrNull("image_name", message.optString("image_name").takeIf { it.isNotBlank() })
-        putStringOrNull("image_mime", message.optString("image_mime").takeIf { it.isNotBlank() })
+        putStringOrNull("image_path", JsonProtocol.string(message, "image_path").takeIf { it.isNotBlank() })
+        putStringOrNull("image_file_id", JsonProtocol.string(message, "image_file_id").takeIf { it.isNotBlank() && it != "null" })
+        putStringOrNull("image_name", JsonProtocol.string(message, "image_name").takeIf { it.isNotBlank() })
+        putStringOrNull("image_mime", JsonProtocol.string(message, "image_mime").takeIf { it.isNotBlank() })
         put("image_size", message.optLong("image_size", 0L).coerceAtLeast(0L))
         putStringOrNull("annotations", message.optJSONArray("annotations")?.toString())
         putStringOrNull("generated_images", message.optJSONArray("generated_images")?.toString())
@@ -871,9 +913,7 @@ data class ExistingMessageRow(
     ) {
         if (chatId.isBlank()) return
         writableDatabase.transaction { db ->
-            val chatExists = db.query(
-                CHAT_TABLE,
-                arrayOf("id"),
+            val chatExists = db.query(CHAT_TABLE, arrayOf("id"),
                 "id=?",
                 arrayOf(chatId),
                 null, null, null, "1"
@@ -1288,9 +1328,7 @@ data class ExistingMessageRow(
     ) {
         if (chatId.isBlank()) return
         writableDatabase.transaction { db ->
-            val chatExists = db.query(
-                CHAT_TABLE,
-                arrayOf("id"),
+            val chatExists = db.query(CHAT_TABLE, arrayOf("id"),
                 "id=?",
                 arrayOf(chatId),
                 null, null, null, "1"
@@ -1336,7 +1374,7 @@ data class ExistingMessageRow(
         if (chatId.isBlank()) return emptyList()
         val safeLimit = limit.coerceIn(1, 100)
         val out = mutableListOf<JSONObject>()
-        readableDatabase.query(
+        SqliteLargeTextQuery.query(readableDatabase,
             REQUEST_EVENT_TABLE,
             null,
             "chat_id=?",
@@ -1393,13 +1431,71 @@ data class ExistingMessageRow(
                 "UPDATE $METRICS_TABLE SET feedback=? WHERE chat_id=? AND request_id=?",
                 arrayOf(v, chatId, requestId)
             )
-            db.query(MESSAGE_TABLE, arrayOf("id", "annotations", "feedback"), "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, "position DESC", "1").use { c ->
+            db.query(MESSAGE_TABLE, arrayOf("id"), "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, "position DESC", "1").use { c ->
                 if (!c.moveToFirst()) return@use
                 val id = c.getLong(c.getColumnIndexOrThrow("id"))
                 val cv = ContentValues().apply { put("feedback", v) }
                 db.update(MESSAGE_TABLE, cv, "id=?", arrayOf(id.toString()))
             }
         }
+    }
+
+    /** Reuse extraction persisted by a previous preparation, including a still-open UI snapshot. */
+    fun cachedAttachmentManifest(chatId: String, expected: JSONObject): JSONArray? {
+        val rowId = expected.optLong("_db_message_id", 0L)
+        val request = JsonProtocol.nonBlank(expected, "request_id")
+        if (rowId == 0L && request == null) return null
+        val where = if (rowId != 0L) "chat_id=? AND id=? AND role='user'" else "chat_id=? AND request_id=? AND role='user'"
+        val args = arrayOf(chatId, if (rowId != 0L) rowId.toString() else request!!)
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE, AttachmentMessageState.columns.toTypedArray(),
+            where, args, null, null, "position DESC", "1").use { c ->
+            if (!c.moveToFirst()) return null
+            val current = JSONObject()
+            AttachmentMessageState.arrays.forEach { key -> parseArrayColumn(c.getString(c.getColumnIndexOrThrow(key)))?.let { current.put(key, it) } }
+            AttachmentMessageState.strings.forEach { key -> c.getString(c.getColumnIndexOrThrow(key))?.let { current.put(key, it) } }
+            current.put("image_size", c.getLong(c.getColumnIndexOrThrow("image_size")))
+            if (AttachmentMessageState.fingerprint(current, false) != AttachmentMessageState.fingerprint(expected, false)) return null
+            return current.optJSONArray("attachments")
+        }
+    }
+
+    /** Attachment CAS, preserving text and any concurrently appended worker tail. */
+    fun updateMessageAttachments(chatId: String, expected: JSONObject, replacement: JSONObject, invalidateContext: Boolean): Boolean {
+        if (chatId.isBlank()) return false
+        if (!invalidateContext && AttachmentMessageState.fingerprint(expected, false) != AttachmentMessageState.fingerprint(replacement, false)) return false
+        var changed = false
+        writableDatabase.transaction { db ->
+            if (invalidateContext) db.query(CHAT_TABLE, arrayOf("active_status"), "id=?", arrayOf(chatId), null, null, null).use {
+                if (it.moveToFirst() && !it.getString(0).isNullOrBlank()) return@transaction
+            }
+            val rowId = expected.optLong("_db_message_id", 0L)
+            val request = JsonProtocol.nonBlank(expected, "request_id")
+            if (rowId == 0L && request == null) return@transaction
+            val where = if (rowId != 0L) "chat_id=? AND id=? AND role='user'" else "chat_id=? AND request_id=? AND role='user'"
+            val args = arrayOf(chatId, if (rowId != 0L) rowId.toString() else request!!)
+            SqliteLargeTextQuery.query(db, MESSAGE_TABLE, (listOf("id", "position") + AttachmentMessageState.columns).toTypedArray(),
+                where, args, null, null, "position DESC", "1").use { c ->
+                if (!c.moveToFirst()) return@transaction
+                val current = JSONObject()
+                AttachmentMessageState.arrays.forEach { key -> parseArrayColumn(c.getString(c.getColumnIndexOrThrow(key)))?.let { current.put(key, it) } }
+                AttachmentMessageState.strings.forEach { key -> c.getString(c.getColumnIndexOrThrow(key))?.let { current.put(key, it) } }
+                current.put("image_size", c.getLong(c.getColumnIndexOrThrow("image_size")))
+                if (AttachmentMessageState.fingerprint(current) != AttachmentMessageState.fingerprint(expected)) return@transaction
+                val values = ContentValues().apply {
+                    AttachmentMessageState.arrays.forEach { key -> putStringOrNull(key, replacement.optJSONArray(key)?.toString()) }
+                    AttachmentMessageState.strings.forEach { key -> putStringOrNull(key, JsonProtocol.nonBlank(replacement, key)) }
+                    put("image_size", replacement.optLong("image_size", 0L)); putNull("content_hash")
+                }
+                changed = db.update(MESSAGE_TABLE, values, "id=?", arrayOf(c.getLong(c.getColumnIndexOrThrow("id")).toString())) == 1
+                if (changed && invalidateContext) {
+                    db.update(CHAT_TABLE, ContentValues().apply { putNull("response_id"); putNull("baseline_effort") }, "id=?", arrayOf(chatId))
+                    db.update(MESSAGE_TABLE, ContentValues().apply { put("protocol_context_state", "invalidated"); putNull("content_hash") },
+                        "chat_id=? AND position>=? AND role='assistant' AND openrouter_protocol IS NOT NULL",
+                        arrayOf(chatId, c.getLong(c.getColumnIndexOrThrow("position")).toString()))
+                }
+            }
+        }
+        return changed
     }
 
     fun updateUserFileLocalPath(
@@ -1412,8 +1508,7 @@ data class ExistingMessageRow(
     ) {
         if (chatId.isBlank() || requestId.isBlank() || index < 0 || localPath.isBlank()) return
         writableDatabase.transaction { db ->
-            db.query(
-                MESSAGE_TABLE,
+            SqliteLargeTextQuery.query(db, MESSAGE_TABLE,
                 arrayOf("id", "file_ids", "file_names", "file_sizes", "file_paths", "file_mimes"),
                 "chat_id=? AND request_id=? AND role='user'",
                 arrayOf(chatId, requestId), null, null, "position DESC", "1"
@@ -1450,9 +1545,7 @@ data class ExistingMessageRow(
     ) {
         if (chatId.isBlank() || requestId.isBlank() || localPath.isBlank()) return
         writableDatabase.transaction { db ->
-            db.query(
-                MESSAGE_TABLE,
-                arrayOf("id"),
+            db.query(MESSAGE_TABLE, arrayOf("id"),
                 "chat_id=? AND request_id=? AND role='user'",
                 arrayOf(chatId, requestId), null, null, "position DESC", "1"
             ).use { c ->
@@ -1479,7 +1572,7 @@ data class ExistingMessageRow(
     ) {
         if (chatId.isBlank() || fileId.isBlank()) return
         writableDatabase.transaction { db ->
-            db.query(MESSAGE_TABLE, arrayOf("id", "annotations"), "chat_id=? AND annotations IS NOT NULL", arrayOf(chatId), null, null, "position ASC").use { c ->
+            SqliteLargeTextQuery.query(db, MESSAGE_TABLE, arrayOf("id", "annotations"), "chat_id=? AND annotations IS NOT NULL", arrayOf(chatId), null, null, "position ASC").use { c ->
                 while (c.moveToNext()) {
                     val raw = c.getString(c.getColumnIndexOrThrow("annotations")) ?: continue
                     val anns = try { JSONArray(raw) } catch (_: Exception) { continue }
@@ -1489,7 +1582,7 @@ data class ExistingMessageRow(
                         val type = a.optString("type")
                         if (type != "container_file_citation" && type != "file_citation") continue
                         if (annotationType != null && type != annotationType) continue
-                        if (a.optString("file_id") != fileId) continue
+                        if (JsonProtocol.string(a, "file_id") != fileId) continue
                         a.put("state", state)
                         if (localPath != null) a.put("local_path", localPath)
                         if (mimeType != null) a.put("mime_type", mimeType)
@@ -1508,8 +1601,7 @@ data class ExistingMessageRow(
 
     fun findLocalFileByFileId(fileId: String): JSONObject? {
         if (fileId.isBlank()) return null
-        readableDatabase.query(
-            MESSAGE_TABLE,
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("chat_id", "annotations"),
             "annotations IS NOT NULL", null, null, null, "id DESC"
         ).use { c ->
@@ -1518,13 +1610,13 @@ data class ExistingMessageRow(
                 val anns = try { JSONArray(raw) } catch (_: Exception) { continue }
                 for (i in 0 until anns.length()) {
                     val a = anns.optJSONObject(i) ?: continue
-                    if (a.optString("file_id") != fileId) continue
+                    if (JsonProtocol.string(a, "file_id") != fileId) continue
                     val path = a.optString("local_path").takeIf { it.isNotBlank() } ?: continue
                     if (!java.io.File(path).isFile) continue
                     return JSONObject()
                         .put("chat_id", c.getString(c.getColumnIndexOrThrow("chat_id")))
                         .put("file_id", fileId)
-                        .put("filename", a.optString("filename"))
+                        .put("filename", JsonProtocol.string(a, "filename"))
                         .put("path", path)
                         .put("mime_type", a.optString("mime_type"))
                         .put("size_bytes", a.optLong("size_bytes", java.io.File(path).length()))
@@ -1623,10 +1715,14 @@ data class ExistingMessageRow(
         writableDatabase.update(CHAT_TABLE, values, where, args)
     }
 
+    /** Ownership checks must not materialize the accumulating answer on every SSE event. */
+    fun isActiveRequest(chatId: String, requestId: String): Boolean = readableDatabase.rawQuery(
+        "SELECT 1 FROM $CHAT_TABLE WHERE id=? AND active_request_id=? LIMIT 1", arrayOf(chatId, requestId)
+    ).use { it.moveToFirst() }
+
     fun getActiveResponse(chatId: String): JSONObject? {
         if (chatId.isBlank()) return null
-        readableDatabase.query(
-            CHAT_TABLE,
+        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
             arrayOf(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
@@ -1656,8 +1752,7 @@ data class ExistingMessageRow(
 
     fun listActiveResponses(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        readableDatabase.query(
-            CHAT_TABLE,
+        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
             arrayOf(
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
@@ -1734,23 +1829,96 @@ data class ExistingMessageRow(
         }
     }
 
+    private fun ensureLocalArtifactsTable(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS answer_notifications (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, completed INTEGER NOT NULL,
+            created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, request_id),
+            FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS openrouter_checkpoints (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, protocol TEXT NOT NULL,
+            PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifacts (
+            path TEXT PRIMARY KEY NOT NULL, chat_id TEXT NOT NULL, request_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL, metadata TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
+    }
+
+    fun saveOpenRouterCheckpoint(chatId: String, requestId: String, protocol: JSONObject) {
+        writableDatabase.transaction { db ->
+            val active = db.query(CHAT_TABLE, arrayOf("active_request_id"), "id=?", arrayOf(chatId), null, null, null).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            if (active != requestId) return@transaction
+            db.insertWithOnConflict("openrouter_checkpoints", null, ContentValues().apply {
+                put("chat_id", chatId); put("request_id", requestId); put("protocol", protocol.toString())
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+    }
+
+    private fun queueAnswerNotification(db: SQLiteDatabase, chatId: String, requestId: String, completed: Boolean) {
+        db.insertWithOnConflict("answer_notifications", null, ContentValues().apply {
+            put("chat_id", chatId); put("request_id", requestId); put("completed", if (completed) 1 else 0)
+            put("created_at", System.currentTimeMillis())
+        }, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+    fun pendingAnswerNotifications(): List<JSONObject> {
+        val out = mutableListOf<JSONObject>()
+        readableDatabase.query("answer_notifications", arrayOf("chat_id", "request_id", "completed"), null, null, null, null, "created_at").use { c ->
+            while (c.moveToNext()) out += JSONObject().put("chat_id", c.getString(0)).put("request_id", c.getString(1)).put("completed", c.getInt(2) != 0)
+        }
+        return out
+    }
+    fun acknowledgeAnswerNotification(chatId: String, requestId: String) {
+        writableDatabase.delete("answer_notifications", "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
+    }
+    fun getOpenRouterCheckpoint(chatId: String, requestId: String): JSONObject? = SqliteLargeTextQuery.query(readableDatabase, "openrouter_checkpoints", arrayOf("protocol"), "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+        keyColumns = arrayOf("chat_id", "request_id")
+    ).use { c -> if (c.moveToFirst()) JSONObject(c.getString(0)) else null }
+    fun clearOpenRouterCheckpoint(chatId: String, requestId: String) {
+        writableDatabase.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
+    }
+
+    /** Durable even if a tool succeeded just before Stop consumed response ownership. */
+    fun registerLocalArtifact(chatId: String, requestId: String, metadata: JSONObject): Boolean {
+        var saved = false
+        writableDatabase.transaction { db ->
+            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(chatId), null, null, null).use { it.moveToFirst() }
+            if (!exists) return@transaction
+            db.insertWithOnConflict("local_artifacts", null, ContentValues().apply {
+                put("path", metadata.getString("path")); put("chat_id", chatId); put("request_id", requestId)
+                put("created_at", System.currentTimeMillis()); put("metadata", metadata.toString())
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+            saved = true
+        }
+        return saved
+    }
+
     /** Local copies of assistant-generated/downloaded files and generated images. */
     fun listLocalFiles(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         val seen = mutableSetOf<String>()
-        readableDatabase.rawQuery(
-            """SELECT m.chat_id, c.title, m.annotations, m.generated_images
-               FROM $MESSAGE_TABLE m
-               JOIN $CHAT_TABLE c ON c.id = m.chat_id
-               WHERE m.annotations IS NOT NULL OR m.generated_images IS NOT NULL
-               ORDER BY m.id DESC""",
-            null
+        val titles = mutableMapOf<String, String>()
+        fun title(chatId: String) = titles.getOrPut(chatId) { getChatTitle(chatId).orEmpty() }
+        SqliteLargeTextQuery.query(readableDatabase, "local_artifacts", arrayOf("chat_id", "metadata"),
+            null, null, null, null, "created_at DESC", keyColumns = arrayOf("path")).use { c ->
+            while (c.moveToNext()) {
+                val a = JSONObject(c.getString(1))
+                val path = a.getString("path")
+                if (java.io.File(path).isFile && seen.add("file:$path")) out += a
+                    .put("kind", "file").put("chat_id", c.getString(0)).put("chat_title", title(c.getString(0)))
+            }
+        }
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
+            arrayOf("chat_id", "annotations", "generated_images"),
+            "annotations IS NOT NULL OR generated_images IS NOT NULL", null,
+            null, null, "id DESC"
         ).use { cur ->
             while (cur.moveToNext()) {
                 val chatId = cur.getString(0)
-                val chatTitle = cur.getString(1)
-                val annotationsRaw = cur.getString(2)
-                val imagesRaw = cur.getString(3)
+                val chatTitle = title(chatId)
+                val annotationsRaw = cur.getString(1)
+                val imagesRaw = cur.getString(2)
                 val annotations = try { if (!annotationsRaw.isNullOrBlank()) JSONArray(annotationsRaw) else JSONArray() } catch (_: Exception) { JSONArray() }
                 for (i in 0 until annotations.length()) {
                     val a = annotations.optJSONObject(i) ?: continue
@@ -1762,7 +1930,7 @@ data class ExistingMessageRow(
                         .put("kind", "file")
                         .put("chat_id", chatId)
                         .put("chat_title", chatTitle)
-                        .put("filename", a.optString("filename").ifBlank { "file" })
+                        .put("filename", JsonProtocol.string(a, "filename").ifBlank { "file" })
                         .put("path", path)
                         .put("mime_type", a.optString("mime_type"))
                         .put("size_bytes", a.optLong("size_bytes", file.length()))
@@ -1777,7 +1945,7 @@ data class ExistingMessageRow(
                         .put("kind", "image")
                         .put("chat_id", chatId)
                         .put("chat_title", chatTitle)
-                        .put("filename", a.optString("filename").ifBlank { "astra_image.png" })
+                        .put("filename", JsonProtocol.string(a, "filename").ifBlank { "astra_image.png" })
                         .put("path", path)
                         .put("mime_type", a.optString("mime_type").ifBlank { "image/png" })
                         .put("size_bytes", a.optLong("size_bytes", file.length()))
@@ -1790,8 +1958,10 @@ data class ExistingMessageRow(
     fun listLocalFilePaths(chatId: String): List<String> {
         if (chatId.isBlank()) return emptyList()
         val out = linkedSetOf<String>()
-        readableDatabase.query(
-            MESSAGE_TABLE,
+        readableDatabase.query("local_artifacts", arrayOf("path"), "chat_id=?", arrayOf(chatId), null, null, null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             "chat_id=?",
             arrayOf(chatId),
@@ -1829,8 +1999,10 @@ data class ExistingMessageRow(
 
     fun listAllLocalFilePaths(): List<String> {
         val out = linkedSetOf<String>()
-        readableDatabase.query(
-            MESSAGE_TABLE,
+        readableDatabase.query("local_artifacts", arrayOf("path"), null, null, null, null, null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             null, null, null, null, "position ASC"
         ).use { c ->
@@ -1849,7 +2021,8 @@ data class ExistingMessageRow(
         if (path.isBlank()) return false
         var removed = false
         writableDatabase.transaction { db ->
-            db.query(MESSAGE_TABLE, arrayOf("id", "annotations", "generated_images"), null, null, null, null, "id ASC").use { c ->
+            if (db.delete("local_artifacts", "path=?", arrayOf(path)) > 0) removed = true
+            SqliteLargeTextQuery.query(db, MESSAGE_TABLE, arrayOf("id", "annotations", "generated_images"), null, null, null, null, "id ASC").use { c ->
                 while (c.moveToNext()) {
                     val id = c.getLong(0)
                     var changed = false
@@ -1928,9 +2101,11 @@ data class ExistingMessageRow(
 
     private fun loadMessages(chatId: String): JSONArray {
         val arr = JSONArray()
-        readableDatabase.query(MESSAGE_TABLE, null, "chat_id=?", arrayOf(chatId), null, null, "position ASC, id ASC").use { c ->
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE, null, "chat_id=?", arrayOf(chatId), null, null, "position ASC, id ASC").use { c ->
             while (c.moveToNext()) {
                 val m = JSONObject()
+                    .put("_db_message_id", c.getLong(c.getColumnIndexOrThrow("id")))
+                    .put("chat_id", chatId)
                     .put("role", c.getString(c.getColumnIndexOrThrow("role")))
                     .put("text", c.getString(c.getColumnIndexOrThrow("text")))
                 c.getString(c.getColumnIndexOrThrow("response_id"))?.let { if (it.isNotBlank()) m.put("response_id", it) }
@@ -1982,7 +2157,7 @@ data class ExistingMessageRow(
                 put("chat_id", id)
                 put("position", i)
                 put("role", m.optString("role"))
-                put("text", m.optString("text"))
+                put("text", JsonProtocol.string(m, "text"))
                 putStringOrNull("response_id", m.optString("response_id").takeIf { it.isNotBlank() && it != "null" })
                 putStringOrNull("request_id", m.optString("request_id").takeIf { it.isNotBlank() && it != "null" })
                 putStringOrNull("file_ids", m.optJSONArray("file_ids")?.toString())
@@ -1991,10 +2166,10 @@ data class ExistingMessageRow(
                 putStringOrNull("file_paths", m.optJSONArray("file_paths")?.toString())
                 putStringOrNull("file_mimes", m.optJSONArray("file_mimes")?.toString())
                 putStringOrNull("attachments", m.optJSONArray("attachments")?.toString())
-                putStringOrNull("image_path", m.optString("image_path").takeIf { it.isNotBlank() })
-                putStringOrNull("image_file_id", m.optString("image_file_id").takeIf { it.isNotBlank() && it != "null" })
-                putStringOrNull("image_name", m.optString("image_name").takeIf { it.isNotBlank() })
-                putStringOrNull("image_mime", m.optString("image_mime").takeIf { it.isNotBlank() })
+                putStringOrNull("image_path", JsonProtocol.string(m, "image_path").takeIf { it.isNotBlank() })
+                putStringOrNull("image_file_id", JsonProtocol.string(m, "image_file_id").takeIf { it.isNotBlank() && it != "null" })
+                putStringOrNull("image_name", JsonProtocol.string(m, "image_name").takeIf { it.isNotBlank() })
+                putStringOrNull("image_mime", JsonProtocol.string(m, "image_mime").takeIf { it.isNotBlank() })
                 put("image_size", m.optLong("image_size", 0L).coerceAtLeast(0L))
                 putStringOrNull("annotations", m.optJSONArray("annotations")?.toString())
                 putStringOrNull("generated_images", m.optJSONArray("generated_images")?.toString())

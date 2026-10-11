@@ -97,7 +97,7 @@ class BackgroundResponseWorker(
                 if (!current.optBoolean("background_enabled", true)) return Result.success()
 
                 val cursor = current.optLong("last_sequence_number", -1L)
-                val full = StringBuilder(if (cursor >= 0L) current.optString("text").orEmpty() else "")
+                val full = StringBuilder(if (cursor >= 0L) JsonProtocol.string(current, "text").orEmpty() else "")
                 var lastSequence = cursor
                 var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -113,12 +113,12 @@ class BackgroundResponseWorker(
                             lastSequence = sequence
                         }
 
-                        if (event.optString("type") == "response.output_text.delta") {
-                            val delta = event.optString("delta")
+                        val type = JsonProtocol.string(event, "type")
+                        if (type == "response.output_text.delta" || type == "response.refusal.delta") {
+                            val delta = JsonProtocol.string(event, "delta")
                             if (delta.isNotEmpty()) full.append(delta)
                         }
 
-                        val type = event.optString("type")
                         val terminal = type == "response.completed" ||
                             type == "response.failed" ||
                             type == "response.incomplete" ||
@@ -274,11 +274,12 @@ class BackgroundResponseWorker(
         val active = db.getActiveResponse(chatId) ?: return
         if (active.optString("request_id") != requestId) return
         val state = response.optString("status").ifBlank { active.optString("status") }
-        val fallbackText = active.optString("text")
+        val fallbackText = JsonProtocol.string(active, "text")
         val text = extractResponseText(response).ifBlank { fallbackText }
         val model = AstraResponseModel.fromResponse(
             response, text, requestId, state,
-            response.optJSONObject("error")?.optString("message")
+            OpenAiFileFailure.recover(applicationContext, response.optJSONObject("error"))
+                ?: response.optJSONObject("error")?.optString("message")
                 ?: response.optJSONObject("incomplete_details")?.optString("reason")
         )
         val savedImages = saveGeneratedImages(model.generatedImageResults, diagnostics)
@@ -325,6 +326,7 @@ class BackgroundResponseWorker(
             diagnostics.log("worker_stale_finalization_ignored", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
             return
         }
+        ResponseNotifications.finished(applicationContext, chatId, requestId, state == "completed")
         db.recordRequestAccounting(
             chatId = chatId, localRequestId = requestId, status = state,
             responseId = responseId, usage = usage

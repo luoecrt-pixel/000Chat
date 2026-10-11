@@ -5,7 +5,8 @@ import org.json.JSONObject
 
 data class GenerationInstructions(
     val systemPrompt: String?,
-    val developerInstructions: String?
+    val developerInstructions: String?,
+    val presentationInstructions: String? = null
 ) {
     private fun clean(value: String?): String? = value?.trim()?.takeIf { it.isNotEmpty() }
 
@@ -13,7 +14,7 @@ data class GenerationInstructions(
     // When a system prompt is configured, use typed Responses instructions so
     // that system and developer instructions retain their distinct API roles.
     fun openAi(): Any? {
-        val system = clean(systemPrompt)
+        val system = listOfNotNull(clean(systemPrompt), clean(presentationInstructions)).joinToString("\n\n").takeIf { it.isNotBlank() }
         val developer = clean(developerInstructions)
         if (system == null) return developer
         return JSONArray().put(JSONObject().put("role", "system").put("content", system)).apply {
@@ -33,6 +34,7 @@ data class GenerationInstructions(
             clean(systemPrompt),
             clean(developerInstructions),
             clean(attachmentContext),
-            clean(localFileToolContext)
+            clean(localFileToolContext),
+            clean(presentationInstructions)
         ).joinToString("\n\n").takeIf { it.isNotEmpty() }
 }

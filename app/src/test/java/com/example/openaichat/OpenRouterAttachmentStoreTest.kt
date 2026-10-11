@@ -8,6 +8,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenRouterAttachmentStoreTest {
+    @Test fun phoneJpegAllowsLargeVendorTrailerButRejectsMissingEoi() {
+        val dir = createTempDir()
+        val jpeg = realImageBytes("jpeg")
+        try {
+            val file = File(dir, "motion.jpg").apply { writeBytes(jpeg + ByteArray(300_000) { 65 }) }
+            val a = OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "image/jpeg")
+            assertEquals("image/jpeg", a.mime)
+            assertTrue(Base64.getDecoder().decode(OpenRouterAttachmentStore.toDataUrl(a).substringAfter(',')).contentEquals(file.readBytes()))
+            file.writeBytes(jpeg.copyOf(jpeg.size - 2) + ByteArray(300_000) { 65 })
+            var rejected = false
+            try { OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "image/jpeg") }
+            catch (_: java.io.IOException) { rejected = true }
+            assertTrue(rejected)
+        } finally { dir.deleteRecursively() }
+    }
 
     @Test
     fun unsupportedLegacyClassificationNeverDeletesOriginalBytes() {
@@ -107,7 +122,9 @@ class OpenRouterAttachmentStoreTest {
         val dir = createTempDir()
         val file = File(dir, "x.pdf").apply { writeBytes("%PDF-1.7".toByteArray()) }
         val a = OpenRouterLocalAttachment("1", "x.pdf", "pdf", file.absolutePath, "application/pdf", file.length(), "hash")
-        val block = OpenRouterAttachmentStore.toContentBlock(a)
+        val block = org.json.JSONObject(java.io.StringWriter().also {
+            StreamingJsonRequestBody.writeJson(OpenRouterAttachmentStore.toContentBlock(a), it)
+        }.toString())
         assertEquals("file", block.optString("type"))
         assertEquals("x.pdf", block.optJSONObject("file")?.optString("filename"))
         assertTrue(block.optJSONObject("file")?.optString("file_data")?.startsWith("data:application/pdf;base64,") == true)
@@ -121,7 +138,9 @@ class OpenRouterAttachmentStoreTest {
         val attachment = OpenRouterAttachmentStore.classifyLocalFile(jpg, "wrong.png", "image/png")
         assertEquals("image", attachment.kind)
         assertEquals("image/jpeg", attachment.mime)
-        val block = OpenRouterAttachmentStore.toContentBlock(attachment)
+        val block = org.json.JSONObject(java.io.StringWriter().also {
+            StreamingJsonRequestBody.writeJson(OpenRouterAttachmentStore.toContentBlock(attachment), it)
+        }.toString())
         val url = block.getJSONObject("image_url").getString("url")
         assertTrue(url.startsWith("data:image/jpeg;base64,"))
         assertTrue(Base64.getDecoder().decode(url.substringAfter(",")).contentEquals(jpg.readBytes()))
@@ -198,7 +217,7 @@ class OpenRouterAttachmentStoreTest {
 
     private fun realImageBytes(format: String): ByteArray = Base64.getDecoder().decode(
         when (format) {
-            "jpeg" -> "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDlqKKK8E/aT//Z"
+            "jpeg" -> "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAACAAIDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDnK/Bz9oP/2Q=="
             "png" -> "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
             "gif" -> "R0lGODdhAgACAIEAAP0OGwAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7"
             "webp" -> "UklGRjwAAABXRUJQVlA4IDAAAADwAQCdASoCAAIAAUAmJaACdLoB+AAETAAA/vCbQ/8WcjEdnm//PaPz2j89o/88IAA="

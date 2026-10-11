@@ -36,7 +36,7 @@ object OpenAiSseStreamReader {
             } catch (e: Exception) {
                 throw IOException("Malformed Responses SSE JSON", e)
             }
-            val type = event.optString("type")
+            val type = JsonProtocol.string(event, "type")
             if (type.isBlank()) throw IOException("Responses SSE event has no type")
             // Duplicated/out-of-order frames rejected by the sequence owner must
             // not supply a terminal event or close the transport prematurely.
@@ -49,9 +49,8 @@ object OpenAiSseStreamReader {
                 else -> null
             }
             if (type == "error" || type == "response.error") {
-                semanticError = event.optJSONObject("error")?.optString("message")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: event.optString("message").takeIf { it.isNotBlank() }
+                semanticError = event.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
+                    ?: JsonProtocol.nonBlank(event, "message")
                     ?: "Responses streaming error"
             }
             return terminal != null
@@ -76,13 +75,13 @@ object OpenAiSseStreamReader {
         val text = StringBuilder()
         for (i in 0 until output.length()) {
             val item = output.optJSONObject(i) ?: continue
-            if (item.optString("type") != "message") continue
+            if (JsonProtocol.string(item, "type") != "message") continue
             val content = item.optJSONArray("content") ?: continue
             for (j in 0 until content.length()) {
                 val part = content.optJSONObject(j) ?: continue
-                when (part.optString("type")) {
-                    "output_text" -> text.append(part.optString("text"))
-                    "refusal" -> text.append(part.optString("refusal"))
+                when (JsonProtocol.string(part, "type")) {
+                    "output_text" -> text.append(JsonProtocol.string(part, "text"))
+                    "refusal" -> text.append(JsonProtocol.string(part, "refusal"))
                 }
             }
         }

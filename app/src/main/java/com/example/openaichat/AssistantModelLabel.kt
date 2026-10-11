@@ -11,7 +11,7 @@ object AssistantModelLabel {
             ?: message.optString("model").takeIf { it.isNotBlank() && it != "null" }
         return when {
             response != null -> ModelCatalog.displayName(provider, response)
-            requested != null -> "Запрошена: " + ModelCatalog.displayName(provider, requested)
+            requested != null -> ModelCatalog.displayName(provider, requested)
             else -> "Ассистент · модель неизвестна"
         }
     }

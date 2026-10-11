@@ -119,7 +119,7 @@ def main() -> int:
         (name, name, False) for name in MUTATIONS
     ]
 
-    with tempfile.TemporaryDirectory(prefix="astra-verify-mutations-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="astra-verify-mutations-", dir=ROOT.parent) as tmp:
         temp_root = Path(tmp) / "repo"
         shutil.copytree(
             ROOT,
@@ -156,6 +156,8 @@ def main() -> int:
                 print(f"PASS {case_name}: verifier rejects mutation ({reason})")
 
     print("Verifier mutation matrix: PASS (8 targeted negative mutations + positive control)")
+    # Keep the new offline checks in the existing CI step instead of adding a workflow.
+    subprocess.run([sys.executable, str(ROOT / "tools/test_verify_implementation_mutations.py")], check=True)
     return 0
 
 

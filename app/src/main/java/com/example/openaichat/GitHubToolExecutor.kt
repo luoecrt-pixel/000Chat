@@ -17,7 +17,8 @@ class GitHubToolExecutor(
     private val allowedBranches: () -> Set<String>,
     private val confirmWrite: (toolName: String, arguments: JSONObject) -> Boolean,
     private val auditWrite: (toolName: String, arguments: JSONObject) -> Unit,
-    private val canExecute: () -> Boolean = { true }
+    private val canExecute: () -> Boolean = { true },
+    private val cacheDirectory: java.io.File? = null
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -33,6 +34,7 @@ class GitHubToolExecutor(
             "get_workflow_runs" -> getWorkflowRuns(arguments)
             "get_workflow_run_jobs" -> getWorkflowRunJobs(arguments)
             "get_file" -> getFile(arguments)
+            "get_file_range" -> getFileRange(arguments)
             "list_directory" -> listDirectory(arguments)
             "create_issue_comment" -> createIssueComment(arguments)
             "submit_pull_request_review" -> submitPullRequestReview(arguments)
@@ -139,6 +141,62 @@ class GitHubToolExecutor(
         val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
         return GitHubFileContentPolicy.decode(path, JSONObject(raw)).toString()
+    }
+
+    private fun getFileRange(a: JSONObject): String {
+        if (a.optLong("offset", 0L) > 0 && JsonProtocol.nonBlank(a, "etag") == null) {
+            throw IOException("Later pages require the first page's ETag; restart reading from offset 0")
+        }
+        val (owner, repo) = repo(a)
+        val path = a.getString("path").trim()
+        if (path.isBlank() || path.startsWith("/") || path.split('/').any { it == ".." }) throw IOException("Invalid path")
+        val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
+        val endpoint = url(owner, repo, "contents/${Uri.encode(path, "/")}?ref=${Uri.encode(ref)}")
+        if (!canExecute()) throw IOException("GitHub request owner is no longer current")
+        cacheDirectory?.let { directory ->
+            val cache = GitHubTextPageCache(directory)
+            val key = StreamingJsonRequestBody.sha256(JSONObject().put("repository", "$owner/$repo")
+                .put("path", path).put("ref", ref).put("credential", StreamingJsonRequestBody.sha256(token())))
+            return cache.read(key, a.optLong("offset", 0L), a.optInt("limit", 24000), JsonProtocol.nonBlank(a, "etag"), canExecute) { tag, save ->
+                val builder = request(endpoint).header("Accept", "application/vnd.github.raw+json")
+                if (tag != null) builder.header("If-None-Match", tag)
+                httpClient.newCall(builder.get().build()).execute().use { response ->
+                    if (!canExecute()) throw IOException("GitHub request owner is no longer current")
+                    if (response.code == 304) return@read tag ?: throw IOException("Unexpected HTTP 304")
+                    if (!response.isSuccessful) throw IOException("GitHub HTTP ${response.code}")
+                    val actual = response.header("ETag") ?: throw IOException("GitHub returned no ETag")
+                    val body = response.body ?: throw IOException("Empty GitHub response")
+                    if (body.contentLength() > 100L * 1024 * 1024) throw IOException("GitHub Contents file exceeds 100 MiB")
+                    val bounded = object : java.io.FilterInputStream(body.byteStream()) {
+                        var received = 0L
+                        fun counted(n: Int): Int {
+                            if (n > 0) received += n
+                            if (received > 100L * 1024 * 1024) throw IOException("GitHub Contents file exceeds 100 MiB")
+                            return n
+                        }
+                        override fun read(): Int = `in`.read().also { counted(if (it < 0) 0 else 1) }
+                        override fun read(bytes: ByteArray, off: Int, len: Int): Int = counted(`in`.read(bytes, off, len))
+                    }
+                    java.io.InputStreamReader(bounded, cache.decoder()).use { save(it, actual) }
+                    actual
+                }
+            }.put("ok", true).put("path", path).put("ref", ref).toString()
+        }
+        val req = request(endpoint).header("Accept", "application/vnd.github.raw+json").get().build()
+        return httpClient.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("GitHub HTTP ${response.code}")
+            val expectedTag = JsonProtocol.nonBlank(a, "etag")
+            val actualTag = response.header("ETag") ?: throw IOException("GitHub returned no ETag; consistent range reading is unavailable")
+            if (expectedTag != null && expectedTag != actualTag) throw IOException("Repository file changed between pages; restart reading from offset 0")
+            val source = response.body?.byteStream() ?: throw IOException("Empty GitHub response")
+            val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            java.io.InputStreamReader(source, decoder).use { reader ->
+                BoundedTextRead.range(reader, a.optLong("offset", 0L), a.optInt("limit", 24000), canExecute)
+                    .put("ok", true).put("path", path).put("ref", ref)
+                    .put("etag", actualTag ?: JSONObject.NULL).toString()
+            }
+        }
     }
 
     private fun listDirectory(a: JSONObject): String {
