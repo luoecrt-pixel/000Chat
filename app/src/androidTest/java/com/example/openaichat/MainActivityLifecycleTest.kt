@@ -852,6 +852,8 @@ class MainActivityLifecycleTest {
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
         )
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"picture received\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         val entered = CountDownLatch(1)
@@ -881,7 +883,7 @@ class MainActivityLifecycleTest {
                     as ConcurrentHashMap<String, Set<String>>
                 modalities[model] = setOf("text", "image")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient, reconcileGenerations = false) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
@@ -1013,6 +1015,8 @@ class MainActivityLifecycleTest {
     @Test
     fun stopDuringBlockedRealOpenRouterPreparationNeverStartsHttp() {
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -1022,7 +1026,7 @@ class MainActivityLifecycleTest {
                     .putString("model", "anthropic/claude-sonnet-5.5").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient, reconcileGenerations = false) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown()
                     release.await(5, TimeUnit.SECONDS)
@@ -1717,6 +1721,8 @@ class MainActivityLifecycleTest {
     @Test
     fun realLargeJpegIsUnchangedAcrossHttpsSendAndFollowingTextHistory() {
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer DNS outside of Activity/UI callbacks.
+        val endpoint = server.url("/api/v1").toString()
         repeat(2) {
             server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"accepted\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
@@ -1759,7 +1765,7 @@ class MainActivityLifecycleTest {
                     as ConcurrentHashMap<String, Set<String>>
                 modalities[model] = setOf("text", "image")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient, reconcileGenerations = false) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 (privateField(activity, "input") as android.widget.EditText).setText("Read the image")
                 invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
             }
