@@ -868,9 +868,13 @@ class MainActivityLifecycleTest {
                 @Suppress("UNCHECKED_CAST")
                 val attachments = privateField(activity, "attachedOpenRouterAttachments")
                     as MutableList<OpenRouterLocalAttachment>
+                // Keep intentionally misleading filename/MIME while verifying the true
+                // digest; stale or forged digests must be rejected by production.
+                val sha = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(original).joinToString("") { "%02x".format(it) }
                 attachments.add(OpenRouterLocalAttachment(
                     "photo", "photo-with-wrong-jpg-name.jpeg", "image", file.absolutePath,
-                    "image/jpeg", file.length(), "sha"
+                    "image/jpeg", file.length(), sha
                 ))
                 @Suppress("UNCHECKED_CAST")
                 val modalities = privateField(activity, "openRouterModelModalities")
@@ -955,6 +959,8 @@ class MainActivityLifecycleTest {
             .associateWith { preferences.getString(it, null) }
         val oldKey = SecureStore(context).getOpenRouterApiKey()
         val (server, testHttpClient) = createHttpsMockServer()
+        // Resolve MockWebServer host before the factory is called by MainActivity UI.
+        val endpoint = server.url("/api/v1").toString()
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"answer\\\":\\\"ok\\\"}\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
@@ -970,7 +976,7 @@ class MainActivityLifecycleTest {
                     .putString("openrouter_json_schema", "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"],\"additionalProperties\":false}").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
                 setPrivateField(activity, "openRouterClientFactory",
-                    { OpenRouterChatClient(server.url("/api/v1").toString(), testHttpClient, reconcileGenerations = false) })
+                    { OpenRouterChatClient(endpoint, testHttpClient, reconcileGenerations = false) })
                 setPrivateField(activity, "openRouterPreparationHook", {
                     entered.countDown(); release.await(5, TimeUnit.SECONDS); Unit
                 })
@@ -1717,12 +1723,17 @@ class MainActivityLifecycleTest {
         }
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         var jpegBytes = ByteArray(0)
+        // 10 MB encoded image is supported on direct Anthropic, not on auto partner routes.
+        val prefs = androidx.test.platform.app.InstrumentationRegistry
+            .getInstrumentation().targetContext.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val previousRoute = prefs.getString("openrouter_claude_route", null)
         val model = "anthropic/claude-sonnet-5.5"
         try {
             scenario.onActivity { activity ->
                 activity.newChat()
                 activity.prefs.edit().putString("provider", "openrouter")
-                    .putString("model", model).putString("reasoning", "high").apply()
+                    .putString("model", model).putString("reasoning", "high")
+                    .putString("openrouter_claude_route", "anthropic").apply()
                 SecureStore(activity).setOpenRouterApiKey("test-key")
                 val width = 2600
                 val height = 2300
@@ -1765,7 +1776,14 @@ class MainActivityLifecycleTest {
                     java.util.Base64.getDecoder().decode(url.substringAfter(","))
                         .contentEquals(jpegBytes))
             }
-            assertJpeg(server.takeRequest(30, TimeUnit.SECONDS) ?: error("First HTTPS Send missing"))
+            val firstRequest = server.takeRequest(30, TimeUnit.SECONDS) ?: run {
+                var diagnostic = ""
+                scenario.onActivity { activity ->
+                    diagnostic = (privateField(activity, "status") as android.widget.TextView).text.toString()
+                }
+                error("First HTTPS Send missing; status=$diagnostic")
+            }
+            assertJpeg(firstRequest)
             var completed = false
             repeat(120) {
                 scenario.onActivity { activity ->
@@ -1795,6 +1813,10 @@ class MainActivityLifecycleTest {
             assertTrue(java.util.Base64.getDecoder().decode(historical.substringAfter(",")).contentEquals(jpegBytes))
         } finally {
             scenario.onActivity { SecureStore(it).setOpenRouterApiKey("") }
+            prefs.edit().apply {
+                if (previousRoute == null) remove("openrouter_claude_route")
+                else putString("openrouter_claude_route", previousRoute)
+            }.commit()
             scenario.close()
             server.shutdown()
         }
