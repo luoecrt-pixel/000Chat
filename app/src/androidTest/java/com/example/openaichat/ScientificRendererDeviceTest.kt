@@ -105,31 +105,36 @@ class ScientificRendererDeviceTest {
         try {
             val valid = "\\frac{a^2+b^2}{c}"
             val hostile = "</script><script>window.attack=1</script>"
-            val formulas = listOf(valid, hostile).map { MathDelimiterScanner.Formula(0, it.length, it, it, true) }
+            // KaTeX accepts angle brackets as math characters; malicious markup is not invalid LaTeX.
+            // Keep script-injection and unsupported-command fallback as separate assertions.
+            val malformed = "\\unknownRendererCommand{$hostile}"
+            val formulas = listOf(valid, hostile, malformed).map { MathDelimiterScanner.Formula(0, it.length, it, it, true) }
             val math = readyPreview(scenario, ScientificRendererDocument.math(formulas), formulas.joinToString("\n") { it.source }, "math")
             try {
                 assertEquals("\"${ScientificRendererDocument.DOCUMENT_URL}\"", evaluate(scenario, math.second, "location.href"))
                 assertEquals("\"${ScientificRendererDocument.ORIGIN.removeSuffix("/")}\"", evaluate(scenario, math.second, "location.origin"))
                 assertEquals("\"undefined\"", evaluate(scenario, math.second, "typeof window.Android"))
-                assertEquals("1", evaluate(scenario, math.second, "document.querySelectorAll('.katex').length"))
-                assertEquals("\"undefined\"", evaluate(scenario, math.second, "typeof window.attack"))
-                assertEquals("true", evaluate(scenario, math.second, "document.querySelector('.failed').textContent.includes('</script>')"))
+                assertEquals("Valid formula and harmless markup must both render", "2", evaluate(scenario, math.second, "document.querySelectorAll('.katex').length"))
+                assertEquals("Model markup must never execute", "\"undefined\"", evaluate(scenario, math.second, "typeof window.attack"))
+                assertEquals("Model markup must never create script elements", "0", evaluate(scenario, math.second, "document.querySelectorAll('#result script').length"))
+                assertEquals("Malformed LaTeX must preserve every source character", malformed,
+                    org.json.JSONTokener(evaluate(scenario, math.second, "document.querySelector('.failed').textContent")).nextValue())
             } finally { scenario.onActivity { math.first.dismiss() } }
             val prose = "Bold ${'$'}x^2${'$'}; цена ${'$'}5 и ${'$'}10; \\[\\frac{a}{b}\\]."
             val prepared = MathTextTokens.prepare(prose, MathDelimiterScanner.scan(prose))
             val nativeHtml = "<p><b>Bold</b> " + prepared.items[0].first + "; цена ${'$'}5 и ${'$'}10; " + prepared.items[1].first + ".</p>"
             val inline = readyPreview(scenario, ScientificRendererDocument.mathInText(nativeHtml, prepared), prose, "math-text")
             try {
-                assertEquals("2", evaluate(scenario, inline.second, "document.querySelectorAll('.katex').length"))
-                assertEquals("1", evaluate(scenario, inline.second, "document.querySelectorAll('#result b').length"))
-                assertEquals("1", evaluate(scenario, inline.second, "document.querySelectorAll('#result .display-formula').length"))
+                assertEquals("Both inline formulas must render", "2", evaluate(scenario, inline.second, "document.querySelectorAll('.katex').length"))
+                assertEquals("Native bold text must survive", "1", evaluate(scenario, inline.second, "document.querySelectorAll('#result b').length"))
+                assertEquals("Only the display formula gets a separate block", "1", evaluate(scenario, inline.second, "document.querySelectorAll('#result .display-formula').length"))
                 assertEquals("true", evaluate(scenario, inline.second, "document.getElementById('result').textContent.includes('цена ${'$'}5 и ${'$'}10')"))
                 assertEquals("0", evaluate(scenario, inline.second, "document.querySelectorAll('#result [onclick],#result iframe,#result img').length"))
             } finally { scenario.onActivity { inline.first.dismiss() } }
             val graph = "flowchart TD\nA[Science] --> B[Result]"
             val diagram = readyPreview(scenario, ScientificRendererDocument.mermaid(graph), graph, "mermaid")
             try {
-                assertEquals("1", evaluate(scenario, diagram.second, "document.querySelectorAll('#result svg').length"))
+                assertEquals("Mermaid must produce one SVG", "1", evaluate(scenario, diagram.second, "document.querySelectorAll('#result svg').length"))
                 assertEquals("0", evaluate(scenario, diagram.second, "document.querySelectorAll('#result script,#result foreignObject').length"))
             } finally { scenario.onActivity { diagram.first.dismiss() } }
         } finally { scenario.close() }
