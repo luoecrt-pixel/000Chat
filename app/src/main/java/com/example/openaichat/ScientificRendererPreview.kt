@@ -30,7 +30,7 @@ object ScientificRendererPreview {
         true
     } catch (_: Exception) { false }
 
-    internal fun webView(context: Context, state: (WebView, String?) -> Unit, failed: (WebView) -> Unit): WebView = WebView(context).apply {
+    internal fun webView(context: Context, document: String, state: (WebView, String?) -> Unit, failed: (WebView) -> Unit): WebView = WebView(context).apply {
         setBackgroundColor(Color.rgb(28, 29, 34))
         settings.javaScriptEnabled = true
         settings.allowFileAccess = false; settings.allowContentAccess = false
@@ -43,7 +43,14 @@ object ScientificRendererPreview {
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
-                val path = ScientificRendererDocument.assetPath(request.url)
+                // loadDataWithBaseURL also intercepts a data: main frame on some WebViews.
+                // Serve only this dialog's owned document at an exact local HTTPS URL instead.
+                if (request.method == "GET" && request.isForMainFrame && request.url.toString() == ScientificRendererDocument.DOCUMENT_URL) {
+                    return WebResourceResponse("text/html", "UTF-8", 200, "OK",
+                        mapOf("Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff"),
+                        ByteArrayInputStream(document.toByteArray(Charsets.UTF_8)))
+                }
+                val path = if (request.method == "GET" && !request.isForMainFrame) ScientificRendererDocument.assetPath(request.url) else null
                 if (path != null) try {
                     val extension = path.substringAfterLast('.')
                     val mime = when (extension) { "js", "mjs" -> "application/javascript"; "css" -> "text/css"; "woff" -> "font/woff"; "woff2" -> "font/woff2"; else -> "font/ttf" }
@@ -84,7 +91,7 @@ object ScientificRendererPreview {
             destroyWeb()
         }
         val timeout = Runnable { if (!ready && !destroyed) fallback("Превью не готово. Исходник сохранён; можно повторить открытие.") }
-        web = webView(context, { _, title ->
+        web = webView(context, document, { _, title ->
             if (!destroyed) when (title) {
                 "renderer:ready" -> { ready = true; handler.removeCallbacks(timeout); notice.text = "Офлайн-превью · исходник сохранён" }
                 "renderer:failed" -> { handler.removeCallbacks(timeout); fallback("Не удалось оформить блок. Показан исходник.") }
@@ -99,7 +106,7 @@ object ScientificRendererPreview {
         dialog.setOnDismissListener { handler.removeCallbacks(timeout); destroyWeb(); closed(dialog) }
         dialog.setOnShowListener {
             handler.postDelayed(timeout, 12_000)
-            web.loadDataWithBaseURL(ScientificRendererDocument.ORIGIN, document, "text/html", "UTF-8", null)
+            web.loadUrl(ScientificRendererDocument.DOCUMENT_URL)
         }
         return dialog
     }

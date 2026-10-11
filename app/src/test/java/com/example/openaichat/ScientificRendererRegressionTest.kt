@@ -1,16 +1,56 @@
 package com.example.openaichat
 
 import android.net.Uri
+import android.webkit.WebResourceRequest
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.util.concurrent.CancellationException
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class ScientificRendererRegressionTest {
+    @Test fun rendererServesItsOwnedDocumentWithoutAllowingDataPagesOrOtherMainFrames() {
+        val document = "<html><body>Наука 😀</body></html>"
+        val web = ScientificRendererPreview.webView(RuntimeEnvironment.getApplication(), document, { _, _ -> }, { })
+        fun request(url: String, mainFrame: Boolean = true, method: String = "GET") = object : WebResourceRequest {
+            override fun getUrl() = Uri.parse(url)
+            override fun isForMainFrame() = mainFrame
+            override fun isRedirect() = false
+            override fun hasGesture() = false
+            override fun getMethod() = method
+            override fun getRequestHeaders() = emptyMap<String, String>()
+        }
+        try {
+            val client = web.webViewClient
+            val response = client.shouldInterceptRequest(web, request(ScientificRendererDocument.DOCUMENT_URL))!!
+            assertEquals(200, response.statusCode)
+            assertEquals("text/html", response.mimeType)
+            assertEquals("UTF-8", response.encoding)
+            assertEquals(document, response.data.bufferedReader(Charsets.UTF_8).use { it.readText() })
+            listOf(
+                request(ScientificRendererDocument.DOCUMENT_URL, mainFrame = false),
+                request(ScientificRendererDocument.DOCUMENT_URL, method = "POST"),
+                request(ScientificRendererDocument.DOCUMENT_URL + "?token=x"),
+                request(ScientificRendererDocument.DOCUMENT_URL + "#fragment"),
+                request("data:text/html,<script>window.attack=1</script>"),
+                request("https://tracker.invalid/index.html"),
+                request("file:///data/data/com.example.openaichat/key"),
+                request(ScientificRendererDocument.ORIGIN + "response-renderer/katex/katex.min.js"),
+                request(ScientificRendererDocument.ORIGIN + "response-renderer/katex/katex.min.js", mainFrame = false, method = "POST")
+            ).forEach {
+                assertEquals(it.url.toString(), 403, client.shouldInterceptRequest(web, it)!!.statusCode)
+                assertTrue(client.shouldOverrideUrlLoading(web, it))
+            }
+            assertTrue(web.settings.blockNetworkLoads)
+            assertFalse(web.settings.allowFileAccess)
+            assertFalse(web.settings.allowContentAccess)
+        } finally { web.destroy() }
+    }
+
     @Test fun mathTokensPreserveSurroundingMarkdownAndCanRestoreEverySourceCharacter() {
         val source = "# Наука\n\n**Сила ${'$'}F=ma${'$'}**; цена ${'$'}5 и ${'$'}10, `\\(code\\)`; \\[x^2+y^2\\]. 😀"
         val formulas = MathDelimiterScanner.scan(source)

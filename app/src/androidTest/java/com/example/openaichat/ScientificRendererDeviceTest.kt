@@ -5,6 +5,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.ConsoleMessage
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -62,6 +63,10 @@ class ScientificRendererDeviceTest {
                     diagnostics.add("resource-error=${request.url} code=${error.errorCode}: ${error.description}")
                     client.onReceivedError(view, request, error)
                 }
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    diagnostics.add("renderer-process-gone: crashed=${detail.didCrash()}")
+                    return client.onRenderProcessGone(view, detail)
+                }
                 override fun onPageFinished(view: WebView, url: String?) {
                     client.onPageFinished(view, url)
                     view.evaluateJavascript("JSON.stringify({title:document.title,ready:document.readyState,fonts:document.fonts.status,origin:window.origin})") {
@@ -103,6 +108,9 @@ class ScientificRendererDeviceTest {
             val formulas = listOf(valid, hostile).map { MathDelimiterScanner.Formula(0, it.length, it, it, true) }
             val math = readyPreview(scenario, ScientificRendererDocument.math(formulas), formulas.joinToString("\n") { it.source }, "math")
             try {
+                assertEquals("\"${ScientificRendererDocument.DOCUMENT_URL}\"", evaluate(scenario, math.second, "location.href"))
+                assertEquals("\"${ScientificRendererDocument.ORIGIN.removeSuffix("/")}\"", evaluate(scenario, math.second, "location.origin"))
+                assertEquals("\"undefined\"", evaluate(scenario, math.second, "typeof window.Android"))
                 assertEquals("1", evaluate(scenario, math.second, "document.querySelectorAll('.katex').length"))
                 assertEquals("\"undefined\"", evaluate(scenario, math.second, "typeof window.attack"))
                 assertEquals("true", evaluate(scenario, math.second, "document.querySelector('.failed').textContent.includes('</script>')"))

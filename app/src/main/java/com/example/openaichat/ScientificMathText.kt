@@ -36,7 +36,7 @@ class ScientificMathText(context: Context, private val original: TextView, priva
         destroyRenderer()
         val html = try { document() } catch (_: Exception) { source("Блок велик или несовместим с оформлением. Исходник доступен полностью."); return }
         formatted = true; notice.text = "Готовлю формулы…"; toggle.text = "Показать исходное оформление"
-        val renderer = ScientificRendererPreview.webView(context, { view, title ->
+        val renderer = ScientificRendererPreview.webView(context, html, { view, title ->
             if (web === view && formatted) when (title) {
                 "renderer:failed" -> source("Не удалось оформить блок. Показан исходник.")
                 "renderer:ready" -> {
@@ -61,7 +61,7 @@ class ScientificMathText(context: Context, private val original: TextView, priva
         web = renderer; renderer.visibility = View.INVISIBLE
         addView(renderer, LayoutParams(-1, (48 * resources.displayMetrics.density).toInt()))
         handler.postDelayed(timeout, 12_000)
-        renderer.loadDataWithBaseURL(ScientificRendererDocument.ORIGIN, html, "text/html", "UTF-8", null)
+        renderer.loadUrl(ScientificRendererDocument.DOCUMENT_URL)
     }
     override fun onDetachedFromWindow() {
         source(); super.onDetachedFromWindow()

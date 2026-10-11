@@ -7,6 +7,7 @@ import org.json.JSONObject
 /** Only app-owned JavaScript runs. Model strings are data, never HTML or scripts. */
 object ScientificRendererDocument {
     const val ORIGIN = "https://response-renderer.invalid/"
+    const val DOCUMENT_URL = ORIGIN + "index.html"
     const val MAX_MATH_CHARACTERS = 16_000
     const val MAX_DIAGRAM_CHARACTERS = 50_000
     fun assetPath(url: Uri): String? {
