@@ -31,6 +31,8 @@ class ActiveResponseMonotonicPersistenceTest {
                     lastSequenceNumber = 10L, expectedRequestId = firstRequest)
                 db.updateActiveResponse(chatId, text = "stale equal", status = "in_progress",
                     lastSequenceNumber = 20L, expectedRequestId = firstRequest)
+                db.updateActiveResponse(chatId, text = "stale terminal", status = "completed",
+                    lastSequenceNumber = 10L, expectedRequestId = firstRequest)
                 var active = db.getActiveResponse(chatId)
                 assertNotNull(active)
                 assertEquals("twenty", active!!.getString("text"))
