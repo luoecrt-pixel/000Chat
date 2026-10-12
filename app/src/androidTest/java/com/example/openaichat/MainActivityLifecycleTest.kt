@@ -131,7 +131,7 @@ class MainActivityLifecycleTest {
                     .put("openai_protocol_output", JSONArray().put(
                         JSONObject().put("type", "message").put("role", "assistant")
                             .put("content", JSONArray().put(JSONObject()
-                                .put("type", "output_text").put("text", "Earlier answer")))))
+                                .put("type", "output_text").put("text", "Earlier answer"))))))
                 setPrivateField(activity, "currentResponseId", "resp_previous")
                 if (replayAttachment) {
                     val file = java.io.File(activity.filesDir, "fixture-openai-owned-note.txt")
