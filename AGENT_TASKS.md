@@ -132,6 +132,18 @@
 
 **Первый шаг:** mock `X-Generation-Id` без SSE ID, когда headers пришли до disconnect; безопасная запись в уже существующий per-round ledger, а `GET /generation` только как read-only reconciliation и с request ownership. Отдельно mock server-tool annotations/citations на assistant, совместимость изображения с tools и выбор engine/маршрута — не делать вид, что native engine всегда поддерживает обе операции. `debug.echo_upstream_body` допустим исключительно в **явно разрешённой dev-сборке** с synthetic/контролируемыми данными; никогда не включать по умолчанию, не записывать в logs/CI реальные keys/messages/file paths.
 
+### 17. [P1] Исключить скрытую OpenRouter middle-out compression до отправки истории
+
+**Подтверждено кодом и документацией, но не live-сокращением:** `OpenRouterChatClient.requestMessage()` отправляет `plugins` только для выбранного PDF engine, **не** указывает `{"id":"context-compression","enabled":false}`. Согласно [OpenRouter Message Transforms](https://openrouter.ai/docs/guides/features/message-transforms), endpoints с контекстом до 8192 токенов **по умолчанию** используют middle-out compression; администратор может также включить default plugins на уровне аккаунта. Это потенциально **молча исключает середину разговора**, включая вложения и важный подписанный префикс, вопреки требованию владельца «полная история без тихого обрезания». Для нынешних основных Claude это не свидетельствует о фактическом сокращении; риск возникает при смене модели/маршрута, в том числе будущими роутерами.
+
+**Первый шаг:** добавить явное отключение компрессии в сформированном wire JSON одновременно с выбранным `file-parser` PDF plugin, не теряя его; mock request-body tests для малого context window, tools/history с image/file, всех cache modes и provider routes. При переполнении контекста должна приходить **явная ошибка без скрытого повторного платного вызова**, а не потеря частей беседы. Учитывать, что принудительная plugin policy уровня workspace может перекрывать request override: проверить effective behavior безопасным способом и показывать ограничение. **Не включать** server-side compact/edit/context-management, пока нет отдельного согласия пользователя на изменение истории. [Plugin precedence](https://openrouter.ai/docs/guides/features/plugins/overview).
+
+### 18. [P2] Разделить подтверждённую общую цену и дополнительную стоимость server tools/tiers
+
+**Наблюдение по коду:** `OpenRouterUsageSnapshot` читает токены и `usage.cost`; `OpenRouterChatClient.accumulateUsage()` суммирует стандартные поля, но **не сохраняет разложение** `usage.cost_details.server_tool_cost`, `upstream_inference_cost`, `iterations[]`, `server_tool_use` и `service_tier`. При текущих включаемых `openrouter:web_search`/`web_fetch` это снижает объяснимость расходов на инструменты; **не доказано**, что существующий итог `cost` занижен или неверен. Восстановление общей фактической цены из /generation уже есть (см. задачи 9 и 16).
+
+**Первый шаг:** fixture двух tool rounds с `usage.cost` + `cost_details` + `server_tool_use` + `iterations`, добавить безопасные per-request/per-round поля учёта, исключить повторное суммирование уже включённой в total стоимости; показывать отдельные платные компоненты только когда они реально подтверждены провайдером. Отсутствие детализации — «неизвестно», не 0. Не включать дополнительные инструменты, быстрые tiers или сторонний Broadcast ради проверки. Опираться на [OpenRouter Server Tools](https://openrouter.ai/docs/guides/features/server-tools/overview) и актуальные поля API выбранного endpoint.
+
 ## Планы на потом
 
 Эти идеи не являются автоматически назначенным scope следующего PR. Проверять существующий код перед реализацией.
@@ -180,6 +192,38 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 ### 13. [P3] Android долгие запросы — отдельно от уже работающего onTimeout
 
 `OpenRouterResponseService.onTimeout` для foreground `dataSync` уже реализован, а `MainActivity` запрашивает `POST_NOTIFICATIONS`. Не объявлять E3 отсутствующей функцией. На реальном Android 15/Xiaomi проверить видимость уведомления, последствия исчерпания суточного FGS budget, убийства процесса и доступность истории/черновика. Никакие OS-исключения из энергосбережения не выдавать за разрешение на бесконечный background stream.
+
+### 14. [P2, только при решении владельца] Отдельный транспорт OpenRouter /messages для Claude
+
+**Это не исправление существующего Chat Completions-клиента.** Нынешний `OpenRouterChatClient` вызывает `/api/v1/chat/completions` и использует `delta.content`, `delta.reasoning_details`, `finish_reason`, `tool_calls`, `OpenRouterProtocolCodec` и собственные sealed replay bindings. Возможности из присланного списка с маркером **[M]** относятся к другому endpoint: [Anthropic Messages через OpenRouter](https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-messages).
+
+Если владелец выберет Messages, сначала сделать самостоятельный transport/stream adapter, typed content-block persistence, signature/binding/Stop/ownership/price/attachments regression matrix, а затем UX. Конкретные кандидаты:
+- citations документа и `search_result` в tool result; показывать источник, не превращая цитаты в простой слитный текст (A1–A3);
+- `context_management.edits`, clear thinking/tool uses, server compaction и encrypted compaction blocks **только по явному opt-in**, с видимыми `applied_edits` и сохранением байтов протокола (A4–A5), без обхода запрета скрытого усечения;
+- mid-dialog system reminders/per-turn effort, строгие инструменты, deferred loading/tool search, advisor, fallbacks, safeguards, thinking display/binding (A8–A16): разные model/route/schema ограничения и реальная цена; сначала capability proof + неплатные контракты, затем отдельная приёмка;
+- `task_budget`, premium `speed`, особые sampling и metadata.user_id (A6/A7/A17) — не внедрять молча и не путать с аварийным 5M budget.
+
+Не утверждать, что прямые Anthropic MCP, memory tool, code execution и token counting доступны через OpenRouter без официальной подтверждённой поддержки (G1–G5). Выбор всего нового endpoint — отдельное продуктовое решение; существующий signed-history Chat Completions обязан продолжить работать.
+
+### 15. [P3] Дополнительные OpenRouter server tools — маленькие опции, большие расходы по согласию
+
+[Обзор server tools](https://openrouter.ai/docs/guides/features/server-tools/overview): текущий каталог предлагает только web_search и web_fetch. Новые кандидаты из списка владельца:
+- **`openrouter:datetime`** [C,M,R] — потенциально простой и полезный источник точного времени; перед добавлением проверить schema, timestamp/timezone, локализацию и overhead. Не считать обязательным багфиксом.
+- **`openrouter:image_generation`** [C,M,R] — стоимость дополнительной image model, получение URL, безопасное скачивание, долговечное локальное сохранение и повторное открытие в истории; UI только после явного consent по оплате.
+- advisor/subagent/fusion/tool_search — дополнительные модели, потенциально многократная оплата и новый слой доверия. Подключать отдельно, с max-cost/step policy и точным usage, без скрытого orchestration.
+- **`openrouter:bash` [M]**, `openrouter:shell` [M,R], `openrouter:apply_patch` [R] и Containers/Files [бета] — **не работают автоматически в нынешнем [C]-клиенте**. Если появится реальная необходимость, спроектировать sandbox, разрешение на запись/сеть, границы файла/контейнера, retention/платежи, безопасные tool outputs; не отдавать модели устройство Android или приватные файлы.
+- OpenRouter Files API, embeddings/rerank, speech, STT, TTS, видео и прочая мультимодальность — продуктовые кандидаты (B5–B7, F1–F3), **не включать без запроса владельца**; файл из облака может быть недоступен для обратного скачивания, локальный оригинал обязателен.
+
+У OpenRouter server tools и beta интерфейсов схема/стоимость меняются; подтверждать по актуальному выбранному endpoint+model+provider, не по рекламному списку возможностей.
+
+### 16. [P3] Управление OpenRouter: маршруты, response caching, доступ и безопасность
+
+Из разделов C–E/H нового списка — **не доказанные ошибки текущего приложения**, а параметры будущего выбора:
+- `models`/fallbacks, router families, provider `sort/order/only`, `max_price`, `service_tier`, presets и `X-OpenRouter-Metadata`: поддержка и стоимость зависят от endpoint, модели и конкретного провайдера; режимы fast/priority/flex не применять без информирования о цене. Текущий UI уже умеет запоминать requested модель и показывать фактическую, при расширении проверять resolved model и тариф.
+- [Response caching](https://openrouter.ai/docs/guides/features/response-caching) через `X-OpenRouter-Cache` — **выключен по умолчанию**, но может прийти из preset. Если включать как отдельную функцию, обозначать `HIT/MISS`, TTL, повторную стоимость и предотвращать возврат того же ответа при явном «Перегенерировать» через `Cache-Clear`/другое тело. Не путать с 1h **prompt caching**, уже существующим в приложении.
+- `plugins.response-healing` работает не во всех stream/schema комбинациях; `context-compression` может выбросить часть истории (см. текущую задачу 17). `moderation`/`alignment enforce`/Guardrails могут вызвать лишние платные действия или 403; нельзя включать скрыто.
+- ZDR/`data_collection`/in-region endpoint, OAuth PKCE и BYOK — выбор владельца с учетом privacy/распределения платы/credential scope. Management API keys/credits/guardrails **не** класть в клиент; внешние Broadcast/trace передают данные третьим сторонам и требуют отдельного согласия.
+- Batch, async generation, analytics, service tiers и variants — самостоятельные сценарии; Chat UI не должен обещать их только потому, что есть docs. Перед решением — capability matrix по `/models/{slug}/endpoints`, стоимости и data retention.
 
 ### Что сознательно не тянуть сейчас
 - MCP и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает execution surface.
