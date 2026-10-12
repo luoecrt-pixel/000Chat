@@ -2925,7 +2925,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 "response.completed" -> {
                                     val r=responseState.terminalResponse
                                     parseTools(r?.optJSONArray("output"),toolItems,requestChatId,requestGeneration)
-                                    newId?.let { activeResponsePersistence.updateActiveResponse(requestChatId, responseId = it, text = responseState.text, status = "completed", expectedRequestId = localRequestId) }
+                                    newId?.let {
+                                        activeResponsePersistence.updateActiveResponse(
+                                            requestChatId,
+                                            responseId = it,
+                                            text = responseState.text,
+                                            status = "completed",
+                                            lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                            expectedRequestId = localRequestId
+                                        )
+                                    }
                                     val annotations=extractAnnotations(r?.optJSONArray("output"))
                                     fileCites=annotations.first
                                     urlCites=annotations.second
