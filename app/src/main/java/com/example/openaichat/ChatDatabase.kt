@@ -747,7 +747,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     ): Boolean {
         if (chatId.isBlank() || expectedRequestId.isBlank()) return false
         var committed = false
-        writableDatabase.transaction { db ->
+        terminalClaimWritableDatabase().transaction { db ->
             // CAS inside an SQLite write transaction serializes simultaneous
             // Worker/Activity claims even when they use separate helpers.
             val activeId = db.query(CHAT_TABLE, arrayOf("active_request_id"), "id=?",
@@ -780,6 +780,32 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ) == 1
         }
         return committed
+    }
+
+    /**
+     * Activity and recovery Worker may open distinct SQLiteOpenHelper instances
+     * while the app is setting its journal mode. Opening a connection can then
+     * raise SQLITE_BUSY *before* our owned terminal transaction starts. Retry
+     * only that side-effect-free connection open, never the HTTP request or an
+     * already-started terminal claim.
+     */
+    private fun terminalClaimWritableDatabase(): SQLiteDatabase {
+        var pauseMs = 80L
+        repeat(4) { attempt ->
+            try {
+                return writableDatabase
+            } catch (busy: android.database.sqlite.SQLiteDatabaseLockedException) {
+                if (attempt == 3) throw busy
+                try {
+                    Thread.sleep(pauseMs)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw busy
+                }
+                pauseMs *= 2L
+            }
+        }
+        error("Unreachable terminal database opener")
     }
 
     private fun upsertCurrentChatInDb(
