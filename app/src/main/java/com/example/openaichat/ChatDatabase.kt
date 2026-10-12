@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 22
+        private const val DB_VERSION = 23
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -176,6 +176,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 finish_reason TEXT,
                 openrouter_protocol TEXT,
                 protocol_context_state TEXT,
+                openai_instructions_sha256 TEXT,
+                openai_protocol_output TEXT,
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
         """.trimIndent())
@@ -329,7 +331,10 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
         }
         if (oldVersion < 17) {
-            MessageMetadataCodec.allKeys.filter { it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state") }.forEach { key ->
+            MessageMetadataCodec.allKeys.filter {
+                it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state",
+                    "openai_instructions_sha256", "openai_protocol_output")
+            }.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
             }
         }
@@ -373,6 +378,21 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 found
             }
             if (!hasProtocolContext) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN protocol_context_state TEXT")
+        }
+        if (oldVersion < 23) {
+            // Older chats never contained these typed protocol columns: retain
+            // their existing history and treat missing output/digests as unknown.
+            // No synthetic fingerprints or output are fabricated in migration.
+            val existing = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameColumn = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names += c.getString(nameColumn)
+                names
+            }
+            if ("openai_instructions_sha256" !in existing)
+                db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_instructions_sha256 TEXT")
+            if ("openai_protocol_output" !in existing)
+                db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_protocol_output TEXT")
         }
     }
 
