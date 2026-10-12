@@ -71,6 +71,130 @@ class MainActivityLifecycleTest {
         } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
     }
 
+    // Verify the *real Activity Send* JSON rather than a helper-only fixture.
+    // The interceptor redirects a synthetic request to a locally trusted HTTPS
+    // MockWebServer; no live provider endpoint or billable credentials are used.
+    private fun actualOpenAiWireWithOwnedLocalManifest(replayAttachment: Boolean): JSONObject {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val response = JSONObject().put("id", "resp_mock_new").put("status", "completed")
+            .put("output", JSONArray().put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(
+                    JSONObject().put("type", "output_text").put("text", "ok"))))
+        val sse = "data: " + JSONObject().put("type", "response.created")
+            .put("sequence_number", 0).put("response", JSONObject().put("id", "resp_mock_new")) +
+            "\n\ndata: " + JSONObject().put("type", "response.completed")
+                .put("sequence_number", 1).put("response", response) + "\n\n"
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse))
+
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val prefs = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .targetContext.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val modified = listOf("provider", "model", "reasoning", "text_format",
+            "system_prompt", "instructions", "file_analysis_tools", "background_responses",
+            "openai_auto_compaction", "web", "file_search", "code_interpreter", "image_generation")
+        val saved = modified.associateWith { key -> prefs.all[key] }
+        var originalApiKey: String? = null
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                activity.prefs.edit().putString("provider", "openai")
+                    .putString("model", "gpt-6-astra").putString("reasoning", "high")
+                    .putString("text_format", "text")
+                    .putString("system_prompt", "System fixture")
+                    .putString("instructions", "Developer fixture")
+                    .putBoolean("file_analysis_tools", false)
+                    .putBoolean("background_responses", false)
+                    .putBoolean("openai_auto_compaction", false)
+                    .putBoolean("web", false).putBoolean("file_search", false)
+                    .putBoolean("code_interpreter", false).putBoolean("image_generation", false)
+                    .commit()
+                originalApiKey = SecureStore(activity).getApiKey()
+                SecureStore(activity).setApiKey("sk-synthetic-only")
+                val secureClient = testHttpClient.newBuilder().addInterceptor { chain ->
+                    val redirected = chain.request().newBuilder()
+                        .url(server.url("/v1/responses")).build()
+                    chain.proceed(redirected)
+                }.build()
+                setPrivateField(activity, "client", secureClient)
+                val presentation = invoke(activity, "presentationInstructionsForRequest") as String?
+                val fingerprint = OpenAiInstructionChainPolicy.fingerprint(
+                    GenerationInstructions("System fixture", "Developer fixture", presentation))
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.clear()
+                history.add(JSONObject().put("role", "user").put("text", "Earlier question")
+                    .put("provider", "openai"))
+                history.add(JSONObject().put("role", "assistant").put("text", "Earlier answer")
+                    .put("provider", "openai").put("response_id", "resp_previous")
+                    .put("status", "completed")
+                    .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, fingerprint)
+                    .put("openai_protocol_output", JSONArray().put(
+                        JSONObject().put("type", "message").put("role", "assistant")
+                            .put("content", JSONArray().put(JSONObject()
+                                .put("type", "output_text").put("text", "Earlier answer")))))
+                setPrivateField(activity, "currentResponseId", "resp_previous")
+                if (replayAttachment) {
+                    val file = java.io.File(activity.filesDir, "fixture-openai-owned-note.txt")
+                        .apply { writeText("ORIGINAL-LOCAL-BYTES-123") }
+                    val manifest = OpenRouterAttachmentStore.classifyLocalFile(
+                        file, file.name, "text/plain")
+                    @Suppress("UNCHECKED_CAST")
+                    val attachments = privateField(activity, "attachedOpenRouterAttachments")
+                        as MutableList<OpenRouterLocalAttachment>
+                    attachments.add(manifest)
+                }
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("Next question")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            val wire = server.takeRequest(20, TimeUnit.SECONDS)
+                ?: throw AssertionError("Actual OpenAI Activity Send did not reach HTTPS mock")
+            return JSONObject(wire.body.readUtf8())
+        } finally {
+            scenario.onActivity { activity ->
+                originalApiKey?.let { SecureStore(activity).setApiKey(it) }
+            }
+            prefs.edit().apply {
+                for (key in modified) {
+                    when (val value = saved[key]) {
+                        is String -> putString(key, value)
+                        is Boolean -> putBoolean(key, value)
+                        is Int -> putInt(key, value)
+                        is Long -> putLong(key, value)
+                        else -> remove(key)
+                    }
+                }
+            }.commit()
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
+    @Test fun actualOpenAiSendKeepsInheritedChainWithoutRepeatingRoles() {
+        val body = actualOpenAiWireWithOwnedLocalManifest(false)
+        assertEquals("resp_previous", body.getString("previous_response_id"))
+        assertFalse(body.has("instructions"))
+        val input = body.getJSONArray("input")
+        assertEquals(1, input.length())
+        assertEquals("user", input.getJSONObject(0).getString("role"))
+    }
+
+    @Test fun actualOpenAiSendSwitchesToFullReplayAndRestoresRolesForManifest() {
+        val body = actualOpenAiWireWithOwnedLocalManifest(true)
+        assertFalse(body.has("previous_response_id"))
+        assertFalse(body.has("instructions"))
+        val input = body.getJSONArray("input")
+        assertEquals("system", input.getJSONObject(0).getString("role"))
+        assertEquals("developer", input.getJSONObject(1).getString("role"))
+        assertTrue(input.getJSONObject(0).getString("content").contains("System fixture"))
+        assertEquals("Developer fixture", input.getJSONObject(1).getString("content"))
+        assertTrue("Historical assistant output must be replayed",
+            input.toString().contains("Earlier answer"))
+        assertTrue("Original local file bytes must reach OpenAI wire request",
+            input.toString().contains("ORIGINAL-LOCAL-BYTES-123"))
+        assertTrue(input.toString().contains("Next question"))
+    }
+
     private var savedNotificationPreference: Boolean? = null
     @Before fun suppressUnrelatedNotificationPermissionDialog() {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
