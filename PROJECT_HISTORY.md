@@ -1,0 +1,27 @@
+# PROJECT_HISTORY — важные причины технических решений
+
+Этот файл **не является журналом действий**. Он нужен только когда причина решения не видна из кода и есть риск повторить старую регрессию. Подробная хронология изменений, отчёты PR и тестовые runs доступны в Git. Нынешние требования — [AGENT_TASKS.md](AGENT_TASKS.md), правила обновления истории — [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md).
+
+## Владение состоянием и lifecycle
+
+- Несколько старых дефектов возникали, когда callback старого request после Stop, Delete, перехода между чатами или Activity recreation мог изменить новый или удалённый чат. Отсюда request-aware SQLite CAS и immutable UI snapshot (`chatId + generation`, для assistant item ещё `assistantItemId`). Не решать такую ошибку глобальными mutable flags. Проверки: `ChatDatabaseActiveFinalizationTest`, `MainActivityLifecycleTest`, `BackgroundResponseUiOwnershipPolicyTest`; PR #29, #35–#43, #59–#75.
+- Foreground/background теперь используют общую response semantics (`ResponseEventReducer`), но transport, checkpoint и DB persistence отделены (`ResumableResponseStreamClient`, `ResponseCheckpointPolicy`, `ActiveResponsePersistence`). Это предотвращает расхождения в terminal/cursor recovery, не является поводом переписать всё в общий controller. Тесты `ResponseEventReducerTest`, `ResponseCheckpointPolicyTest`; PR #36–#42.
+- OpenAI Responses background recovery и OpenRouter Chat Completions stream не эквивалентны: для OpenRouter после process death нет автоматически гарантированного server-side resumable ответа. Повтор запроса может тарифицироваться и не должен запускаться молча. Граница в `BackgroundRecoveryPolicy` / `OpenRouterResponseRuntime`; см. #137.
+- 5h response/recovery и 5M usage tokens OpenRouter — аварийная защита одной генерации с инструментами, **не** cap на ответ/историю/сессию. Старые неявные 128K output и fixed 24 tool rounds были устранены. Тесты `ResponseDeadlinePolicyTest`, `OpenRouterChatClientTest`; #78, #80, #84, #137.
+
+## Исторический контекст, файлы и запросы
+
+- OpenRouter prompt caching однажды возвращал live provider error из-за 1h top-level marker после nested 5m marker. Теперь важен точный multipart `tools + system + messages` и растущая multi-round история, а не просто наличие cache option. `OpenRouterCachePolicyTest`, `OpenRouterChatClientTest`; #103.
+- Подписанные Claude reasoning/tool messages должны переживать следующий turn с прежними order/roles/signatures. `fingerprint v1` связан с полным protocol history; сокращать его ради UI или кэша нельзя. `OpenRouterProtocolRegressionTest`, `ChatMessageFingerprintTest`; интеграция #141.
+- PR G (#57) ввёл локальное хранение исходных OpenRouter attachment bytes и повторное использование в истории; последующие проверки защищают от большой Base64 heap копии и потери файла/оригинала при переключении и восстановлении. Derived/preview может отличаться от оригинала; wire bytes и cached OpenAI file ID имеют отдельную identity по account/bytes. `OpenRouterAttachmentStoreTest`, `FileBackedWireRegressionTest`, `HistoricalAttachmentRepairTest`, `FileCacheAuditRegressionTest`; #141.
+- В request accounting «usage неизвестен» и подтверждённый ноль принципиально различаются. Поздние/cancelled usage/round events не должны удваивать расход и создавать chat после Delete. `ChatDatabaseRequestAccountingTest`, `OpenRouterGenerationAccountingTest`, `RequestStopEventPolicy`; #112–#125 и #141.
+
+## Рендеринг, provenance, выпуск
+
+- HTML/SVG от модели изолирован (без исполнения model JS, внешней сети и Android bridge). Научный KaTeX/Mermaid preview — отдельный owned HTTPS документ с упакованными и SHA-pinned ресурсами; прежний `loadDataWithBaseURL` конфликтовал с запретом data main frame. Не обходить renderer failures ослаблением sandbox/pin. `ScientificRendererDocument`, `ScientificRendererDeviceTest`, [RENDERER_DISTRIBUTIONS.md](RENDERER_DISTRIBUTIONS.md); #141.
+- Release 4.17.0 (#141) включил большое связанное обновление SQLite/ownership, файлов, request accounting, уведомлений и rich renderer. Старые partial ZIP/bundle инструкции **уже применены** и не должны запускаться снова. Текущий code baseline и его доказательства сверять по Git, а не по старой записи здесь.
+- В GitHub Actions кодовый commit, push build SHA, PR head и squash-merge SHA могут различаться. Установленный APK доказывает только код своей сборки; docs-only изменения не делают другой APK. Проверку `Verify handoff` и Debug/Release events оценивать по текущим workflow правилам.
+
+## Удалённые исторические документы
+
+Прежние `666.md`, `667.md`, `668.md`, пакетные handoffs, версии `V4.*_NOTES.md` и датированные аудиты после переноса значимого контекста убраны из актуального дерева. Их полное содержание по-прежнему доступно через историю Git. Не возвращать оттуда закрытые задачи в активный план без новой проверки.
