@@ -2370,10 +2370,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val openAiInstructionFingerprint = OpenAiInstructionChainPolicy.fingerprint(openAiInstructions)
         // previous_response_id inherits prior role-bearing input. Reuse is safe
         // only for the immediate completed turn under identical instructions.
-        val usableOpenAiChain = provider == "openai" &&
-            OpenAiInstructionChainPolicy.canReuse(
-                currentResponseId, chat, openAiInstructionFingerprint, regenerating = regenerate
-            )
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
@@ -2414,6 +2410,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 attachedOpenRouterAttachments.toList()
             }
         }
+        // Local OpenRouter manifests need a full typed local replay. A server
+        // chain must not be reused with a typed fallback (or instructions vanish).
+        val usableOpenAiChain = requestOpenRouterAttachments.isEmpty() &&
+            provider == "openai" &&
+            OpenAiInstructionChainPolicy.canReuse(
+                currentResponseId, chat, openAiInstructionFingerprint, regenerating = regenerate
+            )
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
         if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
@@ -2732,10 +2735,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .put("parallel_tool_calls",prefs.getBoolean("parallel_tools",true))
 
         maxOut?.let { body.put("max_output_tokens",it) }
-        // For a fresh/replayed context send full role-bearing instructions once.
-        // A matching previous_response_id already contains them; reinserting the
-        // same roles on each turn would duplicate rules in the server-side chain.
-        if (!usableOpenAiChain) openAiInstructions.applyToOpenAiRequest(body)
+        // Actual wire mode, not merely chain eligibility, owns the instructions:
+        // a typed-input replay must always start with the current system/developer
+        // roles, because it does not inherit the server-side chain.
+        val chainOnWire = usableOpenAiChain && typedInput == null
+        if (!chainOnWire) openAiInstructions.applyToOpenAiRequest(body)
         prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
         if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", true)) {
@@ -2743,7 +2747,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",threshold)))
             }
         }
-        if (typedInput == null && usableOpenAiChain) {
+        if (chainOnWire) {
             currentResponseId?.let { body.put("previous_response_id", it) }
         }
 
