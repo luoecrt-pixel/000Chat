@@ -79,7 +79,7 @@ class MainActivityLifecycleTest {
         val response = JSONObject().put("id", "resp_mock_new").put("status", "completed")
             .put("output", JSONArray().put(JSONObject().put("type", "message")
                 .put("role", "assistant").put("content", JSONArray().put(
-                    JSONObject().put("type", "output_text").put("text", "ok"))))
+                    JSONObject().put("type", "output_text").put("text", "ok")))))
         val sse = "data: " + JSONObject().put("type", "response.created")
             .put("sequence_number", 0).put("response", JSONObject().put("id", "resp_mock_new")) +
             "\n\ndata: " + JSONObject().put("type", "response.completed")
