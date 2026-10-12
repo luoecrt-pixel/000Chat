@@ -1,13 +1,14 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-12 00:28 +03:00
-**Следующий рабочий срез:** Проверка на телефоне и выбор следующего среза — ручное подтверждение релиза 4.17.0, затем выбор одной задачи по наблюдениям.
-**Текущая работа:** релиз 4.17.0 (`versionCode=64`) подготовлен в PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141). Финальный кодовый SHA `cceacdd8c392b2a69338f2313c6db137d210f307`; Android push-проверки завершены успешно. Канонический handoff сохранён и актуализирован после проверок; копия из ZIP никогда не заменяла этот файл. Фактический статус merge и новый main SHA читать в GitHub, а не выводить из этой записи.
-**Точные проверки релиза:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) **Successful**: source/mutation verifiers, JVM tests, lintDebug, assembleDebug, **39/39 Android instrumentation tests**, Upload APK. [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful**: JVM tests, lintRelease, assembleRelease, bundleRelease, Upload release artifacts. [Verify PR 38175702106](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175702106) **Successful**. Все три на `cceacdd8c392b2a69338f2313c6db137d210f307`, attempt 1. Последующий docs-only head требует собственного Successful Verify; skipped PR-event Android jobs не являются сборками.
-**Артефакты:** подписанный Debug APK — [artifact 11716107416](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416); Release APK/AAB — [artifact 11714939668](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458/artifacts/11714939668). Для Release не настроена release-подпись. `BuildConfig.BUILD_GIT_SHA` этих сборок = `cceacdd8c392b2a69338f2313c6db137d210f307`, не будущий squash merge SHA. Retention — 5 дней; перед скачиванием сверять expired.
-**Итог пакета:** request-aware terminal persistence и SQLite v22, типизированный JSON/SSE, файловые кэши/инструменты и сохранность оригиналов, очередь уведомлений, native rich response и pinned офлайн KaTeX/Mermaid. Сам HTML научного превью теперь выдаётся из памяти через точный локальный HTTPS URL: прежний `loadDataWithBaseURL` попадал под запрет `data:`. Изоляция WebView, SHA, TLS и request ownership сохранены.
-**Закрытые failures:** Debug на `26024559` и диагностическом `63da201e` выявил 403 для `data:` main frame; на `34cdf699` загрузка заработала, но тест ошибочно считал строку с HTML некорректным LaTeX. `cceacdd8c392b2a69338f2313c6db137d210f307` отдельно проверяет безопасный markup, отсутствие выполнения/создания script и полный fallback для действительно неизвестной LaTeX-команды. Последняя полная пара CI прошла.
-**Оставшиеся границы:** физический телефон, исходные большие фотографии, живые Claude/OpenAI/OR, реальная 5h сессия, биллинг и системный picker/IME/gesture не проверены этим релизом. Платных API-вызовов и работы с телефоном не было. README/workflows/.gitignore/SECURITY из main не изменены; Android push на main отключён, branch [ci] и ручной запуск сохранены.
+**Last updated:** 2026-10-12 08:57 +03:00
+**Следующий рабочий срез:** Ручная приёмка 4.17.0 и выбор следующего среза — подтвердить поведение установленного APK по конкретным сценариям; следующую кодовую задачу выбрать по наблюдениям.
+**Подтверждённый статус:** PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141) **merged 2026-10-12 00:30:47 +03:00**; проверенный main до этой документационной правки — `78b6be313f82782999c95579466116f4e572070f`, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9`. При проверке открытых PR не было. Код релиза 4.17.0 (`versionCode=64`, SQLite v22) интегрирован; повторно применять ZIP не нужно.
+**Идентичность сборки:** последняя code/test редакция — `cceacdd8c392b2a69338f2313c6db137d210f307`; финальный docs head #141 — `4f1e96f5c1327fab97a0fd595e546460f5c0d205`; squash/main — `78b6be313f82782999c95579466116f4e572070f`. Эти три SHA имеют разные роли. Код/build/tests текущего main совпадают с проверенным code SHA; после него изменялись только четыре Markdown-документа. В установленном APK ожидается `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`.
+**CI подтверждён:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) и [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful** на code SHA, attempt 1; Debug завершил **39/39 instrumentation tests** и загрузил APK. [Финальный Verify #141 38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925) **Successful** на docs head, attempt 1. Новый docs-only PR требует собственного Verify, без Android rebuild.
+**Артефакты доступны:** Debug `11716107416`, Release `11714939668`; API подтвердил `expired=false`. Debug ZIP истекает **2026-10-17 00:27:30 +03:00**, Release ZIP — **2026-10-17 00:21:00 +03:00**. Полные ссылки и archive SHA-256 — в baseline. Debug APK содержит блок подписи; Release APK/AAB **unsigned**, release signing config отсутствует.
+**Граница релиза:** завершены интеграция кода, CI, merge и создание артефактов. При проверке GitHub Releases список пуст: отдельный опубликованный GitHub Release не создан; публикация в магазине не подтверждена. Production-подпись и канал публикации требуют выбранного владельцем следующего поручения.
+**Закрытые дефекты:** локальный request ID сохраняет terminal assistant независимо от HTTP `x-request-id`; типизированный JSON/SSE не превращает null/объекты в текст; сохранены большие TEXT/оригиналы вложений/signed protocol; исправлены file caches, уведомления и rich renderer. Научный HTML выдаётся из памяти через точный локальный HTTPS URL: прежний `loadDataWithBaseURL` блокировался как `data:` main frame. Ошибочный тест HTML-like LaTeX разделён на безопасное оформление, запрет script execution и настоящий unsupported-command fallback; последние проверки прошли.
+**Что остаётся:** физический телефон, исходное большое фото владельца, живые Claude/OpenAI/OR, реальная 5h сессия, биллинг и системные picker/IME/gesture не приняты вручную. Платных API-вызовов и работы с телефоном в этом проходе не было. Stop/CAS/полная история/lossless originals/signed replay/manual effort/fingerprint v1/1h cache/5h+5M сохраняются. README/workflows/security/settings не менять без соответствующей задачи.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -56,18 +57,35 @@
 
 | Срез | Подтверждение | Граница |
 | --- | --- | --- |
-| main до интеграции #141 | `120ac217c2a9f06a8b0b062b8571800c52682f33`: #138 handoff, #139 security, #140 artifact retention | Новый main после merge сверять через API; merge SHA отличается от build SHA |
-| #141 релиз 4.17.0 / SQLite v22 | Код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` (39/39 device tests), push Release `38175698458`, Verify `38175702106` — Successful, attempt 1 | Полный Android CI на API34 и JVM/Robolectric; телефон и live provider отдельно |
-| Артефакты #141 | Debug `11716107416`, Release `11714939668` в соответствующих runs, загрузки Successful | Debug подписан; release signing config отсутствует; retention 5 дней |
-| #136 APP-04 historical proof | Код `613bff2155838b5b1988df4b478d3bf601a83882`; APK `37994461394`, Release `37994461425`, Verify `37994465824` Successful; merge `0308fd67` | HTTPS mock/ActivityScenario, не физический swipe или исходное проблемное фото |
-| #137 APP-05 historical proof | Код `fe0b5b2597226f5690b502dc462474d07a25292b`; APK `37998337416`, Release `37998337154` Successful; final docs Verify `38028778105`; merge `e3304979` | Fake-clock/blocked socket, не 5h live upstream или полный heap smoke |
-| Физический телефон | Ранее владелец подтвердил камеру и распознавание маленького фото | Большое фото, picker, drawer/IME, новые превью, VS и live API ещё не приняты вручную |
+| Подтверждённый main #141 | `78b6be313f82782999c95579466116f4e572070f`, merged 2026-10-12 00:30:47 +03:00, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9` | Снимок перед этой docs-only правкой; следующий агент повторно сверяет actual main |
+| Последний runtime/code SHA | `cceacdd8c392b2a69338f2313c6db137d210f307`; 4.17.0, versionCode 64, SQLite v22 | В APK Build SHA = этот code SHA, а не squash SHA |
+| Debug push / attempt 1 | [38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456), job `114577504249`: source/mutations, JVM tests, lintDebug, assembleDebug, 39/39 API34 device tests, upload — Successful | Offline mocks/Android emulator, не физический телефон или live provider |
+| Release push / attempt 1 | [38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458), job `114577504504`: test, lintRelease, assembleRelease, bundleRelease, upload — Successful | Обе JVM unit variants выполнены; production signing не настроен |
+| Final docs Verify #141 / attempt 1 | [38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925), pull_request, SHA `4f1e96f5c1327fab97a0fd595e546460f5c0d205` — Successful | Ранний code Verify `38175702106` не подменяет эту финальную проверку |
+| Runs на merge/main SHA | При API-проверке runs отсутствовали | Ожидаемо: Android push на main исключён, Verify workflow запускается только по pull_request |
+| #136 / #137 историческое доказательство | #136 merge `0308fd67`, code `613bff2`, Debug `37994461394`/Release `37994461425`; #137 merge `e3304979`, code `fe0b5b2`, Debug `37998337416`/Release `37998337154` — Successful | Исторические assertions не расширяют актуальную ручную приёмку |
+| Физический телефон | Ранее владелец подтвердил камеру и маленькое фото | Новые renderer/cache/notification paths, большое исходное фото и live API этим наблюдением не доказаны |
+
+### Доступные артефакты и проверка содержимого
+
+| Артефакт | Ссылка и содержимое | Размер ZIP / срок хранения |
+| --- | --- | --- |
+| Debug `11716107416` | [Скачать](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416); `app-debug.apk` | 7 753 654 bytes; expires `2026-10-16T21:27:30Z` = 17 октября 00:27:30 МСК |
+| Release `11714939668` | [Скачать](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458/artifacts/11714939668); `apk/release/app-release-unsigned.apk` и `bundle/release/app-release.aab` | 12 439 053 bytes; expires `2026-10-16T21:21:00Z` = 17 октября 00:21:00 МСК |
+
+Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967a43c0cc9`; Release `2f9a69295eb353f8ee2b84e49fbc028b9df499e954e4ac234f7b849b1f2e089b`. Это хеши ZIP, не исходных APK и не Maven JAR. В завершённом проходе ZIP bytes совпали с API digest; в Debug APK найдены signing block, правильный Build SHA в DEX и packaged KaTeX/Mermaid. В Release APK/AAB не обнаружены v1 certificates/APK signing block, что соответствует Gradle config. Это проверка структуры/идентичности артефакта, не отдельная криптографическая проверка сертификата или установка на телефон. Retention — 5 дней; expired артефакт не выдавать за доступный.
+
+### Локальная среда и разделение доказательств
+
+В этом workspace 2026-10-12 проверен JDK 17.0.20: `java -version` работает с `LD_LIBRARY_PATH=/usr/lib/jvm/java-17-openjdk-amd64/lib:/usr/lib/jvm/java-17-openjdk-amd64/lib/server`. Gradle и adb отсутствуют; Gradle wrapper в репозитории отсутствует. Android compile/JVM/Robolectric/lint/device assertions выполнены в Actions, не в scratch. Новый агент повторяет preflight в своём окружении.
+
+Локально в предыдущем завершённом проходе прошли source/handoff verifiers, 5 implementation mutations и 8 existing mutations с positive controls, 8 Python unittest cases, asset inventory 82 modules/fonts/licenses, host Kotlin генерация production renderer и Node syntax/KaTeX probes. Host `Uri` был compile stub; это не WebView proof. Попытка standalone Chromium закончилась SIGTRAP и не считается браузерной проверкой. Scratch host binaries/ZIP/JAR не являются единственным источником результата: воспроизводимая база — GitHub code/tests/runs и pinned distributions.
 
 Ошибки промежуточных коммитов `d0624e3`, `ce55889b`, `cd8aa0d`, `9bc2d66` — история исправленных failures, не действующие блокеры финального кода. Везде сохраняй distinction: exact test assertion → harness → SHA/run → scope of proof.
 
 ## Подтверждённые lifecycle/recovery контракты
 
-Единая карта доказанности: instrumentation — Android/ActivityScenario; robolectric — Android/SQLite без эмулятора; pure — JVM без Android runtime; static — source/verifier без runtime. Тег применяется к конкретному утверждению, а не ко всему PR. Старые записи — исторический proof; новые проверки и границы ниже.
+Единая карта доказанности: instrumentation — Android/ActivityScenario; robolectric — Android/SQLite без эмулятора; pure — JVM без Android runtime; static — source/verifier без runtime. Тег применяется к конкретному утверждению, а не ко всему PR. Старые записи — исторический proof на указанных SHA, даже когда в цитируемом описании сказано «текущий». Актуальные границы #141 перечислены отдельной таблицей ниже; успешный общий CI не повышает старый source-only тег без соответствующего assertion.
 
 - [pure] **#19:** foreground и resumable SSE соблюдают строгий sequence-gap contract: пропущенная последовательность не принимается как корректное продолжение stream.
 - [static] **#20:** Stop привязан к generation конкретного request; state-level contract `markUserStop()` проверен, но прямой runtime-вызов полного `stopCurrentResponse()` в этом proof отсутствует.
@@ -146,18 +164,52 @@
 | F25 · GitHub file decode | `GitHubFileContentPolicyTest` empty/invalid UTF-8/base64/size/encoding=none/truncation (JVM) | Не raw/blob fallback, не живая `get_file` операция для большого бинарного файла |
 | F26 · docs gate | `*.md`/`**/*.md` trigger и `GitHubToolSafetyTest` nested docs `required()`; Verify PR success | Не server branch protection и не эксперимент на отдельном nested-Markdown-only PR |
 
+### Актуальная карта контрактов релиза #141
+
+Все названные tests находятся в code SHA `cceacdd8c392b2a69338f2313c6db137d210f307`. Android tests прошли в Debug `38175698456` (39/39), JVM/Robolectric suites — в успешных Debug/Release `38175698456`/`38175698458`, attempt 1. Таблица описывает конкретные assertions и отдельно отмечает source-only wiring. Prefix `app/src/main/java/com/example/openaichat/` для production файлов; JVM tests — `app/src/test/java/com/example/openaichat/`, device tests — `app/src/androidTest/java/com/example/openaichat/`.
+
+| Контракт / исходник | Конкретная выполненная проверка | Граница доказательства |
+| --- | --- | --- |
+| Local request ownership · `AstraResponseModel.kt`, `ChatDatabase.kt`, Send wiring в `MainActivity.kt` | `OpenAiRequestOwnershipPersistenceTest.localRequestIdIsPersistedWhileHttpRequestIdRemainsDiagnostic`: чужой HTTP ID не расходует active claim, правильный assistant сохраняется и переживает reopen (instrumentation); Send builder дополнительно source-guarded | Device test вызывает DB напрямую; это не живой OpenAI Send |
+| Failed status и типизированный JSON/SSE · `JsonProtocol.kt`, `AstraResponseModel.kt`, `OpenAiSseStreamReader.kt` | `OpenAiRequestOwnershipPersistenceTest.failedResponseHasEmptyCanonicalTextAndErrorOnlyInMetadata`; `OpenAiAndroidNullStreamTest.nullNumericBooleanAndObjectDeltasCannotLeakIntoAnswerOrReasoning`, `terminalNullIdDoesNotReplaceEarlierResponseIdOrStreamedText` (Robolectric) | Канонический текст и error metadata разделены; provider-specific live frames отдельно |
+| Большие TEXT без CursorWindow truncation · `SqliteLargeTextQuery.kt` | `SqliteLargeTextQueryTest.completeUnicodeAndNulTextFitsSmallWindowAndKeepsColumnContract`, `compositeKeysAndNestedTransactionRemainOwnedByCaller`, `invalidProjectionDoesNotLeaveTransactionOpen` (Robolectric) | UTF-8/NUL/column/transaction assertions; итоговый String всё равно занимает heap, cursor закрывается на исходном потоке |
+| Миграция v22 и выборочное обновление вложений · `ChatDatabase.kt`, attachment state helpers | `HistoricalAttachmentRepairTest.migration22KeepsSignedProtocolAndOldText`, `selectiveRepairPreservesAnswersAndRejectsStaleMutation`, `cacheOnlyWritePreservesConcurrentTailAndCannotChangeOriginalReferences` (Robolectric) | Не переписывать полную историю ради cache repair; не весь migration/device heap surface |
+| Stop и один terminal winner · `ChatDatabase.kt`, `LocalArtifactToolExecutor.kt` | `StopDraftAndArtifactsTest.stopReopenAndStaleUiSaveDoNotResurrectRestoredDraft`, `stopAndCompletedWriterHaveExactlyOneWinner`, `generatedFileSurvivesStopAndDisappearsWithDeletedChat` (Robolectric) | DB/файлы: D2/Stop и CAS; не все Activity/Worker callbacks автоматически |
+| Signed Claude replay и корректный terminal · `OpenRouterProtocolCodec.kt`, `OpenRouterChatClient.kt` | `OpenRouterProtocolRegressionTest.completedToolProtocolSurvivesSerializedHistoryAndNextUserTurn`, `changedPrefixResetsOldBlocksButKeepsNewBlocksSignedAfterThatChange`, `reasoningFragmentsWithOmittedTypeKeepSignatureAndOrder`, `lengthWithAndWithoutVisibleTextRemainsIncompleteAndDoesNotExecuteCutCalls` (JVM/MockWebServer) | Fingerprint v1/full signed tail сохраняются; acceptance подписи настоящим Claude не проверен |
+| Полные wire bytes без большого Base64 String · `FileBackedDataUrl.kt`, `FileBackedText.kt`, `StreamingJsonRequestBody.kt` | `FileBackedWireRegressionTest.diskWireMatchesCanonicalJsonAndCopiesWithoutMaterializingBase64`, `fullAnalysisUsesOriginalImageAfterCompatibleOpenRouterCopy`; `HistoricalAttachmentRepairTest.fullLargeTextStreamsWithCorrectEscapingLengthAndMutationDetection` (Robolectric) | Канонический JSON/оригинал/escaping; это не обещание нулевого heap для всей истории |
+| Upload reuse по account/bytes/name/MIME/purpose · `OpenAiFileUploadCache.kt` | `FileBackedWireRegressionTest.uploadReuseChecksBytesAndAccountAcrossCacheInstances`; `FileCacheAuditRegressionTest.uploadPurposeIsPartOfTheAccountAndByteIdentity`, `clearingDuringUploadDoesNotRepopulateCache`, `historicalDocumentAndImageIdsNeverBypassCurrentAccountCache` (Robolectric) | Исторический чужой file_id не bypass; expired/deleted server ID инвалидируется, автоматический платный resend не подразумевается |
+| GitHub UTF-16 disk snapshot + ETag · `GitHubTextPageCache.kt`, `GitHubToolExecutor.kt` | `AuditFollowupRegressionTest.diskPagesSurviveReopenWithoutDownloadingPrefixesAndRejectChangedVersion`, `invalidUtf8LeavesNoPartialOrInstalledSnapshot`; `FileCacheAuditRegressionTest.laterGithubPagesRequireEtagBeforeAnyFetchWithOrWithoutDiskCache`, `diskBudgetIncludesReplacementAndPartialSnapshotsAndSameEtagNeedsNoSecondCopy` (Robolectric/mock fetch) | `get_file` decoder ≤256 KiB и `get_file_range` — разные paths; не live GitHub binary operation |
+| Локальные CSV/XLSX/текстовые инструменты · `LocalFileTools.kt`, `LocalTextPageIndex.kt` | `LocalFileToolsRegressionTest.csvProcessesAllRowsAndQuotedNewlines`, `sharedFormulaWithoutCachedValueIsNotSilentlyCountedAsAnEmptyCell`, `malformedCsvAndUnknownDevicePathFailClearly`, `blankHistoricalPathDoesNotSilentlyDropAnUploadedFile` (Robolectric) | Request-scoped file allow-list; большие/сложные реальные office файлы и heap отдельно |
+| Сохранение полного source и безопасная file card · `LocalArtifactToolExecutor.kt`, `RichResponsePanel.kt` | `LocalArtifactWriteRegressionTest.completeLargeSourceAndUtf8BoundarySurviveSaveAndReopen`; `RichResponsePanelTest.fileCardSavesOnlyAClosedSafeTextBlockAndNothingAutoExecutes` (Robolectric) | Текст/UTF-8/NUL сохраняются, raw text не выдаётся за настоящий office/binary файл; actions явные |
+| Уведомления после winning SQLite commit · `ChatDatabase.kt`, `AnswerNotificationOutbox.kt`, `ResponseNotifications.kt` | `AuditFollowupRegressionTest.notificationQueueIsCommittedWithAnswerAndSurvivesReopenBeforePost`; `AnswerNotificationOutboxTest.interruptionAfterPostCanBeReplayedWithSameRequestAndThenDeduplicates`; `ClaudeReviewRegressionTest.oldSentNotificationsExpireWhilePendingDeliverySurvives` (Robolectric) | At-least-once с одинаковым Android tag/id; не exactly-once внешнего post и не реальный process kill/device permission race |
+| Native rich response и incremental parsing · `ResponseRenderSafety.kt`, `RichResponsePanel.kt` | `ResponsePresentationRegressionTest.arbitraryStreamingCutsNeverLoseRawSource`, `previewKeepsAttackInsideEscapedOpaqueScriptFreeFrame`; `ResponseIncrementalPresentationTest.nativeHtmlWhitelistNeverAcceptsAttributesOrExecutableMarkup`; `RichResponsePanelTest.narrowDarkCardKeepsCodeAndTableScrollableWithoutCreatingWebView` (JVM/Robolectric) | Полный raw source/protocol не меняется ради показа; 380dp/UX/Copy на телефоне отдельно |
+| Научный isolated renderer · `ScientificRendererDocument.kt`, `ScientificRendererPreview.kt`, `ScientificMathText.kt` | `ScientificRendererDeviceTest.packagedKatexAndMermaidRenderWithoutExposingAnAndroidBridge` (instrumentation); `ScientificRendererRegressionTest.rendererServesItsOwnedDocumentWithoutAllowingDataPagesOrOtherMainFrames` (Robolectric) | Реальные APK engines: math/math-in-text/Mermaid; origin, script rejection, source fallback; не всё форматирование и размеры на телефоне |
+
+- [instrumentation] **#141:** выполнены DB ownership/reopen assertions из `OpenAiRequestOwnershipPersistenceTest` и реальный APK/WebView fixture `ScientificRendererDeviceTest` в Debug `38175698456` на `cceacdd8c392b2a69338f2313c6db137d210f307`, attempt 1. Остальные гарантии #141 имеют указанный в таблице JVM/Robolectric/source harness; этот тег не распространяется на них автоматически.
+
+### Ограничения, которые нельзя превращать в лимиты ответа
+
+- `SqliteLargeTextQuery`: маленькие SQL byte slices, полный UTF-8 текст/NUL собирается без тихого усечения. Это обход CursorWindow, не ограничение размера ответа и не bounded-heap гарантия.
+- `get_file` сохраняет строгий decoder ≤256 KiB и preview до 40 000 characters с явным `truncated=true`; для полного текста использовать `get_file_range`. Последний дополнительно поддерживает последовательные страницы: UTF-16 offsets, возвращённый `next_offset`, ETag на следующих страницах, conditional validation при каждом вызове. Client raw download guard — 100 MiB; UTF-16 snapshot может занимать до 200 MiB, общий cache budget — 220 MiB. Превышение/неверный UTF-8/смена ETag дают явную ошибку, старый cache при HTTP failure не подставляется.
+- File-backed values сериализовать через `JsonProtocol`/`StreamingJsonRequestBody`; не вызывать `JSONObject.toString()`/`getString()` для внутренних file objects как замену wire writer. Typed protocol и fingerprint должны видеть те же полные bytes.
+- Model HTML/SVG preview: JS/network/file/content/storage off, escaped opaque sandbox/CSP. Научный renderer — отдельный WebView с app-owned JS, pinned APK assets, точной owned GET main page и GET subresources; внешние origins, data/file/content, POST/другие main frames запрещены, Android bridge отсутствует.
+- KaTeX `0.17.0`, Mermaid `11.14.0`; доверенные JAR SHA — `config/response-renderer-sha256.properties`, происхождение — `RENDERER_DISTRIBUTIONS.md`. При mismatch расследовать bytes/provenance, не переписывать pins ради green CI. Inventory 82 modules проверяет ссылки/шрифты/licenses; запуск module graph доказан только device fixture.
+- Preview guards: 16 000 LaTeX characters суммарно, 50 000 Mermaid characters, native HTML для math-in-text ≤400 000 characters; timeout подготовки preview 12 s и ограничение его размера внутри UI. Эти правила оставляют исходник доступным и не режут ответ, tool rounds или signed history.
+- Notification queue фиксируется с assistant в SQLite, post и acknowledgement идут отдельно. Pending сохраняется при отсутствии permission; просмотр чата/выключенные уведомления закрывают уведомление явно. Повтор доставки не является повтором model API.
+
 **Пока не подтверждено / не повышать тег автоматически.**
 
+- Renderer coverage: device fixture проверил math/math-text/Mermaid documents в общем preview WebView. Успешное inline widget sizing/toggle в `ScientificMathText`, полный HTML/SVG preview runtime и все Copy/source/reopen UI branches отдельно не подтверждены device assertions; Robolectric parser/settings/failure paths не заменяют эти проверки.
 - Drawer open/close: финальный Android lifecycle `37994461394` Successful для window-dispatch DOWN/MOVE/UP; не проверены OS injection и физический свайп на телефоне.
 - Source-only/частичные границы: direct OpenAI Stop wiring (#20), adapter proof ActiveResponsePersistence (#37), reasoning callback (#40), все image/ZIP completion ветви (#42). F21 проверен fake-clock и quiet socket, не полным пятичасовым процессным restart или live provider. F22/F23 не гарантируют отсутствие любых heap/cleanup defects.
 - Настоящие Claude/OpenAI: проблемное большое фото, живой provider switch/long-running stream, upstream-specific image/effort limits, cache hit/TTL/реальная стоимость, EXIF-интерпретация non-ideal/mirrored фото. Маленькое фото и камера — ограниченные наблюдения владельца.
 - Телефон: три click outcomes, gesture/Back/selection/code scroll, IME/large font, настоящие Photo Picker и MiXplorer, previews/reopen, selectable Copy/share/latest logs, установленный build SHA. Читаемая ошибка и отсутствие нового выдуманного лимита важнее «mock accepted».
 - GitHub: read подтверждён прежним использованием; реальные write/review/merge/workflow от приложения не испытаны. Branch protection — отдельное серверное ограничение.
-- F21–F26 выполнены в проверенном CI, но не вся async surface/heap/cleanup: VS late dialog race проверен pure predicate, ZIP failure — Robolectric, реальный GitHub binary >256 KiB явно unsupported, live VS/provider/физический телефон отсутствуют. Не называть aggregate green подтверждением иных ветвей.
+- F21–F26 выполнены в проверенном CI, но не вся async surface/heap/cleanup: VS late dialog race проверен pure predicate, ZIP failure — Robolectric, старый `get_file` для binary/oversize явно unsupported; новый `get_file_range` имеет отдельные text/ETag/budget assertions, live VS/provider/физический телефон отсутствуют. Не называть aggregate green подтверждением иных ветвей.
 
 **Как поддерживать этот раздел:** после каждого изменённого контракта запиши утверждение, конкретный test/наблюдение, harness, SHA/run/attempt/result и границу. При новом успешном прогоне обнови также ранее Failed/«ещё ждёт» записи, а не добавляй противоречивую строку сверху. Исторический тег не переносится на изменённый runtime автоматически. Закрытый контракт переоткрывай только при новом доказательстве регрессии.
 
-- [instrumentation] **#141:** `ScientificRendererDeviceTest.packagedKatexAndMermaidRenderWithoutExposingAnAndroidBridge` прошёл в Debug `38175698456` на `cceacdd8c392b2a69338f2313c6db137d210f307`: реальные pinned APK assets, локальный HTTPS origin, KaTeX в отдельном блоке/тексте и Mermaid SVG; hostile markup не исполняется и не создаёт script, invalid LaTeX сохраняет полный source. Это emulator proof, не проверка всего форматирования на телефоне.
+
 
 ## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила
 
@@ -170,36 +222,49 @@
 - Persistence extraction должна начинаться с pure snapshot/codec или одной доказанной transactional operation, а не с generic controller framework.
 - Compose — следующий UI-слой только после state/controller extraction; не смешивать Compose migration с upload/persistence refactors.
 
-**Архитектурный обзор 4.17.0:** UI/stream/persistence остаются связаны в MainActivity (~7.5 тыс. строк) и ChatDatabase (~2.2 тыс.). Новые renderer views изолируют JS, сохраняют native source и отбрасывают stale callbacks по экземпляру WebView. Следующий безопасный шаг после ручных наблюдений — одна воспроизводимая lifecycle/persistence граница; широкое controller/Compose переписывание не включать в релиз.
+**Архитектурный обзор 4.17.0, сверён 2026-10-12:** UI/stream/persistence остаются связаны в MainActivity (~7.5 тыс. строк) и ChatDatabase (~2.2 тыс.). Новые renderer views изолируют JS, сохраняют native source и отбрасывают stale callbacks по экземпляру WebView. Следующий безопасный шаг после ручных наблюдений — одна воспроизводимая lifecycle/persistence граница; широкое controller/Compose переписывание не включать в релиз.
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-Редакция 15: релиз #141 получил exact-code Debug/Release/Verify, включая все 39 device tests. Последующий docs-only head проверяется отдельным Verify. Ручной телефон/provider smoke остаётся следующей задачей; Compose rewrite, финансовый ledger и autoretry не включены.
+Редакция 16: code/CI/merge #141 завершены, его final docs Verify также Successful. Подтверждённого нового runtime blocker после этой пары проверок нет. Открыты ручная приёмка, решение о production distribution и выбор следующего узкого среза. Новые функции, controller/Compose rewrite и переработка accounting не включаются автоматически.
 
-### 1. Проверка на телефоне и выбор следующего среза — **следующий**
+### 1. Ручная приёмка 4.17.0 и выбор следующего среза — **следующий**
 
-**Первый шаг:** сверить merged/merged_at PR #141, final-head Successful Verify и actual main. Для разрешённой владельцем ручной проверки использовать [Debug APK из run 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416), artifact `11716107416`. В диагностике ожидать `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`. Если artifact expired — не выдавать старую ссылку за доступную сборку. Без отдельного поручения не работать с телефоном и не вызывать платные API.
+**Первый шаг:** повторно сверить actual main и доступность Debug artifact `11716107416`, предоставить владельцу ссылку на APK и ожидаемый Build SHA `cceacdd8c392b2a69338f2313c6db137d210f307`. После отдельного поручения на телефон выполнить выбранные владельцем сценарии ниже и записать устройство/Android/build SHA, действия, наблюдаемый результат и воспроизводимый negative case. Без поручения не устанавливать APK, не управлять телефоном и не делать платные API-вызовы.
 
-| Приоритет | Ручная/следующая проверка | CI-подтверждённая граница |
+| Сценарий | Наблюдаемый результат / negative case | Имеющийся proof |
 | --- | --- | --- |
-| P1 телефонные вложения | Native Photo Picker и Files/MiXplorer, оригинальное большое JPEG, preview/reopen, историческое OR→OpenAI, сохранность D2 при сбое | Android mock HTTPS bytes/picker ownership на `613bff2`; реальный Claude/OpenAI без разрешения не вызывать |
-| P1 научное превью | Формулы в тексте/отдельном блоке, Mermaid, переключение source/preview и повторное открытие | Pinned APK engines прошли на API34; размеры/шрифты/прокрутка физического телефона отдельно |
-| P1 UI/diagnostics | Нижние model, ⚡ quick effort и advanced отдельно; drawer gesture vs scroll/Back/IME/large font; Copy/share logs и Build SHA | Activity window dispatch/geometry тесты и JVM redaction, не полноценный phone UX |
-| P1 APP-05 long request | persisted 5h deadline, background/resume, Stop/cancel/error без воскрешения stale request | Fake clock/blocked socket, не 5h live upstream |
-| P2 attachments/VS | Partial temp cleanup при Cancel/overflow; выбранный Vector Store, поздние dialog callbacks и >100 files, явное incomplete | JVM/Robolectric ownership/parser/ZIP; real VS server и delayed dialog UI ещё без proof |
-| P2 GitHub/docs | Пустой файл ≠ ошибка encoding/oversize; docs-only Markdown PR должен иметь Verify | GitHub decoder JVM и workflow trigger, не live GitHub операции или server branch protection |
+| Formula/diagram/source | Отдельная формула, формулы в native тексте, Mermaid; source/preview/reopen; invalid LaTeX оставляет полный source, ввод с script не выполняется | API34 packaged engine + JVM/Robolectric fixture; физические размеры/fonts/scroll ещё не приняты |
+| История и вложения | Оригинальное большое JPEG, provider switch/history replay, picker после switch/recreate; недоступный файл не исчезает молча, D2/history сохраняются | HTTPS mock bytes, ownership/repair tests; исходное фото владельца и настоящий Claude/OpenAI отдельно |
+| Composer/UI | Модель у ввода, ⚡ quick effort и advanced имеют разные click outcomes; drawer против вертикального scroll, Back/IME/large font, Copy/share logs | Geometry/window dispatch/redaction tests; системные касания и настоящий picker/IME не доказаны |
+| Stop/recovery/уведомления | Stop/late completion не восстанавливает старый request и не теряет новый draft; reopen не дублирует assistant; denied notification permission не теряет сохранённый ответ | SQLite CAS/outbox/Activity fixtures; process death/reboot и реальная 5h сессия отдельно |
+| File/cache/VS | Полная пагинация и Unicode, cache reset/expired ID без скрытого resend, поздний VS callback не меняет другой диалог | JVM/Robolectric ETag/cache/owner predicates; реальные большие provider файлы, VS dialog races и heap отдельно |
 
-После получения наблюдений выполнить **архитектурный/продуктовый обзор** (активный план сменил слой, триггер из START HERE). Выбрать ровно одну следующую задачу на основе воспроизводимого defect или ценности Product radar, записать owner/negative scenario/test matrix; не делать новый rewrite на всякий случай. Если телефон/провайдер недоступны — указать blocked/not verified, не выдавать за success. Платные API и destructive GitHub writes требуют отдельного разрешения владельца.
+**Критерий завершения:** по выбранным сценариям есть конкретные observation records; ошибки оформлены с исходными данными и owner/negative test. При недоступности телефона записать blocked/not verified, а не success. Наблюдения не переносить на непроверенные upstream/телефоны. Далее выбрать ровно одну следующую задачу с acceptance matrix.
+
+### 2. Production-подпись и публикация — по выбранному владельцем каналу
+
+**Первый шаг:** если владелец поручает distribution, определить целевой канал и нужную signing identity для обновления существующей установки. Сейчас Debug APK подписан, Release APK/AAB unsigned; GitHub Releases пуст, магазинная публикация не подтверждена. Не объявлять CI artifact production release и не создавать/заменять signing identity без нужного поручения. Signing credentials не включать в исходники, логи или handoff.
+
+**Критерий завершения:** concrete release package с согласованной подписью, проверкой package/version/signature и фактической ссылкой выбранного канала. При изменении Gradle/workflow/code выполнить новую CI пару по merge-гейту; оставленные unsigned artifacts этого не подтверждают. Этот пункт не блокирует уже завершённую интеграцию #141.
+
+### 3. Следующий кодовый срез после наблюдений
+
+**Первый шаг:** сверить новые observation records, архитектурный обзор и Product radar; выбрать один defect или одну ценную функцию. Зафиксировать state owner, полный путь Activity/Executor/Worker/DB при необходимости, positive/negative assertion и подходящий harness. Если новых наблюдений нет — провести доступный offline анализ выбранной границы, не начинать широкий rewrite и не изобретать проблему.
+
+**Критерий завершения:** один согласованный scope, одна короткая матрица доказательств и один PR; проведённые #141 fixes не возвращаются в активный backlog без нового failure. Платные/live API и телефонный доступ остаются отдельным scope владельца.
 
 ## Репозиторий / branches
 
-Репозиторий `luoecrt-pixel/000Chat` (переименован из `luoecrt-pixel/OpenAIApiChat`); main только через PR. Продолжай actual open branch, не создавай stacked копию старого snapshot. Перед записью сверяй head и blob SHA; поддерживаемый lease при ref update, без blind force-push. Удаление старых веток не нужно для этой задачи. В текущем коннекторе можно читать push runs/jobs/logs и rerun существующий failed job; создание нового dispatch/repository variable недоступно.
+Репозиторий `luoecrt-pixel/000Chat` (переименован из `luoecrt-pixel/OpenAIApiChat`); main только через PR. Продолжай actual open branch, не создавай stacked копию старого snapshot. Перед записью сверяй head и blob SHA; поддерживаемый lease при ref update, без blind force-push. На проверенном старте open PR отсутствовали, release branch `agent/integrate-clean-bundle-preserve-handoff-20261011` уже merged как #141; не продолжать её как незавершённый релиз. Для нового scope создавать отдельную ветку actual main, если не появился действующий PR. Текущая docs ветка — `agent/complete-next-agent-handoff-20261012`. Удаление старых веток не нужно для этой задачи. В текущем коннекторе можно читать push runs/jobs/logs и rerun существующий failed job; создание нового dispatch/repository variable недоступно.
 
 ## Контекстный режим для агента
 
-Существующая запись — гипотеза до сверки с current source/test/run. Историю ошибок и отменённое UI-ТЗ не выдавай за новый backlog. Источники доказательств не взаимозаменяемы: exact test assertion → выполненный harness → конкретный SHA/attempt; соседний test и общий summary не расширяют claim. Выполненный APP-05 F21–F26 и его ограничения сохранены выше как proof, а не незавершённый backlog.
+Существующая запись — гипотеза до сверки с current source/test/run. Историю ошибок и отменённое UI-ТЗ не выдавай за новый backlog. Источники доказательств не взаимозаменяемы: exact test assertion → выполненный harness → конкретный SHA/attempt; соседний test и общий summary не расширяют claim. Выполненные APP-05 F21–F26 и интеграция #141 сохранены выше как proof с границами. ZIP от `4111b83a` — исторический partial patch, не полный checkout и не текущий pending scope. Source/debugging helpers из scratch не подменяют отслеживаемые repo tests.
 
 ## Как проверять новую работу
+
+Для этой документационной актуализации scope — только `NEXT_AGENT_HANDOFF.md`: сверены GitHub metadata/runs/jobs/artifacts, source/test assertions и равенство runtime tree проверенному code SHA. Выполняются local handoff/source checks и удалённый Verify на final docs PR head; новая Android пара не требуется, поскольку code/test/build/workflow не меняются.
 
 **До первого изменения.**
 
@@ -232,7 +297,11 @@
 
 - Handoff: `python3 tools/verify_handoff.py`
 - Source: `python3 tools/verify_v4_17_0.py`
+- Implementation source: `python3 tools/verify_implementation.py`
 - Existing mutation matrix: `python3 tools/test_verify_v4_17_0_mutations.py`
+- Implementation mutation matrix: `python3 tools/test_verify_implementation_mutations.py`
+- Offline assets после Gradle prepare: `python3 tools/verify_response_renderer_assets.py`
+- Python verifier fixtures: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools -p 'test_*.py'`
 - Targeted JVM: `gradle --no-daemon :app:testDebugUnitTest --tests 'com.example.openaichat.<ChangedTest>'`
 - Compile app/test APK: `gradle --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest`
 - Targeted Android (подключён emulator): `gradle --no-daemon :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.openaichat.MainActivityLifecycleTest#<changedMethod>`
@@ -243,19 +312,19 @@
 
 ## История последних рабочих заходов — последние 5 PR
 
-Окно #137–#141. Merge #137–#140 подтверждён API; статус #141 и его squash SHA сверять по merged/merged_at. Кодовые проверки #141 и docs-only head различать.
+На момент проверки main — последние пять merged PR #137–#141; их статус подтверждён API. Это история завершённых scopes, а не список незавершённых релизных работ. Docs-only актуализация handoff не меняет runtime/code baseline; её final head/Verify/merge фиксируются в соответствующем PR.
 
 - **#137:** APP-05 F21–F26; код `fe0b5b2597226f5690b502dc462474d07a25292b`, APK `37998337416`, Release `37998337154` Successful; docs Verify `38028778105`; merge `e330497967503ef781767ca49e0f2668a805dda6`. Phone/live границы сохранены выше.
 - **#138:** docs-only reconciliation после APP-05; merged `4111b83a215da03af544e8c0477246962c43395b`, 2026-10-10. Это база исходного partial ZIP, не актуальный релизный code SHA.
 - **#139:** security/public-visibility preparation; merged `8ac41908222baf91d76e4456b494779263d0e41d`, 2026-10-11. Security и ignore изменения сохранены при интеграции пакета.
 - **#140:** очистка устаревших Android artifacts и retention 5 дней; merged `120ac217c2a9f06a8b0b062b8571800c52682f33`, 2026-10-11. Workflows при релизной интеграции не менялись.
-- **#141:** интеграция 111 файлов partial bundle с последующими code/test fixes и актуализацией канонического handoff. Финальный код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` и Release `38175698458`, Verify `38175702106` Successful, attempt 1. Артефакты `11716107416`/`11714939668`; final docs Verify и merge SHA читать в GitHub.
+- **#141:** интеграция 111 файлов partial bundle с последующими code/test fixes и актуализацией канонического handoff. Финальный код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` и Release `38175698458`, Verify `38175702106` Successful, attempt 1. Артефакты `11716107416`/`11714939668`; final docs head `4f1e96f5c1327fab97a0fd595e546460f5c0d205`, Verify `38176574925` Successful; merged 2026-10-12 00:30:47 +03:00 как `78b6be313f82782999c95579466116f4e572070f`. Physical phone/live/distribution границы открыты выше.
 
 ## Product radar — идеи с реальной ценностью
 
 Это не backlog и не обещание реализации. Идея попадает сюда только если её можно проверить маленьким шагом и она заметно улучшает ежедневный сценарий.
 
-**Повторная ревизия на базе #130:** хранение метаданных, GitHub tool safeguards и `+` уже реализованы; новые узкие wiring defects не отменяют этих гарантий. Ближайший слой — целостность истории/вложений/ответов, точный UI и понятные outcomes; отменённая стоимость отложена. Регрессионные тесты доказывают конкретные pure/SQLite/ActivityScenario contracts, но не фактические расходы и провайдерский биллинг. Не затевать полный controller/Compose rewrite. Владелец просил README не трогать.
+**Ревизия после #141 (исторические решения #130 сохранены):** хранение метаданных, GitHub tool safeguards и `+` уже реализованы; новые узкие wiring defects не отменяют этих гарантий. Ближайший слой — целостность истории/вложений/ответов, точный UI и понятные outcomes; отменённая стоимость отложена. Регрессионные тесты доказывают конкретные pure/SQLite/ActivityScenario contracts, но не фактические расходы и провайдерский биллинг. Не затевать полный controller/Compose rewrite. Владелец просил README не трогать.
 
 ### 1. Версии ответа + обратимость
 Сейчас regenerate/edit — точечные действия над линейным чатом. Следующий уровень — сохранять альтернативы и уметь вернуть чат к состоянию «до этого ответа». Это естественное продолжение fork: пользователь не должен бояться попробовать другой prompt/effort. Первый шаг: pure domain contract для snapshot/branch point + DB test, без UI.
@@ -267,7 +336,7 @@
 Для длинной локальной истории нужен мгновенный full-text search с переходом прямо к сообщению, а не только список чатов. SQLite уже является source of truth, поэтому Первый шаг: оценить FTS5 на messages(text) и тесты по индексации/удалению/поиску.
 
 ### 4. Переиспользование вложений
-После локальной библиотеки файлов следующий полезный шаг — «использовать снова» без повторного выбора/ручной загрузки. Ещё сильнее — локальный content hash → reuse уже загруженного файла там, где это безопасно и совместимо с текущей серверной семантикой. Первый шаг: инвентаризация того, какие file_id + local path + mime + size уже можно считать устойчивым cache key; сеть и dedup пока не менять.
+Контентный upload reuse уже реализован: `OpenAiFileUploadCache` использует bytes SHA/name/MIME/purpose/credential hash, selective invalidation и generation guard; cache/reset/expired-id регрессии прошли в #141. Не переписывать это как отсутствующую функцию. Возможный следующий UX — явное повторное прикрепление локального оригинала и понятное состояние cached/upload-required по выбранному аккаунту. Первый шаг: инвентаризация существующего UI/manifest paths и pure reuse decision, без автоматического upload/resend или смены server semantics.
 
 ### 5. Per-chat configuration profile
 Сейчас значительная часть настроек живёт глобально в SharedPreferences. Для рабочего чата полезнее помнить его собственный model/reasoning/tools/verbosity profile, чтобы переключение между чатами не меняло незаметно условия эксперимента. Первый шаг: snapshot только settings metadata в DB, без миграции всех UI-настроек сразу.
@@ -284,7 +353,7 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 **Черновик идей — без фильтра, до следующего обзора**
 Сюда можно писать сырое: без доказанной ценности и без первого шага — это специально разрешено, чтобы не отсеивать идею раньше, чем она успела оформиться. Максимум 5 строк. На каждом архитектурном/продуктовом обзоре: по каждой старой записи — либо дожать её до формата Product radar (с «Первый шаг:») и перенести выше, либо вычеркнуть одной строкой почему; добавить не больше одной новой записи, обязательно вдохновлённой взглядом наружу — как эту же проблему решает другой multi-chat/Responses API клиент, либо какая уже существующая pure-архитектура (`ResponseEventReducer`, `ActiveResponsePersistence`, `AttachmentUploadCompletionPolicy`) недоиспользуется и что даст её переиспользование иначе.
 
-(пусто — заполнится на следующем обзоре)
+Неразобранных черновых идей на этой ревизии нет. Существующие восемь кандидатов остаются radar; новые идеи добавлять после конкретных наблюдений по правилам выше, без выдуманного обязательства реализовать их.
 
 ### Что сознательно не тянуть сейчас
 - MCP и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает execution surface.
@@ -296,7 +365,9 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 
 Операционная истина: top/baseline — проверенный SHA и результат workflow; контракты — assertion/harness/proof/границы; активный план — только незавершённое; история — последние 5 merged PR; Product radar — идеи без обещания реализации. Не повторяй один scope в каждом разделе и не сохраняй отменённые требования как активные.
 
-README устарел (v15/baseline #42); **по просьбе владельца не редактировать README**, включая косметику. Исторический `docs/audits/2026-10-08-live-and-independent-triage.md` не переопределяет завершённые code scopes #136/#137 и оставшуюся PHONE acceptance. Пересылаемый отчёт независимому аудитору ведётся отдельно от репозитория. Архивы notes/отсутствие wrapper не важнее data-loss/runtime bugs.
+README устарел (v15/baseline #42); **по просьбе владельца не редактировать README**, включая косметику. Исторический `docs/audits/2026-10-08-live-and-independent-triage.md` и архивные audit/notes не переопределяют завершённые #136/#137/#141, текущие exact CI results и оставшуюся ручную acceptance. `BUNDLE_AGENT_HANDOFF.md`, `AGENT_IMPLEMENTATION_RULES.md` и `RENDERER_DISTRIBUTIONS.md` — дополнительные материалы; актуальный main/handoff имеет приоритет над package snapshot. Пересылаемый отчёт независимому аудитору ведётся отдельно от репозитория. Архивы notes/отсутствие wrapper не важнее data-loss/runtime bugs.
+
+Рабочий этап ограничен последним поручением владельца (сейчас до 40 минут); при незавершённой остановке сохранить краткий фактический checkpoint с SHA/run/remaining, без накопления исторических записок. Не путать этот лимит агента с пятичасовой safety boundary приложения.
 
 Жизненный цикл: plan → implementation → check → merge → history. Контракты обновляются вместе с кодом: actual assertion/harness/SHA/run + что не доказано. Единственный новый пункт не дублировать в radar; завершённые F21–F26 оставить с точным CI proof и границами, не копировать в активный backlog.
 
