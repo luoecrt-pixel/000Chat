@@ -9,6 +9,11 @@
 - OpenAI Responses background recovery и OpenRouter Chat Completions stream не эквивалентны: для OpenRouter после process death нет автоматически гарантированного server-side resumable ответа. Повтор запроса может тарифицироваться и не должен запускаться молча. Граница в `BackgroundRecoveryPolicy` / `OpenRouterResponseRuntime`; см. #137.
 - 5h response/recovery и 5M usage tokens OpenRouter — аварийная защита одной генерации с инструментами, **не** cap на ответ/историю/сессию. Старые неявные 128K output и fixed 24 tool rounds были устранены. Тесты `ResponseDeadlinePolicyTest`, `OpenRouterChatClientTest`; #78, #80, #84, #137.
 
+## API и пользовательская идентичность (решение владельца 12.10.2026)
+
+- **Claude Messages нужен, но только через OpenRouter**: отдельная Anthropic API-подписка/проверка оплаты недоступна владельцу. Ключ/биллинг OpenRouter сохраняются; Auto — маршрут по умолчанию, Direct Anthropic не навязывать. Вводить новый /messages как отдельный transport и сохранять wire-format на уровне чата; не превращать старые Chat Completions/signed thinking чаты в Messages молча. Messages не предоставляет гарантированного resume той же генерации по ID после обрыва (в отличие от OpenAI background Responses); полный час скрытого thinking без завершённого блока не может быть восстановлен сессией телефона.
+- **Integral LLM — публичный бренд приложения**. В Android UI/launcher/уведомлениях заменить устаревшие Astra/OpenAI API Chat там, где они обозначают приложение. gpt-6-astra является идентификатором модели, а AstraApplication, astra_chats.db, package name, notification channel IDs и прошлые URI/пути — технические compatibility identifiers; не переименовывать без проверенной миграции существующей установки. Этим предотвращается потеря чатов/файлов при косметическом ребрендинге.
+
 ## Исторический контекст, файлы и запросы
 
 - OpenRouter prompt caching однажды возвращал live provider error из-за 1h top-level marker после nested 5m marker. Теперь важен точный multipart `tools + system + messages` и растущая multi-round история, а не просто наличие cache option. `OpenRouterCachePolicyTest`, `OpenRouterChatClientTest`; #103.
