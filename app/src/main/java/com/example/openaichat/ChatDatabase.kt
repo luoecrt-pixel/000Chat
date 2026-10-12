@@ -1710,9 +1710,31 @@ data class ExistingMessageRow(
             if (lastSequenceNumber != null) put("active_last_sequence_number", lastSequenceNumber.coerceAtLeast(-1L))
             put("updated_at", System.currentTimeMillis())
         }
-        val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
-        val args = if (expectedRequestId != null) arrayOf(chatId, expectedRequestId) else arrayOf(chatId)
-        writableDatabase.update(CHAT_TABLE, values, where, args)
+        // Request ownership by itself is not sufficient: Activity and Worker can
+        // race with checkpoints from the *same* request. Guard the sequence and
+        // terminal status in the UPDATE predicate so the comparison is atomic.
+        val where = StringBuilder("id=? AND active_status IS NOT NULL")
+        val args = mutableListOf(chatId)
+        if (expectedRequestId != null) {
+            where.append(" AND active_request_id=?")
+            args.add(expectedRequestId)
+        }
+        where.append(" AND active_status NOT IN ('completed','incomplete','failed','cancelled')")
+        if (lastSequenceNumber != null) {
+            val sequence = lastSequenceNumber.coerceAtLeast(-1L)
+            where.append(" AND active_last_sequence_number <= ?")
+            args.add(sequence.toString())
+            // Equal sequence is an idempotent retry, not permission to overwrite
+            // a newer text snapshot. A canonical terminal text may differ and
+            // is deliberately allowed to replace the partial stream snapshot.
+            if (sequence >= 0L && text != null &&
+                status !in setOf("completed", "incomplete", "failed", "cancelled")) {
+                where.append(" AND (active_last_sequence_number < ? OR active_text = ?)")
+                args.add(sequence.toString())
+                args.add(text)
+            }
+        }
+        writableDatabase.update(CHAT_TABLE, values, where.toString(), args.toTypedArray())
     }
 
     /** Ownership checks must not materialize the accumulating answer on every SSE event. */
