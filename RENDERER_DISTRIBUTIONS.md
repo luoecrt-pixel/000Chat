@@ -1,53 +1,19 @@
-# Renderer distributions: проверенный первый baseline — 10 октября 2026
+# KaTeX / Mermaid — происхождение закреплённых зависимостей
 
-Jar bytes получены по HTTPS непосредственно из Maven Central; опубликованный
-SHA-1 каждого jar совпал. Вычисленный SHA-256 закреплён в
-config/response-renderer-sha256.properties. SHA-1 с того же сервера подтверждает
-соответствие скачанного артефакта registry, а не независимую подпись автора.
-Это первый доверенный TLS baseline; будущие сборки обязаны совпадать по SHA-256.
+В Android-приложении используются упакованные webjar-ресурсы. Их точные версии и **ожидаемые SHA-256** находятся в [config/response-renderer-sha256.properties](config/response-renderer-sha256.properties), а правило проверки реализовано в `app/build.gradle.kts`. Файл фиксирует provenance первого доверенного baseline от **10.10.2026**, а не текущее состояние всей сборки.
 
-## Если проверка закреплённого SHA не проходит (ревью 40)
+| Maven Central artifact | Версия | Размер исходного JAR | SHA-256 JAR |
+| --- | --- | ---: | --- |
+| `org.webjars.npm:katex` | `0.17.0` | 1 652 296 байт | `e7dcf511a547a3e353fcc4bd581ac93c9bcfabdde2251920843391a97eafaef9` |
+| `org.webjars.npm:mermaid` | `11.14.0` | 16 257 239 байт | `fcc17f377c0f657513a66735d41a3095cad37e8059d80d39f91458cfbed` |
 
-Не перезаписывать ожидаемый SHA значением из упавшей сборки, не отключать guard
-и не принимать generated distribution-sha256.txt за доказательство доверия.
-Сначала сверить точные group/artifact/version и jar bytes с Maven Central по
-URL ниже; проверить опубликованный .sha1 и, если имеется, соседний .asc.
-SHA-1, полученный с того же сервера, подтверждает совпадение registry bytes,
-но не является независимой подписью. Наличие .asc тоже не доказывает подлинность:
-проверять подпись нужно с проверенным ключом издателя и фиксировать происхождение ключа.
-Отсутствие .asc не разрешает автоматически заменить pin.
-До объяснения расхождения проверка остаётся ошибкой. Обоснованное изменение
-версии/pin оформлять отдельным проверяемым diff с источниками и результатами
-сравнения, сохраняя историю прежнего baseline.
+Исходники JAR и опубликованных SHA-1: [KaTeX](https://repo.maven.apache.org/maven2/org/webjars/npm/katex/0.17.0/), [Mermaid](https://repo.maven.apache.org/maven2/org/webjars/npm/mermaid/11.14.0/). На исходной ревизии байты JAR были получены непосредственно с Maven Central по HTTPS, SHA-1 совпали с registry, а SHA-256 вычислены локально. **SHA-1 того же сервера подтверждает только совпадение с registry**, но не является независимой подписью автора.
 
-| Артефакт | Размер jar, байт | Закреплённый SHA-256 |
-| --- | ---: | --- |
-| katex:0.17.0 | 1652296 | `e7dcf511a547a3e353fcc4bd581ac93c9bcfabdde2251920843391a97eafaef9` |
-| mermaid:11.14.0 | 16257239 | `fcc17f377c0f657513a66735d41a3095cad37e8059d80e2d80d39f91458cfbed` |
+## Если pin не совпал
 
-Источники bytes и опубликованных checksum:
+1. Не выключать SHA guard и **не** подставлять автоматически хеш упавшей сборки или `distribution-sha256.txt`.
+2. Проверить точную координату Maven (`group:artifact:version`) и получить JAR заново по HTTPS из доверенного источника. Проверить опубликованный SHA-1 и, если имеется, `.asc` **с независимо проверенным ключом издателя**. Сам факт наличия `.asc` не доказывает доверие.
+3. Сопоставить точные байты и локальный SHA-256, разобраться в причине несовпадения; только после объяснения и code review отдельным diff обновить версию/pin с provenance.
+4. Прогнать `:app:prepareResponseRendererAssets`, `python3 tools/verify_response_renderer_assets.py`, требуемые JVM/Android WebView тесты и Debug/Release CI по текущим правилам. Static scanner проверяет известные импорты, лицензии и font URL, но не доказывает runtime/computed imports или безопасность WebView.
 
-- https://repo.maven.apache.org/maven2/org/webjars/npm/katex/0.17.0/katex-0.17.0.jar
-- https://repo.maven.apache.org/maven2/org/webjars/npm/katex/0.17.0/katex-0.17.0.jar.sha1
-- https://repo.maven.apache.org/maven2/org/webjars/npm/mermaid/11.14.0/mermaid-11.14.0.jar
-- https://repo.maven.apache.org/maven2/org/webjars/npm/mermaid/11.14.0/mermaid-11.14.0.jar.sha1
-
-## Фактические проверки ресурсов
-
-Python извлёк реальные закреплённые jar теми же правилами отбора, что Gradle task.
-tools/verify_response_renderer_assets.py проверил 82 min Mermaid модуля, обнаруженные
-literal imports, root licenses и все CSS font URLs: PASS. Исправлен ложный import
-внутри строки CSS "@import"; comments/strings больше не принимаются за module statement.
-Сканер не доказывает computed imports/template execution; WebView тест остаётся обязательным.
-
-| Assets | До изменения отбора, байт | После, байт |
-| --- | ---: | ---: |
-| katex | 1372647 | 1372647 |
-| mermaid | 11713439 | 3116521 |
-
-Mermaid: исключено 8 596 918 байт исходных assets, без лицензий и min graph потерь.
-Это uncompressed asset bytes; уменьшение сжатого APK не измерено. KaTeX состав прежний.
-
-Gradle task ordering/Release guard execution и Android engine rendering здесь не
-запускались. Нужны compile/JVM/lint/Android и реальный KaTeX/Mermaid WebView fixture.
-Release теперь имеет настоящие ожидаемые SHA; отдельная задача заполнения ключей снята.
+Прежний baseline и diff изменений хранятся в Git-истории; разовые числа о размере извлечённых assets и старые отчёты о тестах здесь больше не поддерживаются.

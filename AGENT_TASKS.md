@@ -93,6 +93,45 @@
 
 **Критерий завершения:** concrete release package с согласованной подписью, проверкой package/version/signature и фактической ссылкой выбранного канала. При изменении Gradle/workflow/code выполнить новую CI пару по merge-гейту; оставленные unsigned artifacts этого не подтверждают. Этот пункт не блокирует уже завершённую интеграцию #141.
 
+
+### 11. [P1] OpenRouter: точная классификация ошибок и ограничений — подтверждённый пробел
+
+**Наблюдение по коду (12.10.2026):** `OpenRouterChatClient.upstreamError()` читает `error.type`/`code`, но не `error.metadata.error_type`, `limit_source`, `resets_at` и `Retry-After`. Для 400 изображения могут быть `image_too_large`, `invalid_image`, `unsupported_image_format`, `image_download_failed`, `image_not_found`; для 402 различаются отсутствие средств, лимит ключа и in-flight budget; 403 может означать guardrail, 429 — rate limit, 503 — отсутствие совместимого маршрута. Сейчас пользователь может получить малоинформативное upstream сообщение. Не пересылать `metadata.raw` или `flagged_input` без редактирования.
+
+**Первый шаг:** pure mapping `status + structured metadata + safe headers → безопасная человеческая причина, retry eligibility, retry-after`; регрессии synthetic HTTP 400/402 (с/без `Retry-After`)/403/429/503 и masked 500. `Retry-After` только как информация или явно разрешённая стратегия; **никаких скрытых повторных платных запросов**. Сохранить подробности только в защищённой диагностике и проверить редактирование API-ключей. [Ошибки OpenRouter](https://openrouter.ai/docs/api-reference/errors-and-debugging), [лимиты](https://openrouter.ai/docs/api-reference/limits).
+
+**Уже обработано — не переделывать:** `OpenRouterChatClient.consume()` выбрасывает ошибку из верхнеуровневого `error` внутри HTTP 200 SSE (A1), `SseEventParser` поддерживает комментарии и многострочный `data:` (A3); финальный пустой usage chunk не добавляет текст и `usage` трактуется как snapshot, а не дополнительный платёж (A2). Добавить тесты именно на **первый/единственный** error SSE и повторяющийся `finish_reason`, не заводить эти случаи как отсутствующие функции. Клиент сейчас сам использует `stream:true`; non-streaming 200+error нужно учитывать только если появится non-streaming path.
+
+### 12. [P1] OpenRouter Claude: кэш на маршрутах Auto и сохранность подписанного префикса
+
+**Наблюдение:** `OpenRouterCachePolicy.configureRequest` выставляет top-level `cache_control` всем `anthropic/*` с включённым кэшем, а `OpenRouterClaudeRoute.AUTO` разрешает партнёрские маршруты. По текущей [документации OpenRouter о кэше](https://openrouter.ai/docs/guides/best-practices/prompt-caching) top-level automatic caching поддерживается только у прямого Anthropic; explicit breakpoints имеют иные правила. Это **несоответствие условий маршрутизации**, а не доказанный live HTTP failure или отсутствие cache hits.
+
+**Первый шаг:** unit request-body matrix `AUTO/ANTHROPIC × 1h/5m/off × tools/system/history`; проверить fallback/route и provider cache usage на разрешённой владельцем live дешёвой сессии, только после этого менять стратегию. Не посылать несовместимые default 5m + top-level 1h. Различать cached read/write по provider usage, без предположения о цене каждого endpoint. При 400 из-за несовместимости signed thinking с pinned provider показать предложение выбрать совместимый маршрут или начать новую ветку без незаметного удаления исходной истории (A10/B8). Существующий `OpenRouterProtocolCodec.checkBinding` — защитный механизм; проверить его тестами при смене model/key/tools/route/system.
+
+### 13. [P1] OpenRouter: PDF-аннотации и реальные пределы медиа
+
+**Наблюдение:** `OpenRouterChatClient` собирает `content/reasoning_details/tool_calls`, но не переносит входящие `assistant.message.annotations` (parsed PDF и citation payload) в `openrouter_protocol.tail`; `OpenRouterResponseRuntime.annotations()` создаёт только локальные `local_file` карточки. На OCR/не-native пути это может приводить к **повторному платному парсингу PDF** на следующем turn (C2). `OpenRouterAttachmentPreflight` проверяет byte limits и размеры изображений, но явно не ограничивает суммарные **количество картинок и страниц PDF** с учётом истории (B11).
+
+**Первый шаг:** mocked 2-turn PDF OCR scenario: ответ с `annotations[].file.hash/content` сохраняется **без потери оригиналов и без исполнения недоверенных данных**, возвращается в точном поддерживаемом форматировании; отрицательный сценарий — отсутствующий/подменённый hash. Сверить с текущей [спецификацией PDF](https://openrouter.ai/docs/guides/overview/multimodal/pdfs). Отдельно counted media/pages preflight на 20/21 картинках, пограничных моделях и документе с большим количеством страниц; не объявлять лимиты одинаковыми для всех моделей/маршрутов. При `native/auto/mistral-ocr/cloudflare-ai` явно сообщать пользователю о возможной отдельной тарификации OCR; текущий UI уже имеет selector.
+
+### 14. [P1/P2] Claude 5.x: возможности модели, reasoning и видимость неполного ответа
+
+**Наблюдение:** `OpenRouterReasoningPolicy` ограничивает effort для **статического списка** Opus/Sonnet/Fable, но не читает `reasoning.mandatory` или `supported_parameters` из API метаданных. Каталог моделей меняется. `OpenRouterChatClient` получает `reasoning_details`, но основной текстовые обновления идут только из `delta.content`; ответ с одними размышлениями может выглядеть молчащим (B1/B5). `OpenRouterFinishPolicy` **уже** переводит `length/content_filter/error` в incomplete, так что B6/B9 не считать отсутствующим обработчиком.
+
+**Первый шаг:** запросная матрица с синтетическими `/models` capabilities: mandatory vs optional reasoning, supported effort, отсутствие недопустимых `temperature/top_p/top_k`, запрет неподдерживаемого forced `tool_choice` (текущий цикл шлёт auto), отсутствие assistant prefill в Claude 5.x. Для tool-only reasoning chunks проверить явное «идёт генерация», доступную диагностику/индикатор без показа скрытых или запрещённых thinking details. Не имитировать `content` из недоверенной `reasoning`. Тест `length` с пустым visible content и отказ `content_filter` обязателен. Параметры и названия моделей дополнительно сверять с `/models`, не объявлять свойства неподтверждённых 5.5-алиасов фактом.
+
+### 15. [P1/P2] OpenAI: срок хранения файлов, удаление и безопасное повторное использование
+
+**Наблюдение:** `OpenAiFileUploadCache` корректно разделяет account/credential/bytes/purpose и умеет `invalidate/clear`; **локальная очистка кэша не удаляет серверный файл OpenAI**. В коде есть reactive eviction при file-not-found, но политика `expires_after`, информирование пользователя об upstream retention и remote delete при удалении чата пока не подтверждены.
+
+**Первый шаг:** определить явную user-facing retention/deletion policy и ownership между чатами/повторно используемыми file IDs. После Delete chat нельзя безусловно удалять remote file, если он нужен другому чату; нельзя обещать удаление на сервере после одного local cache clear. Mock server delete/expiry/error с локальными оригиналами и запретом автоматического платного повторного анализа. Верифицировать file input limits и `purpose=user_data/vision` по MIME и request-wide bytes отдельно (D2/D3). **Уже закрыто:** `OpenAiFileId` принимает `file-` и `file_` (D1); `MainActivity` умеет локально скачивать `container_file_citation` (D4) — нужны regression fixtures, не переписывание с нуля.
+
+### 16. [P2] OpenRouter: HTTP generation ID, PDF/web-tool metadata и управляемая диагностика
+
+**Наблюдение:** есть `OpenRouterGenerationReconciler` и учёт `/generation?id=`, а `OpenRouterChatClient` достаёт generation ID из JSON SSE; **fallback из заголовка `X-Generation-Id` не виден**. Это может терять сопоставление расходов, когда генерация оборвалась до JSON frame (A6). `OpenRouterServerToolCatalog` отправляет `openrouter:web_search`/`web_fetch`, но не выбирает конкретный engine, а входящие server annotations/citations явно не выделяются (C3–C5).
+
+**Первый шаг:** mock `X-Generation-Id` без SSE ID, когда headers пришли до disconnect; безопасная запись в уже существующий per-round ledger, а `GET /generation` только как read-only reconciliation и с request ownership. Отдельно mock server-tool annotations/citations на assistant, совместимость изображения с tools и выбор engine/маршрута — не делать вид, что native engine всегда поддерживает обе операции. `debug.echo_upstream_body` допустим исключительно в **явно разрешённой dev-сборке** с synthetic/контролируемыми данными; никогда не включать по умолчанию, не записывать в logs/CI реальные keys/messages/file paths.
+
 ## Планы на потом
 
 Эти идеи не являются автоматически назначенным scope следующего PR. Проверять существующий код перед реализацией.
@@ -128,6 +167,19 @@ MVP: «Ветвить отсюда» на выбранном сообщении 
 ### 10. Более компактная организация настроек
 
 Старое отложенное UI-пожелание: разделы «API и модель», «Мышление и ответ», «Инструменты», «Файлы», «Диагностика/дополнительно»; часто используемые controls — у поля ввода, сложные — в Advanced. В текущем showSettings уже есть секции и Advanced, поэтому сначала проверить реальную оставшуюся проблему, не переписывать приложение ради косметики; сохранять prefs и доступность всех настроек.
+
+
+### 11. [P2] OpenRouter бюджет, отказ, приватность и модельные возможности
+
+Проверить безопасные подсказки для `402/403/429/503` после задачи 11; пользовательское объяснение, что Stop при некоторых upstream маршрутах не гарантирует прекращение биллинга (A7/E1), без нового скрытого polling/auto retry. Для будущей настройки приватности сравнить `provider.data_collection=deny`, ZDR и доступность моделей/файлов (A18); выбрать default **только с владельцем**, не отказывать в доступе ко всем моделям молча. `/models` как источник модели/цены/max_completion_tokens/effort/параметров и точный resolved `response.model` для `~latest` (A13–A15/B10): сначала immutable capability snapshot и UI indication, затем динамический конфиг. Поддержка `json_schema` и `provider.require_parameters=true` уже присутствует, дополнительно проверять compatibility model/provider и negative mock (A16).
+
+### 12. [P2] OpenAI: stateless reasoning, billing/rate и границы контекста
+
+Проверка режима `store=false`/ZDR и переноса encrypted reasoning/function_call без выкидывания tool items (D7/D12) — **новая функция лишь при запросе владельца**, не незаметная замена текущему stateful Responses. Chain key/project/expired ID и complete replay уже включены в задачу 1; `response.incomplete/failed` и sequence cursor уже есть — не заводить дубликатов D6/D9. Дополнительно: безопасная UX-классификация `429 insufficient_quota/organization_limit/rate`, `503 overloaded` и `Retry-After` (D10); compact encrypted items передавать без трансформаций (D8), стабильный prefix для cache (D11). **Уточнение по официальной документации:** background Responses сейчас допускает `store=false` и даже ZDR с временным хранением для polling; утверждение «обязательно store=true» в исходном списке не следует добавлять как универсальный закон. Проверить точную политику хранения перед изменением приватности.
+
+### 13. [P3] Android долгие запросы — отдельно от уже работающего onTimeout
+
+`OpenRouterResponseService.onTimeout` для foreground `dataSync` уже реализован, а `MainActivity` запрашивает `POST_NOTIFICATIONS`. Не объявлять E3 отсутствующей функцией. На реальном Android 15/Xiaomi проверить видимость уведомления, последствия исчерпания суточного FGS budget, убийства процесса и доступность истории/черновика. Никакие OS-исключения из энергосбережения не выдавать за разрешение на бесконечный background stream.
 
 ### Что сознательно не тянуть сейчас
 - MCP и Computer Use — пока нет доказанной продуктовой потребности и это резко увеличивает execution surface.
