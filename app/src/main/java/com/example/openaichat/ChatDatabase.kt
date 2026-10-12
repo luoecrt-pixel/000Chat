@@ -1720,19 +1720,50 @@ data class ExistingMessageRow(
             args.add(expectedRequestId)
         }
         where.append(" AND active_status NOT IN ('completed','incomplete','failed','cancelled')")
+        val isTerminalWrite = status in setOf("completed", "incomplete", "failed", "cancelled")
         if (lastSequenceNumber != null) {
             val sequence = lastSequenceNumber.coerceAtLeast(-1L)
             where.append(" AND active_last_sequence_number <= ?")
             args.add(sequence.toString())
-            // Equal sequence is an idempotent retry, not permission to overwrite
-            // a newer text snapshot. A canonical terminal text may differ and
-            // is deliberately allowed to replace the partial stream snapshot.
-            if (sequence >= 0L && text != null &&
-                status !in setOf("completed", "incomplete", "failed", "cancelled")) {
-                where.append(" AND (active_last_sequence_number < ? OR active_text = ?)")
+            // Any strictly newer event may advance in-progress state. For equal
+            // sequence, a nonterminal retry must leave text/status/ID identical,
+            // except a first response ID can fill an empty persisted field.
+            // A terminal event may replace partial text with canonical output,
+            // but may not replace a *different* response identity.
+            if (!isTerminalWrite) {
+                where.append(" AND (active_last_sequence_number < ? OR (")
                 args.add(sequence.toString())
+                if (status != null) {
+                    where.append("active_status = ? AND ")
+                    args.add(status)
+                }
+                if (text != null) {
+                    where.append("active_text = ? AND ")
+                    args.add(text)
+                }
+                where.append("1=1))")
+            }
+        } else {
+            // A callback without a sequence must never roll back an established
+            // SSE cursor. Before the first event, only the initial
+            // starting->in_progress transition is allowed to change status.
+            where.append(" AND active_last_sequence_number = -1")
+            if (status != null && !isTerminalWrite) {
+                where.append(" AND (active_status = ?")
+                args.add(status)
+                if (status == "in_progress") {
+                    where.append(" OR active_status = 'starting'")
+                }
+                where.append(")")
+            }
+            if (text != null && !isTerminalWrite) {
+                where.append(" AND active_text = ?")
                 args.add(text)
             }
+        }
+        if (responseId != null) {
+            where.append(" AND (active_response_id IS NULL OR active_response_id = ?)")
+            args.add(responseId)
         }
         writableDatabase.update(CHAT_TABLE, values, where.toString(), args.toTypedArray())
     }
