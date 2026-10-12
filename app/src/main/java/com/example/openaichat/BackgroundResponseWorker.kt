@@ -291,6 +291,10 @@ class BackgroundResponseWorker(
             .ifBlank { requestMeta?.optString("model").orEmpty() }.takeIf { it.isNotBlank() }
         val assistant = model.toChatJson().apply {
             put("provider", "openai")
+            response.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
+            requestMeta?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
             requestedModel?.let { put("requested_model", it) }
             model.model?.let { put("response_model", it) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
