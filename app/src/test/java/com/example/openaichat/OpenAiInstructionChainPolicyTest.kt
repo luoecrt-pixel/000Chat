@@ -48,6 +48,9 @@ class OpenAiInstructionChainPolicyTest {
             OpenAiInstructionChainPolicy.fingerprint(instructions(presentation = null))))
         assertEquals(signature, OpenAiInstructionChainPolicy.fingerprint(
             instructions(system = " system ", developer = " developer ", presentation = " format ")))
+        // Same words in different privileged roles must not reuse the chain.
+        assertFalse(signature == OpenAiInstructionChainPolicy.fingerprint(
+            instructions(system = "developer", developer = "system")))
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous), ""))
     }
 
