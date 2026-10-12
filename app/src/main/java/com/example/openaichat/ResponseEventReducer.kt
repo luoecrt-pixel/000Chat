@@ -28,6 +28,9 @@ data class ResponseEventDecision(
 /** Reject non-string SSE protocol fields, especially Android JSONObject.NULL. */
 object ResponseEventReducer {
     fun reduce(current: ResponseEventState, event: JSONObject): ResponseEventDecision {
+        // A terminal response is immutable. Late SSE callbacks must not append
+        // content, change the response ID or replace the canonical terminal.
+        if (current.terminalState != null) return ResponseEventDecision(current)
         return when (JsonProtocol.string(event, "type")) {
             "response.created" -> {
                 val responseId = event.optJSONObject("response")?.let { JsonProtocol.nonBlank(it, "id") }
