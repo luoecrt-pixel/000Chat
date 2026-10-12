@@ -1,8 +1,8 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-12 08:57 +03:00
+**Last updated:** 2026-10-12 09:04 +03:00
 **Следующий рабочий срез:** Ручная приёмка 4.17.0 и выбор следующего среза — подтвердить поведение установленного APK по конкретным сценариям; следующую кодовую задачу выбрать по наблюдениям.
-**Подтверждённый статус:** PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141) **merged 2026-10-12 00:30:47 +03:00**; проверенный main до этой документационной правки — `78b6be313f82782999c95579466116f4e572070f`, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9`. При проверке открытых PR не было. Код релиза 4.17.0 (`versionCode=64`, SQLite v22) интегрирован; повторно применять ZIP не нужно.
+**Подтверждённый статус:** PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141) **merged 2026-10-12 00:30:47 +03:00**; проверенный main до этой документационной правки — `78b6be313f82782999c95579466116f4e572070f`, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9`. На старте docs-аудита открытых PR не было; текущая актуализация только этого файла выполняется в [PR #142](https://github.com/luoecrt-pixel/000Chat/pull/142). Код релиза 4.17.0 (`versionCode=64`, SQLite v22) интегрирован; повторно применять ZIP не нужно.
 **Идентичность сборки:** последняя code/test редакция — `cceacdd8c392b2a69338f2313c6db137d210f307`; финальный docs head #141 — `4f1e96f5c1327fab97a0fd595e546460f5c0d205`; squash/main — `78b6be313f82782999c95579466116f4e572070f`. Эти три SHA имеют разные роли. Код/build/tests текущего main совпадают с проверенным code SHA; после него изменялись только четыре Markdown-документа. В установленном APK ожидается `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`.
 **CI подтверждён:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) и [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful** на code SHA, attempt 1; Debug завершил **39/39 instrumentation tests** и загрузил APK. [Финальный Verify #141 38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925) **Successful** на docs head, attempt 1. Новый docs-only PR требует собственного Verify, без Android rebuild.
 **Артефакты доступны:** Debug `11716107416`, Release `11714939668`; API подтвердил `expired=false`. Debug ZIP истекает **2026-10-17 00:27:30 +03:00**, Release ZIP — **2026-10-17 00:21:00 +03:00**. Полные ссылки и archive SHA-256 — в baseline. Debug APK содержит блок подписи; Release APK/AAB **unsigned**, release signing config отсутствует.
@@ -312,13 +312,14 @@ Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967
 
 ## История последних рабочих заходов — последние 5 PR
 
-На момент проверки main — последние пять merged PR #137–#141; их статус подтверждён API. Это история завершённых scopes, а не список незавершённых релизных работ. Docs-only актуализация handoff не меняет runtime/code baseline; её final head/Verify/merge фиксируются в соответствующем PR.
+Окно последних пяти рабочих PR — #138–#142, включая эту docs-only актуализацию. #138–#141 merged подтверждены API; #142 меняет только этот handoff и не меняет runtime/code baseline. Для текущего документа итоговые head/Verify/merge записываются в описании PR после подтверждения; не делать ещё один коммит только ради записи собственного SHA. Следующий агент сверяет фактический merged/merged_at и actual main в GitHub.
 
-- **#137:** APP-05 F21–F26; код `fe0b5b2597226f5690b502dc462474d07a25292b`, APK `37998337416`, Release `37998337154` Successful; docs Verify `38028778105`; merge `e330497967503ef781767ca49e0f2668a805dda6`. Phone/live границы сохранены выше.
 - **#138:** docs-only reconciliation после APP-05; merged `4111b83a215da03af544e8c0477246962c43395b`, 2026-10-10. Это база исходного partial ZIP, не актуальный релизный code SHA.
 - **#139:** security/public-visibility preparation; merged `8ac41908222baf91d76e4456b494779263d0e41d`, 2026-10-11. Security и ignore изменения сохранены при интеграции пакета.
 - **#140:** очистка устаревших Android artifacts и retention 5 дней; merged `120ac217c2a9f06a8b0b062b8571800c52682f33`, 2026-10-11. Workflows при релизной интеграции не менялись.
 - **#141:** интеграция 111 файлов partial bundle с последующими code/test fixes и актуализацией канонического handoff. Финальный код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` и Release `38175698458`, Verify `38175702106` Successful, attempt 1. Артефакты `11716107416`/`11714939668`; final docs head `4f1e96f5c1327fab97a0fd595e546460f5c0d205`, Verify `38176574925` Successful; merged 2026-10-12 00:30:47 +03:00 как `78b6be313f82782999c95579466116f4e572070f`. Physical phone/live/distribution границы открыты выше.
+
+- **#142:** полная docs-only актуализация `NEXT_AGENT_HANDOFF.md` после merge #141: подтверждённые code/docs/main SHA и CI, artifact digests/expiry/signing/publication state, карта 14 source/test/harness contracts, текущая среда и конкретный следующий план. Base `78b6be313f82782999c95579466116f4e572070f`; первая редакция `a8ae3332ff8cfe12fe305c651a19e0cf311881d2` прошла Verify `38210634945` (pull_request, attempt 1, Successful). Финальные head/Verify/merge этого PR находятся в его описании; код/тесты/build/workflows не менялись.
 
 ## Product radar — идеи с реальной ценностью
 
