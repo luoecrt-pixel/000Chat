@@ -10,9 +10,10 @@ import org.json.JSONObject
 object MessageMetadataCodec {
     val textKeys = listOf(
         "provider", "model", "requested_model", "response_model",
-        "reasoning_summary", "error", "finish_reason", "protocol_context_state"
+        "reasoning_summary", "error", "finish_reason", "protocol_context_state",
+        "openai_instructions_sha256"
     )
-    val arrayKeys = listOf("tool_trace")
+    val arrayKeys = listOf("tool_trace", "openai_protocol_output")
     val objectKeys = listOf("usage", "openrouter_protocol")
     val allKeys: List<String> = textKeys + arrayKeys + objectKeys
 
