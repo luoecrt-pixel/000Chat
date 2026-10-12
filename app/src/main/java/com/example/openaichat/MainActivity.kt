@@ -2723,11 +2723,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .put("parallel_tool_calls",prefs.getBoolean("parallel_tools",true))
 
         maxOut?.let { body.put("max_output_tokens",it) }
+        // Responses Create accepts only a string in top-level "instructions".
+        // Use typed input messages for explicit system/developer roles instead.
         GenerationInstructions(
             systemPrompt = prefs.getString("system_prompt", ""),
             developerInstructions = prefs.getString("instructions", ""),
             presentationInstructions = presentationInstructionsForRequest()
-        ).openAi()?.let { body.put("instructions", it) }
+        ).applyToOpenAiRequest(body)
         prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
         if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", true)) {
