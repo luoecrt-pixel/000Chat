@@ -3127,6 +3127,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         .put("provider", "openai")
                         .put("requested_model", model)
                         .put("request_id", localRequestId)
+                    // On nonterminal EOF/exceptions there is no response.output.
+                    // Keep every visible fragment we actually received; next Send
+                    // explicitly labels this as incomplete instead of deadlocking
+                    // or fabricating a completed reasoning/tool protocol.
+                    responseState.reasoningSummary.takeIf { it.isNotEmpty() }
+                        ?.let { assistant.put("reasoning_summary", it) }
+                    if (toolItems.isNotEmpty()) {
+                        assistant.put("tools", JSONArray().apply { toolItems.forEach { put(it) } })
+                    }
                     newId?.let { assistant.put("response_id", it) }
                     val claimed = chatDb.finalizeCurrentChatIfActiveRequest(
                         requestChatId, "", null, null, listOf(assistant), localRequestId
