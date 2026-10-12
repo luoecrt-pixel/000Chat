@@ -2471,6 +2471,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val sentUserMessage = JSONObject().put("role","user").put("text",text).put("request_id",localRequestId).apply {
             put("chat_id", requestChatId)
             put("provider", provider)
+            if (provider == "openai") put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, openAiInstructionFingerprint)
             put("requested_model", model)
             val fileIds=JSONArray(); requestFileIds.forEach{fileIds.put(it)}
             val fileNames=JSONArray(); requestFileNames.forEach{fileNames.put(it)}
@@ -3010,6 +3011,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         .put("requested_model", model)
                         .put("provider", "openai")
                         .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, openAiInstructionFingerprint)
+                    completedResponse?.optJSONArray("output")?.let { output ->
+                        assistantMessage.put("openai_protocol_output", JSONArray(output.toString()))
+                    }
                     responseModel.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
                     val savedGeneratedImages = saveGeneratedImages(responseModel.generatedImageResults)
                     if (savedGeneratedImages.length() > 0) assistantMessage.put("generated_images", savedGeneratedImages)
@@ -3800,6 +3804,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val savedImages=saveGeneratedImages(model.generatedImageResults)
         val assistant=model.toChatJson().apply{
             put("provider", "openai")
+            response.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
             if(savedImages.length()>0)put("generated_images",savedImages)
         }
@@ -3829,6 +3834,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             requestMeta?.optString("model").orEmpty()
         }.ifBlank { null }
         assistant.put("requested_model", requestedModel ?: JSONObject.NULL)
+        requestMeta?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { assistant.put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
         val committed = chatDb.finalizeCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
