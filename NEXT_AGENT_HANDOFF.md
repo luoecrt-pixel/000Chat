@@ -1,14 +1,18 @@
 # NEXT_AGENT_HANDOFF
 
-**Last updated:** 2026-10-12 09:04 +03:00
-**Следующий рабочий срез:** Ручная приёмка 4.17.0 и выбор следующего среза — подтвердить поведение установленного APK по конкретным сценариям; следующую кодовую задачу выбрать по наблюдениям.
-**Подтверждённый статус:** PR [#141](https://github.com/luoecrt-pixel/000Chat/pull/141) **merged 2026-10-12 00:30:47 +03:00**; проверенный main до этой документационной правки — `78b6be313f82782999c95579466116f4e572070f`, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9`. На старте docs-аудита открытых PR не было; текущая актуализация только этого файла выполняется в [PR #142](https://github.com/luoecrt-pixel/000Chat/pull/142). Код релиза 4.17.0 (`versionCode=64`, SQLite v22) интегрирован; повторно применять ZIP не нужно.
-**Идентичность сборки:** последняя code/test редакция — `cceacdd8c392b2a69338f2313c6db137d210f307`; финальный docs head #141 — `4f1e96f5c1327fab97a0fd595e546460f5c0d205`; squash/main — `78b6be313f82782999c95579466116f4e572070f`. Эти три SHA имеют разные роли. Код/build/tests текущего main совпадают с проверенным code SHA; после него изменялись только четыре Markdown-документа. В установленном APK ожидается `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`.
-**CI подтверждён:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) и [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful** на code SHA, attempt 1; Debug завершил **39/39 instrumentation tests** и загрузил APK. [Финальный Verify #141 38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925) **Successful** на docs head, attempt 1. Новый docs-only PR требует собственного Verify, без Android rebuild.
+**Last updated:** 2026-10-12 09:36 +03:00
+**Следующий рабочий срез:** OpenAI request contract и полная история после неуспеха — сначала воспроизвести OA-1/OA-3 из нового аудита, затем исправить builder/chain eligibility с сохранением всех инструкций и вложений.
+**Подтверждённый статус:** Релизная интеграция [#141](https://github.com/luoecrt-pixel/000Chat/pull/141) merged; полный handoff [#142](https://github.com/luoecrt-pixel/000Chat/pull/142) **merged 2026-10-12 09:06:40 +03:00** как `41a02fa8fc83a25c8c5dcf400b4c5c228cefe86d`, tree `1ee07922e02645db5e06da50b9c3efbf4784ce99`. Это проверенная база нового docs-only аудита; открытых PR на старте не было. Код 4.17.0 (`versionCode=64`, SQLite v22) интегрирован, ZIP не применять повторно. Final head/Verify/merge текущей документационной ревизии записываются в её PR, без self-referential коммита.
+**Идентичность сборки:** последняя code/test редакция — `cceacdd8c392b2a69338f2313c6db137d210f307`; финальный docs head #141 — `4f1e96f5c1327fab97a0fd595e546460f5c0d205`; squash/main — `78b6be313f82782999c95579466116f4e572070f`. Эти три SHA имеют разные роли. Код/build/tests текущего main совпадают с проверенным code SHA; после него изменяются только Markdown-документы. В установленном APK ожидается `BuildConfig.BUILD_GIT_SHA = cceacdd8c392b2a69338f2313c6db137d210f307`.
+**CI подтверждён:** [Debug push 38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456) и [Release push 38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458) **Successful** на code SHA, attempt 1; Debug завершил **39/39 instrumentation tests** и загрузил APK. [Финальный Verify #141 38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925) **Successful** на docs head, attempt 1. [Финальный Verify #142 38210797617](https://github.com/luoecrt-pixel/000Chat/actions/runs/38210797617) **Successful** на `9800c030c84bc900f592e53130c0a82d7f5e8283`, attempt 1; #142 merged. Новый docs-only PR требует собственного final-head Verify, без Android rebuild.
 **Артефакты доступны:** Debug `11716107416`, Release `11714939668`; API подтвердил `expired=false`. Debug ZIP истекает **2026-10-17 00:27:30 +03:00**, Release ZIP — **2026-10-17 00:21:00 +03:00**. Полные ссылки и archive SHA-256 — в baseline. Debug APK содержит блок подписи; Release APK/AAB **unsigned**, release signing config отсутствует.
 **Граница релиза:** завершены интеграция кода, CI, merge и создание артефактов. При проверке GitHub Releases список пуст: отдельный опубликованный GitHub Release не создан; публикация в магазине не подтверждена. Production-подпись и канал публикации требуют выбранного владельцем следующего поручения.
 **Закрытые дефекты:** локальный request ID сохраняет terminal assistant независимо от HTTP `x-request-id`; типизированный JSON/SSE не превращает null/объекты в текст; сохранены большие TEXT/оригиналы вложений/signed protocol; исправлены file caches, уведомления и rich renderer. Научный HTML выдаётся из памяти через точный локальный HTTPS URL: прежний `loadDataWithBaseURL` блокировался как `data:` main frame. Ошибочный тест HTML-like LaTeX разделён на безопасное оформление, запрет script execution и настоящий unsupported-command fallback; последние проверки прошли.
 **Что остаётся:** физический телефон, исходное большое фото владельца, живые Claude/OpenAI/OR, реальная 5h сессия, биллинг и системные picker/IME/gesture не приняты вручную. Платных API-вызовов и работы с телефоном в этом проходе не было. Stop/CAS/полная история/lossless originals/signed replay/manual effort/fingerprint v1/1h cache/5h+5M сохраняются. README/workflows/security/settings не менять без соответствующей задачи.
+
+
+**Новый OpenAI аудит:** [полный список восьми гипотез и результаты](docs/audits/2026-10-12-openai-followup.md). OA-1 — массив `instructions` расходится с документированной Create schema (wire проба, live 400 не проверялся); OA-2 — same-request checkpoint откатывается (SQL probe, Android scheduling не воспроизведён); OA-3 — foreground incomplete/failed до reload может пропустить последнюю реплику в outbound chain (source scenario). OA-4 — key/TTL eligibility, OA-5 — 120s pre-ID cleanup живого owner, OA-6 — bare key в error: точные доказательства и ограничения в отчёте. Исправления **pending**, APK #1282 их не содержит. Host pure suite **46 PASS**, actual reconciler local HTTP PASS; это не новый Android/phone/live run.
+**Ответ про APK:** сейчас устанавливать [Debug artifact #1282](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456/artifacts/11716107416), последний Successful build с APK. #1243 job 15:02, #1282 10:48; основная разница — instrumentation stage 9:41 → 6:16. Cache restored в обоих, device tests 34 → 39; точная причина скорости runner не установлена.
 
 # START HERE — ОБЯЗАТЕЛЬНО
 
@@ -57,11 +61,12 @@
 
 | Срез | Подтверждение | Граница |
 | --- | --- | --- |
-| Подтверждённый main #141 | `78b6be313f82782999c95579466116f4e572070f`, merged 2026-10-12 00:30:47 +03:00, tree `3b94abfca5307df1446dcd12f208d50e1b5a21f9` | Снимок перед этой docs-only правкой; следующий агент повторно сверяет actual main |
+| Подтверждённый main #142 | `41a02fa8fc83a25c8c5dcf400b4c5c228cefe86d`, merged 2026-10-12 09:06:40 +03:00, tree `1ee07922e02645db5e06da50b9c3efbf4784ce99` | База нового docs-only OpenAI аудита; следующий агент повторно сверяет actual main |
 | Последний runtime/code SHA | `cceacdd8c392b2a69338f2313c6db137d210f307`; 4.17.0, versionCode 64, SQLite v22 | В APK Build SHA = этот code SHA, а не squash SHA |
 | Debug push / attempt 1 | [38175698456](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698456), job `114577504249`: source/mutations, JVM tests, lintDebug, assembleDebug, 39/39 API34 device tests, upload — Successful | Offline mocks/Android emulator, не физический телефон или live provider |
 | Release push / attempt 1 | [38175698458](https://github.com/luoecrt-pixel/000Chat/actions/runs/38175698458), job `114577504504`: test, lintRelease, assembleRelease, bundleRelease, upload — Successful | Обе JVM unit variants выполнены; production signing не настроен |
 | Final docs Verify #141 / attempt 1 | [38176574925](https://github.com/luoecrt-pixel/000Chat/actions/runs/38176574925), pull_request, SHA `4f1e96f5c1327fab97a0fd595e546460f5c0d205` — Successful | Ранний code Verify `38175702106` не подменяет эту финальную проверку |
+| Final docs Verify #142 / attempt 1 | [38210797617](https://github.com/luoecrt-pixel/000Chat/actions/runs/38210797617), pull_request, SHA `9800c030c84bc900f592e53130c0a82d7f5e8283` — Successful | #142 merged; текущая docs ревизия проходит отдельный Verify |
 | Runs на merge/main SHA | При API-проверке runs отсутствовали | Ожидаемо: Android push на main исключён, Verify workflow запускается только по pull_request |
 | #136 / #137 историческое доказательство | #136 merge `0308fd67`, code `613bff2`, Debug `37994461394`/Release `37994461425`; #137 merge `e3304979`, code `fe0b5b2`, Debug `37998337416`/Release `37998337154` — Successful | Исторические assertions не расширяют актуальную ручную приёмку |
 | Физический телефон | Ранее владелец подтвердил камеру и маленькое фото | Новые renderer/cache/notification paths, большое исходное фото и live API этим наблюдением не доказаны |
@@ -226,9 +231,21 @@ Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967
 
 ## АКТИВНЫЙ ПЛАН — только незавершённое
 
-Редакция 16: code/CI/merge #141 завершены, его final docs Verify также Successful. Подтверждённого нового runtime blocker после этой пары проверок нет. Открыты ручная приёмка, решение о production distribution и выбор следующего узкого среза. Новые функции, controller/Compose rewrite и переработка accounting не включаются автоматически.
+Редакция 17: code/CI/merge #141 и полный docs handoff #142 завершены. По поручению владельца сначала составлены восемь OpenAI гипотез, затем проверены source/официальной схемой/46 host tests и SQL/HTTP probes. Выявлены OA-1…OA-6 с разной силой доказательств; fixes ещё pending. Полный [отчёт/checkpoint](docs/audits/2026-10-12-openai-followup.md) имеет приоритет над прежним утверждением об отсутствии нового дефекта. Feature radar, Compose/controller/accounting redesign автоматически не добавлять.
 
-### 1. Ручная приёмка 4.17.0 и выбор следующего среза — **следующий**
+### 1. OpenAI request contract и полная история после неуспеха — **следующий**
+
+**Первый шаг:** воспроизвести OA-1/OA-3 на request-builder boundary, сверить официальный Create contract отдельно от Response schema. Выделить узкую pure chain eligibility/wire policy; distinct system/developer/presentation instructions, completed → incomplete/failed/disconnected → следующий Send, no-reload/reopen и account/missing-response cases OA-4 должны сохранять полный typed context. Изменённые параметры не считать совместимыми по offline mock. Live provider calls по-прежнему требуют отдельного поручения.
+
+**Критерий завершения:** действующий документированный wire contract, regression actual JSON без скрытой потери ролей/исторических вложений, Android integration fixture до HTTP и новая Debug+Release push пара по merge-гейту. В отчёте отличать schema mismatch от реально наблюдавшегося server rejection. Не вводить тихий paid retry и не объявлять эти fixes установленными в #1282.
+
+### 2. Monotonic checkpoint и pre-ID lifecycle ownership
+
+**Первый шаг:** воспроизвести OA-2 через настоящий ChatDatabase: same local request sequence 20 → 10, terminal → late in_progress, different request и Stop. Отдельно OA-5: delayed response.created, Stop/Start при started_at старше 120s, затем terminal. Cancel Worker не является атомарным fence для уже выполняющегося callback.
+
+**Критерий завершения:** text/status/cursor не регрессируют вместе, равный sequence имеет явный contract, живой pre-ID call не теряет owner из-за orphan cleanup; сохранить one-shot terminal CAS и общую 5h границу. Нужны Android/Robolectric DB и lifecycle assertions, не только Python SQL probe, затем новая push CI пара.
+
+### 3. Ручная приёмка 4.17.0 с найденными OpenAI сценариями
 
 **Первый шаг:** повторно сверить actual main и доступность Debug artifact `11716107416`, предоставить владельцу ссылку на APK и ожидаемый Build SHA `cceacdd8c392b2a69338f2313c6db137d210f307`. После отдельного поручения на телефон выполнить выбранные владельцем сценарии ниже и записать устройство/Android/build SHA, действия, наблюдаемый результат и воспроизводимый negative case. Без поручения не устанавливать APK, не управлять телефоном и не делать платные API-вызовы.
 
@@ -242,17 +259,17 @@ Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967
 
 **Критерий завершения:** по выбранным сценариям есть конкретные observation records; ошибки оформлены с исходными данными и owner/negative test. При недоступности телефона записать blocked/not verified, а не success. Наблюдения не переносить на непроверенные upstream/телефоны. Далее выбрать ровно одну следующую задачу с acceptance matrix.
 
-### 2. Production-подпись и публикация — по выбранному владельцем каналу
+### 4. Production-подпись и публикация — по выбранному владельцем каналу
 
 **Первый шаг:** если владелец поручает distribution, определить целевой канал и нужную signing identity для обновления существующей установки. Сейчас Debug APK подписан, Release APK/AAB unsigned; GitHub Releases пуст, магазинная публикация не подтверждена. Не объявлять CI artifact production release и не создавать/заменять signing identity без нужного поручения. Signing credentials не включать в исходники, логи или handoff.
 
 **Критерий завершения:** concrete release package с согласованной подписью, проверкой package/version/signature и фактической ссылкой выбранного канала. При изменении Gradle/workflow/code выполнить новую CI пару по merge-гейту; оставленные unsigned artifacts этого не подтверждают. Этот пункт не блокирует уже завершённую интеграцию #141.
 
-### 3. Следующий кодовый срез после наблюдений
+### 5. Диагностика: bare key в произвольном error
 
-**Первый шаг:** сверить новые observation records, архитектурный обзор и Product radar; выбрать один defect или одну ценную функцию. Зафиксировать state owner, полный путь Activity/Executor/Worker/DB при необходимости, positive/negative assertion и подходящий harness. Если новых наблюдений нет — провести доступный offline анализ выбранной границы, не начинать широкий rewrite и не изобретать проблему.
+**Первый шаг:** regression OA-6 на synthetic bare key в error/message, включая provider error, сохраняя safe request IDs. Existing redaction тест покрывает sensitive field/Bearer/query/base64, но не этот вариант. Не использовать реальные credentials в fixture.
 
-**Критерий завершения:** один согласованный scope, одна короткая матрица доказательств и один PR; проведённые #141 fixes не возвращаются в активный backlog без нового failure. Платные/live API и телефонный доступ остаются отдельным scope владельца.
+**Критерий завершения:** arbitrary error не публикует bare API key через file/Log.d/share; existing diagnostic fields сохраняются. Runtime change требует targeted Android/Robolectric check и общей CI пары; реальной утечки в этом аудите не наблюдалось.
 
 ## Репозиторий / branches
 
@@ -264,7 +281,7 @@ Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967
 
 ## Как проверять новую работу
 
-Для этой документационной актуализации scope — только `NEXT_AGENT_HANDOFF.md`: сверены GitHub metadata/runs/jobs/artifacts, source/test assertions и равенство runtime tree проверенному code SHA. Выполняются local handoff/source checks и удалённый Verify на final docs PR head; новая Android пара не требуется, поскольку code/test/build/workflow не меняются.
+Для этой docs-only актуализации scope — `NEXT_AGENT_HANDOFF.md` и новый OpenAI Markdown audit. Выполнены source/API schema review, 46 host JUnit tests, actual local HTTP reconciler и SQL/function probes с границами в отчёте. Code/test/build/workflow не меняются; требуется local handoff verifier и Successful Verify на final docs PR head, новая Android пара не нужна. Host harness в scratch — воспроизводимая промежуточная проверка, не новый отслеживаемый repo test и не Android compile.
 
 **До первого изменения.**
 
@@ -312,14 +329,14 @@ Archive SHA-256: Debug `adc5f47445aeeb468ed2ef5e8662d0f8f29b8d82f1311e59f00f0967
 
 ## История последних рабочих заходов — последние 5 PR
 
-Окно последних пяти рабочих PR — #138–#142, включая эту docs-only актуализацию. #138–#141 merged подтверждены API; #142 меняет только этот handoff и не меняет runtime/code baseline. Для текущего документа итоговые head/Verify/merge записываются в описании PR после подтверждения; не делать ещё один коммит только ради записи собственного SHA. Следующий агент сверяет фактический merged/merged_at и actual main в GitHub.
+Окно последних пяти рабочих PR — #139–#143, включая текущий docs-only аудит. #139–#142 merged подтверждены API; #143 сохраняет OpenAI находки и новый план, runtime/code baseline не меняет. Для текущего документа итоговые head/Verify/merge записываются в описании PR после подтверждения; не делать ещё один коммит только ради записи собственного SHA. Следующий агент сверяет фактический merged/merged_at и actual main в GitHub.
 
-- **#138:** docs-only reconciliation после APP-05; merged `4111b83a215da03af544e8c0477246962c43395b`, 2026-10-10. Это база исходного partial ZIP, не актуальный релизный code SHA.
 - **#139:** security/public-visibility preparation; merged `8ac41908222baf91d76e4456b494779263d0e41d`, 2026-10-11. Security и ignore изменения сохранены при интеграции пакета.
 - **#140:** очистка устаревших Android artifacts и retention 5 дней; merged `120ac217c2a9f06a8b0b062b8571800c52682f33`, 2026-10-11. Workflows при релизной интеграции не менялись.
 - **#141:** интеграция 111 файлов partial bundle с последующими code/test fixes и актуализацией канонического handoff. Финальный код `cceacdd8c392b2a69338f2313c6db137d210f307`; push Debug `38175698456` и Release `38175698458`, Verify `38175702106` Successful, attempt 1. Артефакты `11716107416`/`11714939668`; final docs head `4f1e96f5c1327fab97a0fd595e546460f5c0d205`, Verify `38176574925` Successful; merged 2026-10-12 00:30:47 +03:00 как `78b6be313f82782999c95579466116f4e572070f`. Physical phone/live/distribution границы открыты выше.
 
-- **#142:** полная docs-only актуализация `NEXT_AGENT_HANDOFF.md` после merge #141: подтверждённые code/docs/main SHA и CI, artifact digests/expiry/signing/publication state, карта 14 source/test/harness contracts, текущая среда и конкретный следующий план. Base `78b6be313f82782999c95579466116f4e572070f`; первая редакция `a8ae3332ff8cfe12fe305c651a19e0cf311881d2` прошла Verify `38210634945` (pull_request, attempt 1, Successful). Финальные head/Verify/merge этого PR находятся в его описании; код/тесты/build/workflows не менялись.
+- **#142:** полная docs-only актуализация `NEXT_AGENT_HANDOFF.md` после merge #141: карта 14 source/test/harness contracts, baseline/артефакты/границы/план. Final head `9800c030c84bc900f592e53130c0a82d7f5e8283`, Verify `38210797617` Successful, attempt 1; merged 2026-10-12 09:06:40 +03:00 как `41a02fa8fc83a25c8c5dcf400b4c5c228cefe86d`. Код/тесты/build/workflows не менялись.
+- **#143:** docs-only OpenAI audit и актуализация следующего плана. Восемь гипотез сначала перечислены, затем source/API schema/46 host JUnit/actual HTTP/SQL/function probes; OA-1…OA-6 фиксируются с точной силой доказательств. APK #1282 и release code прежние; fixes pending. Final head/Verify/merge находятся в описании PR, текущий Verify обязателен перед merge.
 
 ## Product radar — идеи с реальной ценностью
 
