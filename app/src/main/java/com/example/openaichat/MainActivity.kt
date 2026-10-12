@@ -2360,11 +2360,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 return
             }
         }
-        // An ID is only reusable when the last assistant belongs to OpenAI.
-        // Otherwise reconstruct history, but never silently discard its typed files.
-        val usableOpenAiChain = currentResponseId != null &&
-            chat.lastOrNull { it.optString("role") == "assistant" }
-                ?.optString("provider") == "openai"
+        // Capture instructions once: the chain decision, actual wire request and
+        // persisted assistant metadata must reflect the same settings snapshot.
+        val openAiInstructions = GenerationInstructions(
+            systemPrompt = prefs.getString("system_prompt", ""),
+            developerInstructions = prefs.getString("instructions", ""),
+            presentationInstructions = presentationInstructionsForRequest()
+        )
+        val openAiInstructionFingerprint = OpenAiInstructionChainPolicy.fingerprint(openAiInstructions)
+        // previous_response_id inherits prior role-bearing input. Reuse is safe
+        // only for the immediate completed turn under identical instructions.
+        val usableOpenAiChain = provider == "openai" &&
+            OpenAiInstructionChainPolicy.canReuse(
+                currentResponseId, chat, openAiInstructionFingerprint, regenerating = regenerate
+            )
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
@@ -2723,13 +2732,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .put("parallel_tool_calls",prefs.getBoolean("parallel_tools",true))
 
         maxOut?.let { body.put("max_output_tokens",it) }
-        // Responses Create accepts only a string in top-level "instructions".
-        // Use typed input messages for explicit system/developer roles instead.
-        GenerationInstructions(
-            systemPrompt = prefs.getString("system_prompt", ""),
-            developerInstructions = prefs.getString("instructions", ""),
-            presentationInstructions = presentationInstructionsForRequest()
-        ).applyToOpenAiRequest(body)
+        // For a fresh/replayed context send full role-bearing instructions once.
+        // A matching previous_response_id already contains them; reinserting the
+        // same roles on each turn would duplicate rules in the server-side chain.
+        if (!usableOpenAiChain) openAiInstructions.applyToOpenAiRequest(body)
         prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
         if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", true)) {
@@ -2990,6 +2996,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val assistantMessage=responseModel.toChatJson()
                         .put("requested_model", model)
                         .put("provider", "openai")
+                        .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, openAiInstructionFingerprint)
                     responseModel.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
                     val savedGeneratedImages = saveGeneratedImages(responseModel.generatedImageResults)
                     if (savedGeneratedImages.length() > 0) assistantMessage.put("generated_images", savedGeneratedImages)
@@ -3232,15 +3239,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         }
 
-        val typedHistoryNeeded = !usableOpenAiChain && chat.any { message ->
-            message.optString("role") == "user" && (
-                (message.optJSONArray("attachments")?.length() ?: 0) > 0 ||
-                (message.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
-                (message.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
-                JsonProtocol.string(message, "image_file_id").isNotBlank() ||
-                JsonProtocol.string(message, "image_path").isNotBlank()
-            )
-        } || requestOpenRouterAttachments.isNotEmpty()
+        // A non-chain request must replay every available local turn as typed
+        // input, not just text-only prior messages. The encoder checks original
+        // attachment bytes and fails explicitly rather than silently dropping them.
+        val typedHistoryNeeded = (!usableOpenAiChain && chat.isNotEmpty()) ||
+            requestOpenRouterAttachments.isNotEmpty()
         val hasFilesForAnalysis = capturedFileHistory.any { m -> m.optString("role") == "user" && ((m.optJSONArray("file_ids")?.length() ?: 0) > 0 || (m.optJSONArray("attachments")?.length() ?: 0) > 0) }
         if (typedHistoryNeeded || (fileAnalysisEnabled && hasFilesForAnalysis)) {
             val historySnapshot = chat.map { JSONObject(it.toString()) } +
