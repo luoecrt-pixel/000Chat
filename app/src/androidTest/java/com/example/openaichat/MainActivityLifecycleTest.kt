@@ -196,6 +196,163 @@ class MainActivityLifecycleTest {
         assertTrue(input.toString().contains("Next question"))
     }
 
+    /**
+     * Real Send -> failed/disconnected SSE -> durable assistant -> next explicit
+     * Send. Covers the auditor's reachable P1 path rather than testing only a
+     * pure encoder. Uses local trusted HTTPS and a synthetic key, never billing.
+     */
+    private fun assertActualSendAfterInterruptedOpenAiResponse(reopen: Boolean, errorEvent: Boolean) {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val firstEvents = listOf(
+            JSONObject().put("type", "response.created").put("sequence_number", 0)
+                .put("response", JSONObject().put("id", "resp_unfinished")),
+            JSONObject().put("type", "response.output_text.delta")
+                .put("sequence_number", 1).put("delta", "Partial first answer.  "),
+            JSONObject().put("type", "response.reasoning_summary_text.delta")
+                .put("sequence_number", 2).put("delta", "Received summary before interrupt."),
+            JSONObject().put("type", "response.web_search_call.completed")
+                .put("sequence_number", 3)
+        ).toMutableList()
+        if (errorEvent) firstEvents.add(JSONObject().put("type", "error")
+            .put("sequence_number", 4)
+            .put("message", "Synthetic interrupted stream"))
+        val firstSse = firstEvents.joinToString("") { "data: " + it.toString() + "\n\n" }
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody(firstSse))
+        val final = JSONObject().put("id", "resp_recovery_ok").put("status", "completed")
+            .put("output", JSONArray().put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(
+                    JSONObject().put("type", "output_text").put("text", "Second answer")))))
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: " + JSONObject().put("type", "response.created")
+                .put("sequence_number", 0)
+                .put("response", JSONObject().put("id", "resp_recovery_ok")) +
+                "\n\ndata: " + JSONObject().put("type", "response.completed")
+                .put("sequence_number", 1).put("response", final) + "\n\n"))
+
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val prefs = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .targetContext.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val keys = listOf("provider", "model", "reasoning", "text_format",
+            "system_prompt", "instructions", "background_responses", "file_analysis_tools",
+            "web", "file_search", "code_interpreter", "image_generation")
+        val previousPrefs = keys.associateWith { prefs.all[it] }
+        var oldApiKey: String? = null
+        fun installMockClient(activity: MainActivity) {
+            val redirected = testHttpClient.newBuilder().addInterceptor { chain ->
+                chain.proceed(chain.request().newBuilder()
+                    .url(server.url("/v1/responses")).build())
+            }.build()
+            setPrivateField(activity, "client", redirected)
+        }
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                prefs.edit().putString("provider", "openai")
+                    .putString("model", "gpt-6-astra")
+                    .putString("reasoning", "high").putString("text_format", "text")
+                    .putString("system_prompt", "System retained")
+                    .putString("instructions", "Developer retained")
+                    .putBoolean("background_responses", false)
+                    .putBoolean("file_analysis_tools", false)
+                    .putBoolean("web", false).putBoolean("file_search", false)
+                    .putBoolean("code_interpreter", false).putBoolean("image_generation", false)
+                    .commit()
+                oldApiKey = SecureStore(activity).getApiKey()
+                SecureStore(activity).setApiKey("sk-only-local-test")
+                installMockClient(activity)
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("First explicit paid request")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            assertTrue("First Send did not reach local HTTPS mock",
+                server.takeRequest(20, TimeUnit.SECONDS) != null)
+
+            var recordedAssistant = false
+            var savedFragment = ""
+            var savedStatus = ""
+            repeat(250) {
+                scenario.onActivity { activity ->
+                    @Suppress("UNCHECKED_CAST")
+                    val history = privateField(activity, "chat") as MutableList<JSONObject>
+                    val last = history.lastOrNull()
+                    if (last?.optString("role") == "assistant" &&
+                        last.optString("status") in setOf("disconnected", "failed")) {
+                        recordedAssistant = true
+                        savedFragment = last.optString("text")
+                        savedStatus = last.optString("status")
+                        assertFalse("A nonterminal stream must not fabricate output",
+                            last.has("openai_protocol_output"))
+                        assertEquals("Received summary before interrupt.",
+                            last.optString("reasoning_summary"))
+                    }
+                }
+                if (recordedAssistant) return@repeat
+                SystemClock.sleep(40L)
+            }
+            assertTrue("Interrupted reply must be persisted before next Send", recordedAssistant)
+            assertTrue(savedFragment.contains("Partial first answer."))
+            assertEquals(if (errorEvent) "failed" else "disconnected", savedStatus)
+            assertEquals("No hidden network retry permitted", 1, server.requestCount)
+
+            if (reopen) {
+                scenario.recreate()
+            }
+            scenario.onActivity { activity ->
+                installMockClient(activity)
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                assertTrue("Partial response must survive Activity recreation",
+                    history.any { it.optString("role") == "assistant" &&
+                        it.optString("text").contains("Partial first answer.") })
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("Continue from visible partial only")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+            }
+            val second = server.takeRequest(25, TimeUnit.SECONDS)
+                ?: throw AssertionError("Explicit second Send blocked by partial transcript replay")
+            val wire = JSONObject(second.body.readUtf8())
+            assertFalse("Interrupted response is not a reusable server chain",
+                wire.has("previous_response_id"))
+            val input = wire.getJSONArray("input")
+            assertEquals("system", input.getJSONObject(0).getString("role"))
+            assertEquals("developer", input.getJSONObject(1).getString("role"))
+            val body = input.toString()
+            assertTrue(body.contains("First explicit paid request"))
+            assertTrue(body.contains("Partial first answer."))
+            assertTrue(body.contains("Received summary before interrupt."))
+            assertTrue(body.contains("did NOT complete successfully"))
+            assertTrue(body.contains("Do not retry or regenerate"))
+            assertTrue(body.contains("Continue from visible partial only"))
+            assertEquals("Only explicitly initiated sends must contact the provider", 2, server.requestCount)
+        } finally {
+            scenario.onActivity { activity ->
+                oldApiKey?.let { SecureStore(activity).setApiKey(it) }
+            }
+            prefs.edit().apply {
+                for (key in keys) {
+                    when (val value = previousPrefs[key]) {
+                        is String -> putString(key, value)
+                        is Boolean -> putBoolean(key, value)
+                        is Int -> putInt(key, value)
+                        is Long -> putLong(key, value)
+                        else -> remove(key)
+                    }
+                }
+            }.commit()
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
+    @Test fun disconnectedStreamWithNoTerminalDoesNotBlockSecondRealSend() {
+        assertActualSendAfterInterruptedOpenAiResponse(reopen = false, errorEvent = false)
+    }
+
+    @Test fun failedStreamAfterRecreateDoesNotBlockSecondRealSend() {
+        assertActualSendAfterInterruptedOpenAiResponse(reopen = true, errorEvent = true)
+    }
+
     private var savedNotificationPreference: Boolean? = null
     @Before fun suppressUnrelatedNotificationPermissionDialog() {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
