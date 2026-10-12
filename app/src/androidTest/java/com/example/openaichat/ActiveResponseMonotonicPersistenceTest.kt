@@ -33,11 +33,23 @@ class ActiveResponseMonotonicPersistenceTest {
                     lastSequenceNumber = 20L, expectedRequestId = firstRequest)
                 db.updateActiveResponse(chatId, text = "stale terminal", status = "completed",
                     lastSequenceNumber = 10L, expectedRequestId = firstRequest)
+                // Auditor regression: even with text=null, equal seq cannot reset
+                // status or replace the canonical remote response identity.
+                db.updateActiveResponse(chatId, responseId = "resp_wrong", status = "starting",
+                    lastSequenceNumber = 20L, expectedRequestId = firstRequest)
+                db.updateActiveResponse(chatId, status = "queued",
+                    lastSequenceNumber = 20L, expectedRequestId = firstRequest)
+                db.updateActiveResponse(chatId, responseId = "resp_wrong", text = null,
+                    lastSequenceNumber = 20L, expectedRequestId = firstRequest)
+                // An unsequenced callback cannot overwrite an owned SSE checkpoint.
+                db.updateActiveResponse(chatId, responseId = "resp_wrong", status = "starting",
+                    expectedRequestId = firstRequest)
                 var active = db.getActiveResponse(chatId)
                 assertNotNull(active)
                 assertEquals("twenty", active!!.getString("text"))
                 assertEquals(20L, active.getLong("last_sequence_number"))
                 assertEquals("in_progress", active.getString("status"))
+                assertEquals("resp_first", active.getString("response_id"))
 
                 // The same sequence can harmlessly repeat if it is idempotent.
                 db.updateActiveResponse(chatId, text = "twenty", status = "in_progress",
