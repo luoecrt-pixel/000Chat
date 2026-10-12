@@ -188,4 +188,31 @@ class ResponseEventReducerTest {
         assertEquals("Sorry, not available", state.state.text)
     }
 
+    @Test
+    fun terminalStateCannotBeResurrectedByLateSseEvents() {
+        val completedResponse = JSONObject().put("id", "resp_done")
+            .put("status", "completed").put("output", org.json.JSONArray().put(
+                JSONObject().put("type", "message").put("content", org.json.JSONArray().put(
+                    JSONObject().put("type", "output_text").put("text", "canonical")
+                ))
+            ))
+        val terminal = ResponseEventReducer.reduce(
+            ResponseEventState(responseId = "resp_done", text = "partial"),
+            JSONObject().put("type", "response.completed").put("response", completedResponse)
+        ).state
+        assertEquals("canonical", terminal.text)
+        val late = listOf(
+            JSONObject().put("type", "response.output_text.delta").put("delta", " stale"),
+            JSONObject().put("type", "response.created").put("response", JSONObject().put("id", "resp_other")),
+            JSONObject().put("type", "response.failed").put("response", JSONObject().put("id", "resp_done")),
+            JSONObject().put("type", "error").put("message", "late")
+        )
+        late.forEach { event ->
+            val decision = ResponseEventReducer.reduce(terminal, event)
+            assertEquals(terminal, decision.state)
+            assertEquals(false, decision.textChanged)
+            assertEquals(false, decision.responseIdChanged)
+        }
+    }
+
 }
