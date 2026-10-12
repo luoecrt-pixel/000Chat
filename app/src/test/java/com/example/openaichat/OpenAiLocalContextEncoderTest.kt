@@ -108,7 +108,7 @@ class OpenAiLocalContextEncoderTest {
                 .put("role", "assistant").put("phase", "final")
                 .put("status", "completed")
                 .put("content", JSONArray().put(JSONObject().put("type", "output_text")
-                    .put("text", "Full answer")))
+                    .put("text", "Full answer"))))
             .put(JSONObject().put("type", "web_search_call")
                 .put("id", "tool_1").put("status", "completed")
                 .put("action", JSONObject().put("type", "search").put("query", "fixture")))
