@@ -1,125 +1,84 @@
+from datetime import datetime
 from pathlib import Path
 import re
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 HANDOFF = ROOT / "NEXT_AGENT_HANDOFF.md"
+SECTIONS = (
+    "## Текущий статус",
+    "## Следующая работа",
+    "## Обязательные ограничения",
+    "## Проверки и CI",
+    "## Renderer: происхождение и SHA",
+)
 
-def require(text: str, needle: str) -> None:
-    assert needle in text, f"missing required text: {needle}"
+
+def validate(text: str) -> None:
+    lines = text.splitlines()
+    assert lines and lines[0] == "# NEXT_AGENT_HANDOFF", "invalid handoff title"
+    headings = [line for line in lines if line.startswith("#")]
+    assert headings == ["# NEXT_AGENT_HANDOFF", *SECTIONS], "missing, duplicate or obsolete section"
+    for label in ("Last updated", "Следующий рабочий срез", "Code SHA", "Main baseline"):
+        assert text.count(f"**{label}:**") == 1, f"missing/duplicate {label}"
+    updated = re.search(r"^\*\*Last updated:\*\* (.+)$", text, re.M)
+    assert updated is not None
+    datetime.strptime(updated.group(1), "%Y-%m-%d %H:%M %z")
+    for label in ("Code SHA", "Main baseline"):
+        assert re.search(rf"^\*\*{label}:\*\* \x60[0-9a-f]{{40}}\x60", text, re.M), f"invalid {label}"
+    next_step = re.search(r"^\*\*Следующий рабочий срез:\*\* (.+)$", text, re.M)
+    assert next_step and next_step.group(1).strip(), "empty next step"
+    assert text.count("\x60") % 2 == 0, "unbalanced code delimiters"
+    for index, line in enumerate(lines):
+        if line.startswith("#") and index:
+            assert not lines[index - 1].strip(), "heading needs blank line"
+            assert index + 1 < len(lines) and not lines[index + 1].strip(), "heading needs blank line"
+
+    # These remain operational requirements; old PR histories/radars are not required.
+    for token in ("Stop", "CAS", "fingerprint v1", "1h", "5h", "5M", "40 минут",
+                  "платные API", "телефон", "unsigned", "Verify"):
+        assert token in text, f"lost operational requirement: {token}"
+    assert "docs/audits/2026-10-12-openai-followup.md" in text, "missing current task source"
+    properties = (ROOT / "config/response-renderer-sha256.properties").read_text()
+    for line in properties.splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            digest = line.split("=", 1)[1].strip()
+            assert re.fullmatch(r"[0-9a-f]{64}", digest), "invalid renderer digest"
+            assert digest in text, "renderer provenance lost from handoff"
+
+    for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", text):
+        parsed = urlsplit(target)
+        if parsed.scheme or not parsed.path:
+            continue
+        path = (ROOT / unquote(parsed.path)).resolve()
+        assert path.is_relative_to(ROOT) and path.is_file(), f"broken local link: {target}"
+
+
+def mutation_checks(text: str) -> None:
+    validate(text)
+    mutations = [
+        ("invalid code identity", text.replace("**Code SHA:** \x60", "**Code SHA:** \x60short", 1)),
+        ("lost replay contract", text.replace("fingerprint v1", "legacy fingerprint")),
+        ("missing task source", text.replace("docs/audits/2026-10-12-openai-followup.md", "docs/missing.md")),
+        ("duplicate baseline", text + "\n**Main baseline:** \x60" + "a" * 40 + "\x60\n"),
+        ("lost request boundary", text.replace("5h", "unlimited request")),
+        ("broken source link", text.replace("](config/response-renderer-sha256.properties)", "](config/missing.properties)")),
+    ]
+    for name, changed in mutations:
+        assert changed != text, f"ineffective mutation: {name}"
+        try:
+            validate(changed)
+        except (AssertionError, ValueError):
+            pass
+        else:
+            raise AssertionError(f"mutation incorrectly accepted: {name}")
+
 
 def main() -> None:
     text = HANDOFF.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    mutation_checks(text)
+    print("NEXT_AGENT_HANDOFF verifier: PASS (positive + 6 semantic mutations)")
 
-    assert lines and lines[0] == "# NEXT_AGENT_HANDOFF"
-    assert text.count("**Last updated:**") == 1
-    assert re.search(r"\*\*Last updated:\*\* \d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}", text)
-    assert text.count("**Следующий рабочий срез:**") == 1
-
-    required_sections = [
-        "# START HERE — ОБЯЗАТЕЛЬНО",
-        "## 30-секундная карта проекта",
-        "## Фактический baseline",
-        "## Подтверждённые lifecycle/recovery контракты",
-        "## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила",
-        "## АКТИВНЫЙ ПЛАН — только незавершённое",
-        "## Репозиторий / branches",
-        "## Контекстный режим для агента",
-        "## Как проверять новую работу",
-        "## История последних рабочих заходов — последние 5 PR",
-        "## Product radar — идеи с реальной ценностью",
-        "## Документация",
-        "## Короткий отчёт пользователю",
-    ]
-    headings = [line.strip() for line in lines if line.startswith("#")]
-    assert headings.count("# NEXT_AGENT_HANDOFF") == 1
-    assert len(headings) == len(set(headings)), "duplicate markdown heading detected"
-    for section in required_sections:
-        assert headings.count(section) == 1, f"section count mismatch: {section}"
-
-    positions = [headings.index(section) for section in required_sections]
-    assert positions == sorted(positions), "required sections out of order"
-
-    for index, line in enumerate(lines):
-        if not line.startswith("#"):
-            continue
-        if index > 0:
-            assert lines[index - 1].strip() == "", f"heading without blank line before: {line}"
-        j = index + 1
-        while j < len(lines) and not lines[j].strip():
-            j += 1
-        assert j < len(lines), f"heading without content: {line}"
-        if lines[j].startswith("#"):
-            level = len(line) - len(line.lstrip("#"))
-            next_level = len(lines[j]) - len(lines[j].lstrip("#"))
-            assert next_level > level, f"heading without content: {line}"
-
-    assert text.count("`") % 2 == 0, "unbalanced inline backticks"
-
-    active = text[text.index("## АКТИВНЫЙ ПЛАН — только незавершённое"):text.index("## Репозиторий / branches")]
-    active_headings = [line.strip() for line in active.splitlines() if line.startswith("### ")]
-    assert active_headings, "active plan should contain at least one plan item"
-    next_items = [heading for heading in active_headings if "— **следующий**" in heading]
-    assert len(next_items) == 1, f"expected exactly one active-plan item marked as next, found {len(next_items)}"
-
-    next_slice_line = next(line for line in lines if line.startswith("**Следующий рабочий срез:**"))
-    declared_slice = next_slice_line.replace("**Следующий рабочий срез:**", "", 1).strip().split(" — ", 1)[0].strip()
-    next_heading_title = re.sub(r"^###\s+\d+\.\s*", "", next_items[0])
-    next_heading_title = next_heading_title.replace(" — **следующий**", "").strip()
-    assert next_heading_title.lower() == declared_slice.lower(), "active-plan next item does not match the declared next work slice"
-
-    for index, heading in enumerate(active_headings):
-        start = active.find(heading)
-        end = active.find(active_headings[index + 1], start + len(heading)) if index + 1 < len(active_headings) else len(active)
-        item = active[start:end]
-        require(item, "Первый шаг:")
-
-    # One trigger for architecture/product review; START HERE is the canonical rule.
-    assert text.count("каждые 5 merged PR или раньше") == 1
-
-    confirmed = text[text.index("## Подтверждённые lifecycle/recovery контракты"):text.index("## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ — стабильные правила")]
-    contract_lines = [line for line in confirmed.splitlines() if re.search(r"\*\*#\d+:\*\*", line)]
-    assert contract_lines, "confirmed lifecycle/recovery contracts should not be empty"
-    contract_line = re.compile(r"^- \[(instrumentation|robolectric|pure|static)\] \*\*#\d+:\*\* .+$")
-    contract_numbers = []
-    for line in contract_lines:
-        assert contract_line.fullmatch(line), f"contract line missing exactly one valid proof-tag: {line}"
-        proof_tags = re.findall(r"\[(instrumentation|robolectric|pure|static)\]", line)
-        assert len(proof_tags) == 1, f"contract line must contain exactly one proof-tag: {line}"
-        match = re.search(r"\*\*(#\d+):\*\*", line)
-        contract_numbers.append(match.group(1))
-    assert len(contract_numbers) == len(set(contract_numbers)), "duplicate lifecycle contract PR in proof-tagged list"
-
-    verification = text[text.index("## Как проверять новую работу"):text.index("### Командная шпаргалка")]
-    require(verification, "реально запустить static verifier и любой новый/изменённый verifier-скрипт")
-    require(verification, "чтение кода вместо запуска не считается проверкой")
-    require(verification, "намеренно воспроизвести целевую поломку")
-    require(verification, "позитивный и негативный кейс обязательны оба")
-
-    radar = text[text.index("## Product radar — идеи с реальной ценностью"):text.index("## Документация")]
-    candidate_headings = [line.strip() for line in radar.splitlines() if line.startswith("### ") and not line.startswith("### Что сознательно")]
-    assert candidate_headings, "product radar should contain at least one candidate idea"
-    candidate_numbers = []
-    for heading in candidate_headings:
-        match = re.match(r"### (\d+)\. ", heading)
-        assert match, f"candidate heading is not numbered: {heading}"
-        candidate_numbers.append(int(match.group(1)))
-        start = radar.find(heading)
-        idx = candidate_headings.index(heading)
-        end = radar.find(candidate_headings[idx + 1], start + len(heading)) if idx + 1 < len(candidate_headings) else radar.find("### Что сознательно", start)
-        item = radar[start:end if end >= 0 else len(radar)]
-        require(item, "Первый шаг:")
-    assert candidate_numbers == list(range(1, len(candidate_numbers) + 1)), "product radar numbering is not sequential"
-
-    history = text[text.index("## История последних рабочих заходов — последние 5 PR"):text.index("## Product radar — идеи с реальной ценностью")]
-    prs = re.findall(r"\*\*(#\d+):\*\*", history)
-    assert len(prs) == 5, f"expected exactly 5 individually-listed PRs, found {len(prs)}"
-    assert len(set(prs)) == 5, "duplicate PR entry in recent history"
-    pr_numbers = [int(pr[1:]) for pr in prs]
-    assert pr_numbers == sorted(pr_numbers), "recent PR history should be listed in chronological order"
-
-    require(text, "python3 tools/verify_handoff.py")
-    print("NEXT_AGENT_HANDOFF verifier: PASS")
 
 if __name__ == "__main__":
     main()
