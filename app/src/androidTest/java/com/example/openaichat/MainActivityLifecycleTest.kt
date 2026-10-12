@@ -271,7 +271,7 @@ class MainActivityLifecycleTest {
             var recordedAssistant = false
             var savedFragment = ""
             var savedStatus = ""
-            repeat(250) {
+            for (attempt in 0 until 250) {
                 scenario.onActivity { activity ->
                     @Suppress("UNCHECKED_CAST")
                     val history = privateField(activity, "chat") as MutableList<JSONObject>
@@ -287,7 +287,7 @@ class MainActivityLifecycleTest {
                             last.optString("reasoning_summary"))
                     }
                 }
-                if (recordedAssistant) return@repeat
+                if (recordedAssistant) break
                 SystemClock.sleep(40L)
             }
             assertTrue("Interrupted reply must be persisted before next Send", recordedAssistant)
