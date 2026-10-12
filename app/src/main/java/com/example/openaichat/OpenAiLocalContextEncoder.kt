@@ -19,7 +19,22 @@ object OpenAiLocalContextEncoder {
             if (role != "user" && role != "assistant") return@forEach
             val text = JsonProtocol.string(message, "text").trim()
             if (role == "assistant") {
-                if (text.isNotEmpty()) {
+                if (message.optString("provider") == "openai") {
+                    val output = message.optJSONArray("openai_protocol_output")
+                        ?: throw IOException(
+                            "Старый ответ OpenAI не содержит полного протокольного вывода. " +
+                            "Для безопасного продолжения цепочки необходим исходный Responses output; " +
+                            "только видимый текст не заменяет reasoning и результаты инструментов."
+                        )
+                    // Preserve exact provider ordering and IDs, including reasoning,
+                    // message phases and tool-call items. Never append text a second
+                    // time: the output message already carries the visible answer.
+                    for (index in 0 until output.length()) {
+                        val item = output.optJSONObject(index)
+                            ?: throw IOException("Недействительный элемент OpenAI output в локальной истории")
+                        input.put(JSONObject(item.toString()))
+                    }
+                } else if (text.isNotEmpty()) {
                     input.put(JSONObject().put("role", role).put("content", text))
                 }
                 return@forEach
