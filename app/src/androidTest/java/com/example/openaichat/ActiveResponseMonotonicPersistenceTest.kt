@@ -23,8 +23,13 @@ class ActiveResponseMonotonicPersistenceTest {
         try {
             ChatDatabase(context).use { db ->
                 db.ensureChat(chatId, "Sequence test")
-                db.setActiveResponse(chatId, "resp_first", firstRequest, "", "in_progress",
+                db.setActiveResponse(chatId, "resp_first", firstRequest, "", "starting",
                     1L, "high", "high", false, 0, 0, true)
+                // Initial HTTP connectivity legitimately changes starting to
+                // in_progress before an SSE sequence number exists.
+                db.updateActiveResponse(chatId, text = "", status = "in_progress",
+                    expectedRequestId = firstRequest)
+                assertEquals("in_progress", db.getActiveResponse(chatId)!!.getString("status"))
                 db.updateActiveResponse(chatId, text = "twenty", status = "in_progress",
                     lastSequenceNumber = 20L, expectedRequestId = firstRequest)
                 db.updateActiveResponse(chatId, text = "ten", status = "in_progress",
