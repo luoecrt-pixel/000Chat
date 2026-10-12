@@ -17,22 +17,30 @@ object OpenAiLocalContextEncoder {
             AttachmentHistoryPolicy.validate(message)
             val role = message.optString("role")
             if (role != "user" && role != "assistant") return@forEach
-            val text = JsonProtocol.string(message, "text").trim()
+            val text = JsonProtocol.string(message, "text")
             if (role == "assistant") {
                 if (message.optString("provider") == "openai") {
+                    val interrupted = OpenAiInterruptedTurnReplay.isInterrupted(message)
                     val output = message.optJSONArray("openai_protocol_output")
-                        ?: throw IOException(
+                    if (output == null && !interrupted) {
+                        throw IOException(
                             "Старый ответ OpenAI не содержит полного протокольного вывода. " +
                             "Для безопасного продолжения цепочки необходим исходный Responses output; " +
                             "только видимый текст не заменяет reasoning и результаты инструментов."
                         )
-                    // Preserve exact provider ordering and IDs, including reasoning,
-                    // message phases and tool-call items. Never append text a second
-                    // time: the output message already carries the visible answer.
-                    for (index in 0 until output.length()) {
+                    }
+                    // Retain all actually received signed reasoning/tool/message items.
+                    // These are NOT synthesized from the incomplete visible text.
+                    if (output != null) for (index in 0 until output.length()) {
                         val item = output.optJSONObject(index)
                             ?: throw IOException("Недействительный элемент OpenAI output в локальной истории")
                         input.put(JSONObject(item.toString()))
+                    }
+                    if (interrupted) {
+                        // No terminal output: keep exact visible partial and received
+                        // summary, with an explicit limitation about inaccessible
+                        // reasoning/tool state. This only happens on a NEW user Send.
+                        input.put(OpenAiInterruptedTurnReplay.asVisibleTranscript(message))
                     }
                 } else if (text.isNotEmpty()) {
                     input.put(JSONObject().put("role", role).put("content", text))
