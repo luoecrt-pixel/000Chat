@@ -46,4 +46,20 @@ class OpenAiSseWireByteLimitStreamTest {
             assertTrue(e.message.orEmpty().contains("wire-byte limit"))
         }
     }
+    @Test fun limitNeverReportsClippedPayloadAsCompleteSuccess() {
+        val source = byteArrayOf(10, 20, 30, 40)
+        val reader = OpenAiSseWireByteLimitStream(
+            ByteArrayInputStream(source), maxBytes = 2)
+        val target = ByteArray(8)
+        assertEquals(2, reader.read(target, 0, target.size))
+        assertArrayEquals(byteArrayOf(10, 20), target.copyOfRange(0, 2))
+        try {
+            reader.read(target, 0, target.size)
+            fail("The third source byte must not become a successful EOF")
+        } catch (e: IOException) {
+            assertTrue(e.message.orEmpty().contains("wire-byte limit"))
+            assertEquals(3L, reader.bytesRead)
+        }
+    }
+
 }
