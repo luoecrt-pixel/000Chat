@@ -177,4 +177,46 @@ class ResponseIndexedCheckpointTest {
         }
     }
 
+    @Test fun interruptedSignedReasoningAndToolsSurviveResumeAndTypedHistoryReplay() {
+        val signed = JSONObject().put("type", "reasoning").put("id", "r_signed")
+            .put("encrypted_content", "opaque-signed-blob")
+        val tool = JSONObject().put("type", "web_search_call").put("id", "t_real")
+            .put("status", "completed").put("action",
+                JSONObject().put("type", "search").put("query", "verified"))
+        var state = ResponseEventReducer.reduce(ResponseEventState(),
+            JSONObject().put("type", "response.created")
+                .put("response", JSONObject().put("id", "resp_interrupted"))).state
+        for ((index, item) in listOf(signed, tool).withIndex()) {
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_item.done")
+                .put("output_index", index).put("item", item)).state
+        }
+        state = ResponseEventReducer.reduce(state, delta(3, 2, 0, "Visible partial")).state
+        val save = JSONObject().put("text", state.text).put("last_sequence_number", 3)
+            .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state))
+        val restored = ResponseIndexedCheckpoint.restore(save)
+        assertEquals("Visible partial", restored.text)
+        assertEquals(2, restored.typedOutputItems.size)
+        val output = org.json.JSONArray()
+        restored.typedOutputItems.toSortedMap().values.forEach {
+            output.put(JSONObject(it.toString()))
+        }
+        val incomplete = JSONObject().put("role", "assistant")
+            .put("provider", "openai").put("status", "disconnected")
+            .put("incomplete", true).put("text", restored.text)
+            .put("response_id", "resp_interrupted")
+            .put("openai_protocol_output", output)
+        val next = JSONObject().put("role", "user").put("text", "Follow up")
+        val replay = OpenAiLocalContextEncoder.encode(listOf(incomplete, next))
+        assertEquals("reasoning", replay.getJSONObject(0).getString("type"))
+        assertEquals("opaque-signed-blob", replay.getJSONObject(0)
+            .getString("encrypted_content"))
+        assertEquals("t_real", replay.getJSONObject(1).getString("id"))
+        assertEquals("web_search_call", replay.getJSONObject(1).getString("type"))
+        assertTrue(replay.getJSONObject(2).toString().contains("Visible partial"))
+        assertEquals(4, replay.length())
+        assertFalse(incomplete.has("usage"))
+        assertEquals(2, output.length())
+    }
+
 }
