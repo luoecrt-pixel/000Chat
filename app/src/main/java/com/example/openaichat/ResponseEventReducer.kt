@@ -43,7 +43,11 @@ data class ResponseEventDecision(
 
 /** Reject non-string SSE protocol fields, especially Android JSONObject.NULL. */
 object ResponseEventReducer {
-    fun reduce(current: ResponseEventState, event: JSONObject): ResponseEventDecision {
+    fun reduce(current: ResponseEventState, event: JSONObject): ResponseEventDecision =
+        reduce(current, event, Long.MAX_VALUE)
+
+    internal fun reduce(current: ResponseEventState, event: JSONObject,
+                        maxStateAllocationBytes: Long): ResponseEventDecision {
         // A terminal response is immutable. Late SSE callbacks must not append
         // content, change the response ID or replace the canonical terminal.
         if (current.terminalState != null) return ResponseEventDecision(current)
@@ -62,21 +66,33 @@ object ResponseEventReducer {
                 // items are safe to forward verbatim as typed Responses output.
                 if (outputIndex < 0 || item == null || item.optString("type") == "message")
                     ResponseEventDecision(current)
-                else ResponseEventDecision(current.copy(
-                    typedOutputItems = current.typedOutputItems +
-                        (outputIndex to JSONObject(item.toString()))
-                ))
+                else {
+                    ResponseAccumulatorMemoryBudget.check(current, replacementIndex = outputIndex,
+                        replacementItem = item, limitBytes = maxStateAllocationBytes)
+                    ResponseEventDecision(current.copy(
+                        typedOutputItems = current.typedOutputItems +
+                            (outputIndex to JSONObject(item.toString()))
+                    ))
+                }
             }
             "response.output_text.delta", "response.refusal.delta" ->
-                changeText(current, event, JsonProtocol.string(event, "delta"), replacePart = false)
+                changeText(current, event, JsonProtocol.string(event, "delta"),
+                    replacePart = false, maxStateAllocationBytes = maxStateAllocationBytes)
             "response.output_text.done" ->
-                changeText(current, event, JsonProtocol.string(event, "text"), replacePart = true)
+                changeText(current, event, JsonProtocol.string(event, "text"),
+                    replacePart = true, maxStateAllocationBytes = maxStateAllocationBytes)
             "response.refusal.done" ->
-                changeText(current, event, JsonProtocol.string(event, "refusal"), replacePart = true)
+                changeText(current, event, JsonProtocol.string(event, "refusal"),
+                    replacePart = true, maxStateAllocationBytes = maxStateAllocationBytes)
             "response.reasoning_summary_text.delta" -> {
                 val delta = JsonProtocol.string(event, "delta")
                 if (delta.isEmpty()) ResponseEventDecision(current)
-                else ResponseEventDecision(current.copy(reasoningSummary = current.reasoningSummary + delta), reasoningChanged = true)
+                else {
+                    ResponseAccumulatorMemoryBudget.check(current,
+                        summaryCharacters = current.reasoningSummary.length.toLong() + delta.length,
+                        limitBytes = maxStateAllocationBytes)
+                    ResponseEventDecision(current.copy(reasoningSummary = current.reasoningSummary + delta), reasoningChanged = true)
+                }
             }
             "response.completed" -> terminal(current, event, ResponseTerminalState.COMPLETED)
             "response.failed" -> terminal(current, event, ResponseTerminalState.FAILED,
@@ -100,7 +116,7 @@ object ResponseEventReducer {
 
     private fun changeText(
         current: ResponseEventState, event: JSONObject,
-        value: String, replacePart: Boolean
+        value: String, replacePart: Boolean, maxStateAllocationBytes: Long
     ): ResponseEventDecision {
         // Missing/empty .done payload is not proof that previously streamed
         // text vanished. Only a full terminal response may replace it with an
@@ -118,6 +134,9 @@ object ResponseEventReducer {
             val key = ResponseContentIndex(outputIndex, contentIndex)
             val oldParts = current.indexedTextParts
             val old = oldParts[key].orEmpty()
+            val nextLength = current.text.length.toLong() - (if (replacePart) old.length else 0) + value.length
+            ResponseAccumulatorMemoryBudget.check(current, textCharacters = nextLength,
+                limitBytes = maxStateAllocationBytes)
             val newValue = if (replacePart) value else old + value
             if (newValue == old) return ResponseEventDecision(current)
             val parts = oldParts + (key to newValue)
@@ -130,6 +149,9 @@ object ResponseEventReducer {
             // verbatim in arrival order, without claiming indexed ordering.
             val loose = if (current.indexedTextParts.isEmpty() &&
                 current.unindexedText.isEmpty()) current.text else current.unindexedText
+            val nextLength = current.text.length.toLong() - (if (replacePart) loose.length else 0) + value.length
+            ResponseAccumulatorMemoryBudget.check(current, textCharacters = nextLength,
+                limitBytes = maxStateAllocationBytes)
             val next = if (replacePart) value else loose + value
             if (next == loose) return ResponseEventDecision(current)
             current.copy(unindexedText = next, text =

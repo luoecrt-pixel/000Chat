@@ -29,7 +29,13 @@ class RawResponseRecoveryPersistenceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
 
-    @Test fun actualSendAllocationFailurePreservesSignedPartialAndCompleteReceivedSourceAfterReopen() {
+    @Test fun actualSendAllocationFailurePreservesSignedPartialAndCompleteReceivedSourceAfterReopen() =
+        assertActualSendMemoryFailure(accumulated = false)
+
+    @Test fun actualSendAccumulationFailurePreservesSignedPartialAndCompleteReceivedSourceAfterReopen() =
+        assertActualSendMemoryFailure(accumulated = true)
+
+    private fun assertActualSendMemoryFailure(accumulated: Boolean) {
         val prefs = context.getSharedPreferences("app", 0)
         val settings = listOf("provider", "model", "reasoning", "text_format", "background_responses",
             "system_prompt", "instructions", "file_analysis_tools", "web", "file_search", "code_interpreter", "image_generation")
@@ -43,13 +49,24 @@ class RawResponseRecoveryPersistenceTest {
         val endpoint = server.url("/v1/responses")
         val http = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
             .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().url(endpoint).build()) }.build()
-        // A little over the production frame reservation for this actual Android
-        // heap. The fixture itself retains only a small fraction of the heap.
+        // Same real heap boundary, exercised as one oversized frame or many
+        // individually small indexed events. No huge test-only budget is used.
         val payloadChars = (Runtime.getRuntime().maxMemory() / 3L / 32L + 4096L).toInt()
-        val source = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_memory_fixture\"}}\n\n" +
+        val prefix = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_memory_fixture\"}}\n\n" +
             "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"signed_memory\",\"encrypted_content\":\"exact-signed-memory-bytes\"}}\n\n" +
-            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"output_index\":1,\"content_index\":0,\"delta\":\"paid partial\"}\n\n" +
-            "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_memory_fixture\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" +
+            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"output_index\":1,\"content_index\":0,\"delta\":\"paid partial\"}\n\n"
+        val source = prefix + if (accumulated) buildString {
+            val fragment = "x".repeat(32_768)
+            repeat((payloadChars + fragment.length - 1) / fragment.length) { index ->
+                append("data: ")
+                append(JSONObject().put("type", "response.output_text.delta").put("sequence_number", index + 3)
+                    .put("output_index", 1).put("content_index", 0).put("delta", fragment))
+                append("\n\n")
+            }
+            append("data: {\"type\":\"response.completed\",\"sequence_number\":")
+            append(3 + (payloadChars + fragment.length - 1) / fragment.length)
+            append(",\"response\":{\"id\":\"resp_memory_fixture\",\"status\":\"completed\"}}\n\n")
+        } else "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_memory_fixture\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" +
             "x".repeat(payloadChars) + "\"}]}]}}\n\n"
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(source))
         var chatId = ""
@@ -88,10 +105,19 @@ class RawResponseRecoveryPersistenceTest {
                 ChatDatabase(context).use { db ->
                     val assistant = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
                     requestId = assistant.getString("request_id")
-                    assertEquals("paid partial", assistant.getString("text"))
+                    val receivedText = assistant.getString("text")
+                    if (accumulated) {
+                        assertTrue(receivedText.startsWith("paid partial"))
+                        val retained = receivedText.removePrefix("paid partial")
+                        assertTrue(retained.isNotEmpty())
+                        assertEquals(0, retained.length % 32_768)
+                        assertTrue(retained.all { it == 'x' })
+                        assertTrue(retained.length < payloadChars)
+                    } else assertEquals("paid partial", receivedText)
                     assertEquals("failed", assistant.getString("status"))
                     assertTrue(assistant.getBoolean("incomplete"))
                     assertTrue(assistant.getString("error").contains("памяти"))
+                    if (accumulated) assertTrue(assistant.getString("error").contains("Накопленный ответ"))
                     assertEquals("exact-signed-memory-bytes", assistant.getJSONArray("openai_protocol_output")
                         .getJSONObject(0).getString("encrypted_content"))
                     sourceFile = File(assistant.getJSONArray("annotations").getJSONObject(0).getString("local_path"))
