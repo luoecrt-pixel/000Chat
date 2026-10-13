@@ -24,10 +24,44 @@ data class OpenAiSseReadResult(
  * Callers own response state, event sequencing and UI/persistence ownership.
  */
 object OpenAiSseStreamReader {
-    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult {
+    // Hard limits on *decoded characters* (UTF-8 bytes can be up to 4x).
+    // Limits are deliberately larger than ordinary text events because tool
+    // image_generation_call results may contain PNG base64 in terminal JSON.
+    // Exceeding a limit is an explicit failure, never a truncated success.
+    internal data class Limits(
+        val maxLineChars: Int = 128 * 1024 * 1024,
+        val maxEventChars: Int = 160 * 1024 * 1024,
+        val maxStreamChars: Long = 512L * 1024 * 1024
+    ) {
+        init {
+            require(maxLineChars > 0 && maxEventChars >= maxLineChars && maxStreamChars >= maxEventChars)
+        }
+    }
+
+    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult =
+        read(reader, Limits(), onEvent)
+
+    internal fun read(reader: BufferedReader, limits: Limits, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult {
         val parser = SseEventParser()
         var terminal: OpenAiStreamEnd? = null
         var semanticError: String? = null
+        var eventChars = 0L
+        var streamChars = 0L
+
+        // BufferedReader.readLine() can allocate an unbounded string *before*
+        // we can inspect its length; read incrementally and fail at the boundary.
+        fun boundedLine(): String? {
+            val line = StringBuilder()
+            while (true) {
+                val ch = reader.read()
+                if (ch < 0) return if (line.isEmpty()) null else line.toString()
+                if (ch == '\n'.code) return line.toString()
+                if (line.length >= limits.maxLineChars) {
+                    throw IOException("Responses SSE line limit exceeded: ${limits.maxLineChars} characters")
+                }
+                line.append(ch.toChar())
+            }
+        }
 
         fun consume(data: String): Boolean {
             if (data == "[DONE]") return true
@@ -57,8 +91,15 @@ object OpenAiSseStreamReader {
         }
 
         while (true) {
-            val line = reader.readLine() ?: break
+            val line = boundedLine() ?: break
+            streamChars += line.length.toLong() + 1L
+            if (streamChars > limits.maxStreamChars)
+                throw IOException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
+            eventChars += line.length.toLong() + 1L
+            if (eventChars > limits.maxEventChars)
+                throw IOException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
             val frame = parser.acceptLine(line) ?: continue
+            eventChars = 0L
             if (consume(frame.data)) break
         }
         // A final frame without a trailing blank line is still a real SSE record.
