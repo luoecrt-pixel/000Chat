@@ -374,7 +374,7 @@ class BackgroundResponseWorker(
         val maxEncodedBytes = 72L * 1024L * 1024L
         val maxDecodedBytes = 50L * 1024L * 1024L
         val dir = File(applicationContext.filesDir, "generated_images").apply { mkdirs() }
-        results.take(4).forEachIndexed { index, encoded ->
+        results.forEachIndexed { index, encoded ->
             try {
                 if (encoded.length.toLong() > maxEncodedBytes) throw IOException("generated image too large")
                 val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
@@ -384,7 +384,10 @@ class BackgroundResponseWorker(
                 file.outputStream().use { it.write(bytes) }
                 out.put(JSONObject().put("filename", file.name).put("local_path", file.absolutePath).put("mime_type", "image/png").put("size_bytes", file.length()).put("state", "READY"))
             } catch (e: Exception) {
-                diagnostics.log("generated_image_failed", mapOf("error" to (e.message ?: e.toString()).take(300)))
+                val failure = (e.message ?: e.toString()).take(300)
+                diagnostics.log("generated_image_failed", mapOf("error" to failure, "index" to index))
+                out.put(JSONObject().put("state", "FAILED").put("source_index", index)
+                    .put("error", failure).put("filename", "astra_image_${index + 1}.png"))
             }
         }
         return out
