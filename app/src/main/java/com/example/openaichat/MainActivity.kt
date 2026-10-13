@@ -3594,6 +3594,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val result = resumableResponseClient.stream(
                     responseId = responseId,
                     startingAfter = cursor,
+                    ownerChatId = chatId,
+                    ownerRequestId = requestId,
                     onCallCreated = { call -> activeResumeCalls[chatId] = call },
                     startedAtEpochMs = requestStartedAt
                 ) { event ->
