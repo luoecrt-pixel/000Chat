@@ -97,7 +97,7 @@ class BackgroundResponseWorker(
                 if (!current.optBoolean("background_enabled", true)) return Result.success()
 
                 val cursor = current.optLong("last_sequence_number", -1L)
-                val full = StringBuilder(if (cursor >= 0L) JsonProtocol.string(current, "text").orEmpty() else "")
+                var responseState = ResponseIndexedCheckpoint.restore(current)
                 var lastSequence = cursor
                 var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -113,11 +113,11 @@ class BackgroundResponseWorker(
                             lastSequence = sequence
                         }
 
+                        // Identical indexed assembly as the foreground and
+                        // resumed Activity paths. Never append interleaved deltas
+                        // in arrival order or discard .done corrections.
+                        responseState = ResponseEventReducer.reduce(responseState, event).state
                         val type = JsonProtocol.string(event, "type")
-                        if (type == "response.output_text.delta" || type == "response.refusal.delta") {
-                            val delta = JsonProtocol.string(event, "delta")
-                            if (delta.isNotEmpty()) full.append(delta)
-                        }
 
                         val terminal = type == "response.completed" ||
                             type == "response.failed" ||
@@ -129,7 +129,7 @@ class BackgroundResponseWorker(
                             db.updateActiveResponse(
                                 chatId,
                                 responseId = responseId,
-                                text = full.toString(),
+                                text = responseState.text,
                                 status = when (type) {
                                     "response.completed" -> "completed"
                                     "response.failed" -> "failed"
@@ -138,6 +138,7 @@ class BackgroundResponseWorker(
                                     else -> "in_progress"
                                 },
                                 lastSequenceNumber = lastSequence,
+                                indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                 expectedRequestId = requestId
                             )
                         }
@@ -151,7 +152,7 @@ class BackgroundResponseWorker(
                         db.updateActiveResponse(
                             chatId,
                             responseId = responseId,
-                            text = full.toString(),
+                            text = responseState.text,
                             status = when (result.terminalEventType) {
                                 "response.completed" -> "completed"
                                 "response.failed" -> "failed"
@@ -160,6 +161,7 @@ class BackgroundResponseWorker(
                                 else -> "in_progress"
                             },
                             lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                            indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                             expectedRequestId = requestId
                         )
                         finalize(
@@ -176,9 +178,10 @@ class BackgroundResponseWorker(
                     db.updateActiveResponse(
                         chatId,
                         responseId = responseId,
-                        text = full.toString(),
+                        text = responseState.text,
                         status = "in_progress",
                         lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                        indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                         expectedRequestId = requestId
                     )
 
