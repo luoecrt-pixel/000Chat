@@ -3561,6 +3561,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // The original credential stays in memory; never persist it. Late-ID
         // cancellation runs on the existing IO thread, even after onDestroy.
         val cancel = Runnable {
+            // onDestroy interrupted Create, not this compensating /cancel.
+            // Okio would otherwise reject reading the already-paid usage body.
+            // Preserve cancellation for the caller after this bounded operation.
+            val createWasInterrupted = inline && Thread.interrupted()
             try {
                 if (credential.isBlank()) return@Runnable
                 ChatDatabase(applicationContext).use { db ->
@@ -3577,6 +3581,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             } catch (error: Exception) {
                 diagnostics.log("background_response_cancel_failed", mapOf(
                     "chat_id" to chatId, "response_id" to responseId, "error_type" to error.javaClass.simpleName))
+            } finally {
+                if (createWasInterrupted) Thread.currentThread().interrupt()
             }
         }
         if (inline) cancel.run() else executor.execute(cancel)
@@ -3618,8 +3624,41 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
             if (requestId != null && chatDb.listRequestAccounting(chatId).any { it.optString("local_request_id") == requestId && it.optString("provider") == "openrouter" }) return@forEach
+            // A closed socket may still own parsed bytes and its final SQLite
+            // transaction. Neither foreground cleanup nor another resume may
+            // discard that owner while the original callback is finishing.
+            if (requestId != null && OpenAiCreateCallOwners.isRegistered(chatId, requestId)) {
+                if (chatId == currentChatId() &&
+                    (currentCall == null || OpenAiCreateCallOwners.call(chatId, requestId) !== currentCall)) {
+                    watchOriginalCreateAfterRecreate(chatId, requestId)
+                }
+                return@forEach
+            }
             if (!a.optBoolean("background_enabled", true)) {
-                activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId=requestId)
+                if (requestId == null) return@forEach
+                val generation = activeResponseState.state.generation
+                val assistantItem = activeAssistantItemId
+                executor.execute {
+                    try {
+                        val current = activeResponsePersistence.getActiveResponse(chatId) ?: return@execute
+                        if (JsonProtocol.string(current, "request_id") != requestId ||
+                            OpenAiCreateCallOwners.isRegistered(chatId, requestId)) return@execute
+                        val terminal = try {
+                            ResponseIndexedCheckpoint.restore(current).terminalResponse
+                        } catch (_: UnrecoverableResponsesCheckpointException) { null }
+                        if (terminal != null) {
+                            // Received terminal output needs local finalization,
+                            // even when network/background recovery is disabled.
+                            finalizeBackgroundResponse(current, terminal, null)
+                        } else {
+                            BackgroundRequestFailureRecorder.persist(chatDb, chatId, requestId,
+                                JsonProtocol.string(current, "response_id"), "disconnected",
+                                "Original connection closed; background recovery is disabled", filesDir)
+                        }
+                    } finally {
+                        reconcileOriginalCreateUi(chatId, requestId, generation, assistantItem)
+                    }
+                }
                 diagnostics.log("background_recovery_disabled", mapOf(
                     "chat_id" to chatId,
                     "request_id" to requestId,
@@ -4124,13 +4163,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             return
         }
         ResponseNotifications.finished(applicationContext, chatId, requestId, success)
-        chatDb.recordEffortMetric(
+        recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(
             requestId,chatId,"resumed",
             effortPref,effectiveEffort,active.optBoolean("auto_selected",false),
             active.optInt("prompt_chars",0),active.optInt("attachments",0),
             latency,inTok,cachedTok,cacheWriteTok,outTok,reasoningTok,success,
             if(success)null else state.ifBlank{"background_failed"},cost
-        )
+        ) }
         chatDb.recordRequestAccounting(
             chatId = chatId, localRequestId = requestId,
             status = state, responseId = responseId, usage = usage

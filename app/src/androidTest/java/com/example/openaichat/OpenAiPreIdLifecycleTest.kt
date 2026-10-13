@@ -24,9 +24,13 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(AndroidJUnit4::class)
 class OpenAiPreIdLifecycleTest {
@@ -51,7 +55,23 @@ class OpenAiPreIdLifecycleTest {
     @Test fun connectionLostDuringPreIdRecreateKeepsReceivedPrefixUnknownCostAndOneCreate() =
         assertDelayedCreated(Action.RECREATE_DISCONNECT)
 
-    private enum class Action { STOP_START, STOP, DELETE, REPLACE, RECREATE, RECREATE_STOP, RECREATE_DISCONNECT }
+    @Test fun archivedForegroundCreatedAcrossRecreateKeepsOwnerAndCommitsWithoutBackgroundRecovery() =
+        assertDelayedCreated(Action.FOREGROUND_RECREATE)
+
+    @Test fun lostForegroundConnectionAcrossRecreateKeepsReceivedPrefixAndDraftWithoutNewCreate() =
+        assertDelayedCreated(Action.FOREGROUND_RECREATE_DISCONNECT)
+
+    @Test fun oldCreatedAfterRecreateAndSecondSendCannotFinishOrClearNewActivityOwner() =
+        assertDelayedCreated(Action.RECREATE_REPLACE)
+
+    @Test fun foregroundTerminalCheckpointReopenFinalizesLocallyDespiteOptionalMetricFailure() =
+        assertForegroundCheckpoint(terminal = true)
+
+    @Test fun foregroundPartialCheckpointReopenKeepsSignedOutputAndSourceWithoutNetworkRecovery() =
+        assertForegroundCheckpoint(terminal = false)
+
+    private enum class Action { STOP_START, STOP, DELETE, REPLACE, RECREATE, RECREATE_STOP,
+        RECREATE_DISCONNECT, FOREGROUND_RECREATE, FOREGROUND_RECREATE_DISCONNECT, RECREATE_REPLACE }
 
     private fun assertDelayedCreated(action: Action) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -71,8 +91,14 @@ class OpenAiPreIdLifecycleTest {
         val replacementEntered = CountDownLatch(1)
         val replacementRelease = CountDownLatch(1)
         val createNumber = AtomicInteger()
-        val cancelExpected = action in setOf(Action.STOP, Action.DELETE, Action.REPLACE, Action.RECREATE_STOP)
-        val parsedGate = action == Action.RECREATE || action == Action.RECREATE_STOP
+        val replace = action == Action.REPLACE || action == Action.RECREATE_REPLACE
+        val foreground = action == Action.FOREGROUND_RECREATE || action == Action.FOREGROUND_RECREATE_DISCONNECT
+        val disconnect = action == Action.RECREATE_DISCONNECT || action == Action.FOREGROUND_RECREATE_DISCONNECT
+        val recreateComplete = action == Action.RECREATE || action == Action.FOREGROUND_RECREATE
+        val cancelExpected = action in setOf(Action.STOP, Action.DELETE, Action.RECREATE_STOP) || replace
+        val parsedGate = recreateComplete || action == Action.RECREATE_STOP || action == Action.RECREATE_REPLACE
+        val interruptedCreated = AtomicBoolean()
+        val interruptedCancel = AtomicBoolean()
         val responseId = "resp_preid_fixture"
         val replacementResponseId = "resp_preid_replacement"
         fun completedStream(id: String, text: String): String {
@@ -86,22 +112,22 @@ class OpenAiPreIdLifecycleTest {
         }
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody(completedStream(responseId, "Canonical result")))
-        if (action == Action.REPLACE) server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+        if (replace) server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody(completedStream(replacementResponseId, "Replacement result")))
         if (cancelExpected) server.enqueue(MockResponse().setHeader("Content-Type", "application/json")
             .setBody(JSONObject().put("id", responseId).put("status", "cancelled")
                 .put("usage", JSONObject().put("input_tokens", 17).put("output_tokens", 31)).toString()))
         val createClient = trusted.newBuilder().addInterceptor { chain ->
             val response = chain.proceed(chain.request().newBuilder().url(server.url("/v1/responses")).build())
-            if (parsedGate) return@addInterceptor response
-            val body = response.body!!
             val number = createNumber.getAndIncrement()
+            if (parsedGate && number == 0) return@addInterceptor response
+            val body = response.body!!
             val receivedGate = if (number == 0) entered else replacementEntered
             val releaseGate = if (number == 0) release else replacementRelease
             val gated = object : ForwardingSource(body.source()) {
                 private var first = true
                 override fun read(sink: Buffer, byteCount: Long): Long {
-                    if (action == Action.RECREATE_DISCONNECT) {
+                    if (disconnect) {
                         if (first) {
                             first = false
                             // This one byte has reached the production archive;
@@ -130,6 +156,7 @@ class OpenAiPreIdLifecycleTest {
             }).build()
         }.build()
         val cancelClient = trusted.newBuilder().addInterceptor { chain ->
+            interruptedCancel.set(Thread.currentThread().isInterrupted)
             chain.proceed(chain.request().newBuilder().url(server.url(chain.request().url.encodedPath)).build())
         }.build()
         var chatId = ""
@@ -139,6 +166,15 @@ class OpenAiPreIdLifecycleTest {
         var replacementCall: Call? = null
         var replacementGeneration = -1L
         var replacementAssistantId: String? = null
+        fun sendReplacement(activity: MainActivity) {
+            (field("input").get(activity) as EditText).setText("Replacement prompt")
+            MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType!!)
+                .apply { isAccessible = true }.invoke(activity, false)
+            replacementCall = field("currentCall").get(activity) as Call
+            val state = (field("activeResponseState").get(activity) as ActiveResponseStateStore).state
+            replacementGeneration = state.generation
+            replacementAssistantId = state.assistantItemId
+        }
         try {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 scenario.onActivity { activity ->
@@ -147,7 +183,7 @@ class OpenAiPreIdLifecycleTest {
                     prefs.edit().putString("provider", "openai").putString("model", "gpt-6-astra")
                         .putString("reasoning", "high").putString("text_format", "text")
                         .putString("system_prompt", "").putString("instructions", "")
-                        .putBoolean("background_responses", true).putBoolean("file_analysis_tools", false)
+                        .putBoolean("background_responses", !foreground).putBoolean("file_analysis_tools", false)
                         .putBoolean("web", false).putBoolean("file_search", false)
                         .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit()
                     SecureStore(context).setApiKey("sk-only-local-pre-id")
@@ -165,6 +201,7 @@ class OpenAiPreIdLifecycleTest {
                                     try { release.await(100, TimeUnit.MILLISECONDS) }
                                     catch (_: InterruptedException) { interrupted = true }
                                 }
+                                interruptedCreated.set(interrupted)
                                 if (interrupted) Thread.currentThread().interrupt()
                                 if (release.count > 0L) throw IOException("Parsed callback gate timed out")
                             }
@@ -177,7 +214,7 @@ class OpenAiPreIdLifecycleTest {
                 }
                 val create = server.takeRequest(20, TimeUnit.SECONDS)!!
                 assertEquals("POST", create.method)
-                assertTrue(JSONObject(create.body.readUtf8()).getBoolean("background"))
+                assertEquals(!foreground, JSONObject(create.body.readUtf8()).getBoolean("background"))
                 assertTrue(entered.await(20, TimeUnit.SECONDS))
                 ChatDatabase(context).use { db ->
                     val active = db.getActiveResponse(chatId)!!
@@ -185,7 +222,7 @@ class OpenAiPreIdLifecycleTest {
                     assertTrue(JsonProtocol.string(active, "response_id").isBlank())
                     assertTrue(OpenAiCreateCallOwners.hasLiveCall(chatId, requestId))
                     db.setActiveResponse(chatId, null, requestId, "", "starting",
-                        System.currentTimeMillis() - 180_000L, "high", "high", false, 13, 0, true)
+                        System.currentTimeMillis() - 180_000L, "high", "high", false, 13, 0, !foreground)
                 }
                 when (action) {
                     Action.STOP_START -> {
@@ -206,17 +243,21 @@ class OpenAiPreIdLifecycleTest {
                         }
                         ChatDatabase(context).use { assertNull(it.getChat(chatId)) }
                     }
-                    Action.RECREATE, Action.RECREATE_STOP, Action.RECREATE_DISCONNECT -> {
+                    Action.RECREATE, Action.RECREATE_STOP, Action.RECREATE_DISCONNECT,
+                    Action.FOREGROUND_RECREATE, Action.FOREGROUND_RECREATE_DISCONNECT, Action.RECREATE_REPLACE -> {
                         if (parsedGate) {
                             val archive = OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId).single()
                             assertTrue("Created bytes must already be in the real archive", archive.readText().contains(responseId))
                         }
                         scenario.recreate()
                         scenario.onActivity { activity ->
+                            field("client").set(activity, createClient)
+                            field("pollingClient").set(activity, cancelClient)
                             SecureStore(context).setApiKey("sk-only-local-new-account")
-                            if (action == Action.RECREATE_STOP) {
+                            if (action == Action.RECREATE_STOP || replace) {
                                 MainActivity::class.java.getDeclaredMethod("stopCurrentResponse")
                                     .apply { isAccessible = true }.invoke(activity)
+                                if (replace) sendReplacement(activity)
                             } else {
                                 (field("input").get(activity) as EditText).setText("Recreated draft")
                                 if (parsedGate) {
@@ -233,26 +274,19 @@ class OpenAiPreIdLifecycleTest {
                             MainActivity::class.java.getDeclaredMethod("stopCurrentResponse")
                                 .apply { isAccessible = true }.invoke(activity)
                             SecureStore(context).setApiKey("sk-only-local-new-account")
-                            if (action == Action.REPLACE) {
-                                (field("input").get(activity) as EditText).setText("Replacement prompt")
-                                MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType!!)
-                                    .apply { isAccessible = true }.invoke(activity, false)
-                                replacementCall = field("currentCall").get(activity) as Call
-                                val state = (field("activeResponseState").get(activity) as ActiveResponseStateStore).state
-                                replacementGeneration = state.generation
-                                replacementAssistantId = state.assistantItemId
-                            }
+                            if (replace) sendReplacement(activity)
                         }
-                        if (action == Action.REPLACE) {
-                            val replacementCreate = server.takeRequest(20, TimeUnit.SECONDS)!!
-                            assertEquals("POST", replacementCreate.method)
-                            assertEquals("Bearer sk-only-local-new-account", replacementCreate.getHeader("Authorization"))
-                            assertTrue(replacementEntered.await(20, TimeUnit.SECONDS))
-                            ChatDatabase(context).use { db ->
-                                replacementRequestId = db.getActiveResponse(chatId)!!.getString("request_id")
-                                assertNotEquals(requestId, replacementRequestId)
-                            }
-                        } else ChatDatabase(context).use { assertNull(it.getActiveResponse(chatId)) }
+                        if (!replace) ChatDatabase(context).use { assertNull(it.getActiveResponse(chatId)) }
+                    }
+                }
+                if (replace) {
+                    val replacementCreate = server.takeRequest(20, TimeUnit.SECONDS)!!
+                    assertEquals("POST", replacementCreate.method)
+                    assertEquals("Bearer sk-only-local-new-account", replacementCreate.getHeader("Authorization"))
+                    assertTrue(replacementEntered.await(20, TimeUnit.SECONDS))
+                    ChatDatabase(context).use { db ->
+                        replacementRequestId = db.getActiveResponse(chatId)!!.getString("request_id")
+                        assertNotEquals(requestId, replacementRequestId)
                     }
                 }
                 release.countDown()
@@ -266,10 +300,12 @@ class OpenAiPreIdLifecycleTest {
                     assertEquals("POST", cancel.method)
                     assertEquals("/v1/responses/$responseId/cancel", cancel.path)
                     assertEquals("Bearer sk-only-local-pre-id", cancel.getHeader("Authorization"))
+                    assertFalse("Late cancellation must read usage without the destroyed Create interrupt", interruptedCancel.get())
+                    if (parsedGate) assertTrue("The old Activity really interrupted its Create callback", interruptedCreated.get())
                 }
                 // The old callback has exited: assert replacement ownership before
                 // allowing its independently paid response to finish.
-                if (action == Action.REPLACE) {
+                if (replace) {
                     InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                     ChatDatabase(context).use { db ->
                         val active = db.getActiveResponse(chatId)!!
@@ -296,7 +332,9 @@ class OpenAiPreIdLifecycleTest {
                     finished = ChatDatabase(context).use { db ->
                         when (action) {
                             Action.DELETE -> db.getChat(chatId) == null
-                            Action.STOP, Action.RECREATE_STOP -> db.listRequestAccounting(chatId).single().optString("response_id") == responseId
+                            Action.STOP, Action.RECREATE_STOP -> db.listRequestAccounting(chatId).single().let {
+                                it.optString("response_id") == responseId && it.optString("provider_status") == "cancelled"
+                            }
                             else -> db.getChat(chatId)!!.getJSONArray("messages").length() == 2 &&
                                 db.getActiveResponse(chatId) == null
                         }
@@ -305,7 +343,7 @@ class OpenAiPreIdLifecycleTest {
                     SystemClock.sleep(20)
                 }
                 assertTrue("Original/replacement request did not finish its owned transaction", finished)
-                if (action == Action.REPLACE) {
+                if (replace) {
                     while (OpenAiCreateCallOwners.isRegistered(chatId, replacementRequestId) &&
                         SystemClock.elapsedRealtime() < commitDeadline) SystemClock.sleep(20)
                     assertFalse(OpenAiCreateCallOwners.isRegistered(chatId, replacementRequestId))
@@ -320,7 +358,7 @@ class OpenAiPreIdLifecycleTest {
                     } else {
                         val messages = db.getChat(chatId)!!.getJSONArray("messages")
                         if (cancelExpected && action != Action.DELETE) {
-                            assertEquals(if (action == Action.REPLACE) 2 else 0, messages.length())
+                            assertEquals(if (replace) 2 else 0, messages.length())
                             val accounting = db.listRequestAccounting(chatId).single {
                                 it.getString("local_request_id") == requestId
                             }
@@ -332,13 +370,13 @@ class OpenAiPreIdLifecycleTest {
                             assertEquals("unknown", accounting.getString("cost_kind"))
                             assertFalse(accounting.has("cost_usd"))
                         }
-                        if (action == Action.STOP_START || action == Action.REPLACE || action == Action.RECREATE) {
-                            assertEquals(if (action == Action.REPLACE) "Replacement result" else "Canonical result",
+                        if (action == Action.STOP_START || replace || recreateComplete) {
+                            assertEquals(if (replace) "Replacement result" else "Canonical result",
                                 messages.getJSONObject(1).getString("text"))
-                            assertEquals(if (action == Action.REPLACE) replacementResponseId else responseId,
+                            assertEquals(if (replace) replacementResponseId else responseId,
                                 messages.getJSONObject(1).getString("response_id"))
                         }
-                        if (action == Action.RECREATE_DISCONNECT) {
+                        if (disconnect) {
                             val assistant = messages.getJSONObject(1)
                             assertTrue(assistant.getBoolean("incomplete"))
                             assertEquals("", assistant.getString("text"))
@@ -362,7 +400,7 @@ class OpenAiPreIdLifecycleTest {
                 scenario.onActivity { activity ->
                     assertTrue(activity.send.isEnabled)
                     if (action == Action.STOP || action == Action.RECREATE_STOP) assertEquals("Pre-ID prompt", (field("input").get(activity) as EditText).text.toString())
-                    if (action == Action.RECREATE || action == Action.RECREATE_DISCONNECT) {
+                    if (recreateComplete || disconnect) {
                         assertEquals("Recreated draft", (field("input").get(activity) as EditText).text.toString())
                     }
                     if (action == Action.DELETE) {
@@ -372,7 +410,7 @@ class OpenAiPreIdLifecycleTest {
                     }
                 }
                 assertEquals("Only explicitly requested Creates and old-response cancellation",
-                    when (action) { Action.STOP_START, Action.RECREATE, Action.RECREATE_DISCONNECT -> 1; Action.REPLACE -> 3; else -> 2 }, server.requestCount)
+                    if (replace) 3 else if (cancelExpected) 2 else 1, server.requestCount)
             }
         } finally {
             release.countDown()
@@ -394,6 +432,139 @@ class OpenAiPreIdLifecycleTest {
             server.shutdown()
         }
     }
+
+    private fun assertForegroundCheckpoint(terminal: Boolean) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("app", 0)
+        val previousProvider = prefs.getString("provider", null)
+        val previousBackground = prefs.all["background_responses"] as? Boolean
+        val previousChat = prefs.getString("current_chat", null)
+        val previousKey = SecureStore(context).getApiKey()
+        val requestId = "foreground-reopen-" + UUID.randomUUID()
+        val responseId = "resp_foreground_checkpoint"
+        val signed = "saved-signed-\u0000😀"
+        val reasoning = JSONObject().put("type", "reasoning").put("id", "rs_foreground")
+            .put("encrypted_content", signed)
+        val originalSource = ("data: " + JSONObject().put("type", "response.output_item.done")
+            .put("output_index", 0).put("item", reasoning) + "\n\n").toByteArray(Charsets.UTF_8)
+        val calls = AtomicInteger()
+        val metricFailures = AtomicInteger()
+        val noNetwork = OkHttpClient.Builder().addInterceptor {
+            calls.incrementAndGet()
+            throw IOException("Foreground checkpoint must not start network recovery")
+        }.build()
+        var chatId = ""
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    activity.newChat()
+                    chatId = activity.prefs.getString("current_chat", "")!!
+                    prefs.edit().putString("provider", "openai").putBoolean("background_responses", false).commit()
+                    SecureStore(context).setApiKey("sk-only-local-foreground-checkpoint")
+                    field("client").set(activity, noNetwork)
+                    field("pollingClient").set(activity, noNetwork)
+                    ResumableResponseStreamClient::class.java.getDeclaredField("httpClient").apply {
+                        isAccessible = true
+                    }.set(field("resumableResponseClient").get(activity), noNetwork)
+                    val metricHook: () -> Unit = {
+                        metricFailures.incrementAndGet()
+                        throw android.database.sqlite.SQLiteDatabaseLockedException("Synthetic optional foreground metric lock")
+                    }
+                    field("openAiEffortMetricHook").set(activity, metricHook)
+                    var state = ResponseEventReducer.reduce(ResponseEventState(), JSONObject()
+                        .put("type", "response.created").put("response", JSONObject().put("id", responseId))).state
+                    state = ResponseEventReducer.reduce(state, JSONObject().put("type", "response.output_item.done")
+                        .put("output_index", 0).put("item", reasoning)).state
+                    state = ResponseEventReducer.reduce(state, JSONObject().put("type", "response.output_text.delta")
+                        .put("output_index", 1).put("content_index", 0).put("delta", "Saved partial")).state
+                    if (terminal) {
+                        val output = JSONArray().put(reasoning).put(JSONObject().put("type", "message")
+                            .put("role", "assistant").put("content", JSONArray().put(JSONObject()
+                                .put("type", "output_text").put("text", "Saved terminal"))))
+                        state = ResponseEventReducer.reduce(state, JSONObject().put("type", "response.completed")
+                            .put("response", JSONObject().put("id", responseId).put("status", "completed").put("output", output)
+                                .put("usage", JSONObject().put("input_tokens", 21).put("output_tokens", 45)))).state
+                    }
+                    val user = JSONObject().put("role", "user").put("text", "Foreground prompt")
+                        .put("request_id", requestId).put("provider", "openai").put("requested_model", "gpt-6-astra")
+                    ChatDatabase(context).use { db ->
+                        db.upsertCurrentChat(chatId, "Foreground checkpoint", null, "high", listOf(user))
+                        assertTrue(db.startRequestAccounting(chatId, requestId, "openai", "gpt-6-astra", "openai_api_key"))
+                        db.setActiveResponse(chatId, responseId, requestId, "", "starting",
+                            System.currentTimeMillis() - 180_000L, "high", "high", false, 17, 0, false)
+                        db.updateActiveResponse(chatId, responseId, state.text,
+                            if (terminal) "completed" else "in_progress", 3, requestId, ResponseIndexedCheckpoint.serialize(state))
+                    }
+                    // Close/reopen the seeded SQLite path before the actual
+                    // Activity restore and recovery methods inspect its owner.
+                    ChatDatabase(context).use { assertEquals(requestId, it.getActiveResponse(chatId)!!.getString("request_id")) }
+                    OpenAiRawSseArchive.begin(ByteArrayInputStream(originalSource), context.filesDir, chatId, requestId)
+                        .use { it.copyTo(ByteArrayOutputStream()) }
+                    assertFalse(OpenAiCreateCallOwners.isRegistered(chatId, requestId))
+                    (field("input").get(activity) as EditText).setText("Preserved reopen draft")
+                    invoke(activity, "persistComposerStateNow")
+                    invoke(activity, "restoreCurrentChat")
+                    invoke(activity, "resumeBackgroundResponses")
+                }
+                val expectedStatus = if (terminal) "completed" else "disconnected"
+                var finished = false
+                val deadline = SystemClock.elapsedRealtime() + 20_000L
+                while (!finished && SystemClock.elapsedRealtime() < deadline) {
+                    finished = ChatDatabase(context).use { db ->
+                        !db.isActiveRequest(chatId, requestId) && db.listRequestAccounting(chatId).single()
+                            .optString("local_status") == expectedStatus
+                    }
+                    if (!finished) SystemClock.sleep(20)
+                }
+                assertTrue("Foreground checkpoint must finalize before clearing ownership", finished)
+                var uiReady = false
+                while (!uiReady && SystemClock.elapsedRealtime() < deadline) {
+                    scenario.onActivity { uiReady = it.send.isEnabled }
+                    if (!uiReady) SystemClock.sleep(20)
+                }
+                assertTrue(uiReady)
+                scenario.onActivity { activity ->
+                    assertEquals("Preserved reopen draft", (field("input").get(activity) as EditText).text.toString())
+                    invoke(activity, "resumeBackgroundResponses")
+                }
+                ChatDatabase(context).use { db ->
+                    assertNull(db.getActiveResponse(chatId))
+                    val messages = db.getChat(chatId)!!.getJSONArray("messages")
+                    assertEquals(2, messages.length())
+                    val answer = messages.getJSONObject(1)
+                    assertEquals(if (terminal) "Saved terminal" else "Saved partial", answer.getString("text"))
+                    assertEquals(signed, answer.getJSONArray("openai_protocol_output").getJSONObject(0).getString("encrypted_content"))
+                    val account = db.listRequestAccounting(chatId).single()
+                    assertEquals("unknown", account.getString("cost_kind"))
+                    assertFalse(account.has("cost_usd"))
+                    if (terminal) {
+                        assertEquals(21L, account.getLong("input_tokens"))
+                        assertEquals(45L, account.getLong("output_tokens"))
+                    } else {
+                        assertTrue(answer.getBoolean("incomplete"))
+                        val source = java.io.File(answer.getJSONArray("annotations").getJSONObject(0).getString("local_path"))
+                        assertArrayEquals(originalSource, source.readBytes())
+                    }
+                }
+                assertEquals(if (terminal) 1 else 0, metricFailures.get())
+                assertEquals("No Create, cancel, retrieve or SSE resume", 0, calls.get())
+            }
+        } finally {
+            SecureStore(context).setApiKey(previousKey)
+            prefs.edit().apply {
+                if (previousProvider == null) remove("provider") else putString("provider", previousProvider)
+                if (previousBackground == null) remove("background_responses") else putBoolean("background_responses", previousBackground)
+                if (previousChat == null) remove("current_chat") else putString("current_chat", previousChat)
+            }.commit()
+            if (chatId.isNotBlank()) {
+                ChatDatabase(context).use { it.deleteChat(chatId) }
+                OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId).forEach { it.delete() }
+            }
+        }
+    }
+
+    private fun invoke(activity: MainActivity, name: String) = MainActivity::class.java.getDeclaredMethod(name)
+        .apply { isAccessible = true }.invoke(activity)
 
     private fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
 }
