@@ -116,6 +116,8 @@ class BackgroundResponseWorker(
                     val result = streamClient.stream(
                         responseId = responseId,
                         startingAfter = cursor,
+                        ownerChatId = chatId,
+                        ownerRequestId = requestId,
                         onCallCreated = { call -> activeCall = call },
                         startedAtEpochMs = requestStartedAt
                     ) { event ->
