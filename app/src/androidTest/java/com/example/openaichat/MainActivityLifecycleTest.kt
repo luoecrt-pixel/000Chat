@@ -177,7 +177,7 @@ class MainActivityLifecycleTest {
             .put("status", "completed")
             .put("output", JSONArray().put(JSONObject().put("type", "message")
                 .put("role", "assistant").put("content", JSONArray().put(JSONObject()
-                    .put("type", "output_text").put("text", "Follow-up answer"))))
+                    .put("type", "output_text").put("text", "Follow-up answer")))))
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody("data: " + JSONObject().put("type", "response.created")
                 .put("sequence_number", 0).put("response", JSONObject()
