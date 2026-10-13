@@ -92,7 +92,7 @@ object ResponseEventReducer {
         val contentIndex = event.optInt("content_index", -1)
         val updated = if (outputIndex >= 0 && contentIndex >= 0) {
             if (current.legacyFlatCheckpoint) {
-                throw java.io.IOException(
+                throw UnrecoverableResponsesCheckpointException(
                     "Indexed Responses continuation requires an owned checkpoint; " +
                     "legacy flattened partial cannot be safely reordered"
                 )
