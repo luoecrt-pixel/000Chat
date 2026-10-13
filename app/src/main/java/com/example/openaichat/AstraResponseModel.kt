@@ -115,7 +115,7 @@ data class AstraResponseModel(
                 status = status,
                 error = error,
                 reasoningSummary = reasoningSummaryParts.joinToString("\n\n").takeIf{it.isNotBlank()},
-                generatedImageResults = generatedImages.take(4)
+                generatedImageResults = generatedImages
             )
         }
 
