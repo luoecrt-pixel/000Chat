@@ -353,6 +353,53 @@ class MainActivityLifecycleTest {
         assertActualSendAfterInterruptedOpenAiResponse(reopen = true, errorEvent = true)
     }
 
+
+    @Test
+    fun sixRealGeneratedPngsPlusFailedSeventhAreAllRepresentedAndRenderable() {
+        // A real 2x2 PNG fixture, with no paid API or test-network traffic.
+        val png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
+        val results = List(6) { png } + "not-valid-png"
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val savedPaths = mutableListOf<String>()
+        try {
+            scenario.onActivity { activity ->
+                val manifest = invokeMethod(
+                    activity, "saveGeneratedImages", arrayOf(List::class.java),
+                    arrayOf(results)
+                ) as JSONArray
+                assertEquals("Every provider output needs a durable outcome", 7, manifest.length())
+                for (i in 0 until 6) {
+                    val entry = manifest.getJSONObject(i)
+                    assertEquals("READY", entry.getString("state"))
+                    val path = entry.getString("local_path")
+                    assertTrue(java.io.File(path).isFile)
+                    assertEquals("image/png", entry.getString("mime_type"))
+                    assertEquals(i, path.substringAfterLast("_").substringBefore(".png").toInt())
+                    savedPaths += path
+                }
+                val failed = manifest.getJSONObject(6)
+                assertEquals("FAILED", failed.getString("state"))
+                assertEquals(6, failed.getInt("source_index"))
+                assertTrue(failed.getString("error").isNotBlank())
+                val layout = android.widget.LinearLayout(activity).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                }
+                invokeMethod(
+                    activity, "renderGeneratedImages",
+                    arrayOf(JSONObject::class.java, android.widget.LinearLayout::class.java),
+                    arrayOf(JSONObject().put("generated_images", manifest), layout)
+                )
+                assertEquals("Each successful or failed paid image needs a UI row",
+                    7, layout.childCount)
+                val last = layout.getChildAt(6) as android.widget.TextView
+                assertTrue(last.text.toString().contains("№7"))
+            }
+        } finally {
+            savedPaths.forEach { java.io.File(it).delete() }
+            scenario.close()
+        }
+    }
+
     private var savedNotificationPreference: Boolean? = null
     @Before fun suppressUnrelatedNotificationPermissionDialog() {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
