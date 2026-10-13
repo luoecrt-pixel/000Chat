@@ -82,9 +82,10 @@ object ResponseEventReducer {
         current: ResponseEventState, event: JSONObject,
         value: String, replacePart: Boolean
     ): ResponseEventDecision {
-        // A zero-length delta is a no-op. For .done, preserve deliberately empty
-        // text unless this part was already populated; terminal output is final.
-        if (value.isEmpty() && !replacePart) return ResponseEventDecision(current)
+        // Missing/empty .done payload is not proof that previously streamed
+        // text vanished. Only a full terminal response may replace it with an
+        // authoritative empty output. Never erase another indexed item.
+        if (value.isEmpty()) return ResponseEventDecision(current)
         val outputIndex = event.optInt("output_index", -1)
         val contentIndex = event.optInt("content_index", -1)
         val updated = if (outputIndex >= 0 && contentIndex >= 0) {
