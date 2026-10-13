@@ -171,6 +171,97 @@ class MainActivityLifecycleTest {
         }
     }
 
+    @Test fun legacyCompletedOpenAiRequiresVisibleConsentBeforeWireAndPreservesDraft() {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val terminal = JSONObject().put("id", "resp_legacy_followup")
+            .put("status", "completed")
+            .put("output", JSONArray().put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(JSONObject()
+                    .put("type", "output_text").put("text", "Follow-up answer"))))
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
+            .setBody("data: " + JSONObject().put("type", "response.created")
+                .put("sequence_number", 0).put("response", JSONObject()
+                    .put("id", "resp_legacy_followup")) +
+                "\n\ndata: " + JSONObject().put("type", "response.completed")
+                .put("sequence_number", 1).put("response", terminal) + "\n\n"))
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        val prefs = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .targetContext.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val keys = listOf("provider", "model", "reasoning", "text_format",
+            "system_prompt", "instructions", "background_responses",
+            "file_analysis_tools", "web", "file_search", "code_interpreter", "image_generation")
+        val previous = keys.associateWith { prefs.all[it] }
+        var originalKey: String? = null
+        try {
+            scenario.onActivity { activity ->
+                activity.newChat()
+                prefs.edit().putString("provider", "openai")
+                    .putString("model", "gpt-6-astra")
+                    .putString("reasoning", "high").putString("text_format", "text")
+                    .putString("system_prompt", "Current system")
+                    .putString("instructions", "Current developer")
+                    .putBoolean("background_responses", false)
+                    .putBoolean("file_analysis_tools", false)
+                    .putBoolean("web", false).putBoolean("file_search", false)
+                    .putBoolean("code_interpreter", false).putBoolean("image_generation", false)
+                    .commit()
+                originalKey = SecureStore(activity).getApiKey()
+                SecureStore(activity).setApiKey("sk-only-local-test")
+                val redirected = testHttpClient.newBuilder().addInterceptor { chain ->
+                    chain.proceed(chain.request().newBuilder()
+                        .url(server.url("/v1/responses")).build())
+                }.build()
+                setPrivateField(activity, "client", redirected)
+                @Suppress("UNCHECKED_CAST")
+                val history = privateField(activity, "chat") as MutableList<JSONObject>
+                history.clear()
+                history += JSONObject().put("role", "user").put("text", "Original prompt")
+                history += JSONObject().put("role", "assistant").put("provider", "openai")
+                    .put("status", "completed").put("response_id", "resp_old_no_output")
+                    .put("text", "Legacy visible answer")
+                (privateField(activity, "input") as android.widget.EditText)
+                    .setText("Follow up")
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                val first = privateField(activity, "openAiLegacyConsentDialog") as android.app.AlertDialog
+                assertTrue("Legacy downgrade must require dialog", first.isShowing)
+                first.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).performClick()
+                assertEquals("Follow up", (privateField(activity, "input") as android.widget.EditText)
+                    .text.toString())
+                assertEquals(2, history.size)
+                invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                val second = privateField(activity, "openAiLegacyConsentDialog") as android.app.AlertDialog
+                assertTrue(second.isShowing)
+                second.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick()
+            }
+            val request = server.takeRequest(25, TimeUnit.SECONDS)
+                ?: throw AssertionError("Explicit legacy text-only Send did not reach local HTTPS")
+            val body = JSONObject(request.body.readUtf8())
+            assertFalse(body.has("previous_response_id"))
+            val wire = body.getJSONArray("input").toString()
+            assertTrue(wire.contains("Current system"))
+            assertTrue(wire.contains("Current developer"))
+            assertTrue(wire.contains("Legacy visible answer"))
+            assertTrue(wire.contains("ТОЛЬКО видимый текст"))
+            assertTrue(wire.contains("Follow up"))
+            assertEquals("Consent cannot trigger more than one Create", 1, server.requestCount)
+        } finally {
+            scenario.onActivity { activity ->
+                originalKey?.let { SecureStore(activity).setApiKey(it) }
+            }
+            prefs.edit().apply {
+                for (key in keys) when (val value = previous[key]) {
+                    is String -> putString(key, value)
+                    is Boolean -> putBoolean(key, value)
+                    is Int -> putInt(key, value)
+                    is Long -> putLong(key, value)
+                    else -> remove(key)
+                }
+            }.commit()
+            scenario.close()
+            server.shutdown()
+        }
+    }
+
     @Test fun actualOpenAiSendKeepsInheritedChainWithoutRepeatingRoles() {
         val body = actualOpenAiWireWithOwnedLocalManifest(false)
         assertEquals("resp_previous", body.getString("previous_response_id"))
