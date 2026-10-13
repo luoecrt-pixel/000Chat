@@ -13,7 +13,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.util.UUID
 
-/** Opens a real existing v22 file via SQLiteOpenHelper.onUpgrade(22, 23). */
+/** Opens a real existing v22 file via SQLiteOpenHelper.onUpgrade(22, 24). */
 @RunWith(AndroidJUnit4::class)
 class OpenAiV22ToV23MigrationTest {
     @Test fun nonDestructiveUpgradePreservesLegacyMessagesAttachmentsAndLedger() {
@@ -94,7 +94,7 @@ class OpenAiV22ToV23MigrationTest {
         }
         try {
             ChatDatabase(isolatedContext).use { upgraded ->
-                assertEquals(23, upgraded.readableDatabase.version)
+                assertEquals(24, upgraded.readableDatabase.version)
                 val chat = upgraded.getChat(chatId)!!
                 val restored = chat.getJSONArray("messages")
                 assertEquals(1, restored.length())
@@ -119,7 +119,7 @@ class OpenAiV22ToV23MigrationTest {
                 // Reopening the migrated file must not re-run the migration.
             }
             ChatDatabase(isolatedContext).use { reopened ->
-                assertEquals(23, reopened.readableDatabase.version)
+                assertEquals(24, reopened.readableDatabase.version)
                 assertEquals("Preserved original answer",
                     reopened.getChat(chatId)!!.getJSONArray("messages")
                         .getJSONObject(0).getString("text"))
