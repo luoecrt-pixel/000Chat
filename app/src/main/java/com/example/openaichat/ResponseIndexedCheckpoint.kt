@@ -89,8 +89,7 @@ object ResponseIndexedCheckpoint {
         val terminalResponse = snapshot.optJSONObject("terminal_response")
         if (terminalResponse != null && terminalState == null)
             throw UnrecoverableResponsesCheckpointException("Terminal Responses output without terminal state")
-        if (terminalState != null && terminalResponse == null &&
-            active.optString("status") in listOf("completed", "incomplete", "failed", "cancelled")) {
+        if (terminalState != null && terminalResponse == null) {
             // No paid terminal provider output exists in the checkpoint; a
             // retry cannot reconstruct it, so do not silently declare success.
             throw UnrecoverableResponsesCheckpointException("Terminal Responses output was not preserved")
