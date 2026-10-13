@@ -2857,7 +2857,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: " +
                         OpenAiFileFailure.fromHttp(applicationContext, response.body?.string().orEmpty(), response.code))
-                    val reader=response.body?.byteStream()?.bufferedReader(Charsets.UTF_8) ?: throw IOException("Пустой ответ")
+                    val reader=response.body?.byteStream()?.let {
+                        OpenAiSseWireByteLimitStream(it).bufferedReader(Charsets.UTF_8)
+                    } ?: throw IOException("Пустой ответ")
                     val sequenceCursor = ResponseStreamSequenceCursor()
 
                     fun handleSseEvent(ev:JSONObject): Boolean {
