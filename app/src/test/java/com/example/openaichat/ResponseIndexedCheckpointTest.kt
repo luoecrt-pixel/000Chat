@@ -142,12 +142,13 @@ class ResponseIndexedCheckpointTest {
         for (type in listOf("response.incomplete", "response.failed", "response.cancelled")) {
             var state = ResponseEventReducer.reduce(ResponseEventState(),
                 delta(2, 1, 0, "draft")).state
+            val content = JSONObject().put("type", "output_text")
+                .put("text", "canonical")
+            val message = JSONObject().put("type", "message")
+                .put("content", org.json.JSONArray().put(content))
             val response = JSONObject().put("id", "resp_terminal")
                 .put("status", type.removePrefix("response."))
-                .put("output", org.json.JSONArray().put(JSONObject()
-                    .put("type", "message")
-                    .put("content", org.json.JSONArray().put(JSONObject()
-                        .put("type", "output_text").put("text", "canonical"))))
+                .put("output", org.json.JSONArray().put(message))
             state = ResponseEventReducer.reduce(state, JSONObject()
                 .put("type", type).put("response", response)).state
             val active = JSONObject().put("text", state.text).put("status",
