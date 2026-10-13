@@ -88,7 +88,7 @@ class OpenAiSseStreamReaderTest {
             """{"type":"response.completed","response":{"id":"resp"}}""",
             """{"type":"response.failed","response":{"id":"late"}}"""
         )
-        val firstFrameChars = source.indexOf("\\n\\n") + 2
+        val firstFrameChars = source.indexOf("\n\n") + 2
         val reader = object : BufferedReader(StringReader("")) {
             var reads = 0
             override fun read(): Int {
@@ -172,7 +172,7 @@ class OpenAiSseStreamReaderTest {
         assertEquals(1, callbacks)
     }
     @Test fun oversizedSingleLineFailsBeforeParsingOrDispatch() {
-        val source = "data: " + "A".repeat(50) + "\\n\\n"
+        val source = "data: " + "A".repeat(50) + "\n\n"
         var callbacks = 0
         try {
             OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
@@ -186,7 +186,7 @@ class OpenAiSseStreamReaderTest {
     }
 
     @Test fun repeatedDataLinesCannotEvadeEventLimit() {
-        val source = "data: AAAAAAAAAA\\ndata: BBBBBBBBBB\\ndata: CCCCCCCCCC\\n\\n"
+        val source = "data: AAAAAAAAAA\ndata: BBBBBBBBBB\ndata: CCCCCCCCCC\n\n"
         try {
             OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
                 OpenAiSseStreamReader.Limits(maxLineChars = 24, maxEventChars = 30,
@@ -216,7 +216,7 @@ class OpenAiSseStreamReaderTest {
     }
 
     @Test fun malformedOversizeThenTerminalCannotBeSilentlyTreatedAsSuccess() {
-        val source = "data: " + "z".repeat(50) + "\\n\\n" +
+        val source = "data: " + "z".repeat(50) + "\n\n" +
             frames("""{"type":"response.completed","response":{"id":"resp"}}""")
         try {
             OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
