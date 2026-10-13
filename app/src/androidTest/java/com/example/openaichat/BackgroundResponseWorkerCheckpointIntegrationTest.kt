@@ -120,4 +120,32 @@ class BackgroundResponseWorkerCheckpointIntegrationTest {
             ChatDatabase(context).use { it.deleteChat(chatId) }
         }
     }
+    @Test fun preIdStopAndLaterKnownIdCannotResurrectOldChat() {
+        val chatId = "worker-preid-" + UUID.randomUUID()
+        val requestId = "pre_id_stopped"
+        try {
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Stopped before response.created")
+                db.setActiveResponse(chatId, null, requestId, "", "starting",
+                    System.currentTimeMillis(), "high", "high", false, 1, 0, true)
+                assertTrue("Stop must consume pending local ownership",
+                    db.stopActiveRequestOnce(chatId, requestId))
+                assertNull(db.getActiveResponse(chatId))
+            }
+            // No provider response_id existed when Stop won. A late worker
+            // callback supplied with an ID must not resurrect a deleted claim.
+            assertEquals(ListenableWorker.Result.success(),
+                runBlocking { worker(chatId, "resp_created_too_late", requestId).doWork() })
+            ChatDatabase(context).use { db ->
+                assertNull(db.getActiveResponse(chatId))
+                assertEquals(0, db.getChat(chatId)!!.getJSONArray("messages").length())
+                val stopped = db.listRequestAccounting(chatId)
+                    .firstOrNull { it.optString("local_request_id") == requestId }
+                assertEquals("stopped", stopped?.optString("local_status"))
+            }
+        } finally {
+            ChatDatabase(context).use { it.deleteChat(chatId) }
+        }
+    }
+
 }
