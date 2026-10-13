@@ -22,7 +22,9 @@ data class ResponseEventState(
     // Responses output_text/refusal deltas can interleave across output items.
     // Do not append in arrival order: sort by provider output/content indices.
     val indexedTextParts: Map<ResponseContentIndex, String> = emptyMap(),
-    val unindexedText: String = ""
+    val unindexedText: String = "",
+    /** v23 had only flattened text; indexed replay must fail closed. */
+    val legacyFlatCheckpoint: Boolean = false
 )
 
 data class ResponseEventDecision(
@@ -89,6 +91,12 @@ object ResponseEventReducer {
         val outputIndex = event.optInt("output_index", -1)
         val contentIndex = event.optInt("content_index", -1)
         val updated = if (outputIndex >= 0 && contentIndex >= 0) {
+            if (current.legacyFlatCheckpoint) {
+                throw java.io.IOException(
+                    "Indexed Responses continuation requires an owned checkpoint; " +
+                    "legacy flattened partial cannot be safely reordered"
+                )
+            }
             val key = ResponseContentIndex(outputIndex, contentIndex)
             val oldParts = current.indexedTextParts
             val old = oldParts[key].orEmpty()
