@@ -24,7 +24,12 @@ data class ResponseEventState(
     val indexedTextParts: Map<ResponseContentIndex, String> = emptyMap(),
     val unindexedText: String = "",
     /** v23 had only flattened text; indexed replay must fail closed. */
-    val legacyFlatCheckpoint: Boolean = false
+    val legacyFlatCheckpoint: Boolean = false,
+    /** Fully received, provider-authored non-message output items only.
+     * Do not fabricate encrypted reasoning from a summary or a provisional
+     * output_item.added event. Includes signed reasoning and completed tools.
+     */
+    val typedOutputItems: Map<Int, JSONObject> = emptyMap()
 )
 
 data class ResponseEventDecision(
@@ -48,6 +53,19 @@ object ResponseEventReducer {
                 val state = if (responseId == null || responseId == current.responseId) current
                     else current.copy(responseId = responseId)
                 ResponseEventDecision(state, responseIdChanged = state.responseId != current.responseId)
+            }
+            "response.output_item.done" -> {
+                val outputIndex = event.optInt("output_index", -1)
+                val item = event.optJSONObject("item")
+                // The visible message (possibly partial) is separately preserved
+                // as a clearly labelled transcript. Only fully done non-message
+                // items are safe to forward verbatim as typed Responses output.
+                if (outputIndex < 0 || item == null || item.optString("type") == "message")
+                    ResponseEventDecision(current)
+                else ResponseEventDecision(current.copy(
+                    typedOutputItems = current.typedOutputItems +
+                        (outputIndex to JSONObject(item.toString()))
+                ))
             }
             "response.output_text.delta", "response.refusal.delta" ->
                 changeText(current, event, JsonProtocol.string(event, "delta"), replacePart = false)
