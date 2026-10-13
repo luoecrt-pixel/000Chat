@@ -2336,7 +2336,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (missing != null) throw IOException("Модель " + model + " не поддерживает вложения типа " + missing)
         return true
     }
-    private fun sendMessage(regenerate:Boolean) {
+    private fun sendMessage(regenerate:Boolean) = sendMessageWithLegacyChoice(regenerate, false)
+
+    private fun sendMessageWithLegacyChoice(regenerate:Boolean, allowLegacyVisibleTextOnly:Boolean) {
         if (pendingAttachmentChange.get() != null) { status.text = "Дождитесь обновления вложения"; return }
         if (stop.visibility == View.VISIBLE || preparingZipAttachments || pendingUploads.get() > 0) {
             status.text = "Дождитесь завершения или остановите текущую операцию"
@@ -2417,6 +2419,29 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             OpenAiInstructionChainPolicy.canReuse(
                 currentResponseId, chat, openAiInstructionFingerprint, regenerating = regenerate
             )
+        val legacyMissingCount = if (provider == "openai" && !usableOpenAiChain)
+            OpenAiLocalContextEncoder.missingCompletedTypedOutput(chat) else 0
+        if (legacyMissingCount > 0 && !allowLegacyVisibleTextOnly) {
+            // No network or chat write has started. The older DB stored only
+            // visible words, not signed reasoning or tool output. Explicit
+            // consent is mandatory to continue with an honestly limited replay.
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Старые ответы OpenAI — неполный контекст")
+                .setMessage("В истории $legacyMissingCount завершённых ответов OpenAI без " +
+                    "сохранённого Responses output. Их reasoning и результаты инструментов " +
+                    "восстановить нельзя. Продолжение передаст модели только видимый текст, " +
+                    "явно помеченный как неполный. Старый чат останется без изменений. " +
+                    "Продолжить в таком ограниченном режиме?")
+                .setNegativeButton("Отмена") { _, _ ->
+                    status.text = "Отправка отменена — старый чат и черновик сохранены"
+                }
+                .setPositiveButton("Только видимый текст") { _, _ ->
+                    if (currentChatId() == requestChatId)
+                        sendMessageWithLegacyChoice(regenerate, true)
+                }
+                .show()
+            return
+        }
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
         if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
@@ -3298,7 +3323,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             if (mime.startsWith("image/")) uploadImageFile(file.path, filename, credential = key, mimeOverride = mime, active = ownerActive)
                             else uploadLocalUserFile(file, filename, mime, credential = key, active = ownerActive).id
                         }) else emptyMap()
-                    val prepared = if (typedHistoryNeeded) OpenAiLocalContextEncoder.encode(historySnapshot, containerFiles) { before, after ->
+                    val prepared = if (typedHistoryNeeded) OpenAiLocalContextEncoder.encode(
+                        historySnapshot, containerFiles, allowLegacyVisibleTextOnly
+                    ) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     } else null
                     handedToUi = true
