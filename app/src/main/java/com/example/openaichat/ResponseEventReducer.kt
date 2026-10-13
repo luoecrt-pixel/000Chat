@@ -125,9 +125,16 @@ object ResponseEventReducer {
         val response = event.optJSONObject("response")
         val responseId = response?.let { JsonProtocol.nonBlank(it, "id") }
         val canonical = OpenAiSseStreamReader.terminalOutputText(response)
+        val hasCanonical = canonical.isNotBlank()
         val state = current.copy(
             responseId = responseId ?: current.responseId,
-            text = canonical.ifBlank { current.text },
+            text = if (hasCanonical) canonical else current.text,
+            // Terminal response.output is authoritative. The partial indexed
+            // parts describe a *different* string; retain those only when
+            // terminal supplied no canonical replacement.
+            indexedTextParts = if (hasCanonical) emptyMap() else current.indexedTextParts,
+            unindexedText = if (hasCanonical) canonical else current.unindexedText,
+            legacyFlatCheckpoint = if (hasCanonical) false else current.legacyFlatCheckpoint,
             terminalState = terminalState,
             terminalResponse = response,
             completionError = completionError,
