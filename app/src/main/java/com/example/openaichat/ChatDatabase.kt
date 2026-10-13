@@ -395,7 +395,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if ("openai_protocol_output" !in existing)
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_protocol_output TEXT")
         }
-        if (oldVersion < 24) {
+        if (oldVersion < 24 && newVersion >= 24) {
             val columns = db.rawQuery("PRAGMA table_info($CHAT_TABLE)", null).use { c ->
                 val names = mutableSetOf<String>()
                 val nameIndex = c.getColumnIndexOrThrow("name")
