@@ -3497,13 +3497,24 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 return
             }
+            val cursor = current.optLong("last_sequence_number", -1L)
+            var responseState = try {
+                ResponseIndexedCheckpoint.restore(current)
+            } catch (e: UnrecoverableResponsesCheckpointException) {
+                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e)
+                return
+            }
+            // A paid terminal event was checkpointed but the app crashed before
+            // the one-shot final commit. Finalize locally; never resume or
+            // regenerate an already completed provider response.
+            responseState.terminalResponse?.let { terminal ->
+                finalizeBackgroundResponse(current, terminal)
+                return
+            }
             if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                 finishBackgroundRecovery(chatId, "Истёк сквозной лимит ответа (5 часов)", requestId)
                 return
             }
-
-            val cursor = current.optLong("last_sequence_number", -1L)
-            var responseState = ResponseIndexedCheckpoint.restore(current)
             var lastSequence = cursor
             var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -3657,6 +3668,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
                 if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: UnrecoverableResponsesCheckpointException) {
+                activeResumeCalls.remove(chatId)
+                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e)
+                return
             } catch (e: ResponseStreamSequenceGapException) {
                 activeResumeCalls.remove(chatId)
                 diagnostics.log("background_resume_sequence_gap", mapOf(
@@ -3738,6 +3753,38 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
+
+    private fun failUnrecoverableBackgroundCheckpoint(
+        chatId: String,
+        responseId: String,
+        requestId: String,
+        cause: UnrecoverableResponsesCheckpointException
+    ) {
+        diagnostics.log("background_checkpoint_unrecoverable", mapOf(
+            "chat_id" to chatId,
+            "request_id" to requestId,
+            "response_id" to responseId,
+            "error" to cause.message.orEmpty().take(300)
+        ))
+        // A one-shot owned failure preserves all locally received partial text
+        // in the chat. It does not perform a new provider Create or retry the
+        // same non-reconstructable SSE cursor.
+        val persisted = BackgroundRequestFailureRecorder.persist(
+            chatDb, chatId, requestId, responseId, "failed",
+            "unrecoverable_checkpoint: " + cause.message.orEmpty()
+        )
+        if (persisted && currentChatId() == chatId) {
+            runOnUiThread {
+                if (currentChatId() == chatId) {
+                    activeAssistantItemId = null
+                    currentCall = null
+                    restoreCurrentChat()
+                    setBusy(false)
+                    status.text = "Не удалось безопасно восстановить ответ; полученный текст сохранён"
+                }
+            }
+        }
+    }
 
     private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
         val actual = BackgroundRecoveryPolicy.jitteredDelayMs(baseDelayMs)
