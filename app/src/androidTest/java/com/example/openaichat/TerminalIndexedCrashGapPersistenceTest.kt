@@ -131,4 +131,57 @@ class TerminalIndexedCrashGapPersistenceTest {
             ChatDatabase(context).use { it.deleteChat(chatId) }
         }
     }
+    @Test fun workerFailureAfterReopenPreservesReceivedSignedAndToolItems() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val chatId = freshChat()
+        val requestId = "req_signed_partial"
+        val reasoning = JSONObject().put("type", "reasoning")
+            .put("id", "r_paid").put("encrypted_content", "signed-actual-bytes")
+        val tool = JSONObject().put("type", "web_search_call")
+            .put("id", "tool_paid").put("status", "completed")
+        try {
+            var state = ResponseEventState()
+            for ((index, item) in listOf(reasoning, tool).withIndex()) {
+                state = ResponseEventReducer.reduce(state, JSONObject()
+                    .put("type", "response.output_item.done")
+                    .put("output_index", index).put("item", item)).state
+            }
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_text.delta")
+                .put("output_index", 2).put("content_index", 0)
+                .put("delta", "Received fragment")).state
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Signed partial")
+                db.upsertCurrentChat(chatId, "Signed partial", null, null,
+                    listOf(JSONObject().put("role", "user").put("text", "Prompt")
+                        .put("request_id", requestId).put("provider", "openai")))
+                db.setActiveResponse(chatId, "resp_signed", requestId, "",
+                    "starting", 1L, "high", "high", false, 6, 0, true)
+                db.updateActiveResponse(chatId, "resp_signed", state.text,
+                    "in_progress", 3, requestId, ResponseIndexedCheckpoint.serialize(state))
+            }
+            ChatDatabase(context).use { db ->
+                val before = ResponseIndexedCheckpoint.restore(db.getActiveResponse(chatId)!!)
+                assertEquals(2, before.typedOutputItems.size)
+                assertTrue(BackgroundRequestFailureRecorder.persist(db, chatId,
+                    requestId, "resp_signed", "failed", "disconnect_after_signed_item"))
+                assertNull(db.getActiveResponse(chatId))
+                val restored = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
+                assertEquals("Received fragment", restored.getString("text"))
+                assertTrue(restored.getBoolean("incomplete"))
+                val output = restored.getJSONArray("openai_protocol_output")
+                assertEquals("signed-actual-bytes", output.getJSONObject(0)
+                    .getString("encrypted_content"))
+                assertEquals("tool_paid", output.getJSONObject(1).getString("id"))
+                val replay = OpenAiLocalContextEncoder.encode(
+                    listOf(restored, JSONObject().put("role", "user").put("text", "Next")))
+                assertEquals("reasoning", replay.getJSONObject(0).getString("type"))
+                assertEquals("web_search_call", replay.getJSONObject(1).getString("type"))
+                assertTrue(replay.getJSONObject(2).toString().contains("Received fragment"))
+            }
+        } finally {
+            ChatDatabase(context).use { it.deleteChat(chatId) }
+        }
+    }
+
 }
