@@ -22,6 +22,7 @@ object ResponseIndexedCheckpoint {
             .put("text", state.text)
             .put("unindexed_text", state.unindexedText)
             .put("reasoning_summary", state.reasoningSummary)
+            .put("legacy_flat_checkpoint", state.legacyFlatCheckpoint)
             .put("parts", parts).toString()
     }
 
@@ -65,6 +66,7 @@ object ResponseIndexedCheckpoint {
         }
         return ResponseEventState(text = text, unindexedText = loose,
             indexedTextParts = indexed,
-            reasoningSummary = JsonProtocol.string(snapshot, "reasoning_summary"))
+            reasoningSummary = JsonProtocol.string(snapshot, "reasoning_summary"),
+            legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false))
     }
 }
