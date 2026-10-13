@@ -130,6 +130,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
+    private var openAiLegacyConsentDialog: AlertDialog? = null
     private val currentGitHubToolOwner = ThreadLocal<Pair<String, Long>>()
     // Cancels an in-flight serialization before it can commit a user message or start HTTP.
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
@@ -383,6 +384,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             status.text = "Подготовка остановлена — черновик сохранён"
         }
         cancelPendingGitHubConfirmation()
+        openAiLegacyConsentDialog?.dismiss()
+        openAiLegacyConsentDialog = null
         persistComposerStateNow()
         activityVisible = false
         val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
@@ -2425,7 +2428,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             // No network or chat write has started. The older DB stored only
             // visible words, not signed reasoning or tool output. Explicit
             // consent is mandatory to continue with an honestly limited replay.
-            android.app.AlertDialog.Builder(this)
+            val dialog = android.app.AlertDialog.Builder(this)
                 .setTitle("Старые ответы OpenAI — неполный контекст")
                 .setMessage("В истории $legacyMissingCount завершённых ответов OpenAI без " +
                     "сохранённого Responses output. Их reasoning и результаты инструментов " +
@@ -2436,10 +2439,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     status.text = "Отправка отменена — старый чат и черновик сохранены"
                 }
                 .setPositiveButton("Только видимый текст") { _, _ ->
-                    if (currentChatId() == requestChatId)
+                    if (currentChatId() == requestChatId && activityVisible)
                         sendMessageWithLegacyChoice(regenerate, true)
                 }
-                .show()
+                .create()
+            openAiLegacyConsentDialog = dialog
+            dialog.setOnDismissListener {
+                if (openAiLegacyConsentDialog === dialog) openAiLegacyConsentDialog = null
+            }
+            dialog.show()
             return
         }
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
