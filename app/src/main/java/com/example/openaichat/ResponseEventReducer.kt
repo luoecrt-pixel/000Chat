@@ -6,6 +6,11 @@ enum class ResponseTerminalState(val wireStatus: String) {
     COMPLETED("completed"), FAILED("failed"), INCOMPLETE("incomplete"), CANCELLED("cancelled")
 }
 
+data class ResponseContentIndex(val outputIndex: Int, val contentIndex: Int) : Comparable<ResponseContentIndex> {
+    override fun compareTo(other: ResponseContentIndex): Int =
+        compareValuesBy(this, other, ResponseContentIndex::outputIndex, ResponseContentIndex::contentIndex)
+}
+
 data class ResponseEventState(
     val responseId: String? = null,
     val text: String = "",
@@ -13,7 +18,11 @@ data class ResponseEventState(
     val terminalState: ResponseTerminalState? = null,
     val terminalResponse: JSONObject? = null,
     val completionError: String? = null,
-    val usage: JSONObject? = null
+    val usage: JSONObject? = null,
+    // Responses output_text/refusal deltas can interleave across output items.
+    // Do not append in arrival order: sort by provider output/content indices.
+    val indexedTextParts: Map<ResponseContentIndex, String> = emptyMap(),
+    val unindexedText: String = ""
 )
 
 data class ResponseEventDecision(
@@ -38,16 +47,12 @@ object ResponseEventReducer {
                     else current.copy(responseId = responseId)
                 ResponseEventDecision(state, responseIdChanged = state.responseId != current.responseId)
             }
-            "response.output_text.delta", "response.refusal.delta" -> {
-                val delta = JsonProtocol.string(event, "delta")
-                if (delta.isEmpty()) ResponseEventDecision(current)
-                else ResponseEventDecision(current.copy(text = current.text + delta), textChanged = true)
-            }
-            "response.refusal.done" -> {
-                val full = JsonProtocol.string(event, "refusal")
-                if (full.isBlank() || full == current.text) ResponseEventDecision(current)
-                else ResponseEventDecision(current.copy(text = full), textChanged = true)
-            }
+            "response.output_text.delta", "response.refusal.delta" ->
+                changeText(current, event, JsonProtocol.string(event, "delta"), replacePart = false)
+            "response.output_text.done" ->
+                changeText(current, event, JsonProtocol.string(event, "text"), replacePart = true)
+            "response.refusal.done" ->
+                changeText(current, event, JsonProtocol.string(event, "refusal"), replacePart = true)
             "response.reasoning_summary_text.delta" -> {
                 val delta = JsonProtocol.string(event, "delta")
                 if (delta.isEmpty()) ResponseEventDecision(current)
@@ -71,6 +76,39 @@ object ResponseEventReducer {
             ))
             else -> ResponseEventDecision(current)
         }
+    }
+
+    private fun changeText(
+        current: ResponseEventState, event: JSONObject,
+        value: String, replacePart: Boolean
+    ): ResponseEventDecision {
+        // A zero-length delta is a no-op. For .done, preserve deliberately empty
+        // text unless this part was already populated; terminal output is final.
+        if (value.isEmpty() && !replacePart) return ResponseEventDecision(current)
+        val outputIndex = event.optInt("output_index", -1)
+        val contentIndex = event.optInt("content_index", -1)
+        val updated = if (outputIndex >= 0 && contentIndex >= 0) {
+            val key = ResponseContentIndex(outputIndex, contentIndex)
+            val oldParts = current.indexedTextParts
+            val old = oldParts[key].orEmpty()
+            val newValue = if (replacePart) value else old + value
+            if (newValue == old) return ResponseEventDecision(current)
+            val parts = oldParts + (key to newValue)
+            val loose = if (oldParts.isEmpty() && current.unindexedText.isEmpty())
+                current.text else current.unindexedText
+            current.copy(indexedTextParts = parts, unindexedText = loose,
+                text = parts.toSortedMap().values.joinToString("") + loose)
+        } else {
+            // Old provider/fixture frames do not carry indices: preserve them
+            // verbatim in arrival order, without claiming indexed ordering.
+            val loose = if (current.indexedTextParts.isEmpty() &&
+                current.unindexedText.isEmpty()) current.text else current.unindexedText
+            val next = if (replacePart) value else loose + value
+            if (next == loose) return ResponseEventDecision(current)
+            current.copy(unindexedText = next, text =
+                current.indexedTextParts.toSortedMap().values.joinToString("") + next)
+        }
+        return ResponseEventDecision(updated, textChanged = updated.text != current.text)
     }
 
     private fun terminal(current: ResponseEventState, event: JSONObject,
