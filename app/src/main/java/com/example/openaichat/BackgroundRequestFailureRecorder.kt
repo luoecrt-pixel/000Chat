@@ -43,6 +43,23 @@ object BackgroundRequestFailureRecorder {
                 .put("incomplete", true)
                 .put("error", error.take(1200))
                 .apply { requestedModel?.let { put("requested_model", it) } }
+                .apply {
+                    // Incomplete streams can nevertheless contain genuine
+                    // fully delivered signed reasoning/tool output_item.done.
+                    // Preserve only those exact provider-authored items.
+                    try {
+                        val typed = ResponseIndexedCheckpoint.restore(active).typedOutputItems
+                        if (typed.isNotEmpty()) put("openai_protocol_output",
+                            org.json.JSONArray().apply {
+                                typed.toSortedMap().values.forEach { item ->
+                                    put(JSONObject(item.toString()))
+                                }
+                            })
+                    } catch (_: UnrecoverableResponsesCheckpointException) {
+                        // A damaged checkpoint must not prevent saving the
+                        // actual visible partial text and owned failure.
+                    }
+                }
         }
         val previousResponseId = chat.optString("response_id")
             .takeIf { it.isNotBlank() && it != "null" }
