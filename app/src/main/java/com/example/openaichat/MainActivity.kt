@@ -2913,6 +2913,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 ))
                             }
 
+                            if (ev.optString("type") == "response.output_item.done") {
+                                // An already completed signed reasoning/tool item is
+                                // paid provider output. Persist it immediately even
+                                // if no visible text delta triggered the UI throttle.
+                                activeResponsePersistence.updateActiveResponse(
+                                    requestChatId, responseId = newId,
+                                    text = responseState.text, status = "in_progress",
+                                    lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                    indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
+                                    expectedRequestId = localRequestId
+                                )
+                            }
                             if (responseDecision.textChanged) {
                                 val now = SystemClock.elapsedRealtime()
                                 if (now - lastUiUpdate >= 50L) {
@@ -3171,6 +3183,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     // or fabricating a completed reasoning/tool protocol.
                     responseState.reasoningSummary.takeIf { it.isNotEmpty() }
                         ?.let { assistant.put("reasoning_summary", it) }
+                    if (responseState.typedOutputItems.isNotEmpty()) {
+                        assistant.put("openai_protocol_output", JSONArray().apply {
+                            responseState.typedOutputItems.toSortedMap().values.forEach {
+                                put(JSONObject(it.toString()))
+                            }
+                        })
+                    }
                     if (toolItems.isNotEmpty()) {
                         assistant.put("tools", JSONArray().apply { toolItems.forEach { put(it) } })
                     }
@@ -3643,7 +3662,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         lastCheckpointElapsedMs = lastCheckpointAt,
                         checkpointIntervalMs = 500L
                     )
-                    if (checkpoint.shouldPersist) {
+                    if (checkpoint.shouldPersist ||
+                        event.optString("type") == "response.output_item.done") {
                         lastCheckpointAt = now
                         activeResponsePersistence.updateActiveResponse(
                             chatId,
