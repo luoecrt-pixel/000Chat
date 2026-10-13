@@ -8,6 +8,10 @@ open class UnrecoverableResponsesStreamException(message: String, cause: Throwab
 
 class ResponsesSseLimitException(message: String) : UnrecoverableResponsesStreamException(message)
 
+class ResponsesResponseIdentityException : UnrecoverableResponsesStreamException(
+    "Responses event does not belong to the original response"
+)
+
 class ResponsesArchiveStorageException(cause: Throwable) : UnrecoverableResponsesStreamException(
     "Не удалось сохранить исходные данные ответа. Полученная часть сохранена, где это было возможно.", cause
 )

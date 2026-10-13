@@ -70,8 +70,11 @@ class OpenAiPreIdLifecycleTest {
     @Test fun foregroundPartialCheckpointReopenKeepsSignedOutputAndSourceWithoutNetworkRecovery() =
         assertForegroundCheckpoint(terminal = false)
 
+    @Test fun differentTerminalResponseCannotCommitOriginalRequestOrLoseReceivedSource() =
+        assertDelayedCreated(Action.MISMATCH)
+
     private enum class Action { STOP_START, STOP, DELETE, REPLACE, RECREATE, RECREATE_STOP,
-        RECREATE_DISCONNECT, FOREGROUND_RECREATE, FOREGROUND_RECREATE_DISCONNECT, RECREATE_REPLACE }
+        RECREATE_DISCONNECT, FOREGROUND_RECREATE, FOREGROUND_RECREATE_DISCONNECT, RECREATE_REPLACE, MISMATCH }
 
     private fun assertDelayedCreated(action: Action) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -101,17 +104,19 @@ class OpenAiPreIdLifecycleTest {
         val interruptedCancel = AtomicBoolean()
         val responseId = "resp_preid_fixture"
         val replacementResponseId = "resp_preid_replacement"
-        fun completedStream(id: String, text: String): String {
-            val terminal = JSONObject().put("id", id).put("status", "completed")
+        fun completedStream(id: String, text: String, mismatch: Boolean = false): String {
+            val terminal = JSONObject().put("id", if (mismatch) "resp_unowned" else id).put("status", "completed")
                 .put("output", JSONArray().put(JSONObject().put("type", "message").put("role", "assistant")
                     .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", text)))))
             return "data: " + JSONObject().put("type", "response.created").put("sequence_number", 0)
                 .put("response", JSONObject().put("id", id)) + "\n\n" +
-                "data: " + JSONObject().put("type", "response.completed").put("sequence_number", 1)
+                (if (mismatch) "data: " + JSONObject().put("type", "response.output_text.delta").put("sequence_number", 1)
+                    .put("output_index", 0).put("content_index", 0).put("delta", "Paid partial") + "\n\n" else "") +
+                "data: " + JSONObject().put("type", "response.completed").put("sequence_number", if (mismatch) 2 else 1)
                     .put("response", terminal) + "\n\n"
         }
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
-            .setBody(completedStream(responseId, "Canonical result")))
+            .setBody(completedStream(responseId, "Canonical result", action == Action.MISMATCH)))
         if (replace) server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody(completedStream(replacementResponseId, "Replacement result")))
         if (cancelExpected) server.enqueue(MockResponse().setHeader("Content-Type", "application/json")
@@ -225,6 +230,7 @@ class OpenAiPreIdLifecycleTest {
                         System.currentTimeMillis() - 180_000L, "high", "high", false, 13, 0, !foreground)
                 }
                 when (action) {
+                    Action.MISMATCH -> Unit
                     Action.STOP_START -> {
                         scenario.moveToState(Lifecycle.State.CREATED)
                         scenario.moveToState(Lifecycle.State.RESUMED)
@@ -375,6 +381,19 @@ class OpenAiPreIdLifecycleTest {
                                 messages.getJSONObject(1).getString("text"))
                             assertEquals(if (replace) replacementResponseId else responseId,
                                 messages.getJSONObject(1).getString("response_id"))
+                        }
+                        if (action == Action.MISMATCH) {
+                            val assistant = messages.getJSONObject(1)
+                            assertTrue(assistant.getBoolean("incomplete"))
+                            assertEquals("failed", assistant.getString("status"))
+                            assertEquals("Paid partial", assistant.getString("text"))
+                            assertEquals(responseId, assistant.getString("response_id"))
+                            assertFalse(assistant.has("openai_protocol_output"))
+                            val source = java.io.File(assistant.getJSONArray("annotations").getJSONObject(0).getString("local_path"))
+                            assertArrayEquals(completedStream(responseId, "Canonical result", true).toByteArray(Charsets.UTF_8), source.readBytes())
+                            val account = db.listRequestAccounting(chatId).single()
+                            assertEquals("unknown", account.getString("cost_kind"))
+                            assertFalse(account.has("cost_usd"))
                         }
                         if (disconnect) {
                             val assistant = messages.getJSONObject(1)

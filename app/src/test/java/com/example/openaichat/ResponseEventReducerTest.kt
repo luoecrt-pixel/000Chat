@@ -4,8 +4,36 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 
 class ResponseEventReducerTest {
+    @Test fun differentCreatedOrTerminalResponseCannotReplaceOwnedPaidPartial() {
+        val owned = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+            JSONObject().put("type", "response.output_text.delta").put("delta", "paid partial")).state
+        for (type in listOf("response.created", "response.completed", "response.failed", "response.in_progress")) {
+            try {
+                ResponseEventReducer.reduce(owned, JSONObject().put("type", type)
+                    .put("response", JSONObject().put("id", "resp_other").put("output", org.json.JSONArray())))
+                fail("A different response must not advance the original state")
+            } catch (_: ResponsesResponseIdentityException) { }
+            assertEquals("resp_owned", owned.responseId)
+            assertEquals("paid partial", owned.text)
+            assertNull(owned.terminalState)
+        }
+    }
+
+    @Test fun topLevelResponseIdentityMustMatchBothOwnerAndNestedIdentity() {
+        for (owner in listOf<String?>(null, "resp_owned")) {
+            try {
+                ResponseEventReducer.reduce(ResponseEventState(responseId = owner), JSONObject()
+                    .put("type", "response.created").put("response_id", "resp_other")
+                    .put("response", JSONObject().put("id", "resp_owned")))
+                fail("Contradictory response identities must fail before mutation")
+            } catch (_: ResponsesResponseIdentityException) { }
+        }
+    }
+
     @Test
     fun accumulatesTextAndReasoningDeltas() {
         var state = ResponseEventState()

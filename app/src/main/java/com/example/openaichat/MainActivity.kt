@@ -3645,7 +3645,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             OpenAiCreateCallOwners.isRegistered(chatId, requestId)) return@execute
                         val terminal = try {
                             ResponseIndexedCheckpoint.restore(current).terminalResponse
-                        } catch (_: UnrecoverableResponsesCheckpointException) { null }
+                        } catch (error: UnrecoverableResponsesCheckpointException) {
+                            failUnrecoverableBackgroundCheckpoint(chatId,
+                                JsonProtocol.string(current, "response_id"), requestId, error, null)
+                            return@execute
+                        }
                         if (terminal != null) {
                             // Received terminal output needs local finalization,
                             // even when network/background recovery is disabled.

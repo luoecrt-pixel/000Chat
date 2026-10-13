@@ -6,6 +6,37 @@ import org.junit.Test
 import java.io.IOException
 
 class ResponseIndexedCheckpointTest {
+    @Test fun reopenedIndexedAndLegacyStateKeepOriginalResponseIdentity() {
+        val state = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+            delta(1, 0, 0, "paid partial")).state
+        for (indexed in listOf(false, true)) {
+            val active = JSONObject().put("response_id", "resp_owned").put("text", state.text)
+                .put("last_sequence_number", 1)
+            if (indexed) active.put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state))
+            val reopened = ResponseIndexedCheckpoint.restore(active)
+            assertEquals("resp_owned", reopened.responseId)
+            try {
+                ResponseEventReducer.reduce(reopened, JSONObject().put("type", "response.completed")
+                    .put("response", JSONObject().put("id", "resp_other")))
+                fail("Reopening must not permit another response to claim the original request")
+            } catch (_: ResponsesResponseIdentityException) { }
+            assertEquals("paid partial", reopened.text)
+        }
+    }
+
+    @Test fun terminalCheckpointOfDifferentResponseIsRejectedBeforeFinalization() {
+        val state = ResponseEventReducer.reduce(ResponseEventState(), JSONObject().put("type", "response.completed")
+            .put("response", JSONObject().put("id", "resp_other").put("status", "completed"))).state
+        val active = JSONObject().put("response_id", "resp_owned").put("text", state.text)
+            .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state))
+        try {
+            ResponseIndexedCheckpoint.restore(active)
+            fail("A matching local request cannot authorize a mismatched terminal response")
+        } catch (error: UnrecoverableResponsesCheckpointException) {
+            assertTrue(error.message.orEmpty().contains("response ID mismatch"))
+        }
+    }
+
     private fun delta(sequence: Int, output: Int, content: Int, value: String) =
         JSONObject().put("type", "response.output_text.delta")
             .put("sequence_number", sequence)

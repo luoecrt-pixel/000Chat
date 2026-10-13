@@ -51,6 +51,7 @@ object ResponseIndexedCheckpoint {
     }
 
     fun restore(active: JSONObject): ResponseEventState {
+        val responseId = JsonProtocol.nonBlank(active, "response_id")
         val text = JsonProtocol.string(active, "text")
         val raw = JsonProtocol.string(active, "indexed_checkpoint")
         if (raw.isBlank()) {
@@ -58,7 +59,7 @@ object ResponseIndexedCheckpoint {
             // impossible to infer past output/content indices from that text.
             // Keep unindexed legacy deltas in arrival order; explicitly reject
             // indexed continuation instead of silently corrupting the answer.
-            return ResponseEventState(text = text, unindexedText = text,
+            return ResponseEventState(responseId = responseId, text = text, unindexedText = text,
                 legacyFlatCheckpoint = text.isNotEmpty() &&
                     active.optLong("last_sequence_number", -1L) >= 0L)
         }
@@ -108,6 +109,9 @@ object ResponseIndexedCheckpoint {
             else ResponseTerminalState.entries.firstOrNull { it.wireStatus == terminalName }
                 ?: throw UnrecoverableResponsesCheckpointException("Unknown Responses terminal state")
         val terminalResponse = snapshot.optJSONObject("terminal_response")
+        val terminalId = terminalResponse?.let { JsonProtocol.nonBlank(it, "id") }
+        if (responseId != null && terminalId != null && responseId != terminalId)
+            throw UnrecoverableResponsesCheckpointException("Responses checkpoint response ID mismatch")
         if (terminalResponse != null && terminalState == null)
             throw UnrecoverableResponsesCheckpointException("Terminal Responses output without terminal state")
         if (terminalState != null && terminalResponse == null) {
@@ -115,7 +119,7 @@ object ResponseIndexedCheckpoint {
             // retry cannot reconstruct it, so do not silently declare success.
             throw UnrecoverableResponsesCheckpointException("Terminal Responses output was not preserved")
         }
-        return ResponseEventState(text = text, unindexedText = loose,
+        return ResponseEventState(responseId = responseId ?: terminalId, text = text, unindexedText = loose,
             indexedTextParts = indexed,
             reasoningSummary = JsonProtocol.string(snapshot, "reasoning_summary"),
             legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false),

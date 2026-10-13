@@ -51,6 +51,16 @@ object ResponseEventReducer {
         // A terminal response is immutable. Late SSE callbacks must not append
         // content, change the response ID or replace the canonical terminal.
         if (current.terminalState != null) return ResponseEventDecision(current)
+        val receivedIds = listOfNotNull(
+            event.optJSONObject("response")?.let { JsonProtocol.nonBlank(it, "id") },
+            JsonProtocol.nonBlank(event, "response_id")
+        ).distinct()
+        if (receivedIds.size > 1 || (current.responseId != null &&
+                receivedIds.any { it != current.responseId })) {
+            // Reject before canonical output, usage or accumulated parts change.
+            // The local request ID alone cannot authorize a different response.
+            throw ResponsesResponseIdentityException()
+        }
         return when (JsonProtocol.string(event, "type")) {
             "response.created" -> {
                 val responseId = event.optJSONObject("response")?.let { JsonProtocol.nonBlank(it, "id") }
