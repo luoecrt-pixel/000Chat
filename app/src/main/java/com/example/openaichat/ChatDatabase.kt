@@ -14,6 +14,11 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
+        // The app opens this file via independent SQLiteOpenHelpers in Activity,
+        // WorkManager and lifecycle callbacks. Android sets PRAGMA journal_mode
+        // during connection initialization. Concurrent helper opens can race
+        // for its exclusive journal-mode transition and raise SQLITE_BUSY.
+        private val CONNECTION_OPEN_LOCK = Any()
         private const val DB_VERSION = 24
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
@@ -22,6 +27,34 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
         private const val OPENROUTER_ROUND_TABLE = "openrouter_request_rounds"
     }
+
+    /**
+     * Serialize only opening/configuring SQLite connections, NOT user queries
+     * or transactions. An open helper may race an already-running transaction
+     * in another helper; retry just the failed side-effect-free open when the
+     * framework reports SQLITE_BUSY during PRAGMA journal_mode. Every normal
+     * SQL error or upgrade error still propagates untouched.
+     */
+    private fun <T> openConnection(operation: () -> T): T = synchronized(CONNECTION_OPEN_LOCK) {
+        var pauseMs = 35L
+        repeat(8) { attempt ->
+            try {
+                return@synchronized operation()
+            } catch (e: android.database.sqlite.SQLiteDatabaseLockedException) {
+                if (attempt == 7 || !e.message.orEmpty().contains("journal_mode", ignoreCase = true)) throw e
+                try { Thread.sleep(pauseMs) } catch (interrupt: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw e
+                }
+                pauseMs = (pauseMs * 2).coerceAtMost(1_000L)
+            }
+        }
+        error("Unreachable SQLite connection opener")
+    }
+
+    override fun getWritableDatabase(): SQLiteDatabase = openConnection { super.getWritableDatabase() }
+
+    override fun getReadableDatabase(): SQLiteDatabase = openConnection { super.getReadableDatabase() }
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
