@@ -215,4 +215,77 @@ class ResponseEventReducerTest {
         }
     }
 
+    @Test
+    fun interleavedOutputAndContentIndicesPreserveProviderOrderAndEveryDelta() {
+        var state = ResponseEventState()
+        fun delta(out: Int, content: Int, value: String) {
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_text.delta")
+                .put("output_index", out)
+                .put("content_index", content)
+                .put("delta", value)).state
+        }
+        delta(2, 0, "third-1 ")
+        delta(0, 1, "first-2 ")
+        delta(1, 0, "second-1 ")
+        delta(0, 0, "first-1 ")
+        delta(2, 0, "third-2 ")
+        delta(0, 1, "first-2b ")
+        assertEquals("first-1 first-2 first-2b second-1 third-1 third-2 ", state.text)
+        assertEquals(4, state.indexedTextParts.size)
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.done")
+            .put("output_index", 1)
+            .put("content_index", 0)
+            .put("text", "second-complete ")).state
+        assertEquals("first-1 first-2 first-2b second-complete third-1 third-2 ", state.text)
+        assertEquals(4, state.indexedTextParts.size)
+    }
+
+    @Test
+    fun indexedRefusalDoneDoesNotEraseOtherOutputsOrDuplicatePart() {
+        var state = ResponseEventState()
+        val events = listOf(
+            JSONObject().put("type", "response.refusal.delta")
+                .put("output_index", 1).put("content_index", 0).put("delta", "No"),
+            JSONObject().put("type", "response.output_text.delta")
+                .put("output_index", 0).put("content_index", 0).put("delta", "Earlier. "),
+            JSONObject().put("type", "response.refusal.done")
+                .put("output_index", 1).put("content_index", 0).put("refusal", "No thanks.")
+        )
+        events.forEach { state = ResponseEventReducer.reduce(state, it).state }
+        assertEquals("Earlier. No thanks.", state.text)
+        val same = ResponseEventReducer.reduce(state, events.last())
+        assertEquals(state, same.state)
+        assertEquals(false, same.textChanged)
+    }
+
+    @Test
+    fun authoritativeTerminalReplacesInterleavedPartialInCanonicalOutputOrder() {
+        var state = ResponseEventState()
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 1).put("content_index", 0).put("delta", "B-before")).state
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 0).put("content_index", 0).put("delta", "A-before")).state
+        assertEquals("A-beforeB-before", state.text)
+        val terminal = JSONObject().put("id", "resp_interleaved").put("output",
+            org.json.JSONArray()
+                .put(JSONObject().put("type", "message").put("content",
+                    org.json.JSONArray().put(JSONObject().put("type", "output_text")
+                        .put("text", "A-canonical"))))
+                .put(JSONObject().put("type", "message").put("content",
+                    org.json.JSONArray().put(JSONObject().put("type", "output_text")
+                        .put("text", "B-canonical")))))
+        val decision = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.completed").put("response", terminal))
+        assertEquals("A-canonicalB-canonical", decision.state.text)
+        assertEquals(ResponseTerminalState.COMPLETED, decision.state.terminalState)
+        val late = ResponseEventReducer.reduce(decision.state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 2).put("content_index", 0).put("delta", "late"))
+        assertEquals(decision.state, late.state)
+    }
+
 }
