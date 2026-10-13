@@ -28,6 +28,17 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val OPENROUTER_ROUND_TABLE = "openrouter_request_rounds"
     }
 
+    init {
+        // All Activity, Worker and instrumentation helpers open the same
+        // persistent database. Using the platform's rollback journal default
+        // makes SQLiteConnection.setJournalMode attempt exclusive PRAGMA
+        // journal_mode transitions while other owners have active writes.
+        // WAL preserves atomic CAS/transactions while allowing readers to
+        // open during a writer's transaction. Set it on EVERY helper before
+        // its first database open, never by running PRAGMA in an active query.
+        setWriteAheadLoggingEnabled(true)
+    }
+
     /**
      * Serialize only opening/configuring SQLite connections, NOT user queries
      * or transactions. An open helper may race an already-running transaction

@@ -19,6 +19,32 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class ChatDatabaseConcurrentOpenStressTest {
+    @Test fun distinctHelpersUseSameWalModeAcrossReopen() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val chatId = "db-wal-open-" + UUID.randomUUID()
+        try {
+            ChatDatabase(context).use { first ->
+                first.ensureChat(chatId, "WAL persists")
+                first.writableDatabase.rawQuery("PRAGMA journal_mode", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals("wal", it.getString(0).lowercase(java.util.Locale.ROOT))
+                }
+                ChatDatabase(context).use { second ->
+                    second.writableDatabase.rawQuery("PRAGMA journal_mode", null).use {
+                        assertTrue(it.moveToFirst())
+                        assertEquals("wal", it.getString(0).lowercase(java.util.Locale.ROOT))
+                    }
+                    assertEquals("WAL persists", second.getChatTitle(chatId))
+                }
+            }
+            ChatDatabase(context).use { reopened ->
+                assertEquals("WAL persists", reopened.getChatTitle(chatId))
+            }
+        } finally {
+            ChatDatabase(context).use { it.deleteChat(chatId) }
+        }
+    }
+
     @Test fun simultaneousColdHelperOpensUnderReadWriteLoadKeepHistory() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val id = "db-concurrency-" + UUID.randomUUID()
