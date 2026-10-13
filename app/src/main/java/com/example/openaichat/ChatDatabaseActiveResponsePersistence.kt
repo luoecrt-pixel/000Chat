@@ -39,14 +39,16 @@ class ChatDatabaseActiveResponsePersistence(
         text: String?,
         status: String?,
         lastSequenceNumber: Long?,
-        expectedRequestId: String?
+        expectedRequestId: String?,
+        indexedCheckpoint: String?
     ) = database.updateActiveResponse(
         chatId = chatId,
         responseId = responseId,
         text = text,
         status = status,
         lastSequenceNumber = lastSequenceNumber,
-        expectedRequestId = expectedRequestId
+        expectedRequestId = expectedRequestId,
+        indexedCheckpoint = indexedCheckpoint
     )
 
     override fun getActiveResponse(chatId: String): JSONObject? =
