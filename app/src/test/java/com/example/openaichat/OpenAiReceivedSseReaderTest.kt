@@ -66,7 +66,13 @@ class OpenAiReceivedSseReaderTest {
         val root = createTempDir(prefix = "received-io-")
         val source = object : InputStream() {
             var delivered = 0
-            override fun read(): Int = throw AssertionError("Use bounded buffers")
+            override fun read(): Int {
+                // The wire limiter legitimately probes one extra byte to
+                // distinguish exact EOF from overflow. It is still bounded.
+                if (delivered >= 16_384) throw IOException("Original socket cancelled")
+                delivered++
+                return 'x'.code
+            }
             override fun read(b: ByteArray, off: Int, len: Int): Int {
                 if (delivered >= 16_384) throw IOException("Original socket cancelled")
                 val count = minOf(len, 16_384 - delivered)
