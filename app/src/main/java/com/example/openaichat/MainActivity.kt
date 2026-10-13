@@ -2869,10 +2869,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: " +
                         OpenAiFileFailure.fromHttp(applicationContext, response.body?.string().orEmpty(), response.code))
+                    var rawSseArchive: OpenAiRawSseArchive? = null
                     val reader=response.body?.byteStream()?.let { input ->
                         val archived = OpenAiRawSseArchive.begin(
                             input, applicationContext.filesDir, requestChatId, localRequestId
                         )
+                        rawSseArchive = archived
                         OpenAiSseWireByteLimitStream(archived).bufferedReader(Charsets.UTF_8)
                     } ?: throw IOException("Пустой ответ")
                     val sequenceCursor = ResponseStreamSequenceCursor()
@@ -3023,7 +3025,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         return true
                     }
 
-                    val streamEnd = OpenAiSseStreamReader.read(reader) { ev -> handleSseEvent(ev) }
+                    // Reader.close() propagates to the raw archive's fsync/close.
+                    // Closing only the OkHttp response would bypass that wrapper.
+                    val streamEnd = reader.use { buffered ->
+                        OpenAiSseStreamReader.read(buffered) { ev -> handleSseEvent(ev) }
+                    }
                     completionState = streamEnd.end.wireStatus
                     streamEnd.errorMessage?.let { completionError = it }
                     OpenAiFileFailure.recover(applicationContext, completedResponse?.optJSONObject("error"))?.let { completionError = it }
@@ -3093,8 +3099,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         // Raw archive is redundant only after the complete
                         // provider output and every generated artifact are
                         // already durable under the winning SQLite claim.
-                        OpenAiRawSseArchive.deleteAfterDurableCommit(
-                            applicationContext.filesDir, requestChatId, localRequestId)
+                        // Keep archives of overlapping Activity/Worker streams:
+                        // only this successfully committed connection is redundant.
+                        rawSseArchive?.deleteAfterDurableCommit()
                     }
                     ResponseNotifications.finished(applicationContext, requestChatId, localRequestId, completionState == "completed")
                     chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)

@@ -61,9 +61,16 @@ class OpenAiRawSseArchive private constructor(
                 ?.sortedBy { it.name }.orEmpty()
         }
 
-        fun deleteAfterDurableCommit(filesDir: File, chatId: String, requestId: String) {
-            archivesFor(filesDir, chatId, requestId).forEach { it.delete() }
-        }
+    }
+
+    /**
+     * Delete only THIS completed connection's archive, and only after close()
+     * has fsynced it. Another Activity/Worker stream for the same request may
+     * have received different paid bytes that are not part of this commit.
+     */
+    fun deleteAfterDurableCommit(): Boolean {
+        if (!closed) return false
+        return !file.exists() || file.delete()
     }
 
     private val sink = FileOutputStream(file, true)
