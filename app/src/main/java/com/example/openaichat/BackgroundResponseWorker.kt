@@ -79,6 +79,25 @@ class BackgroundResponseWorker(
             var retryDelayMs = 1_500L
 
             while (!isStopped) {
+                val current = db.getActiveResponse(chatId)
+                    ?: return Result.success()
+                if (current.optString("request_id") != requestId) return Result.success()
+                if (!current.optBoolean("background_enabled", true)) return Result.success()
+
+                val cursor = current.optLong("last_sequence_number", -1L)
+                var responseState = try {
+                    ResponseIndexedCheckpoint.restore(current)
+                } catch (e: UnrecoverableResponsesCheckpointException) {
+                    failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
+                    return Result.failure()
+                }
+                responseState.terminalResponse?.let { terminal ->
+                    // Paid terminal already arrived before process death.
+                    // Complete its owned one-shot commit with NO network call.
+                    finalize(chatId, responseId, requestId, terminal, db, diagnostics)
+                    return if (responseState.terminalState == ResponseTerminalState.FAILED)
+                        Result.failure() else Result.success()
+                }
                 if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                     diagnostics.log("worker_recovery_timeout", mapOf(
                         "chat_id" to chatId,
@@ -90,14 +109,6 @@ class BackgroundResponseWorker(
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
-
-                val current = db.getActiveResponse(chatId)
-                    ?: return Result.success()
-                if (current.optString("request_id") != requestId) return Result.success()
-                if (!current.optBoolean("background_enabled", true)) return Result.success()
-
-                val cursor = current.optLong("last_sequence_number", -1L)
-                var responseState = ResponseIndexedCheckpoint.restore(current)
                 var lastSequence = cursor
                 var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -188,6 +199,10 @@ class BackgroundResponseWorker(
                     if (isStopped) return Result.success()
                     delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
                     retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                } catch (e: UnrecoverableResponsesCheckpointException) {
+                    activeCall = null
+                    failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
+                    return Result.failure()
                 } catch (e: ResponseStreamSequenceGapException) {
                     activeCall = null
                     diagnostics.log("worker_sequence_gap", mapOf(
@@ -268,6 +283,26 @@ class BackgroundResponseWorker(
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }
+    }
+
+    private fun failUnrecoverableCheckpoint(
+        db: ChatDatabase,
+        diagnostics: AstraDiagnostics,
+        chatId: String,
+        responseId: String,
+        requestId: String,
+        cause: UnrecoverableResponsesCheckpointException
+    ) {
+        diagnostics.log("worker_checkpoint_unrecoverable", mapOf(
+            "chat_id" to chatId,
+            "response_id" to responseId,
+            "request_id" to requestId,
+            "error" to cause.message.orEmpty().take(300)
+        ))
+        BackgroundRequestFailureRecorder.persist(
+            db, chatId, requestId, responseId, "failed",
+            "unrecoverable_checkpoint: " + cause.message.orEmpty()
+        )
     }
 
     private fun extractResponseText(response: JSONObject?): String =
