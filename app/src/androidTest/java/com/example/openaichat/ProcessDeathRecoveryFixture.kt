@@ -79,9 +79,12 @@ class ProcessDeathRecoveryFixture {
                     state = ResponseEventReducer.reduce(state, JSONObject()
                         .put("type", "response.completed").put("response", terminal)).state
                 }
-                assertTrue(db.updateActiveResponse(chatId, responseId, state.text,
+                db.updateActiveResponse(chatId, responseId, state.text,
                     if (scenario == "terminal") "completed" else "in_progress", 9,
-                    requestId, ResponseIndexedCheckpoint.serialize(state)))
+                    requestId, ResponseIndexedCheckpoint.serialize(state))
+                val stored = db.getActiveResponse(chatId)!!
+                assertEquals(9L, stored.getLong("last_sequence_number"))
+                assertEquals(state.text, ResponseIndexedCheckpoint.restore(stored).text)
             }
         }
         OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId).forEach { it.delete() }
