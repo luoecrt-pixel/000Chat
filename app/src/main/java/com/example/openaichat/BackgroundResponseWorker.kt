@@ -135,7 +135,8 @@ class BackgroundResponseWorker(
                             type == "response.incomplete" ||
                             type == "response.cancelled"
                         val now = SystemClock.elapsedRealtime()
-                        if (terminal || now - lastCheckpointAt >= 500L) {
+                        if (terminal || type == "response.output_item.done" ||
+                            now - lastCheckpointAt >= 500L) {
                             lastCheckpointAt = now
                             db.updateActiveResponse(
                                 chatId,
