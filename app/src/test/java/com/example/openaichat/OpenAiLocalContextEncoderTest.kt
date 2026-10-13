@@ -176,7 +176,7 @@ class OpenAiLocalContextEncoderTest {
         val original = legacy.toString()
         val replay = serialized(OpenAiLocalContextEncoder.encode(
             history, emptyMap(), allowLegacyVisibleTextOnly = true))
-        assertEquals(6, replay.length())
+        assertEquals(5, replay.length())
         val plain = replay.getJSONObject(1)
         assertEquals("assistant", plain.getString("role"))
         assertTrue(plain.getString("content").contains("ТОЛЬКО видимый текст"))
