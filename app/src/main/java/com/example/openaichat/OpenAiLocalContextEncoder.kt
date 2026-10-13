@@ -27,8 +27,14 @@ object OpenAiLocalContextEncoder {
     fun encode(
         history: List<JSONObject>,
         containerFiles: Map<String, String> = emptyMap(),
-        onManifest: ((JSONObject, JSONObject) -> Unit)? = null,
-        allowLegacyVisibleTextOnly: Boolean = false
+        onManifest: ((JSONObject, JSONObject) -> Unit)? = null
+    ): JSONArray = encode(history, containerFiles, false, onManifest)
+
+    fun encode(
+        history: List<JSONObject>,
+        containerFiles: Map<String, String>,
+        allowLegacyVisibleTextOnly: Boolean,
+        onManifest: ((JSONObject, JSONObject) -> Unit)? = null
     ): JSONArray {
         val input = JSONArray()
         history.forEach { message ->
