@@ -2875,7 +2875,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             input, applicationContext.filesDir, requestChatId, localRequestId
                         )
                         rawSseArchive = archived
-                        OpenAiSseWireByteLimitStream(archived).bufferedReader(Charsets.UTF_8)
+                        OpenAiSseUtf8Reader.open(OpenAiSseWireByteLimitStream(archived))
                     } ?: throw IOException("Пустой ответ")
                     val sequenceCursor = ResponseStreamSequenceCursor()
 

@@ -106,7 +106,7 @@ class ResumableResponseStreamClient(
                 OpenAiRawSseArchive.begin(
                     body.byteStream(), rawFilesDir, ownerChatId, ownerRequestId)
             } else body.byteStream()
-            OpenAiSseWireByteLimitStream(source).bufferedReader(Charsets.UTF_8).use { reader ->
+            OpenAiSseUtf8Reader.open(OpenAiSseWireByteLimitStream(source)).use { reader ->
                 val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
                 if (outcome.errorMessage != null) {
                     // A semantic SSE error is a terminal failure, not a transient
