@@ -31,9 +31,10 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     /**
      * Serialize only opening/configuring SQLite connections, NOT user queries
      * or transactions. An open helper may race an already-running transaction
-     * in another helper; retry just the failed side-effect-free open when the
-     * framework reports SQLITE_BUSY during PRAGMA journal_mode. Every normal
-     * SQL error or upgrade error still propagates untouched.
+     * in another helper; retry SQLITE_BUSY only while the helper itself is
+     * opening/configuring its connection (including idempotent onOpen schema
+     * ensures). Never replay a caller's transaction or mutate a chat on retry.
+     * Non-lock SQL/upgrade errors propagate untouched.
      */
     private fun <T> openConnection(operation: () -> T): T = synchronized(CONNECTION_OPEN_LOCK) {
         var pauseMs = 35L
@@ -41,7 +42,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             try {
                 return@synchronized operation()
             } catch (e: android.database.sqlite.SQLiteDatabaseLockedException) {
-                if (attempt == 7 || !e.message.orEmpty().contains("journal_mode", ignoreCase = true)) throw e
+                if (attempt == 7) throw e
                 try { Thread.sleep(pauseMs) } catch (interrupt: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw e
