@@ -59,6 +59,18 @@ class ResponseIndexedCheckpointTest {
             JSONObject().put("type", "response.completed")
                 .put("response", terminalResponse)).state
         assertEquals("AUTHORITATIVE", activity.text)
+        assertEquals(emptyMap<ResponseContentIndex, String>(), activity.indexedTextParts)
+        val terminalSaved = JSONObject()
+            .put("text", activity.text)
+            .put("last_sequence_number", 6)
+            .put("status", "completed")
+            .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(activity))
+        val terminalRestored = ResponseIndexedCheckpoint.restore(terminalSaved)
+        assertEquals("AUTHORITATIVE", terminalRestored.text)
+        assertEquals(ResponseTerminalState.COMPLETED, terminalRestored.terminalState)
+        assertEquals("resp", terminalRestored.terminalResponse?.getString("id"))
+        assertEquals("AUTHORITATIVE",
+            OpenAiSseStreamReader.terminalOutputText(terminalRestored.terminalResponse))
     }
 
     @Test fun oldFlatCheckpointCanAppendUnindexedButMustRejectIndexedCorrection() {
@@ -93,4 +105,75 @@ class ResponseIndexedCheckpointTest {
             assertTrue(e.message.orEmpty().contains("mismatch"))
         }
     }
+    @Test fun canonicalTerminalCheckpointRoundTripsWithoutPartialMismatch() {
+        var state = ResponseEventReducer.reduce(ResponseEventState(),
+            delta(10, 0, 0, "partial")).state
+        val signed = JSONObject().put("type", "reasoning")
+            .put("encrypted_content", "opaque-signed-reasoning").put("id", "reason_001")
+        val reply = JSONObject().put("type", "message")
+            .put("content", org.json.JSONArray().put(JSONObject()
+                .put("type", "output_text").put("text", "corrected")))
+        val response = JSONObject().put("id", "resp_paid")
+            .put("status", "completed")
+            .put("output", org.json.JSONArray().put(signed).put(reply))
+            .put("usage", JSONObject().put("output_tokens", 37))
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.completed").put("response", response)).state
+        assertEquals("corrected", state.text)
+        assertTrue(state.indexedTextParts.isEmpty())
+        val active = JSONObject().put("status", "completed").put("text", state.text)
+            .put("last_sequence_number", 11)
+            .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state))
+        val reopened = ResponseIndexedCheckpoint.restore(active)
+        assertEquals("corrected", reopened.text)
+        assertEquals(ResponseTerminalState.COMPLETED, reopened.terminalState)
+        assertEquals("opaque-signed-reasoning",
+            reopened.terminalResponse!!.getJSONArray("output")
+                .getJSONObject(0).getString("encrypted_content"))
+        assertEquals(37L, reopened.terminalResponse!!.getJSONObject("usage")
+            .getLong("output_tokens"))
+        // A crash-gap owner cannot append late callbacks to paid terminal data.
+        val late = ResponseEventReducer.reduce(reopened, delta(12, 0, 0, "impostor"))
+        assertEquals(reopened, late.state)
+        assertFalse(late.textChanged)
+    }
+
+    @Test fun incompleteOrFailedCanonicalTerminalAlsoRemainsRecoverable() {
+        for (type in listOf("response.incomplete", "response.failed", "response.cancelled")) {
+            var state = ResponseEventReducer.reduce(ResponseEventState(),
+                delta(2, 1, 0, "draft")).state
+            val response = JSONObject().put("id", "resp_terminal")
+                .put("status", type.removePrefix("response."))
+                .put("output", org.json.JSONArray().put(JSONObject()
+                    .put("type", "message")
+                    .put("content", org.json.JSONArray().put(JSONObject()
+                        .put("type", "output_text").put("text", "canonical"))))
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", type).put("response", response)).state
+            val active = JSONObject().put("text", state.text).put("status",
+                state.terminalState!!.wireStatus).put("last_sequence_number", 3)
+                .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state))
+            val reopened = ResponseIndexedCheckpoint.restore(active)
+            assertEquals("canonical", reopened.text)
+            assertEquals(state.terminalState, reopened.terminalState)
+            assertNotNull(reopened.terminalResponse)
+        }
+    }
+
+    @Test fun missingTerminalProviderOutputIsUnrecoverableNotRetryable() {
+        val state = ResponseEventReducer.reduce(ResponseEventState(),
+            delta(2, 0, 0, "visible")).state
+        val broken = JSONObject(ResponseIndexedCheckpoint.serialize(state))
+            .put("terminal_state", "completed")
+        val active = JSONObject().put("status", "completed")
+            .put("text", "visible").put("last_sequence_number", 3)
+            .put("indexed_checkpoint", broken.toString())
+        try {
+            ResponseIndexedCheckpoint.restore(active)
+            fail("A paid terminal output cannot be regenerated from a flat string")
+        } catch (e: UnrecoverableResponsesCheckpointException) {
+            assertTrue(e.message.orEmpty().contains("not preserved"))
+        }
+    }
+
 }
