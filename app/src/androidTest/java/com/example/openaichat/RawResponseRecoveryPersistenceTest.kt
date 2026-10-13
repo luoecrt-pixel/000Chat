@@ -50,7 +50,8 @@ class RawResponseRecoveryPersistenceTest {
                 assertTrue(assistant.getBoolean("incomplete"))
                 assertFalse("Do not synthesize provider output", assistant.has("openai_protocol_output"))
                 val card = assistant.getJSONArray("annotations").getJSONObject(0)
-                assertEquals(archive.file.absolutePath, card.getString("local_path"))
+                // Android /data/user/0 and /data/data can alias the same file.
+                assertEquals(archive.file.canonicalFile, File(card.getString("local_path")).canonicalFile)
                 assertArrayEquals(bytes, File(card.getString("local_path")).readBytes())
                 filename = card.getString("filename")
                 assertFalse(BackgroundRequestFailureRecorder.persist(db, chatId, requestId,

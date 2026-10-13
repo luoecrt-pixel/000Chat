@@ -471,7 +471,9 @@ class MainActivityLifecycleTest {
                     val path = entry.getString("local_path")
                     assertTrue(java.io.File(path).isFile)
                     assertEquals("image/png", entry.getString("mime_type"))
-                    assertEquals(i, path.substringAfterLast("_").substringBefore(".png").toInt())
+                    // Source identity is explicit metadata; filenames may use
+                    // UUIDs for collision-free atomic publication.
+                    assertEquals(i, entry.getInt("source_index"))
                     savedPaths += path
                 }
                 val failed = manifest.getJSONObject(6)
