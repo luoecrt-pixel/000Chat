@@ -2302,6 +2302,16 @@ data class ExistingMessageRow(
                 MessageMetadataCodec.allKeys.forEach { key ->
                     MessageMetadataCodec.decodeInto(m, key, c.getString(c.getColumnIndexOrThrow(key)))
                 }
+                // SQLite stores the durable OpenAI assistant status, not the
+                // transient JSON flag "incomplete". Reconstruct that flag
+                // only for interrupted OpenAI assistant turns on reopen.
+                // Without it, a Worker failure saved with incomplete=true
+                // reopens as an apparently complete assistant message.
+                if (m.optString("role") == "assistant" &&
+                    m.optString("provider") == "openai" &&
+                    m.optString("status") in setOf("failed", "disconnected", "incomplete", "cancelled")) {
+                    m.put("incomplete", true)
+                }
                 arr.put(m)
             }
         }
