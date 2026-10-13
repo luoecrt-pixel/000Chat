@@ -17,11 +17,109 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
+import android.os.SystemClock
+import android.widget.EditText
 
 @RunWith(AndroidJUnit4::class)
 class RawResponseRecoveryPersistenceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
+
+    @Test fun actualSendAllocationFailurePreservesSignedPartialAndCompleteReceivedSourceAfterReopen() {
+        val prefs = context.getSharedPreferences("app", 0)
+        val settings = listOf("provider", "model", "reasoning", "text_format", "background_responses",
+            "system_prompt", "instructions", "file_analysis_tools", "web", "file_search", "code_interpreter", "image_generation")
+        val previous = settings.associateWith { prefs.all[it] }
+        val previousKey = SecureStore(context).getApiKey()
+        val previousChat = prefs.getString("current_chat", null)
+        val certificate = HeldCertificate.Builder().commonName("localhost").addSubjectAlternativeName("localhost").build()
+        val serverTls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
+        val endpoint = server.url("/v1/responses")
+        val http = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
+            .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().url(endpoint).build()) }.build()
+        // A little over the production frame reservation for this actual Android
+        // heap. The fixture itself retains only a small fraction of the heap.
+        val payloadChars = (Runtime.getRuntime().maxMemory() / 3L / 32L + 4096L).toInt()
+        val source = "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_memory_fixture\"}}\n\n" +
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"signed_memory\",\"encrypted_content\":\"exact-signed-memory-bytes\"}}\n\n" +
+            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"output_index\":1,\"content_index\":0,\"delta\":\"paid partial\"}\n\n" +
+            "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_memory_fixture\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" +
+            "x".repeat(payloadChars) + "\"}]}]}}\n\n"
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(source))
+        var chatId = ""
+        var requestId = ""
+        var sourceFile: File? = null
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+                    activity.newChat()
+                    chatId = activity.prefs.getString("current_chat", "")!!
+                    prefs.edit().putString("provider", "openai").putString("model", "gpt-6-astra")
+                        .putString("reasoning", "high").putString("text_format", "text")
+                        .putString("system_prompt", "").putString("instructions", "")
+                        .putBoolean("background_responses", true).putBoolean("file_analysis_tools", false)
+                        .putBoolean("web", false).putBoolean("file_search", false)
+                        .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit()
+                    SecureStore(context).setApiKey("sk-only-local-memory-test")
+                    field("client").set(activity, http)
+                    (field("input").get(activity) as EditText).setText("Memory source fixture")
+                    MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType!!)
+                        .apply { isAccessible = true }.invoke(activity, false)
+                }
+                assertEquals("POST", server.takeRequest(20, TimeUnit.SECONDS)!!.method)
+                val deadline = SystemClock.elapsedRealtime() + 20_000L
+                var finished = false
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    finished = ChatDatabase(context).use { db ->
+                        db.getActiveResponse(chatId) == null && db.getChat(chatId)!!.getJSONArray("messages").length() == 2
+                    }
+                    if (finished) break
+                    SystemClock.sleep(20)
+                }
+                assertTrue("Actual Send must finalize a memory failure, not crash/retry", finished)
+                instrumentation.waitForIdleSync()
+                ChatDatabase(context).use { db ->
+                    val assistant = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
+                    requestId = assistant.getString("request_id")
+                    assertEquals("paid partial", assistant.getString("text"))
+                    assertEquals("failed", assistant.getString("status"))
+                    assertTrue(assistant.getBoolean("incomplete"))
+                    assertTrue(assistant.getString("error").contains("памяти"))
+                    assertEquals("exact-signed-memory-bytes", assistant.getJSONArray("openai_protocol_output")
+                        .getJSONObject(0).getString("encrypted_content"))
+                    sourceFile = File(assistant.getJSONArray("annotations").getJSONObject(0).getString("local_path"))
+                    assertArrayEquals(source.toByteArray(), sourceFile!!.readBytes())
+                    val accounting = db.listRequestAccounting(chatId).single()
+                    assertEquals("failed", accounting.getString("local_status"))
+                    assertEquals("unknown", accounting.getString("cost_kind"))
+                    assertFalse(accounting.has("cost_usd"))
+                }
+                scenario.onActivity { activity -> assertTrue(activity.send.isEnabled) }
+                assertEquals("One original Create; no automatic paid regeneration", 1, server.requestCount)
+            }
+        } finally {
+            SecureStore(context).setApiKey(previousKey)
+            prefs.edit().apply {
+                previous.forEach { (key, value) -> when (value) {
+                    null -> remove(key); is String -> putString(key, value); is Boolean -> putBoolean(key, value)
+                } }
+                if (previousChat == null) remove("current_chat") else putString("current_chat", previousChat)
+            }.commit()
+            if (chatId.isNotBlank()) {
+                ChatDatabase(context).use { it.deleteChat(chatId) }
+                if (requestId.isNotBlank()) OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId).forEach { it.delete() }
+            }
+            sourceFile?.delete()
+            server.shutdown()
+        }
+    }
 
     @Test fun committedOldCheckpointFailureCannotClearNewSameChatUi() =
         assertRecoveryFailureUi(expired = false, replaceBeforeUi = true)

@@ -7,8 +7,137 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class OpenAiReceivedSseReaderTest {
+    @Test fun concurrentFramesHoldReservationsThroughCallbackAndReleaseThemForNextRead() {
+        val runtime = Runtime.getRuntime()
+        val headroom = runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory()
+        fun source(characters: Int) = "data: {\"type\":\"response.completed\",\"text\":\"" +
+            "x".repeat(characters) + "\"}\n\n"
+        val heldSource = source((headroom / 8L / 32L).toInt())
+        val largerSource = source((headroom / 3L / 32L).toInt())
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val held = (0 until 2).map {
+            val result = CompletableFuture<OpenAiSseReadResult>()
+            Thread {
+                try {
+                    result.complete(OpenAiSseStreamReader.read(heldSource.reader().buffered()) {
+                        entered.countDown()
+                        assertTrue(release.await(10, TimeUnit.SECONDS))
+                        true
+                    })
+                } catch (failure: Throwable) { result.completeExceptionally(failure) }
+            }.apply { isDaemon = true; start() }
+            result
+        }
+        val root = createTempDir(prefix = "received-concurrent-")
+        try {
+            assertTrue("Both actual parsed frames must reach their callbacks", entered.await(10, TimeUnit.SECONDS))
+            val bytes = largerSource.toByteArray()
+            val archive = OpenAiRawSseArchive.begin(ByteArrayInputStream(bytes), root, "chat", "req")
+            var callbacks = 0
+            assertThrows(ResponsesSseLimitException::class.java) {
+                OpenAiSseUtf8Reader.open(archive).use { reader ->
+                    OpenAiReceivedSseReader.read(reader, archive) { callbacks++; true }
+                }
+            }
+            assertEquals(0, callbacks)
+            assertArrayEquals(bytes, archive.file.readBytes())
+            release.countDown()
+            held.forEach { assertEquals(OpenAiStreamEnd.COMPLETED, it.get(10, TimeUnit.SECONDS).end) }
+            val next = OpenAiSseStreamReader.read(largerSource.reader().buffered()) { callbacks++; true }
+            assertEquals(OpenAiStreamEnd.COMPLETED, next.end)
+            assertEquals(1, callbacks)
+        } finally {
+            release.countDown()
+            held.forEach { it.get(10, TimeUnit.SECONDS) }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun allocationLimitDrainsBodyAndKeepsEarlierSignedEventWithoutDispatchingLargeTerminal() {
+        val signed = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"exact-signed-bytes\"}}\n\n"
+        val terminal = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"" +
+            "x".repeat(100_000) + "\"}]}]}}\n\n"
+        val bytes = (signed + terminal).toByteArray()
+        val root = createTempDir(prefix = "received-memory-")
+        try {
+            val archive = OpenAiRawSseArchive.begin(ByteArrayInputStream(bytes), root, "chat", "req")
+            val events = mutableListOf<JSONObject>()
+            assertThrows(ResponsesSseLimitException::class.java) {
+                OpenAiSseUtf8Reader.open(archive).use { reader ->
+                    OpenAiReceivedSseReader.read(reader, archive,
+                        OpenAiSseStreamReader.Limits(maxAllocationBytes = 64 * 1024L)) { events += it; true }
+                }
+            }
+            assertEquals(1, events.size)
+            assertEquals("exact-signed-bytes", events.single().getJSONObject("item").getString("encrypted_content"))
+            assertArrayEquals(bytes, archive.file.readBytes())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun denseJsonCannotEvadeAllocationLimitWithShortStrings() {
+        val bytes = ("data: {\"type\":\"response.completed\",\"response\":{\"output\":[" +
+            List(10_000) { "{}" }.joinToString(",") + "]}}\n\n").toByteArray()
+        assertTrue("The framing text alone fits this allocation budget", bytes.size * 32L < 2_000_000L)
+        val root = createTempDir(prefix = "received-nodes-")
+        try {
+            val archive = OpenAiRawSseArchive.begin(ByteArrayInputStream(bytes), root, "chat", "req")
+            var callbacks = 0
+            assertThrows(ResponsesSseLimitException::class.java) {
+                OpenAiSseUtf8Reader.open(archive).use { reader ->
+                    OpenAiReceivedSseReader.read(reader, archive,
+                        OpenAiSseStreamReader.Limits(maxAllocationBytes = 2_000_000L)) { callbacks++; true }
+                }
+            }
+            assertEquals(0, callbacks)
+            assertArrayEquals(bytes, archive.file.readBytes())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun quotedEscapedJsonDelimitersRemainActualText() {
+        val text = "[{}]\"\\ ".repeat(3_000)
+        val event = JSONObject().put("type", "response.completed").put("text", text)
+        var captured = ""
+        val result = OpenAiSseStreamReader.read(("data: $event\n\n").reader().buffered(),
+            OpenAiSseStreamReader.Limits(maxAllocationBytes = 2_000_000L)) {
+            captured = it.getString("text"); true
+        }
+        assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
+        assertEquals(text, captured)
+    }
+
+    @Test fun manySmallEventsReleaseReservationsAndDoNotCapGenerationLength() {
+        val source = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n".repeat(5_000) +
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\"}}\n\n"
+        var callbacks = 0
+        val result = OpenAiSseStreamReader.read(source.reader().buffered(),
+            OpenAiSseStreamReader.Limits(maxAllocationBytes = 64 * 1024L)) { callbacks++; true }
+        assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
+        assertEquals(5_001, callbacks)
+    }
+
+    @Test fun deepJsonIsRejectedBeforeRecursiveParserAndSourceIsRetained() {
+        val bytes = ("data: {\"type\":\"response.completed\",\"nested\":" + "[".repeat(300) +
+            "0" + "]".repeat(300) + "}\n\n").toByteArray()
+        val root = createTempDir(prefix = "received-depth-")
+        try {
+            val archive = OpenAiRawSseArchive.begin(ByteArrayInputStream(bytes), root, "chat", "req")
+            var callbacks = 0
+            assertThrows(ResponsesSseLimitException::class.java) {
+                OpenAiSseUtf8Reader.open(archive).use { reader ->
+                    OpenAiReceivedSseReader.read(reader, archive) { callbacks++; true }
+                }
+            }
+            assertEquals(0, callbacks)
+            assertArrayEquals(bytes, archive.file.readBytes())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun parserLimitRetainsWholeExistingBodyWithoutInterpretingTheTail() {
         val root = createTempDir(prefix = "received-limit-")
         val bytes = ("data: " + "x".repeat(100_000) + "\n\n" +

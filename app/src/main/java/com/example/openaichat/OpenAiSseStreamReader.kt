@@ -31,10 +31,12 @@ object OpenAiSseStreamReader {
     internal data class Limits(
         val maxLineChars: Int = 128 * 1024 * 1024,
         val maxEventChars: Int = 160 * 1024 * 1024,
-        val maxStreamChars: Long = 512L * 1024 * 1024
+        val maxStreamChars: Long = 512L * 1024 * 1024,
+        val maxAllocationBytes: Long = Long.MAX_VALUE
     ) {
         init {
             require(maxLineChars > 0 && maxEventChars >= maxLineChars && maxStreamChars >= maxEventChars)
+            require(maxAllocationBytes > 0L)
         }
     }
 
@@ -47,6 +49,7 @@ object OpenAiSseStreamReader {
         var semanticError: String? = null
         var eventChars = 0L
         var streamChars = 0L
+        var allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes)
 
         // BufferedReader.readLine() can allocate an unbounded string *before*
         // we can inspect its length; read incrementally and fail at the boundary.
@@ -59,12 +62,19 @@ object OpenAiSseStreamReader {
                 if (line.length >= limits.maxLineChars) {
                     throw ResponsesSseLimitException("Responses SSE line limit exceeded: ${limits.maxLineChars} characters")
                 }
+                val pending = line.length.toLong() + 1L
+                if (eventChars + pending > limits.maxEventChars)
+                    throw ResponsesSseLimitException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
+                if (streamChars + pending > limits.maxStreamChars)
+                    throw ResponsesSseLimitException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
+                allocation.framingCharacters(eventChars + pending)
                 line.append(ch.toChar())
             }
         }
 
         fun consume(data: String): Boolean {
             if (data == "[DONE]") return true
+            allocation.json(data)
             val event = try {
                 JSONObject(data)
             } catch (e: Exception) {
@@ -90,20 +100,26 @@ object OpenAiSseStreamReader {
             return terminal != null
         }
 
-        while (true) {
-            val line = boundedLine() ?: break
-            streamChars += line.length.toLong() + 1L
-            if (streamChars > limits.maxStreamChars)
-                throw ResponsesSseLimitException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
-            eventChars += line.length.toLong() + 1L
-            if (eventChars > limits.maxEventChars)
-                throw ResponsesSseLimitException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
-            val frame = parser.acceptLine(line) ?: continue
-            eventChars = 0L
-            if (consume(frame.data)) break
+        try {
+            while (true) {
+                val line = boundedLine() ?: break
+                streamChars += line.length.toLong() + 1L
+                if (streamChars > limits.maxStreamChars)
+                    throw ResponsesSseLimitException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
+                eventChars += line.length.toLong() + 1L
+                if (eventChars > limits.maxEventChars)
+                    throw ResponsesSseLimitException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
+                val frame = parser.acceptLine(line) ?: continue
+                eventChars = 0L
+                if (consume(frame.data)) break
+                allocation.close()
+                allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes)
+            }
+            // A final frame without a trailing blank line is still a real SSE record.
+            if (terminal == null) parser.finish()?.let { consume(it.data) }
+        } finally {
+            allocation.close()
         }
-        // A final frame without a trailing blank line is still a real SSE record.
-        if (terminal == null) parser.finish()?.let { consume(it.data) }
 
         return OpenAiSseReadResult(
             end = terminal ?: OpenAiStreamEnd.DISCONNECTED,
