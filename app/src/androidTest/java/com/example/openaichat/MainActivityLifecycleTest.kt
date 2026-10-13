@@ -266,6 +266,9 @@ class MainActivityLifecycleTest {
         val body = actualOpenAiWireWithOwnedLocalManifest(false)
         assertEquals("resp_previous", body.getString("previous_response_id"))
         assertFalse(body.has("instructions"))
+        val includes = body.getJSONArray("include")
+        assertTrue("Signed reasoning output must be requested on the real Send wire",
+            (0 until includes.length()).any { includes.optString(it) == "reasoning.encrypted_content" })
         val input = body.getJSONArray("input")
         assertEquals(1, input.length())
         assertEquals("user", input.getJSONObject(0).getString("role"))
@@ -275,6 +278,9 @@ class MainActivityLifecycleTest {
         val body = actualOpenAiWireWithOwnedLocalManifest(true)
         assertFalse(body.has("previous_response_id"))
         assertFalse(body.has("instructions"))
+        val includes = body.getJSONArray("include")
+        assertTrue("Signed reasoning output must be requested on the real Send wire",
+            (0 until includes.length()).any { includes.optString(it) == "reasoning.encrypted_content" })
         val input = body.getJSONArray("input")
         assertEquals("system", input.getJSONObject(0).getString("role"))
         assertEquals("developer", input.getJSONObject(1).getString("role"))
