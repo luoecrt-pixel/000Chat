@@ -99,7 +99,7 @@ class ResumableResponseStreamClient(
                 throw ApiHttpException(response.code, retryAfterMs, raw.take(4096))
             }
             val body = response.body ?: throw IOException("Empty Responses SSE body")
-            body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+            OpenAiSseWireByteLimitStream(body.byteStream()).bufferedReader(Charsets.UTF_8).use { reader ->
                 val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
                 if (outcome.errorMessage != null) {
                     // A semantic SSE error is a terminal failure, not a transient
