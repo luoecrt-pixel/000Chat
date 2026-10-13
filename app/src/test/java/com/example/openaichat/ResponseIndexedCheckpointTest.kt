@@ -50,12 +50,14 @@ class ResponseIndexedCheckpointTest {
             .put("type", "response.output_text.done")
             .put("output_index", 1).put("content_index", 0).put("text", "B-DONE")).state
         assertEquals("A1A2B-DONEC1C2", activity.text)
-        activity = ResponseEventReducer.reduce(activity, JSONObject()
-            .put("type", "response.completed").put("response", JSONObject()
-                .put("id", "resp").put("output", org.json.JSONArray()
-                    .put(JSONObject().put("type", "message")
-                        .put("content", org.json.JSONArray().put(
-                            JSONObject().put("type", "output_text").put("text", "AUTHORITATIVE")))))).state
+        val finalMessage = JSONObject().put("type", "message").put("content",
+            org.json.JSONArray().put(JSONObject().put("type", "output_text")
+                .put("text", "AUTHORITATIVE")))
+        val terminalResponse = JSONObject().put("id", "resp")
+            .put("output", org.json.JSONArray().put(finalMessage))
+        activity = ResponseEventReducer.reduce(activity,
+            JSONObject().put("type", "response.completed")
+                .put("response", terminalResponse)).state
         assertEquals("AUTHORITATIVE", activity.text)
     }
 
