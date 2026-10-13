@@ -16,7 +16,8 @@ object BackgroundRequestFailureRecorder {
         responseId: String,
         status: String,
         error: String,
-        receivedFilesDir: File? = null
+        receivedFilesDir: File? = null,
+        latencyMs: Long = 0L
     ): Boolean {
         val active = db.getActiveResponse(chatId) ?: return false
         if (active.optString("request_id") != localRequestId) return false
@@ -92,6 +93,7 @@ object BackgroundRequestFailureRecorder {
             responseModel = null,
             modelMatch = ModelCatalog.Match.UNKNOWN,
             status = status,
+            latencyMs = latencyMs,
             error = error
         )
         return true

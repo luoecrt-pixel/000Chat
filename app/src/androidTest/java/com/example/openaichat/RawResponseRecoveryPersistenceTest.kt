@@ -23,15 +23,33 @@ class RawResponseRecoveryPersistenceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
 
-    @Test fun committedOldCheckpointFailureCannotClearNewSameChatUi() {
+    @Test fun committedOldCheckpointFailureCannotClearNewSameChatUi() =
+        assertRecoveryFailureUi(expired = false, replaceBeforeUi = true)
+
+    @Test fun expiredRecoveryPreservesSignedPartialAndRawSourceBeforeClearingUi() =
+        assertRecoveryFailureUi(expired = true, replaceBeforeUi = false)
+
+    @Test fun committedOldTimeoutCannotClearNewSameChatUi() =
+        assertRecoveryFailureUi(expired = true, replaceBeforeUi = true)
+
+    private fun assertRecoveryFailureUi(expired: Boolean, replaceBeforeUi: Boolean) {
         val chatId = "raw-ui-owner-" + UUID.randomUUID()
         val oldRequest = "req_checkpoint_old"
         val newRequest = "req_checkpoint_new"
         val prefs = context.getSharedPreferences("app", 0)
         val previousChat = prefs.getString("current_chat", null)
         val newerCall = OkHttpClient().newCall(Request.Builder().url("https://example.invalid/").build())
+        val sourceBytes = "data: exact received source before timeout\n\n".toByteArray()
+        var archive: OpenAiRawSseArchive? = null
         try {
-            ChatDatabase(context).use { it.ensureChat(chatId, "Recovery UI owner fixture") }
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Recovery UI owner fixture")
+                db.upsertCurrentChat(chatId, "Recovery UI owner fixture", null, "high", listOf(
+                    JSONObject().put("role", "user").put("text", "Synthetic prompt")
+                        .put("provider", "openai").put("request_id", oldRequest)))
+            }
+            archive = OpenAiRawSseArchive.begin(ByteArrayInputStream(sourceBytes), context.filesDir, chatId, oldRequest)
+            archive.use { it.receiveRemaining() }
             assertTrue(prefs.edit().putString("current_chat", chatId).commit())
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 instrumentation.waitForIdleSync()
@@ -43,18 +61,36 @@ class RawResponseRecoveryPersistenceTest {
                     state.setAssistantItemId("old-assistant")
                     val captured = BackgroundResponseUiSnapshot(chatId, oldGeneration, "old-assistant")
                     ChatDatabase(context).use { db ->
+                        val started = System.currentTimeMillis() -
+                            if (expired) ResponseDeadlinePolicy.MAX_REQUEST_MS + 1L else 0L
                         db.setActiveResponse(chatId, "resp_old", oldRequest, "paid partial", "in_progress",
-                            System.currentTimeMillis(), "high", "high", false, 16, 0, false)
+                            started, "high", "high", false, 16, 0, expired)
+                        val signed = JSONObject().put("type", "reasoning").put("id", "signed_timeout")
+                            .put("encrypted_content", "signed-paid-exact-bytes")
+                        var recovered = ResponseEventReducer.reduce(ResponseEventState(), JSONObject()
+                            .put("type", "response.output_item.done").put("output_index", 0).put("item", signed)).state
+                        recovered = ResponseEventReducer.reduce(recovered, JSONObject()
+                            .put("type", "response.output_text.delta").put("output_index", 1)
+                            .put("content_index", 0).put("delta", "paid partial")).state
+                        db.updateActiveResponse(chatId, "resp_old", "paid partial", "in_progress", 9,
+                            oldRequest, ResponseIndexedCheckpoint.serialize(recovered))
                     }
                     val callbackFinished = CompletableFuture<Unit>()
                     val callback = Thread {
                         try {
-                            MainActivity::class.java.getDeclaredMethod("failUnrecoverableBackgroundCheckpoint",
-                                String::class.java, String::class.java, String::class.java,
-                                UnrecoverableResponsesCheckpointException::class.java,
-                                BackgroundResponseUiSnapshot::class.java).apply { isAccessible = true }
-                                .invoke(activity, chatId, "resp_old", oldRequest,
-                                    UnrecoverableResponsesCheckpointException("Synthetic checkpoint failure"), captured)
+                            if (expired) {
+                                val active = ChatDatabase(context).use { it.getActiveResponse(chatId)!! }
+                                MainActivity::class.java.getDeclaredMethod("streamBackgroundResponse",
+                                    JSONObject::class.java, BackgroundResponseUiSnapshot::class.java)
+                                    .apply { isAccessible = true }.invoke(activity, active, captured)
+                            } else {
+                                MainActivity::class.java.getDeclaredMethod("failUnrecoverableBackgroundCheckpoint",
+                                    String::class.java, String::class.java, String::class.java,
+                                    UnrecoverableResponsesCheckpointException::class.java,
+                                    BackgroundResponseUiSnapshot::class.java).apply { isAccessible = true }
+                                    .invoke(activity, chatId, "resp_old", oldRequest,
+                                        UnrecoverableResponsesCheckpointException("Synthetic checkpoint failure"), captured)
+                            }
                             callbackFinished.complete(Unit)
                         } catch (failure: Throwable) {
                             callbackFinished.completeExceptionally(failure)
@@ -67,14 +103,24 @@ class RawResponseRecoveryPersistenceTest {
                     callbackFinished.get(10, TimeUnit.SECONDS)
                     ChatDatabase(context).use { db ->
                         assertNull(db.getActiveResponse(chatId))
-                        assertEquals("paid partial", db.getChat(chatId)!!.getJSONArray("messages")
-                            .getJSONObject(0).getString("text"))
-                        db.setActiveResponse(chatId, "resp_new", newRequest, "", "starting",
+                        val assistant = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
+                        assertEquals("paid partial", assistant.getString("text"))
+                        assertTrue(assistant.getBoolean("incomplete"))
+                        assertEquals("signed-paid-exact-bytes", assistant.getJSONArray("openai_protocol_output")
+                            .getJSONObject(0).getString("encrypted_content"))
+                        assertArrayEquals(sourceBytes, File(assistant.getJSONArray("annotations")
+                            .getJSONObject(0).getString("local_path")).readBytes())
+                        val accounting = db.listRequestAccounting(chatId).single()
+                        assertEquals("unknown", accounting.getString("cost_kind"))
+                        assertFalse(accounting.has("cost_usd"))
+                        if (replaceBeforeUi) db.setActiveResponse(chatId, "resp_new", newRequest, "", "starting",
                             System.currentTimeMillis(), "high", "high", false, 16, 0, false)
                     }
-                    newerGeneration = state.nextGeneration()
-                    state.setAssistantItemId("new-assistant")
-                    state.setResponseId("resp_new")
+                    if (replaceBeforeUi) {
+                        newerGeneration = state.nextGeneration()
+                        state.setAssistantItemId("new-assistant")
+                        state.setResponseId("resp_new")
+                    }
                     field("currentCall").set(activity, newerCall)
                     (field("status").get(activity) as TextView).text = "New request remains busy"
                     activity.send.isEnabled = false
@@ -83,22 +129,31 @@ class RawResponseRecoveryPersistenceTest {
                 scenario.onActivity { activity ->
                     fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
                     val state = (field("activeResponseState").get(activity) as ActiveResponseStateStore).state
-                    assertEquals(newerGeneration, state.generation)
-                    assertEquals("new-assistant", state.assistantItemId)
-                    assertEquals("resp_new", state.responseId)
-                    assertSame(newerCall, field("currentCall").get(activity))
-                    assertFalse(activity.send.isEnabled)
-                    assertEquals("New request remains busy", (field("status").get(activity) as TextView).text.toString())
+                    if (replaceBeforeUi) {
+                        assertEquals(newerGeneration, state.generation)
+                        assertEquals("new-assistant", state.assistantItemId)
+                        assertEquals("resp_new", state.responseId)
+                        assertSame(newerCall, field("currentCall").get(activity))
+                        assertFalse(activity.send.isEnabled)
+                        assertEquals("New request remains busy", (field("status").get(activity) as TextView).text.toString())
+                    } else {
+                        assertNull(state.assistantItemId)
+                        assertNull(field("currentCall").get(activity))
+                        assertTrue(activity.send.isEnabled)
+                        assertTrue((field("status").get(activity) as TextView).text.toString().contains("5 часов"))
+                    }
                 }
                 ChatDatabase(context).use { db ->
-                    assertEquals(newRequest, db.getActiveResponse(chatId)!!.getString("request_id"))
-                    assertEquals(1, db.getChat(chatId)!!.getJSONArray("messages").length())
+                    if (replaceBeforeUi) assertEquals(newRequest, db.getActiveResponse(chatId)!!.getString("request_id"))
+                    else assertNull(db.getActiveResponse(chatId))
+                    assertEquals(2, db.getChat(chatId)!!.getJSONArray("messages").length())
                 }
             }
         } finally {
             newerCall.cancel()
             prefs.edit().apply { if (previousChat == null) remove("current_chat") else putString("current_chat", previousChat) }.commit()
             ChatDatabase(context).use { it.deleteChat(chatId) }
+            archive?.file?.delete()
         }
     }
 

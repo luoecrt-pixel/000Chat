@@ -396,7 +396,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val currentActive = active.firstOrNull { it.optString("chat_id") == currentChatId() }
         val backgroundEnabled = currentActive?.optBoolean("background_enabled", true) == true
         if (!backgroundEnabled) currentActive?.optString("request_id")?.let { OpenRouterResponseRuntime.cancel(it, "Фоновое выполнение отключено — соединение прервано") }
-        val responseIdKnown = !currentActive?.optString("response_id").isNullOrBlank()
+        val responseIdKnown = currentActive?.let { JsonProtocol.string(it, "response_id").isNotBlank() } == true
         val keepStreamUntilId = backgroundEnabled && !responseIdKnown
         if (!keepStreamUntilId) {
             currentCall?.cancel()
@@ -2157,6 +2157,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
+        val originalCredential = (currentCall ?: activeResumeCalls[chatId])?.request()
+            ?.header("Authorization")?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
         currentCall?.cancel()
         cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
@@ -2189,31 +2191,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // OpenAI only permits /cancel for background=true Responses.
         if (stopped && active?.optBoolean("background_enabled", false) == true &&
             responseId != null && activeRequestId != null) {
-            // Reconciliation has no UI callback and cannot resurrect chat messages.
-            // Capture only the request identity; no API keys enter SQLite or logs.
-            executor.execute {
-                try {
-                    val key = secure.getApiKey()
-                    if (key.isBlank()) return@execute
-                    val result = OpenAiCancelReconciler(pollingClient).reconcile(responseId, key) { snapshot ->
-                        chatDb.reconcileStoppedOpenAiResponse(
-                            chatId, activeRequestId, responseId, snapshot
-                        )
-                    }
-                    diagnostics.log("background_response_cancel_reconciled", mapOf(
-                        "chat_id" to chatId, "response_id" to responseId,
-                        "cancel_http_status" to result.cancelStatus,
-                        "retrieve_count" to result.retrievals,
-                        "provider_status" to result.terminalStatus,
-                        "usage_present" to result.hasUsage
-                    ))
-                } catch (e: Exception) {
-                    diagnostics.log("background_response_cancel_failed", mapOf(
-                        "chat_id" to chatId, "response_id" to responseId,
-                        "error_type" to e.javaClass.simpleName
-                    ))
-                }
-            }
+            cancelUnownedOpenAiResponse(chatId, activeRequestId, responseId,
+                originalCredential ?: secure.getApiKey())
         }
         if(!activeRequestRegenerate){
             restoringComposer=true
@@ -2868,6 +2847,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
         currentCall=client.newCall(req)
         val call=currentCall!!
+        OpenAiCreateCallOwners.register(requestChatId, localRequestId, call)
 
         executor.execute {
             var requestId: String? = null
@@ -2929,6 +2909,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 responseDecision.responseIdChanged &&
                                 !newId.isNullOrBlank()
                             ) {
+                                if (backgroundEnabled &&
+                                    activeResponsePersistence.getActiveResponse(requestChatId)
+                                        ?.optString("request_id") != localRequestId) {
+                                    // Stop/Delete can win while already-received
+                                    // bytes are queued before response.created.
+                                    cancelUnownedOpenAiResponse(requestChatId, localRequestId, newId!!, key, inline = true)
+                                    throw IOException("Responses owner was stopped or replaced")
+                                }
                                 activeResponsePersistence.updateActiveResponse(
                                     requestChatId,
                                     responseId = newId,
@@ -3209,7 +3197,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val userStopped = activeResponseState.state.wasUserStopped(requestGeneration)
                 val canContinueInBackground = backgroundEnabled && newId != null &&
                     (completionState == "in_progress" || completionState == "disconnected") && !userStopped &&
-                    !ResponsesStreamFailurePolicy.isUnrecoverable(e)
+                    !ResponsesStreamFailurePolicy.isUnrecoverable(e) &&
+                    activeResponsePersistence.getActiveResponse(requestChatId)?.optString("request_id") == localRequestId
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
@@ -3370,6 +3359,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         addBubble("Ошибка",friendly,false)
                     }
                 }
+            } finally {
+                OpenAiCreateCallOwners.release(requestChatId, localRequestId, call)
             }
         }
         }
@@ -3496,6 +3487,33 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
+    private fun cancelUnownedOpenAiResponse(
+        chatId: String, requestId: String, responseId: String, credential: String,
+        inline: Boolean = false
+    ) {
+        // The original credential stays in memory; never persist it. Late-ID
+        // cancellation runs on the existing IO thread, even after onDestroy.
+        val cancel = Runnable {
+            try {
+                if (credential.isBlank()) return@Runnable
+                ChatDatabase(applicationContext).use { db ->
+                    val result = OpenAiCancelReconciler(pollingClient).reconcile(responseId, credential) { snapshot ->
+                        db.reconcileStoppedOpenAiResponse(chatId, requestId, responseId, snapshot)
+                    }
+                    diagnostics.log("background_response_cancel_reconciled", mapOf(
+                        "chat_id" to chatId, "response_id" to responseId,
+                        "cancel_http_status" to result.cancelStatus,
+                        "retrieve_count" to result.retrievals,
+                        "provider_status" to result.terminalStatus, "usage_present" to result.hasUsage))
+                }
+            } catch (error: Exception) {
+                diagnostics.log("background_response_cancel_failed", mapOf(
+                    "chat_id" to chatId, "response_id" to responseId, "error_type" to error.javaClass.simpleName))
+            }
+        }
+        if (inline) cancel.run() else executor.execute(cancel)
+    }
+
     private fun renderToolActivity(){
         if(!::toolLabel.isInitialized)return
         if(toolStates.isEmpty()){toolLabel.text="";return}
@@ -3544,8 +3562,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(responseId==null){
                 val startedAt=a.optLong("started_at",0L)
                 val age=System.currentTimeMillis()-startedAt
-                if(requestId!=null && startedAt>0L && age>120_000L){
-                    activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId=requestId)
+                if(requestId!=null && startedAt>0L && age>120_000L &&
+                    !OpenAiCreateCallOwners.hasLiveCall(chatId, requestId)){
+                    BackgroundRequestFailureRecorder.persist(chatDb, chatId, requestId, "",
+                        "unknown", "Original connection lost before response ID", filesDir)
                     diagnostics.log("background_response_orphaned",mapOf("chat_id" to chatId,"request_id" to requestId,"age_ms" to age))
                 }
                 return@forEach
@@ -3616,11 +3636,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             // the one-shot final commit. Finalize locally; never resume or
             // regenerate an already completed provider response.
             responseState.terminalResponse?.let { terminal ->
-                finalizeBackgroundResponse(current, terminal)
+                finalizeBackgroundResponse(current, terminal, uiSnapshot)
                 return
             }
             if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
-                finishBackgroundRecovery(chatId, "Истёк сквозной лимит ответа (5 часов)", requestId)
+                finishBackgroundRecovery(chatId, "Истёк сквозной лимит ответа (5 часов)", requestId, uiSnapshot)
                 return
             }
             var lastSequence = cursor
@@ -3753,7 +3773,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     )
                     finalizeBackgroundResponse(
                         activeResponsePersistence.getActiveResponse(chatId) ?: active,
-                        result.terminalResponse!!
+                        result.terminalResponse!!,
+                        uiSnapshot
                     )
                     return
                 }
@@ -3772,7 +3793,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     finishBackgroundRecovery(
                         chatId,
                         "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
-                        requestId
+                        requestId, uiSnapshot
                     )
                     return
                 }
@@ -3807,7 +3828,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             "response_id" to responseId,
                             "status" to e.statusCode
                         ))
-                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ: проверьте API-ключ", requestId)
+                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ: проверьте API-ключ", requestId, uiSnapshot)
                         return
                     }
                     404, 410 -> {
@@ -3816,7 +3837,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             "response_id" to responseId,
                             "status" to e.statusCode
                         ))
-                        finishBackgroundRecovery(chatId, "Фоновый ответ больше недоступен", requestId)
+                        finishBackgroundRecovery(chatId, "Фоновый ответ больше недоступен", requestId, uiSnapshot)
                         return
                     }
                     429 -> {
@@ -3838,7 +3859,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                     }
                     else -> {
-                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ (HTTP " + e.statusCode + ")", requestId)
+                        finishBackgroundRecovery(chatId, "Не удалось восстановить ответ (HTTP " + e.statusCode + ")", requestId, uiSnapshot)
                         return
                     }
                 }
@@ -3863,7 +3884,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     finishBackgroundRecovery(
                         chatId,
                         "Фоновое восстановление приостановлено — попробуйте открыть приложение позже",
-                        requestId
+                        requestId, uiSnapshot
                     )
                     return
                 }
@@ -3882,16 +3903,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val persisted = BackgroundRequestFailureRecorder.persist(
             chatDb, chatId, requestId, responseId, "failed", cause.message.orEmpty(), filesDir
         )
-        if (persisted && uiSnapshot != null) runOnUiThread {
-            if (activeResponseState.state.isCurrent(
-                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
-                activeAssistantItemId = null
-                currentCall = null
-                restoreCurrentChat()
-                setBusy(false)
-                status.text = "Ответ обработан не полностью. Полученные исходные данные можно сохранить из карточки файла."
-            }
-        }
+        if (persisted) renderOwnedBackgroundRecoveryFailure(uiSnapshot,
+            "Ответ обработан не полностью. Полученные исходные данные можно сохранить из карточки файла.")
     }
 
     private fun failUnrecoverableBackgroundCheckpoint(
@@ -3914,16 +3927,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             chatDb, chatId, requestId, responseId, "failed",
             "unrecoverable_checkpoint: " + cause.message.orEmpty(), filesDir
         )
-        if (persisted && uiSnapshot != null) runOnUiThread {
-            if (activeResponseState.state.isCurrent(
-                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
-                activeAssistantItemId = null
-                currentCall = null
-                restoreCurrentChat()
-                setBusy(false)
-                status.text = "Не удалось безопасно восстановить ответ; полученный текст сохранён"
-            }
-        }
+        if (persisted) renderOwnedBackgroundRecoveryFailure(uiSnapshot,
+            "Не удалось безопасно восстановить ответ; полученный текст сохранён")
     }
 
     private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
@@ -3937,60 +3942,44 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun finishBackgroundRecovery(chatId:String,message:String,requestId:String?){
-        val active = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_:Exception) { null }
-        val matchingRequest = requestId?.takeIf { it.isNotBlank() && it != "null" }
-        if (active != null && matchingRequest != null && active.optString("request_id") == matchingRequest) {
-            if (!chatDb.claimActiveRequestFailure(chatId, matchingRequest)) return
-            val chatObj = try { chatDb.getChat(chatId) } catch (_:Exception) { null }
-            val messages = chatObj?.optJSONArray("messages")
-            val requestMeta = messages?.let { arr ->
-                (0 until arr.length())
-                    .mapNotNull { arr.optJSONObject(it) }
-                    .firstOrNull { it.optString("request_id") == matchingRequest }
-            }
-            val provider = requestMeta?.optString("provider").orEmpty().ifBlank { "openai" }
-            val requestedModel = requestMeta?.optString("requested_model").orEmpty()
-                .ifBlank { requestMeta?.optString("model").orEmpty() }
-                .takeIf { it.isNotBlank() }
-            val startedAt = active.optLong("started_at", System.currentTimeMillis())
-            val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-            chatDb.recordRequestAccounting(
-                chatId = chatId,
-                localRequestId = matchingRequest,
-                status = "failed",
-                error = message
-            )
-            chatDb.recordRequestEvent(
-                chatId = chatId,
-                eventType = "request_failed",
-                requestId = matchingRequest,
-                provider = provider,
-                requestedModel = requestedModel,
-                responseModel = null,
-                modelMatch = ModelCatalog.Match.UNKNOWN,
-                status = "failed",
-                latencyMs = latency,
-                error = message.take(1200)
-            )
-        }
-        // Already cleared inside claimActiveRequestFailure; a stale callback
-        // must not clear a newer request or mutate its UI.
-        if (active == null || matchingRequest == null || active.optString("request_id") != matchingRequest) return
-        if(currentChatId()!=chatId) return
-        runOnUiThread{
-            if(currentChatId()!=chatId) return@runOnUiThread
-            activeAssistantItemId=null
-            currentCall=null
+    private fun finishBackgroundRecovery(
+        chatId: String, message: String, requestId: String?,
+        uiSnapshot: BackgroundResponseUiSnapshot?
+    ) {
+        val owner = requestId?.takeIf { it.isNotBlank() && it != "null" } ?: return
+        val active = activeResponsePersistence.getActiveResponse(chatId) ?: return
+        if (active.optString("request_id") != owner) return
+        val latency = (System.currentTimeMillis() -
+            active.optLong("started_at", System.currentTimeMillis())).coerceAtLeast(0L)
+        // Preserve the received text, signed items and raw source in the same
+        // request-aware one-shot transaction before releasing its checkpoint.
+        if (BackgroundRequestFailureRecorder.persist(
+                chatDb, chatId, owner, JsonProtocol.string(active, "response_id"),
+                "failed", message, filesDir, latency
+            )) renderOwnedBackgroundRecoveryFailure(uiSnapshot, message)
+    }
+
+    private fun renderOwnedBackgroundRecoveryFailure(
+        uiSnapshot: BackgroundResponseUiSnapshot?, message: String
+    ) {
+        if (uiSnapshot == null) return
+        runOnUiThread {
+            if (!activeResponseState.state.isCurrent(
+                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) return@runOnUiThread
+            activeAssistantItemId = null
+            currentCall = null
+            restoreCurrentChat()
             setBusy(false)
-            status.text=message
+            status.text = message
         }
     }
 
     private fun extractResponseText(response:JSONObject?):String =
         OpenAiSseStreamReader.terminalOutputText(response)
 
-    private fun finalizeBackgroundResponse(active:JSONObject,response:JSONObject){
+    private fun finalizeBackgroundResponse(
+        active: JSONObject, response: JSONObject, uiSnapshot: BackgroundResponseUiSnapshot?
+    ) {
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
         val state=response.optString("status").ifBlank{active.optString("status")}
@@ -4095,10 +4084,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             "latency_ms" to latency,
             "estimated_cost_usd" to "%.6f".format(cost)
         ))
-        val claimedGeneration = activeResponseState.state.generation
         runOnUiThread{
-            if (currentChatId()==chatId &&
-                activeResponseState.state.generation == claimedGeneration &&
+            if (uiSnapshot != null && activeResponseState.state.isCurrent(
+                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing) &&
                 activeResponsePersistence.getActiveResponse(chatId) == null) {
                 persistComposerStateNow()
                 activeResponseState.nextGeneration()
