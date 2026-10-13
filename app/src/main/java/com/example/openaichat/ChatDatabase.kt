@@ -14,7 +14,7 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 23
+        private const val DB_VERSION = 24
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -136,7 +136,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 active_prompt_chars INTEGER NOT NULL DEFAULT 0,
                 active_attachments INTEGER NOT NULL DEFAULT 0,
                 active_background_enabled INTEGER NOT NULL DEFAULT 1,
-                active_last_sequence_number INTEGER NOT NULL DEFAULT -1
+                active_last_sequence_number INTEGER NOT NULL DEFAULT -1,
+                active_indexed_checkpoint TEXT
             )
         """.trimIndent())
         db.execSQL("""
@@ -393,6 +394,16 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_instructions_sha256 TEXT")
             if ("openai_protocol_output" !in existing)
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_protocol_output TEXT")
+        }
+        if (oldVersion < 24) {
+            val columns = db.rawQuery("PRAGMA table_info($CHAT_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names += c.getString(nameIndex)
+                names
+            }
+            if ("active_indexed_checkpoint" !in columns)
+                db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_indexed_checkpoint TEXT")
         }
     }
 
@@ -717,6 +728,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 putNull("active_response_id")
                 putNull("active_request_id")
                 putNull("active_text")
+                putNull("active_indexed_checkpoint")
                 putNull("active_status")
                 putNull("active_started_at")
                 putNull("active_effort_pref")
@@ -783,6 +795,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 putNull("active_response_id")
                 putNull("active_request_id")
                 putNull("active_text")
+                putNull("active_indexed_checkpoint")
                 putNull("active_status")
                 putNull("active_started_at")
                 putNull("active_effort_pref")
@@ -1735,6 +1748,7 @@ data class ExistingMessageRow(
             put("active_attachments", attachments.coerceAtLeast(0))
             put("active_background_enabled", if (backgroundEnabled) 1 else 0)
             put("active_last_sequence_number", -1)
+            putNull("active_indexed_checkpoint")
             put("updated_at", System.currentTimeMillis())
         }
         writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
@@ -1746,12 +1760,19 @@ data class ExistingMessageRow(
         text: String? = null,
         status: String? = null,
         lastSequenceNumber: Long? = null,
-        expectedRequestId: String? = null
+        expectedRequestId: String? = null,
+        indexedCheckpoint: String? = null
     ) {
         if (chatId.isBlank()) return
+        if (indexedCheckpoint != null && (text == null || lastSequenceNumber == null || expectedRequestId == null))
+            throw IllegalArgumentException("Indexed checkpoint must be atomic with text, sequence and owner")
         val values = ContentValues().apply {
             if (responseId != null) putStringOrNull("active_response_id", responseId)
-            if (text != null) put("active_text", text)
+            if (text != null) {
+                put("active_text", text)
+                if (indexedCheckpoint == null) putNull("active_indexed_checkpoint")
+            }
+            if (indexedCheckpoint != null) put("active_indexed_checkpoint", indexedCheckpoint)
             if (status != null) put("active_status", status)
             if (lastSequenceNumber != null) put("active_last_sequence_number", lastSequenceNumber.coerceAtLeast(-1L))
             put("updated_at", System.currentTimeMillis())
@@ -1786,6 +1807,10 @@ data class ExistingMessageRow(
                 if (text != null) {
                     where.append("active_text = ? AND ")
                     args.add(text)
+                }
+                if (indexedCheckpoint != null) {
+                    where.append("active_indexed_checkpoint = ? AND ")
+                    args.add(indexedCheckpoint)
                 }
                 where.append("1=1))")
             }
@@ -1826,7 +1851,7 @@ data class ExistingMessageRow(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
                 "active_auto_selected", "active_prompt_chars", "active_attachments",
-                "active_background_enabled", "active_last_sequence_number"
+                "active_background_enabled", "active_last_sequence_number", "active_indexed_checkpoint"
             ),
             "id=? AND active_status IS NOT NULL",
             arrayOf(chatId), null, null, null, "1"
@@ -1846,6 +1871,7 @@ data class ExistingMessageRow(
                 .put("attachments", c.getInt(9))
                 .put("background_enabled", c.getInt(10) != 0)
                 .put("last_sequence_number", c.getLong(11))
+                .apply { c.getString(12)?.let { put("indexed_checkpoint", it) } }
         }
     }
 
@@ -1856,7 +1882,7 @@ data class ExistingMessageRow(
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
                 "active_effective_effort", "active_auto_selected", "active_prompt_chars",
-                "active_attachments", "active_background_enabled", "active_last_sequence_number"
+                "active_attachments", "active_background_enabled", "active_last_sequence_number", "active_indexed_checkpoint"
             ),
             "active_status IS NOT NULL",
             null, null, null, "updated_at DESC"
@@ -1877,6 +1903,7 @@ data class ExistingMessageRow(
                     .put("attachments", c.getInt(11))
                     .put("background_enabled", c.getInt(12) != 0)
                     .put("last_sequence_number", c.getLong(13))
+                    .apply { c.getString(14)?.let { put("indexed_checkpoint", it) } }
             }
         }
         return out
@@ -1888,6 +1915,7 @@ data class ExistingMessageRow(
             putNull("active_response_id")
             putNull("active_request_id")
             putNull("active_text")
+                putNull("active_indexed_checkpoint")
             putNull("active_status")
             putNull("active_started_at")
             putNull("active_effort_pref")
@@ -1897,6 +1925,7 @@ data class ExistingMessageRow(
             put("active_attachments", 0)
             put("active_background_enabled", 1)
             put("active_last_sequence_number", -1)
+            putNull("active_indexed_checkpoint")
             put("updated_at", System.currentTimeMillis())
         }
         val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
