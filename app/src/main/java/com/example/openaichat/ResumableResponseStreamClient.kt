@@ -29,6 +29,7 @@ class ResumableResponseStreamClient(
     context: Context
 ) {
     private val secureStore = SecureStore(context.applicationContext)
+    private val rawFilesDir = context.applicationContext.filesDir
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
@@ -43,6 +44,8 @@ class ResumableResponseStreamClient(
     fun stream(
         responseId: String,
         startingAfter: Long,
+        ownerChatId: String? = null,
+        ownerRequestId: String? = null,
         onCallCreated: (Call) -> Unit = {},
         startedAtEpochMs: Long? = null,
         onEvent: (JSONObject) -> Unit = {}
@@ -99,7 +102,11 @@ class ResumableResponseStreamClient(
                 throw ApiHttpException(response.code, retryAfterMs, raw.take(4096))
             }
             val body = response.body ?: throw IOException("Empty Responses SSE body")
-            OpenAiSseWireByteLimitStream(body.byteStream()).bufferedReader(Charsets.UTF_8).use { reader ->
+            val source = if (!ownerChatId.isNullOrBlank() && !ownerRequestId.isNullOrBlank()) {
+                OpenAiRawSseArchive.begin(
+                    body.byteStream(), rawFilesDir, ownerChatId, ownerRequestId)
+            } else body.byteStream()
+            OpenAiSseWireByteLimitStream(source).bufferedReader(Charsets.UTF_8).use { reader ->
                 val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
                 if (outcome.errorMessage != null) {
                     // A semantic SSE error is a terminal failure, not a transient
