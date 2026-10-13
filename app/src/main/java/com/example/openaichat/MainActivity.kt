@@ -2869,8 +2869,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: " +
                         OpenAiFileFailure.fromHttp(applicationContext, response.body?.string().orEmpty(), response.code))
-                    val reader=response.body?.byteStream()?.let {
-                        OpenAiSseWireByteLimitStream(it).bufferedReader(Charsets.UTF_8)
+                    val reader=response.body?.byteStream()?.let { input ->
+                        val archived = OpenAiRawSseArchive.begin(
+                            input, applicationContext.filesDir, requestChatId, localRequestId
+                        )
+                        OpenAiSseWireByteLimitStream(archived).bufferedReader(Charsets.UTF_8)
                     } ?: throw IOException("Пустой ответ")
                     val sequenceCursor = ResponseStreamSequenceCursor()
 
@@ -3084,6 +3087,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         requestChatId, "", newId, actualEffort, listOf(assistantMessage), localRequestId
                     )
                     if (!finalized) return@execute
+                    if (completionState == "completed" && (0 until savedGeneratedImages.length()).all {
+                            savedGeneratedImages.optJSONObject(it)?.optString("state") == "READY"
+                        }) {
+                        // Raw archive is redundant only after the complete
+                        // provider output and every generated artifact are
+                        // already durable under the winning SQLite claim.
+                        OpenAiRawSseArchive.deleteAfterDurableCommit(
+                            applicationContext.filesDir, requestChatId, localRequestId)
+                    }
                     ResponseNotifications.finished(applicationContext, requestChatId, localRequestId, completionState == "completed")
                     chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
 
