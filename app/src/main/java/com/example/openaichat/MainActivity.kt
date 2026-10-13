@@ -2822,6 +2822,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(tools.length()>0) body.put("tools",tools)
 
         val include=JSONArray()
+        // A reasoning summary is NOT the signed reasoning state. Request the
+        // provider's opaque encrypted_content so a local typed replay can
+        // preserve it without fabricating private reasoning.
+        include.put("reasoning.encrypted_content")
         if(prefs.getBoolean("web",true)) include.put("web_search_call.action.sources")
         if(prefs.getBoolean("file_search",false)) include.put("file_search_call.results")
         if(enableCodeInterpreter) include.put("code_interpreter_call.outputs")
