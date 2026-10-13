@@ -1,6 +1,7 @@
 package com.example.openaichat
 
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Records a Worker terminal failure only for the still-owned active request.
@@ -14,7 +15,8 @@ object BackgroundRequestFailureRecorder {
         localRequestId: String,
         responseId: String,
         status: String,
-        error: String
+        error: String,
+        receivedFilesDir: File? = null
     ): Boolean {
         val active = db.getActiveResponse(chatId) ?: return false
         if (active.optString("request_id") != localRequestId) return false
@@ -41,7 +43,12 @@ object BackgroundRequestFailureRecorder {
         }
         val typed = recovered?.typedOutputItems?.toSortedMap()?.values.orEmpty()
         val summary = recovered?.reasoningSummary.orEmpty()
-        if ((partial.isNotBlank() || typed.isNotEmpty() || summary.isNotBlank()) && items.none {
+        val sourceMessage = JSONObject()
+        receivedFilesDir?.let {
+            OpenAiRawSseArchive.attachToMessage(sourceMessage, it, chatId, localRequestId)
+        }
+        if ((partial.isNotBlank() || typed.isNotEmpty() || summary.isNotBlank() ||
+                sourceMessage.has("annotations")) && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {
             items += JSONObject()
@@ -55,6 +62,7 @@ object BackgroundRequestFailureRecorder {
                 .put("error", error.take(1200))
                 .apply { requestedModel?.let { put("requested_model", it) } }
                 .apply {
+                    sourceMessage.optJSONArray("annotations")?.let { put("annotations", it) }
                     if (summary.isNotBlank()) put("reasoning_summary", summary)
                     if (typed.isNotEmpty()) put("openai_protocol_output",
                         org.json.JSONArray().apply {

@@ -31,7 +31,7 @@ class OpenAiSseWireByteLimitStream(
         if (next < 0) return -1
         bytesRead++
         if (bytesRead > maxBytes)
-            throw IOException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
+            throw ResponsesSseLimitException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
         return next
     }
 
@@ -45,7 +45,7 @@ class OpenAiSseWireByteLimitStream(
             val extra = `in`.read()
             if (extra < 0) return -1
             bytesRead++
-            throw IOException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
+            throw ResponsesSseLimitException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
         }
         val wanted = minOf(len.toLong(), remaining).toInt()
         val n = `in`.read(b, off, wanted)

@@ -309,8 +309,11 @@ assert 'pollingClient' in main
 reader = (ROOT / 'app/src/main/java/com/example/openaichat/OpenAiSseStreamReader.kt').read_text()
 resumable = (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
 assert 'SseEventParser()' in reader
-assert 'OpenAiSseStreamReader.read(reader)' in main
-assert 'OpenAiSseStreamReader.read(reader)' in resumable
+assert 'OpenAiReceivedSseReader.read(reader, rawSseArchive)' in main
+assert 'OpenAiReceivedSseReader.read(reader, source as? OpenAiRawSseArchive)' in resumable
+received_reader = (ROOT / 'app/src/main/java/com/example/openaichat/OpenAiReceivedSseReader.kt').read_text()
+assert 'OpenAiSseStreamReader.read(reader, limits, onEvent)' in received_reader
+assert 'archive?.receiveRemaining()' in received_reader
 assert 'if (consume(frame.data)) break' in reader
 assert 'OpenAiStreamEnd.DISCONNECTED' in reader
 assert 'terminalOutputText(completedResponse)' in main

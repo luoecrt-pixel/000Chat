@@ -940,6 +940,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun buildRequestEventView(event: JSONObject): View {
+        val eventChatId = currentChatId()
+        val eventGeneration = activeResponseState.state.generation
         val wrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(7), dp(10), dp(7))
@@ -971,6 +973,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setPadding(dp(2), dp(5), dp(2), 0)
             setOnClickListener { copyText("Событие запроса", RequestEventFormatter.details(event)) }
         })
+        val localRequestId = event.optString("local_request_id").ifBlank { event.optString("request_id") }
+        if (localRequestId.isNotBlank()) {
+            val sourceMessage = JSONObject()
+            OpenAiRawSseArchive.attachToMessage(sourceMessage, filesDir, eventChatId, localRequestId)
+            sourceMessage.optJSONArray("annotations")?.let { sources ->
+                wrapper.addView(fileActionButton("Сохранённые исходные данные") {
+                    if (currentChatId() != eventChatId ||
+                        activeResponseState.state.generation != eventGeneration) return@fileActionButton
+                    val content = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(14), dp(12), dp(14), dp(12))
+                    }
+                    renderAnnotations(sources, content, sourceMessage, eventChatId, eventGeneration)
+                    AlertDialog.Builder(this).setTitle("Полученные данные ответа")
+                        .setView(ScrollView(this).apply { addView(content) })
+                        .setPositiveButton("Закрыть", null).show()
+                })
+            }
+        }
         wrapper.setOnLongClickListener {
             copyText("Событие запроса", RequestEventFormatter.details(event))
             true
@@ -3028,7 +3049,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     // Reader.close() propagates to the raw archive's fsync/close.
                     // Closing only the OkHttp response would bypass that wrapper.
                     val streamEnd = reader.use {
-                        OpenAiSseStreamReader.read(reader) { ev -> handleSseEvent(ev) }
+                        OpenAiReceivedSseReader.read(reader, rawSseArchive) { ev -> handleSseEvent(ev) }
                     }
                     completionState = streamEnd.end.wireStatus
                     streamEnd.errorMessage?.let { completionError = it }
@@ -3080,6 +3101,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     responseModel.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
                     val savedGeneratedImages = saveGeneratedImages(responseModel.generatedImageResults)
                     if (savedGeneratedImages.length() > 0) assistantMessage.put("generated_images", savedGeneratedImages)
+                    if (completionState != "completed" || (0 until savedGeneratedImages.length()).any {
+                            savedGeneratedImages.optJSONObject(it)?.optString("state") != "READY"
+                        }) {
+                        OpenAiRawSseArchive.attachToMessage(
+                            assistantMessage, filesDir, requestChatId, localRequestId)
+                    }
 
                     val latency=SystemClock.elapsedRealtime()-startedAt
                     val usageObj=usage
@@ -3181,7 +3208,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 // the composer/chat UI. The worker must not replay those mutations after the stop.
                 val userStopped = activeResponseState.state.wasUserStopped(requestGeneration)
                 val canContinueInBackground = backgroundEnabled && newId != null &&
-                    (completionState == "in_progress" || completionState == "disconnected") && !userStopped
+                    (completionState == "in_progress" || completionState == "disconnected") && !userStopped &&
+                    !ResponsesStreamFailurePolicy.isUnrecoverable(e)
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
                     chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
@@ -3217,6 +3245,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         assistant.put("tools", JSONArray().apply { toolItems.forEach { put(it) } })
                     }
                     newId?.let { assistant.put("response_id", it) }
+                    OpenAiRawSseArchive.attachToMessage(assistant, filesDir, requestChatId, localRequestId)
                     val claimed = chatDb.finalizeCurrentChatIfActiveRequest(
                         requestChatId, "", null, null, listOf(assistant), localRequestId
                     )
@@ -3750,6 +3779,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
                 if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+            } catch (e: UnrecoverableResponsesStreamException) {
+                activeResumeCalls.remove(chatId)
+                failUnrecoverableBackgroundStream(chatId, responseId, requestId, e, uiSnapshot)
+                return
             } catch (e: UnrecoverableResponsesCheckpointException) {
                 activeResumeCalls.remove(chatId)
                 failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e)
@@ -3812,6 +3845,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
             } catch (e: Exception) {
                 activeResumeCalls.remove(chatId)
+                if (ResponsesStreamFailurePolicy.isUnrecoverable(e)) {
+                    failUnrecoverableBackgroundStream(chatId, responseId, requestId,
+                        UnrecoverableResponsesStreamException(e.message.orEmpty(), e), uiSnapshot)
+                    return
+                }
                 if (!activityVisible) {
                     BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext, chatId, responseId, requestId)
                     return
@@ -3836,6 +3874,26 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
 
+    private fun failUnrecoverableBackgroundStream(
+        chatId: String, responseId: String, requestId: String,
+        cause: UnrecoverableResponsesStreamException,
+        uiSnapshot: BackgroundResponseUiSnapshot?
+    ) {
+        val persisted = BackgroundRequestFailureRecorder.persist(
+            chatDb, chatId, requestId, responseId, "failed", cause.message.orEmpty(), filesDir
+        )
+        if (persisted && uiSnapshot != null) runOnUiThread {
+            if (activeResponseState.state.isCurrent(
+                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                activeAssistantItemId = null
+                currentCall = null
+                restoreCurrentChat()
+                setBusy(false)
+                status.text = "Ответ обработан не полностью. Полученные исходные данные можно сохранить из карточки файла."
+            }
+        }
+    }
+
     private fun failUnrecoverableBackgroundCheckpoint(
         chatId: String,
         responseId: String,
@@ -3853,7 +3911,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // same non-reconstructable SSE cursor.
         val persisted = BackgroundRequestFailureRecorder.persist(
             chatDb, chatId, requestId, responseId, "failed",
-            "unrecoverable_checkpoint: " + cause.message.orEmpty()
+            "unrecoverable_checkpoint: " + cause.message.orEmpty(), filesDir
         )
         if (persisted && currentChatId() == chatId) {
             runOnUiThread {
@@ -3949,6 +4007,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             response.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
             if(savedImages.length()>0)put("generated_images",savedImages)
+            if (state != "completed" || (0 until savedImages.length()).any {
+                    savedImages.optJSONObject(it)?.optString("state") != "READY"
+                }) {
+                OpenAiRawSseArchive.attachToMessage(this, filesDir, chatId, requestId)
+            }
         }
         val chatObj=chatDb.getChat(chatId) ?: return
         val arr=chatObj.optJSONArray("messages") ?: JSONArray()
@@ -4321,7 +4384,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         box.removeAllViews()
         val mime=annotation.optString("mime_type").ifBlank{mimeForFilename(filename)}
         val size=annotation.optLong("size_bytes",File(path).length())
-        if(mime.startsWith("image/")){
+        if(annotation.optBoolean("received_source", false)) {
+            box.addView(TextView(this).apply {
+                text="Полученные исходные данные ответа. Файл может содержать только часть ответа; его можно сохранить без новой генерации."
+                textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
+            })
+        }else if(mime.startsWith("image/")){
             val preview=ImageView(this).apply{
                 adjustViewBounds=true
                 scaleType=ImageView.ScaleType.FIT_CENTER
@@ -4463,33 +4531,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private class FileDownloadException(val code:Int):IOException("HTTP $code")
 
-    private fun saveGeneratedImages(results:List<String>):JSONArray {
-        val out=JSONArray()
-        if(results.isEmpty()) return out
-        val maxEncodedBytes = 72L*1024L*1024L
-        val maxDecodedBytes = 50L*1024L*1024L
-        val dir=File(filesDir,"generated_images").apply{mkdirs()}
-        results.forEachIndexed { index, encoded ->
-            try{
-                if(encoded.length.toLong() > maxEncodedBytes) throw IOException("Изображение Astra слишком большое")
-                val bytes=Base64.decode(encoded,Base64.DEFAULT)
-                if(bytes.size.toLong()>maxDecodedBytes) throw IOException("Изображение Astra слишком большое")
-                if(bytes.size<8 || (bytes[0].toInt() and 0xFF)!=0x89 || (bytes[1].toInt() and 0xFF)!=0x50 || (bytes[2].toInt() and 0xFF)!=0x4E || (bytes[3].toInt() and 0xFF)!=0x47) throw IOException("Ожидался PNG")
-                val file=File(dir,"astra_${System.currentTimeMillis()}_${System.nanoTime()}_$index.png")
-                file.outputStream().use{it.write(bytes)}
-                out.put(JSONObject().put("filename",file.name).put("local_path",file.absolutePath).put("mime_type","image/png").put("size_bytes",file.length()).put("state","READY"))
-            }catch(e:Exception){
-                val failure = (e.message ?: e.toString()).take(300)
-                diagnostics.log("generated_image_failed",mapOf("error" to failure, "index" to index))
-                // The provider already ran this image tool. Keep a visible,
-                // indexed failure instead of silently discarding a paid output;
-                // the original response.output is also preserved in SQLite.
-                out.put(JSONObject().put("state", "FAILED").put("source_index", index)
-                    .put("error", failure).put("filename", "astra_image_${index + 1}.png"))
-            }
+    private fun saveGeneratedImages(results:List<String>):JSONArray =
+        GeneratedImageStore.save(filesDir, results) { index, failure ->
+            diagnostics.log("generated_image_failed", mapOf(
+                "error" to failure.message.orEmpty().take(300), "index" to index))
         }
-        return out
-    }
 
     private fun renderGeneratedImages(message:JSONObject,parent:LinearLayout){
         val arr=message.optJSONArray("generated_images") ?: return

@@ -7,6 +7,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * App-private raw-byte safety net for a Responses SSE transport.
@@ -25,8 +27,22 @@ import java.util.UUID
  */
 class OpenAiRawSseArchive private constructor(
     source: InputStream,
-    val file: File
+    val file: File,
+    private val sink: Sink
 ) : FilterInputStream(source) {
+    internal interface Sink {
+        fun write(bytes: ByteArray, offset: Int, length: Int)
+        fun sync()
+        fun close()
+    }
+
+    private class FileSink(file: File) : Sink {
+        private val output = FileOutputStream(file, true)
+        override fun write(bytes: ByteArray, offset: Int, length: Int) = output.write(bytes, offset, length)
+        override fun sync() = output.fd.sync()
+        override fun close() = output.close()
+    }
+
     companion object {
         private const val ROOT = "openai_received_sse"
         private const val SYNC_EVERY = 1024L * 1024L
@@ -38,29 +54,62 @@ class OpenAiRawSseArchive private constructor(
             return digest.joinToString("") { "%02x".format(it) }
         }
 
-        fun begin(input: InputStream, filesDir: File, chatId: String, requestId: String): OpenAiRawSseArchive {
+        fun begin(input: InputStream, filesDir: File, chatId: String, requestId: String): OpenAiRawSseArchive =
+            begin(input, filesDir, chatId, requestId) { FileSink(it) }
+
+        internal fun begin(
+            input: InputStream, filesDir: File, chatId: String, requestId: String,
+            sinkFactory: (File) -> Sink
+        ): OpenAiRawSseArchive {
             val dir = File(filesDir, ROOT)
-            if (!dir.isDirectory && !dir.mkdirs())
-                throw IOException("Cannot create app-private Responses raw SSE archive")
+            if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory)
+                throw ResponsesArchiveStorageException(IOException("Cannot create Responses archive directory"))
             val filename = owner(chatId, requestId) + "_" + UUID.randomUUID() + ".sse"
             val file = File(dir, filename)
             // CREATE_NEW semantics: never replace another paid connection.
-            if (!file.createNewFile()) throw IOException("Responses SSE archive filename collision")
+            try {
+                if (!file.createNewFile()) throw IOException("Responses SSE archive filename collision")
+            } catch (error: IOException) {
+                throw ResponsesArchiveStorageException(error)
+            }
             return try {
-                OpenAiRawSseArchive(input, file)
+                OpenAiRawSseArchive(input, file, sinkFactory(file))
             } catch (error: Exception) {
                 file.delete()
-                throw error
+                throw ResponsesArchiveStorageException(error)
             }
         }
 
         fun archivesFor(filesDir: File, chatId: String, requestId: String): List<File> {
             val prefix = owner(chatId, requestId) + "_"
-            return File(filesDir, ROOT).listFiles()
-                ?.filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(".sse") }
+            val root = File(filesDir, ROOT).canonicalFile
+            return root.listFiles()
+                ?.filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(".sse") &&
+                    it.canonicalFile.parentFile == root }
                 ?.sortedBy { it.name }.orEmpty()
         }
 
+        /** Local file cards expose received source without sending it to a provider. */
+        fun attachToMessage(message: JSONObject, filesDir: File, chatId: String, requestId: String) {
+            val files = archivesFor(filesDir, chatId, requestId).filter { it.length() > 0L }
+            if (files.isEmpty()) return
+            val annotations = message.optJSONArray("annotations") ?: JSONArray()
+            val present = (0 until annotations.length()).mapNotNull {
+                annotations.optJSONObject(it)?.optString("local_path")
+            }.toMutableSet()
+            files.forEach { file ->
+                if (present.add(file.absolutePath)) {
+                    annotations.put(JSONObject().put("type", "local_file")
+                        .put("file_id", "local_received_" + file.name.removeSuffix(".sse"))
+                        .put("filename", "response-source-" + file.name.substringAfter('_'))
+                        .put("local_path", file.absolutePath)
+                        .put("mime_type", "application/octet-stream")
+                        .put("size_bytes", file.length()).put("state", "READY")
+                        .put("received_source", true))
+                }
+            }
+            message.put("annotations", annotations)
+        }
     }
 
     /**
@@ -69,13 +118,14 @@ class OpenAiRawSseArchive private constructor(
      * have received different paid bytes that are not part of this commit.
      */
     fun deleteAfterDurableCommit(): Boolean {
-        if (!closed) return false
+        if (!durablyClosed) return false
         return !file.exists() || file.delete()
     }
 
-    private val sink = FileOutputStream(file, true)
     private var sinceSync = 0L
     private var closed = false
+    private var durablyClosed = false
+    private var storageFailure: ResponsesArchiveStorageException? = null
     var archivedBytes: Long = 0L
         private set
 
@@ -86,35 +136,75 @@ class OpenAiRawSseArchive private constructor(
             archivedBytes += length
             sinceSync += length
             if (sinceSync >= SYNC_EVERY) {
-                sink.fd.sync()
+                sink.sync()
                 sinceSync = 0L
             }
         } catch (error: IOException) {
             // Never consume further upstream data after local storage failed.
             // A partial file remains on disk for honest diagnostics/recovery.
-            throw IOException("Cannot durably archive received Responses SSE bytes", error)
+            val failure = ResponsesArchiveStorageException(error)
+            storageFailure = failure
+            throw failure
         }
     }
 
+    private fun ensureReadable() {
+        storageFailure?.let { throw it }
+        if (closed) throw IOException("Responses archive is closed")
+    }
+
     override fun read(): Int {
+        ensureReadable()
         val b = `in`.read()
         if (b >= 0) record(byteArrayOf(b.toByte()), 0, 1)
         return b
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length < 0 || offset > buffer.size - length) throw IndexOutOfBoundsException()
+        ensureReadable()
+        if (length == 0) return 0
         val n = `in`.read(buffer, offset, length)
         if (n > 0) record(buffer, offset, n)
         return n
     }
 
+    /** Bypasses only interpretation budgets; remains on the original owned Call. */
+    fun receiveRemaining() {
+        val buffer = ByteArray(64 * 1024)
+        while (read(buffer, 0, buffer.size) >= 0) Unit
+    }
+
+    override fun skip(count: Long): Long {
+        if (count <= 0L) return 0L
+        val buffer = ByteArray(minOf(count, 64L * 1024L).toInt())
+        var skipped = 0L
+        while (skipped < count) {
+            val n = read(buffer, 0, minOf(buffer.size.toLong(), count - skipped).toInt())
+            if (n < 0) break
+            skipped += n
+        }
+        return skipped
+    }
+
+    override fun markSupported(): Boolean = false
+    override fun mark(readlimit: Int) = Unit
+    override fun reset(): Unit = throw IOException("Responses archive does not support reset")
+
     override fun close() {
         if (closed) return
         closed = true
-        try {
-            sink.fd.sync()
-        } finally {
-            try { sink.close() } finally { super.close() }
+        var failure: IOException? = storageFailure
+        fun closePart(action: () -> Unit) {
+            try { action() } catch (error: IOException) {
+                if (failure == null) failure = ResponsesArchiveStorageException(error)
+                else if (failure !== error) failure!!.addSuppressed(error)
+            }
         }
+        closePart { sink.sync() }
+        closePart { sink.close() }
+        closePart { super.close() }
+        durablyClosed = failure == null
+        failure?.let { throw it }
     }
 }

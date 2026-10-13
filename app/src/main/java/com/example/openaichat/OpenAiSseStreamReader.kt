@@ -57,7 +57,7 @@ object OpenAiSseStreamReader {
                 if (ch < 0) return if (line.isEmpty()) null else line.toString()
                 if (ch == '\n'.code) return line.toString()
                 if (line.length >= limits.maxLineChars) {
-                    throw IOException("Responses SSE line limit exceeded: ${limits.maxLineChars} characters")
+                    throw ResponsesSseLimitException("Responses SSE line limit exceeded: ${limits.maxLineChars} characters")
                 }
                 line.append(ch.toChar())
             }
@@ -68,10 +68,10 @@ object OpenAiSseStreamReader {
             val event = try {
                 JSONObject(data)
             } catch (e: Exception) {
-                throw IOException("Malformed Responses SSE JSON", e)
+                throw UnrecoverableResponsesStreamException("Malformed Responses SSE JSON", e)
             }
             val type = JsonProtocol.string(event, "type")
-            if (type.isBlank()) throw IOException("Responses SSE event has no type")
+            if (type.isBlank()) throw UnrecoverableResponsesStreamException("Responses SSE event has no type")
             // Duplicated/out-of-order frames rejected by the sequence owner must
             // not supply a terminal event or close the transport prematurely.
             if (!onEvent(event)) return false
@@ -94,10 +94,10 @@ object OpenAiSseStreamReader {
             val line = boundedLine() ?: break
             streamChars += line.length.toLong() + 1L
             if (streamChars > limits.maxStreamChars)
-                throw IOException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
+                throw ResponsesSseLimitException("Responses SSE stream limit exceeded: ${limits.maxStreamChars} characters")
             eventChars += line.length.toLong() + 1L
             if (eventChars > limits.maxEventChars)
-                throw IOException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
+                throw ResponsesSseLimitException("Responses SSE event limit exceeded: ${limits.maxEventChars} characters")
             val frame = parser.acceptLine(line) ?: continue
             eventChars = 0L
             if (consume(frame.data)) break

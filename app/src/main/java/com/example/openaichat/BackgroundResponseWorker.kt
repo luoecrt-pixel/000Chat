@@ -105,7 +105,7 @@ class BackgroundResponseWorker(
                         "request_id" to requestId
                     ))
                     BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                        "failed", "recovery_timeout")
+                        "failed", "recovery_timeout", applicationContext.filesDir)
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
@@ -202,6 +202,12 @@ class BackgroundResponseWorker(
                     if (isStopped) return Result.success()
                     delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
                     retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                } catch (e: UnrecoverableResponsesStreamException) {
+                    activeCall = null
+                    BackgroundRequestFailureRecorder.persist(
+                        db, chatId, requestId, responseId, "failed",
+                        e.message.orEmpty(), applicationContext.filesDir)
+                    return Result.failure()
                 } catch (e: UnrecoverableResponsesCheckpointException) {
                     activeCall = null
                     failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
@@ -227,7 +233,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "failed", "recovery_auth_${e.statusCode}")
+                                "failed", "recovery_auth_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -238,7 +244,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "unknown", "response_gone_${e.statusCode}")
+                                "unknown", "response_gone_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
@@ -261,7 +267,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "failed", "recovery_http_${e.statusCode}")
+                                "failed", "recovery_http_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -269,6 +275,11 @@ class BackgroundResponseWorker(
                 } catch (e: Exception) {
                     activeCall = null
                     if (isStopped) return Result.success()
+                    if (ResponsesStreamFailurePolicy.isUnrecoverable(e)) {
+                        BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                            "failed", e.message.orEmpty(), applicationContext.filesDir)
+                        return Result.failure()
+                    }
                     diagnostics.log("worker_stream_failed", mapOf(
                         "chat_id" to chatId,
                         "response_id" to responseId,
@@ -304,7 +315,7 @@ class BackgroundResponseWorker(
         ))
         BackgroundRequestFailureRecorder.persist(
             db, chatId, requestId, responseId, "failed",
-            "unrecoverable_checkpoint: " + cause.message.orEmpty()
+            "unrecoverable_checkpoint: " + cause.message.orEmpty(), applicationContext.filesDir
         )
     }
 
@@ -340,6 +351,11 @@ class BackgroundResponseWorker(
             model.model?.let { put("response_model", it) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
             if (savedImages.length() > 0) put("generated_images", savedImages)
+            if (state != "completed" || (0 until savedImages.length()).any {
+                    savedImages.optJSONObject(it)?.optString("state") != "READY"
+                }) {
+                OpenAiRawSseArchive.attachToMessage(this, applicationContext.filesDir, chatId, requestId)
+            }
         }
 
         val chatObj = db.getChat(chatId) ?: return
@@ -409,30 +425,11 @@ class BackgroundResponseWorker(
         return (uncached * (10.0 * inMultiplier) + cachedTokens * (1.0 * inMultiplier) + cacheWriteTokens * (12.50 * inMultiplier) + outputTokens * (50.0 * outMultiplier)) / 1_000_000.0
     }
 
-    private fun saveGeneratedImages(results: List<String>, diagnostics: AstraDiagnostics): JSONArray {
-        val out = JSONArray()
-        if (results.isEmpty()) return out
-        val maxEncodedBytes = 72L * 1024L * 1024L
-        val maxDecodedBytes = 50L * 1024L * 1024L
-        val dir = File(applicationContext.filesDir, "generated_images").apply { mkdirs() }
-        results.forEachIndexed { index, encoded ->
-            try {
-                if (encoded.length.toLong() > maxEncodedBytes) throw IOException("generated image too large")
-                val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
-                if (bytes.size.toLong() > maxDecodedBytes) throw IOException("generated image too large")
-                if (bytes.size < 8 || (bytes[0].toInt() and 0xFF) != 0x89 || (bytes[1].toInt() and 0xFF) != 0x50 || (bytes[2].toInt() and 0xFF) != 0x4E || (bytes[3].toInt() and 0xFF) != 0x47) throw IOException("expected PNG")
-                val file = File(dir, "astra_${System.currentTimeMillis()}_${System.nanoTime()}_$index.png")
-                file.outputStream().use { it.write(bytes) }
-                out.put(JSONObject().put("filename", file.name).put("local_path", file.absolutePath).put("mime_type", "image/png").put("size_bytes", file.length()).put("state", "READY"))
-            } catch (e: Exception) {
-                val failure = (e.message ?: e.toString()).take(300)
-                diagnostics.log("generated_image_failed", mapOf("error" to failure, "index" to index))
-                out.put(JSONObject().put("state", "FAILED").put("source_index", index)
-                    .put("error", failure).put("filename", "astra_image_${index + 1}.png"))
-            }
+    private fun saveGeneratedImages(results: List<String>, diagnostics: AstraDiagnostics): JSONArray =
+        GeneratedImageStore.save(applicationContext.filesDir, results) { index, failure ->
+            diagnostics.log("generated_image_failed", mapOf(
+                "error" to failure.message.orEmpty().take(300), "index" to index))
         }
-        return out
-    }
 
     private fun createForegroundInfo(title: String): ForegroundInfo {
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

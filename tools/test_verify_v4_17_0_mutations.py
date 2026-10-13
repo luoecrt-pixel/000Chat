@@ -83,11 +83,11 @@ def mutate_db(source: str, name: str) -> str:
 
 def mutate_stream(source: str, name: str, target: str) -> str:
     if name == "remove_foreground_stream_reader" and target == "main":
-        old = "OpenAiSseStreamReader.read(reader)"
+        old = "OpenAiReceivedSseReader.read(reader, rawSseArchive)"
         assert old in source
         return source.replace(old, "BrokenSseReader.read(reader)", 1)
     if name == "remove_resume_stream_reader" and target == "resume":
-        old = "OpenAiSseStreamReader.read(reader)"
+        old = "OpenAiReceivedSseReader.read(reader, source as? OpenAiRawSseArchive)"
         assert old in source
         return source.replace(old, "BrokenSseReader.read(reader)", 1)
     if name == "disable_stream_terminal_break" and target == "stream":
