@@ -26,6 +26,11 @@ object ResponseIndexedCheckpoint {
             parts.put(JSONObject().put("output_index", key.outputIndex)
                 .put("content_index", key.contentIndex).put("text", value))
         }
+        val typedItems = JSONArray()
+        state.typedOutputItems.toSortedMap().forEach { (index, item) ->
+            typedItems.put(JSONObject().put("output_index", index)
+                .put("item", JSONObject(item.toString())))
+        }
         val assembled = state.indexedTextParts.toSortedMap().values.joinToString("") + state.unindexedText
         require(assembled == state.text) { "Responses checkpoint accumulator and text differ" }
         return JSONObject().put("version", VERSION)
@@ -41,7 +46,8 @@ object ResponseIndexedCheckpoint {
                     put("terminal_response", JSONObject(it.toString()))
                 }
             }
-            .put("parts", parts).toString()
+            .put("parts", parts)
+            .put("typed_output_items", typedItems).toString()
     }
 
     fun restore(active: JSONObject): ResponseEventState {
@@ -82,6 +88,21 @@ object ResponseIndexedCheckpoint {
             // mutates the checkpoint or changes the next model's context.
             throw UnrecoverableResponsesCheckpointException("Responses indexed checkpoint text mismatch")
         }
+        val typedItems = linkedMapOf<Int, JSONObject>()
+        snapshot.optJSONArray("typed_output_items")?.let { array ->
+            for (i in 0 until array.length()) {
+                val entry = array.optJSONObject(i)
+                    ?: throw UnrecoverableResponsesCheckpointException("Invalid typed Responses item")
+                val index = entry.optInt("output_index", -1)
+                val item = entry.optJSONObject("item")
+                    ?: throw UnrecoverableResponsesCheckpointException("Missing typed Responses item")
+                if (index < 0 || item.optString("type") == "message" ||
+                    typedItems.put(index, JSONObject(item.toString())) != null) {
+                    throw UnrecoverableResponsesCheckpointException(
+                        "Duplicated or unsafe typed Responses output item")
+                }
+            }
+        }
         val terminalName = JsonProtocol.string(snapshot, "terminal_state")
         val terminalState = if (terminalName.isBlank()) null
             else ResponseTerminalState.entries.firstOrNull { it.wireStatus == terminalName }
@@ -99,6 +120,7 @@ object ResponseIndexedCheckpoint {
             reasoningSummary = JsonProtocol.string(snapshot, "reasoning_summary"),
             legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false),
             terminalState = terminalState,
-            terminalResponse = terminalResponse)
+            terminalResponse = terminalResponse,
+            typedOutputItems = typedItems)
     }
 }
