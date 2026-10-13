@@ -9,6 +9,14 @@ import java.io.IOException
  * as the SSE sequence. Reconnect/WorkManager must restore the indexed parts
  * instead of treating already assembled output as an unordered text suffix.
  */
+/**
+ * No retry of the same unrecoverable Responses cursor. An owned failure
+ * finalization preserves the received text and makes the issue visible.
+ */
+class UnrecoverableResponsesCheckpointException(
+    message: String, cause: Throwable? = null
+) : IOException(message, cause)
+
 object ResponseIndexedCheckpoint {
     private const val VERSION = 1
 
@@ -18,11 +26,21 @@ object ResponseIndexedCheckpoint {
             parts.put(JSONObject().put("output_index", key.outputIndex)
                 .put("content_index", key.contentIndex).put("text", value))
         }
+        val assembled = state.indexedTextParts.toSortedMap().values.joinToString("") + state.unindexedText
+        require(assembled == state.text) { "Responses checkpoint accumulator and text differ" }
         return JSONObject().put("version", VERSION)
             .put("text", state.text)
             .put("unindexed_text", state.unindexedText)
             .put("reasoning_summary", state.reasoningSummary)
             .put("legacy_flat_checkpoint", state.legacyFlatCheckpoint)
+            .put("terminal_state", state.terminalState?.wireStatus ?: JSONObject.NULL)
+            .apply {
+                // The paid terminal output must survive a crash between the
+                // terminal cursor write and one-shot chat finalization.
+                state.terminalResponse?.let {
+                    put("terminal_response", JSONObject(it.toString()))
+                }
+            }
             .put("parts", parts).toString()
     }
 
@@ -39,34 +57,49 @@ object ResponseIndexedCheckpoint {
                     active.optLong("last_sequence_number", -1L) >= 0L)
         }
         val snapshot = try { JSONObject(raw) } catch (error: Exception) {
-            throw IOException("Damaged Responses indexed checkpoint", error)
+            throw UnrecoverableResponsesCheckpointException("Damaged Responses indexed checkpoint", error)
         }
         if (snapshot.optInt("version") != VERSION)
-            throw IOException("Unsupported Responses indexed checkpoint version")
+            throw UnrecoverableResponsesCheckpointException("Unsupported Responses indexed checkpoint version")
         val indexed = linkedMapOf<ResponseContentIndex, String>()
         val parts = snapshot.optJSONArray("parts")
-            ?: throw IOException("Missing Responses indexed checkpoint parts")
+            ?: throw UnrecoverableResponsesCheckpointException("Missing Responses indexed checkpoint parts")
         for (i in 0 until parts.length()) {
             val item = parts.optJSONObject(i)
-                ?: throw IOException("Invalid Responses indexed checkpoint item")
+                ?: throw UnrecoverableResponsesCheckpointException("Invalid Responses indexed checkpoint item")
             val out = item.optInt("output_index", -1)
             val content = item.optInt("content_index", -1)
             if (out < 0 || content < 0 || !item.has("text"))
-                throw IOException("Invalid Responses indexed checkpoint coordinates")
+                throw UnrecoverableResponsesCheckpointException("Invalid Responses indexed checkpoint coordinates")
             val key = ResponseContentIndex(out, content)
             if (indexed.put(key, JsonProtocol.string(item, "text")) != null)
-                throw IOException("Duplicate Responses indexed checkpoint coordinate")
+                throw UnrecoverableResponsesCheckpointException("Duplicate Responses indexed checkpoint coordinate")
         }
         val loose = JsonProtocol.string(snapshot, "unindexed_text")
         val expected = indexed.toSortedMap().values.joinToString("") + loose
         if (JsonProtocol.string(snapshot, "text") != text || expected != text) {
             // Refuse a corrupt cursor/text/parts pair before the resumed SSE
             // mutates the checkpoint or changes the next model's context.
-            throw IOException("Responses indexed checkpoint text mismatch")
+            throw UnrecoverableResponsesCheckpointException("Responses indexed checkpoint text mismatch")
+        }
+        val terminalName = JsonProtocol.string(snapshot, "terminal_state")
+        val terminalState = if (terminalName.isBlank()) null
+            else ResponseTerminalState.entries.firstOrNull { it.wireStatus == terminalName }
+                ?: throw UnrecoverableResponsesCheckpointException("Unknown Responses terminal state")
+        val terminalResponse = snapshot.optJSONObject("terminal_response")
+        if (terminalResponse != null && terminalState == null)
+            throw UnrecoverableResponsesCheckpointException("Terminal Responses output without terminal state")
+        if (terminalState != null && terminalResponse == null &&
+            active.optString("status") in listOf("completed", "incomplete", "failed", "cancelled")) {
+            // No paid terminal provider output exists in the checkpoint; a
+            // retry cannot reconstruct it, so do not silently declare success.
+            throw UnrecoverableResponsesCheckpointException("Terminal Responses output was not preserved")
         }
         return ResponseEventState(text = text, unindexedText = loose,
             indexedTextParts = indexed,
             reasoningSummary = JsonProtocol.string(snapshot, "reasoning_summary"),
-            legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false))
+            legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false),
+            terminalState = terminalState,
+            terminalResponse = terminalResponse)
     }
 }
