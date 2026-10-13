@@ -4336,7 +4336,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val maxEncodedBytes = 72L*1024L*1024L
         val maxDecodedBytes = 50L*1024L*1024L
         val dir=File(filesDir,"generated_images").apply{mkdirs()}
-        results.take(4).forEachIndexed { index, encoded ->
+        results.forEachIndexed { index, encoded ->
             try{
                 if(encoded.length.toLong() > maxEncodedBytes) throw IOException("Изображение Astra слишком большое")
                 val bytes=Base64.decode(encoded,Base64.DEFAULT)
@@ -4346,7 +4346,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 file.outputStream().use{it.write(bytes)}
                 out.put(JSONObject().put("filename",file.name).put("local_path",file.absolutePath).put("mime_type","image/png").put("size_bytes",file.length()).put("state","READY"))
             }catch(e:Exception){
-                diagnostics.log("generated_image_failed",mapOf("error" to (e.message ?: e.toString()).take(300)))
+                val failure = (e.message ?: e.toString()).take(300)
+                diagnostics.log("generated_image_failed",mapOf("error" to failure, "index" to index))
+                // The provider already ran this image tool. Keep a visible,
+                // indexed failure instead of silently discarding a paid output;
+                // the original response.output is also preserved in SQLite.
+                out.put(JSONObject().put("state", "FAILED").put("source_index", index)
+                    .put("error", failure).put("filename", "astra_image_${index + 1}.png"))
             }
         }
         return out
@@ -4356,6 +4362,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val arr=message.optJSONArray("generated_images") ?: return
         for(i in 0 until arr.length()){
             val a=arr.optJSONObject(i) ?: continue
+            if (a.optString("state") == "FAILED") {
+                parent.addView(TextView(this).apply {
+                    text = "⚠ Не удалось сохранить изображение №${a.optInt("source_index", i) + 1}: " +
+                        JsonProtocol.string(a, "error")
+                    textSize = 12f
+                    setTextColor(Color.rgb(225, 180, 120))
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                })
+                continue
+            }
             val path=a.optString("local_path").takeIf{it.isNotBlank()}
             val filename=safeDisplayName(JsonProtocol.string(a, "filename").ifBlank{"astra_image.png"})
             val mime=a.optString("mime_type").ifBlank{"image/png"}
