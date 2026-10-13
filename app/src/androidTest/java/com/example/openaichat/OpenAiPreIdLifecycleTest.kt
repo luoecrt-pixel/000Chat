@@ -484,7 +484,7 @@ class OpenAiPreIdLifecycleTest {
                     field("pollingClient").set(activity, noNetwork)
                     ResumableResponseStreamClient::class.java.getDeclaredField("httpClient").apply {
                         isAccessible = true
-                    }.set(field("resumableResponseClient").get(activity), noNetwork)
+                    }.set(invoke(activity, "getResumableResponseClient"), noNetwork)
                     val metricHook: () -> Unit = {
                         metricFailures.incrementAndGet()
                         throw android.database.sqlite.SQLiteDatabaseLockedException("Synthetic optional foreground metric lock")
