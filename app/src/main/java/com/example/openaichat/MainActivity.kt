@@ -2897,6 +2897,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                         text = responseState.text,
                                         status = "in_progress",
                                         lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                        indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                         expectedRequestId = localRequestId
                                     )
                                 }
@@ -2937,6 +2938,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                             text = responseState.text,
                                             status = "completed",
                                             lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                            indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                             expectedRequestId = localRequestId
                                         )
                                     }
@@ -2977,6 +2979,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         activeResponsePersistence.updateActiveResponse(
                             requestChatId, responseId = newId, text = responseState.text,
                             status = "in_progress", lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                            indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                             expectedRequestId = localRequestId
                         )
                         throw IOException("Responses SSE disconnected before terminal event")
@@ -3500,9 +3503,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
 
             val cursor = current.optLong("last_sequence_number", -1L)
-            var responseState = ResponseEventState(
-                text = if (cursor >= 0L) JsonProtocol.string(current, "text").orEmpty() else ""
-            )
+            var responseState = ResponseIndexedCheckpoint.restore(current)
             var lastSequence = cursor
             var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -3602,6 +3603,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             text = checkpoint.text,
                             status = checkpoint.status,
                             lastSequenceNumber = checkpoint.lastSequenceNumber,
+                            indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                             expectedRequestId = requestId
                         )
                     }
@@ -3624,6 +3626,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             else -> "in_progress"
                         },
                         lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                        indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                         expectedRequestId = requestId
                     )
                     finalizeBackgroundResponse(
@@ -3639,6 +3642,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     text = responseState.text,
                     status = "in_progress",
                     lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                    indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                     expectedRequestId = requestId
                 )
 
