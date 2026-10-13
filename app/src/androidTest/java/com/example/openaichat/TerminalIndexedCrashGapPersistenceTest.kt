@@ -22,8 +22,11 @@ class TerminalIndexedCrashGapPersistenceTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val chatId = freshChat()
         val requestId = "req_large_terminal"
-        val fragment = "x".repeat(256) + "😀\u0000"
-        val signed = "opaque-signature-\u0000😀".repeat(65_536)
+        // Positive native-processing fixture within the real heap budget;
+        // oversized output is separately covered by full-source refusal tests.
+        val characterBudget = Runtime.getRuntime().maxMemory() / 3L / 32L
+        val fragment = "x".repeat(minOf(256L, characterBudget / 3L / 4_096L).toInt()) + "😀\u0000"
+        val signed = "opaque-signature-\u0000😀".repeat(minOf(65_536L, characterBudget / 2L / 20L).toInt())
         val reasoning = JSONObject().put("type", "reasoning").put("id", "rs_large")
             .put("encrypted_content", signed)
         val user = JSONObject().put("role", "user").put("text", "Large checkpoint fixture")
