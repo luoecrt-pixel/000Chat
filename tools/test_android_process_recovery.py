@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kill the live seeded app process, then verify production WorkManager recovery.
 
-Requires installed Debug + AndroidTest APKs on a disposable emulator. Uses
+Installs the current Debug + AndroidTest APKs on a disposable emulator. Uses
 ordinary AndroidJUnitRunner arguments; never clears app data or touches a phone.
 The seed test does not return normally: its marker proves a durable checkpoint
 and pending WorkManager work before an external force-stop kills that process.
@@ -27,6 +27,9 @@ SCENARIOS = ("terminal", "expired_partial", "stopped_pre_id", "replaced")
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", default=os.environ.get("ANDROID_SERIAL"))
+    parser.add_argument("--app-apk", type=Path, default=Path("app/build/outputs/apk/debug/app-debug.apk"))
+    parser.add_argument("--test-apk", type=Path,
+                        default=Path("app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"))
     parser.add_argument("--reports", type=Path, default=Path("app/build/reports/process-recovery"))
     args = parser.parse_args()
     if not args.serial:
@@ -45,6 +48,13 @@ def main() -> None:
 
     if command("shell", "getprop", "ro.kernel.qemu") != "1":
         raise SystemExit("Refusing process-kill tests on a physical device")
+    # connectedDebugAndroidTest uninstalls its APKs on completion. Install the
+    # exact current build for this separate host-driven run, retaining app data.
+    for apk in (args.app_apk, args.test_apk):
+        if not apk.is_file():
+            raise SystemExit(f"Required Debug test build is missing: {apk}")
+    for apk in (args.app_apk, args.test_apk):
+        command("install", "-r", str(apk.resolve()), timeout=60)
     installed = command("shell", "pm", "list", "instrumentation")
     if RUNNER not in installed:
         raise SystemExit("Debug AndroidTest APK is not installed")
