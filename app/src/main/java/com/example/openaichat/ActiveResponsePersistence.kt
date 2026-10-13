@@ -24,7 +24,8 @@ interface ActiveResponsePersistence {
         text: String? = null,
         status: String? = null,
         lastSequenceNumber: Long? = null,
-        expectedRequestId: String? = null
+        expectedRequestId: String? = null,
+        indexedCheckpoint: String? = null
     )
 
     fun getActiveResponse(chatId: String): JSONObject?
