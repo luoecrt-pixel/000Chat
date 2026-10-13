@@ -30,7 +30,18 @@ object BackgroundRequestFailureRecorder {
             .takeIf { it.isNotBlank() }
 
         val partial = JsonProtocol.string(active, "text")
-        if (partial.isNotBlank() && items.none {
+        // A provider may finish signed reasoning/tool output_item.done BEFORE
+        // emitting its first visible text delta. Persist the exact received
+        // typed items and readable summary even if the assistant text is empty.
+        // Otherwise the Worker clears the owned checkpoint and loses paid data.
+        val recovered = try {
+            ResponseIndexedCheckpoint.restore(active)
+        } catch (_: UnrecoverableResponsesCheckpointException) {
+            null
+        }
+        val typed = recovered?.typedOutputItems?.toSortedMap()?.values.orEmpty()
+        val summary = recovered?.reasoningSummary.orEmpty()
+        if ((partial.isNotBlank() || typed.isNotEmpty() || summary.isNotBlank()) && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {
             items += JSONObject()
@@ -44,21 +55,11 @@ object BackgroundRequestFailureRecorder {
                 .put("error", error.take(1200))
                 .apply { requestedModel?.let { put("requested_model", it) } }
                 .apply {
-                    // Incomplete streams can nevertheless contain genuine
-                    // fully delivered signed reasoning/tool output_item.done.
-                    // Preserve only those exact provider-authored items.
-                    try {
-                        val typed = ResponseIndexedCheckpoint.restore(active).typedOutputItems
-                        if (typed.isNotEmpty()) put("openai_protocol_output",
-                            org.json.JSONArray().apply {
-                                typed.toSortedMap().values.forEach { item ->
-                                    put(JSONObject(item.toString()))
-                                }
-                            })
-                    } catch (_: UnrecoverableResponsesCheckpointException) {
-                        // A damaged checkpoint must not prevent saving the
-                        // actual visible partial text and owned failure.
-                    }
+                    if (summary.isNotBlank()) put("reasoning_summary", summary)
+                    if (typed.isNotEmpty()) put("openai_protocol_output",
+                        org.json.JSONArray().apply {
+                            typed.forEach { item -> put(JSONObject(item.toString())) }
+                        })
                 }
         }
         val previousResponseId = chat.optString("response_id")

@@ -131,6 +131,61 @@ class TerminalIndexedCrashGapPersistenceTest {
             ChatDatabase(context).use { it.deleteChat(chatId) }
         }
     }
+    @Test fun workerFailureWithNoVisibleTextStillPreservesSignedAndReadableReasoning() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val chatId = freshChat()
+        val requestId = "req_signed_without_text"
+        try {
+            var state = ResponseEventReducer.reduce(ResponseEventState(), JSONObject()
+                .put("type", "response.reasoning_summary_text.delta")
+                .put("delta", "Received reasoning summary")).state
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_item.done").put("output_index", 0)
+                .put("item", JSONObject().put("type", "reasoning")
+                    .put("id", "signed_only")
+                    .put("encrypted_content", "signed-before-text"))).state
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_item.done").put("output_index", 1)
+                .put("item", JSONObject().put("type", "web_search_call")
+                    .put("id", "tool_before_text").put("status", "completed"))).state
+            assertEquals("", state.text)
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Signed no text")
+                db.upsertCurrentChat(chatId, "Signed no text", null, null,
+                    listOf(JSONObject().put("role", "user").put("text", "Prompt")
+                        .put("request_id", requestId).put("provider", "openai")))
+                db.setActiveResponse(chatId, "resp_signed_only", requestId, "",
+                    "starting", 1L, "high", "high", false, 6, 0, true)
+                db.updateActiveResponse(chatId, "resp_signed_only", "",
+                    "in_progress", 3, requestId, ResponseIndexedCheckpoint.serialize(state))
+            }
+            ChatDatabase(context).use { db ->
+                assertTrue(BackgroundRequestFailureRecorder.persist(
+                    db, chatId, requestId, "resp_signed_only", "failed", "network_broken"))
+                assertNull(db.getActiveResponse(chatId))
+                val messages = db.getChat(chatId)!!.getJSONArray("messages")
+                assertEquals("Never discard signed output just because text is empty", 2, messages.length())
+                val assistant = messages.getJSONObject(1)
+                assertEquals("", assistant.getString("text"))
+                assertTrue(assistant.getBoolean("incomplete"))
+                assertEquals("Received reasoning summary", assistant.getString("reasoning_summary"))
+                val output = assistant.getJSONArray("openai_protocol_output")
+                assertEquals("signed-before-text", output.getJSONObject(0)
+                    .getString("encrypted_content"))
+                assertEquals("tool_before_text", output.getJSONObject(1).getString("id"))
+                val replay = OpenAiLocalContextEncoder.encode(
+                    listOf(assistant, JSONObject().put("role", "user").put("text", "Next")))
+                assertEquals("reasoning", replay.getJSONObject(0).getString("type"))
+                assertEquals("web_search_call", replay.getJSONObject(1).getString("type"))
+                assertTrue(replay.getJSONObject(2).toString().contains("Received reasoning summary"))
+                assertFalse(BackgroundRequestFailureRecorder.persist(
+                    db, chatId, requestId, "resp_signed_only", "failed", "duplicate"))
+            }
+        } finally {
+            ChatDatabase(context).use { it.deleteChat(chatId) }
+        }
+    }
+
     @Test fun workerFailureAfterReopenPreservesReceivedSignedAndToolItems() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val chatId = freshChat()
