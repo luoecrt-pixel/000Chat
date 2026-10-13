@@ -6,6 +6,8 @@ import android.os.SystemClock
 import android.widget.LinearLayout
 import android.widget.Button
 import android.app.Activity
+import android.app.Application
+import android.os.Bundle
 import android.app.AlertDialog
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -1005,32 +1007,61 @@ class MainActivityLifecycleTest {
 
     @Test
     fun stopCancelsOpenRouterModelPreflightCall() {
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
         val callCancelled = AtomicReference(false)
-        scenario.onActivity { activity ->
-            val fakeCall = Proxy.newProxyInstance(
-                Call::class.java.classLoader,
-                arrayOf(Call::class.java)
-            ) { _, method, _ ->
-                when (method.name) {
-                    "cancel" -> {
-                        callCancelled.set(true)
-                        null
-                    }
-                    "isCanceled" -> callCancelled.get()
-                    "isExecuted" -> true
-                    else -> null
+        val cancelledAtStop = AtomicReference<Boolean?>(null)
+        val stopped = CountDownLatch(1)
+        var target: Activity? = null
+        val application = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .targetContext.applicationContext as Application
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStopped(activity: Activity) {
+                if (activity === target) {
+                    // MainActivity calls super.onStop after cancelling preflight.
+                    // Observe here, before onDestroy could cancel it independently.
+                    cancelledAtStop.set(callCancelled.get())
+                    stopped.countDown()
                 }
-            } as Call
-            @Suppress("UNCHECKED_CAST")
-            val preflight = privateField(activity, "openRouterModelPreflightCall") as AtomicReference<Call?>
-            preflight.set(fakeCall)
+            }
+            override fun onActivityCreated(activity: Activity, state: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
         }
+        application.registerActivityLifecycleCallbacks(callbacks)
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    target = activity
+                    val fakeCall = Proxy.newProxyInstance(
+                        Call::class.java.classLoader,
+                        arrayOf(Call::class.java)
+                    ) { _, method, _ ->
+                        when (method.name) {
+                            "cancel" -> {
+                                callCancelled.set(true)
+                                null
+                            }
+                            "isCanceled" -> callCancelled.get()
+                            "isExecuted" -> true
+                            else -> null
+                        }
+                    } as Call
+                    @Suppress("UNCHECKED_CAST")
+                    val preflight = privateField(activity, "openRouterModelPreflightCall") as AtomicReference<Call?>
+                    preflight.set(fakeCall)
+                }
 
-        scenario.moveToState(Lifecycle.State.CREATED)
-
-        assertTrue("OpenRouter model preflight Call was not cancelled on Stop", callCancelled.get())
-        scenario.close()
+                // Finish causes a real framework Stop without relying on the emulator's
+                // temporary overlay reaching ActivityScenario.State.CREATED.
+                scenario.onActivity { it.finish() }
+                assertTrue("Framework Stop was not observed", stopped.await(5, TimeUnit.SECONDS))
+                assertEquals("Preflight must be cancelled at Stop, before Destroy", true, cancelledAtStop.get())
+            }
+        } finally {
+            application.unregisterActivityLifecycleCallbacks(callbacks)
+        }
     }
 
     @Test

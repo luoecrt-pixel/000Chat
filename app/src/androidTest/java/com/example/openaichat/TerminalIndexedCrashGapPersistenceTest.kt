@@ -18,6 +18,74 @@ import java.util.UUID
 class TerminalIndexedCrashGapPersistenceTest {
     private fun freshChat() = "crash-gap-" + UUID.randomUUID()
 
+    @Test fun largeIndexedTerminalAndSignedOutputSurviveSQLiteReopenAndOneClaim() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val chatId = freshChat()
+        val requestId = "req_large_terminal"
+        val fragment = "x".repeat(256) + "😀\u0000"
+        val signed = "opaque-signature-\u0000😀".repeat(65_536)
+        val reasoning = JSONObject().put("type", "reasoning").put("id", "rs_large")
+            .put("encrypted_content", signed)
+        val user = JSONObject().put("role", "user").put("text", "Large checkpoint fixture")
+            .put("provider", "openai").put("request_id", requestId)
+        try {
+            var state = ResponseEventReducer.reduce(ResponseEventState(), JSONObject()
+                .put("type", "response.output_item.done").put("output_index", 0)
+                .put("item", reasoning)).state
+            // Actual indexed reducer accumulation, including supplementary Unicode
+            // and NUL. No preconstructed flat checkpoint substitutes for this path.
+            repeat(4_096) {
+                state = ResponseEventReducer.reduce(state, JSONObject()
+                    .put("type", "response.output_text.delta").put("output_index", 1)
+                    .put("content_index", 0).put("delta", fragment)).state
+            }
+            val expectedText = fragment.repeat(4_096)
+            assertEquals(expectedText, state.text)
+            val output = JSONArray().put(reasoning).put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(JSONObject()
+                    .put("type", "output_text").put("text", expectedText))))
+            state = ResponseEventReducer.reduce(state, JSONObject().put("type", "response.completed")
+                .put("response", JSONObject().put("id", "resp_large_terminal")
+                    .put("status", "completed").put("output", output))).state
+            val checkpoint = ResponseIndexedCheckpoint.serialize(state)
+            assertTrue("Exercise actual multi-megabyte SQLite TEXT", checkpoint.toByteArray().size > 2 * 1024 * 1024)
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Large indexed terminal")
+                db.upsertCurrentChat(chatId, "Large indexed terminal", null, "high", listOf(user))
+                db.setActiveResponse(chatId, "resp_large_terminal", requestId, "", "starting",
+                    1L, "high", "high", false, 24, 0, true)
+                db.updateActiveResponse(chatId, "resp_large_terminal", state.text, "completed",
+                    4_097, requestId, checkpoint)
+            }
+            ChatDatabase(context).use { db ->
+                val active = db.getActiveResponse(chatId)!!
+                assertEquals(checkpoint, active.getString("indexed_checkpoint"))
+                assertEquals(4_097L, active.getLong("last_sequence_number"))
+                val restored = ResponseIndexedCheckpoint.restore(active)
+                assertEquals(expectedText, restored.text)
+                assertEquals(signed, restored.typedOutputItems.getValue(0).getString("encrypted_content"))
+                val canonical = restored.terminalResponse!!.getJSONArray("output")
+                assertEquals(signed, canonical.getJSONObject(0).getString("encrypted_content"))
+                val assistant = JSONObject().put("role", "assistant").put("provider", "openai")
+                    .put("request_id", requestId).put("response_id", "resp_large_terminal")
+                    .put("status", "completed").put("text", restored.text).put("openai_protocol_output", canonical)
+                assertTrue(db.finalizeCurrentChatIfActiveRequest(chatId, "Large indexed terminal",
+                    "resp_large_terminal", "high", listOf(user, assistant), requestId))
+                assertFalse(db.finalizeCurrentChatIfActiveRequest(chatId, "Large indexed terminal",
+                    "resp_large_terminal", "high", listOf(user, assistant), requestId))
+                assertNull(db.getActiveResponse(chatId))
+            }
+            ChatDatabase(context).use { db ->
+                val messages = db.getChat(chatId)!!.getJSONArray("messages")
+                assertEquals(2, messages.length())
+                assertEquals(expectedText, messages.getJSONObject(1).getString("text"))
+                assertEquals(signed, messages.getJSONObject(1).getJSONArray("openai_protocol_output")
+                    .getJSONObject(0).getString("encrypted_content"))
+                assertNull(db.getActiveResponse(chatId))
+            }
+        } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
+    }
+
     @Test fun paidCanonicalTerminalSurvivesCrashAndCanBeFinalizedExactlyOnce() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val chatId = freshChat()
