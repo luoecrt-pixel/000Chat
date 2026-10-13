@@ -41,14 +41,15 @@ class OpenAiSseWireByteLimitStream(
         // FilterInputStream.read(byte[],off,len) delegates to read() on some
         // implementations. Call the underlying input directly and count once.
         val remaining = maxBytes - bytesRead
-        val wanted = if (remaining >= len.toLong()) len
-            else (remaining + 1L).coerceAtMost(len.toLong()).toInt()
-        val n = `in`.read(b, off, wanted)
-        if (n > 0) {
-            bytesRead += n
-            if (bytesRead > maxBytes)
-                throw IOException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
+        if (remaining <= 0L) {
+            val extra = `in`.read()
+            if (extra < 0) return -1
+            bytesRead++
+            throw IOException("Responses SSE wire-byte limit exceeded: $maxBytes bytes")
         }
+        val wanted = minOf(len.toLong(), remaining).toInt()
+        val n = `in`.read(b, off, wanted)
+        if (n > 0) bytesRead += n
         return n
     }
 }
