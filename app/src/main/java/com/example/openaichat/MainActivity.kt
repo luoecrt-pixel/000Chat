@@ -3609,7 +3609,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             var responseState = try {
                 ResponseIndexedCheckpoint.restore(current)
             } catch (e: UnrecoverableResponsesCheckpointException) {
-                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e)
+                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e, uiSnapshot)
                 return
             }
             // A paid terminal event was checkpointed but the app crashed before
@@ -3785,7 +3785,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 return
             } catch (e: UnrecoverableResponsesCheckpointException) {
                 activeResumeCalls.remove(chatId)
-                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e)
+                failUnrecoverableBackgroundCheckpoint(chatId, responseId, requestId, e, uiSnapshot)
                 return
             } catch (e: ResponseStreamSequenceGapException) {
                 activeResumeCalls.remove(chatId)
@@ -3898,7 +3898,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         chatId: String,
         responseId: String,
         requestId: String,
-        cause: UnrecoverableResponsesCheckpointException
+        cause: UnrecoverableResponsesCheckpointException,
+        uiSnapshot: BackgroundResponseUiSnapshot?
     ) {
         diagnostics.log("background_checkpoint_unrecoverable", mapOf(
             "chat_id" to chatId,
@@ -3913,15 +3914,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             chatDb, chatId, requestId, responseId, "failed",
             "unrecoverable_checkpoint: " + cause.message.orEmpty(), filesDir
         )
-        if (persisted && currentChatId() == chatId) {
-            runOnUiThread {
-                if (currentChatId() == chatId) {
-                    activeAssistantItemId = null
-                    currentCall = null
-                    restoreCurrentChat()
-                    setBusy(false)
-                    status.text = "Не удалось безопасно восстановить ответ; полученный текст сохранён"
-                }
+        if (persisted && uiSnapshot != null) runOnUiThread {
+            if (activeResponseState.state.isCurrent(
+                    uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing)) {
+                activeAssistantItemId = null
+                currentCall = null
+                restoreCurrentChat()
+                setBusy(false)
+                status.text = "Не удалось безопасно восстановить ответ; полученный текст сохранён"
             }
         }
     }

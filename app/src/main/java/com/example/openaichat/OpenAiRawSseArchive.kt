@@ -195,15 +195,18 @@ class OpenAiRawSseArchive private constructor(
         if (closed) return
         closed = true
         var failure: IOException? = storageFailure
-        fun closePart(action: () -> Unit) {
+        fun closePart(storage: Boolean = true, action: () -> Unit) {
             try { action() } catch (error: IOException) {
-                if (failure == null) failure = ResponsesArchiveStorageException(error)
-                else if (failure !== error) failure!!.addSuppressed(error)
+                val reported = if (storage) ResponsesArchiveStorageException(error) else error
+                if (failure == null) failure = reported
+                else if (failure !== reported) failure!!.addSuppressed(reported)
             }
         }
         closePart { sink.sync() }
         closePart { sink.close() }
-        closePart { super.close() }
+        // Closing the upstream socket can fail independently of local storage.
+        // Keep it retryable unless a write/sync/close of the archive also failed.
+        closePart(storage = false) { super.close() }
         durablyClosed = failure == null
         failure?.let { throw it }
     }

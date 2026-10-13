@@ -13,11 +13,94 @@ import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 @RunWith(AndroidJUnit4::class)
 class RawResponseRecoveryPersistenceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
+
+    @Test fun committedOldCheckpointFailureCannotClearNewSameChatUi() {
+        val chatId = "raw-ui-owner-" + UUID.randomUUID()
+        val oldRequest = "req_checkpoint_old"
+        val newRequest = "req_checkpoint_new"
+        val prefs = context.getSharedPreferences("app", 0)
+        val previousChat = prefs.getString("current_chat", null)
+        val newerCall = OkHttpClient().newCall(Request.Builder().url("https://example.invalid/").build())
+        try {
+            ChatDatabase(context).use { it.ensureChat(chatId, "Recovery UI owner fixture") }
+            assertTrue(prefs.edit().putString("current_chat", chatId).commit())
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                instrumentation.waitForIdleSync()
+                var newerGeneration = -1L
+                scenario.onActivity { activity ->
+                    fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+                    val state = field("activeResponseState").get(activity) as ActiveResponseStateStore
+                    val oldGeneration = state.nextGeneration()
+                    state.setAssistantItemId("old-assistant")
+                    val captured = BackgroundResponseUiSnapshot(chatId, oldGeneration, "old-assistant")
+                    ChatDatabase(context).use { db ->
+                        db.setActiveResponse(chatId, "resp_old", oldRequest, "paid partial", "in_progress",
+                            System.currentTimeMillis(), "high", "high", false, 16, 0, false)
+                    }
+                    val callbackFinished = CompletableFuture<Unit>()
+                    val callback = Thread {
+                        try {
+                            MainActivity::class.java.getDeclaredMethod("failUnrecoverableBackgroundCheckpoint",
+                                String::class.java, String::class.java, String::class.java,
+                                UnrecoverableResponsesCheckpointException::class.java,
+                                BackgroundResponseUiSnapshot::class.java).apply { isAccessible = true }
+                                .invoke(activity, chatId, "resp_old", oldRequest,
+                                    UnrecoverableResponsesCheckpointException("Synthetic checkpoint failure"), captured)
+                            callbackFinished.complete(Unit)
+                        } catch (failure: Throwable) {
+                            callbackFinished.completeExceptionally(failure)
+                        }
+                    }.apply { isDaemon = true }
+                    callback.start()
+                    // The main thread stays here until the old DB claim has
+                    // completed and its UI runnable is queued, then starts a
+                    // newer request before that runnable can execute.
+                    callbackFinished.get(10, TimeUnit.SECONDS)
+                    ChatDatabase(context).use { db ->
+                        assertNull(db.getActiveResponse(chatId))
+                        assertEquals("paid partial", db.getChat(chatId)!!.getJSONArray("messages")
+                            .getJSONObject(0).getString("text"))
+                        db.setActiveResponse(chatId, "resp_new", newRequest, "", "starting",
+                            System.currentTimeMillis(), "high", "high", false, 16, 0, false)
+                    }
+                    newerGeneration = state.nextGeneration()
+                    state.setAssistantItemId("new-assistant")
+                    state.setResponseId("resp_new")
+                    field("currentCall").set(activity, newerCall)
+                    (field("status").get(activity) as TextView).text = "New request remains busy"
+                    activity.send.isEnabled = false
+                }
+                instrumentation.waitForIdleSync()
+                scenario.onActivity { activity ->
+                    fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }
+                    val state = (field("activeResponseState").get(activity) as ActiveResponseStateStore).state
+                    assertEquals(newerGeneration, state.generation)
+                    assertEquals("new-assistant", state.assistantItemId)
+                    assertEquals("resp_new", state.responseId)
+                    assertSame(newerCall, field("currentCall").get(activity))
+                    assertFalse(activity.send.isEnabled)
+                    assertEquals("New request remains busy", (field("status").get(activity) as TextView).text.toString())
+                }
+                ChatDatabase(context).use { db ->
+                    assertEquals(newRequest, db.getActiveResponse(chatId)!!.getString("request_id"))
+                    assertEquals(1, db.getChat(chatId)!!.getJSONArray("messages").length())
+                }
+            }
+        } finally {
+            newerCall.cancel()
+            prefs.edit().apply { if (previousChat == null) remove("current_chat") else putString("current_chat", previousChat) }.commit()
+            ChatDatabase(context).use { it.deleteChat(chatId) }
+        }
+    }
 
     @Test fun undecodedPaidSourceSurvivesSQLiteReopenAndHasAnActualSaveCard() {
         val chatId = "raw-export-" + UUID.randomUUID()

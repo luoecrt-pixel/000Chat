@@ -94,6 +94,59 @@ class OpenAiRawSseArchiveTest {
         } finally { dir.deleteRecursively() }
     }
 
+    @Test fun upstreamCloseFailureRemainsRetryableAndPreservesReceivedBytes() {
+        val dir = root()
+        val bytes = byteArrayOf(1, 2, 3)
+        val socketFailure = IOException("Provider socket failed on close")
+        val source = object : ByteArrayInputStream(bytes) {
+            override fun close(): Unit = throw socketFailure
+        }
+        try {
+            val archive = OpenAiRawSseArchive.begin(source, dir, "chat", "req")
+            try {
+                archive.use { it.receiveRemaining() }
+                fail("Socket close failure must remain visible")
+            } catch (failure: IOException) {
+                assertSame("A network close is not a local storage failure", socketFailure, failure)
+                assertFalse(ResponsesStreamFailurePolicy.isUnrecoverable(failure))
+            }
+            assertArrayEquals(bytes, archive.file.readBytes())
+            assertFalse("Failed close must not authorize cleanup", archive.deleteAfterDurableCommit())
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun storageAndUpstreamCloseFailuresRemainPermanentWithBothCauses() {
+        val dir = root()
+        val bytes = byteArrayOf(1, 2, 3)
+        val socketFailure = IOException("Provider socket failed on close")
+        val diskFailure = IOException("Archive fsync failed")
+        var sinkClosed = false
+        val source = object : ByteArrayInputStream(bytes) {
+            override fun close(): Unit = throw socketFailure
+        }
+        try {
+            val archive = OpenAiRawSseArchive.begin(source, dir, "chat", "req") { file ->
+                object : OpenAiRawSseArchive.Sink {
+                    val output = FileOutputStream(file)
+                    override fun write(bytes: ByteArray, offset: Int, length: Int) = output.write(bytes, offset, length)
+                    override fun sync(): Unit = throw diskFailure
+                    override fun close() { sinkClosed = true; output.close() }
+                }
+            }
+            try {
+                archive.use { it.receiveRemaining() }
+                fail("Storage failure must remain visible")
+            } catch (failure: ResponsesArchiveStorageException) {
+                assertSame(diskFailure, failure.cause)
+                assertTrue("Preserve independent network close failure", failure.suppressed.any { it === socketFailure })
+                assertTrue(ResponsesStreamFailurePolicy.isUnrecoverable(failure))
+            }
+            assertTrue(sinkClosed)
+            assertArrayEquals(bytes, archive.file.readBytes())
+            assertFalse(archive.deleteAfterDurableCommit())
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun failedFsyncCannotAuthorizeArchiveDeletion() {
         val dir = root()
         var sourceClosed = false
