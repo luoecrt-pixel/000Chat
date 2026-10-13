@@ -1173,6 +1173,26 @@ data class ExistingMessageRow(
     }
 
     /**
+     * Bind an ID delivered by the original Create after local Stop. Only its
+     * existing, stopped OpenAI accounting row with no captured ID can change;
+     * this never recreates a row, replaces an ID, or touches the active owner.
+     */
+    fun captureStoppedOpenAiResponseId(chatId: String, localRequestId: String, responseId: String): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank() ||
+            !Regex("resp_[A-Za-z0-9_-]+").matches(responseId)) return false
+        return writableDatabase.update(
+            REQUEST_ACCOUNTING_TABLE,
+            ContentValues().apply {
+                put("response_id", responseId)
+                put("updated_at", System.currentTimeMillis())
+            },
+            "chat_id=? AND local_request_id=? AND provider='openai' AND local_status='stopped' " +
+                "AND (response_id IS NULL OR response_id='')",
+            arrayOf(chatId, localRequestId)
+        ) == 1
+    }
+
+    /**
      * BILL-03: reconcile only an already-stopped, locally captured OpenAI response.
      * A matching response ID from the provider is required; the provider may
      * enrich usage/status but must never revive a chat, reset Stop, or mint cost.

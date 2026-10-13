@@ -61,6 +61,7 @@ class RawResponseRecoveryPersistenceTest {
                     state.setAssistantItemId("old-assistant")
                     val captured = BackgroundResponseUiSnapshot(chatId, oldGeneration, "old-assistant")
                     ChatDatabase(context).use { db ->
+                        assertTrue(db.startRequestAccounting(chatId, oldRequest, "openai", "fixture-model", "openai_api_key"))
                         val started = System.currentTimeMillis() -
                             if (expired) ResponseDeadlinePolicy.MAX_REQUEST_MS + 1L else 0L
                         db.setActiveResponse(chatId, "resp_old", oldRequest, "paid partial", "in_progress",

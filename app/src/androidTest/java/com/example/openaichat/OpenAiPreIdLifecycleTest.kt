@@ -165,7 +165,12 @@ class OpenAiPreIdLifecycleTest {
                         assertEquals(0, messages.length())
                         val accounting = db.listRequestAccounting(chatId).single()
                         assertEquals("stopped", accounting.getString("local_status"))
+                        assertEquals(responseId, accounting.getString("response_id"))
+                        assertEquals("cancelled", accounting.getString("provider_status"))
+                        assertEquals(17L, accounting.getLong("input_tokens"))
+                        assertEquals(31L, accounting.getLong("output_tokens"))
                         assertEquals("unknown", accounting.getString("cost_kind"))
+                        assertFalse(accounting.has("cost_usd"))
                     } else assertEquals("Canonical result", messages.getJSONObject(1).getString("text"))
                 }
                 scenario.onActivity { activity ->

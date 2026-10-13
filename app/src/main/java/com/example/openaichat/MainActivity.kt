@@ -3497,6 +3497,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             try {
                 if (credential.isBlank()) return@Runnable
                 ChatDatabase(applicationContext).use { db ->
+                    db.captureStoppedOpenAiResponseId(chatId, requestId, responseId)
                     val result = OpenAiCancelReconciler(pollingClient).reconcile(responseId, credential) { snapshot ->
                         db.reconcileStoppedOpenAiResponse(chatId, requestId, responseId, snapshot)
                     }
