@@ -3027,8 +3027,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
                     // Reader.close() propagates to the raw archive's fsync/close.
                     // Closing only the OkHttp response would bypass that wrapper.
-                    val streamEnd = reader.use { buffered ->
-                        OpenAiSseStreamReader.read(buffered) { ev -> handleSseEvent(ev) }
+                    val streamEnd = reader.use {
+                        OpenAiSseStreamReader.read(reader) { ev -> handleSseEvent(ev) }
                     }
                     completionState = streamEnd.end.wireStatus
                     streamEnd.errorMessage?.let { completionError = it }
