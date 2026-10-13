@@ -13,19 +13,20 @@ import java.util.concurrent.TimeUnit
 
 class OpenAiReceivedSseReaderTest {
     @Test fun concurrentFramesHoldReservationsThroughCallbackAndReleaseThemForNextRead() {
-        val runtime = Runtime.getRuntime()
-        val headroom = runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory()
+        // Actual parsers/callbacks and shared reservations; a fixed small
+        // pressure budget cannot expand when another test's garbage is collected.
+        val limits = OpenAiSseStreamReader.Limits(maxSharedAllocationBytes = 256 * 1024L)
         fun source(characters: Int) = "data: {\"type\":\"response.completed\",\"text\":\"" +
             "x".repeat(characters) + "\"}\n\n"
-        val heldSource = source((headroom / 8L / 32L).toInt())
-        val largerSource = source((headroom / 3L / 32L).toInt())
+        val heldSource = source(1_024)
+        val largerSource = source(4_096)
         val entered = CountDownLatch(2)
         val release = CountDownLatch(1)
         val held = (0 until 2).map {
             val result = CompletableFuture<OpenAiSseReadResult>()
             Thread {
                 try {
-                    result.complete(OpenAiSseStreamReader.read(heldSource.reader().buffered()) {
+                    result.complete(OpenAiSseStreamReader.read(heldSource.reader().buffered(), limits) {
                         entered.countDown()
                         assertTrue(release.await(10, TimeUnit.SECONDS))
                         true
@@ -42,14 +43,14 @@ class OpenAiReceivedSseReaderTest {
             var callbacks = 0
             assertThrows(ResponsesSseLimitException::class.java) {
                 OpenAiSseUtf8Reader.open(archive).use { reader ->
-                    OpenAiReceivedSseReader.read(reader, archive) { callbacks++; true }
+                    OpenAiReceivedSseReader.read(reader, archive, limits) { callbacks++; true }
                 }
             }
             assertEquals(0, callbacks)
             assertArrayEquals(bytes, archive.file.readBytes())
             release.countDown()
             held.forEach { assertEquals(OpenAiStreamEnd.COMPLETED, it.get(10, TimeUnit.SECONDS).end) }
-            val next = OpenAiSseStreamReader.read(largerSource.reader().buffered()) { callbacks++; true }
+            val next = OpenAiSseStreamReader.read(largerSource.reader().buffered(), limits) { callbacks++; true }
             assertEquals(OpenAiStreamEnd.COMPLETED, next.end)
             assertEquals(1, callbacks)
         } finally {

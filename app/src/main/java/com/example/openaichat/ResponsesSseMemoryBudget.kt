@@ -13,7 +13,10 @@ import java.io.Closeable
  * Reservations stay held through the event callback and are always released.
  * This does not bound unrelated allocations in UI/history/SQLite code.
  */
-internal class ResponsesSseMemoryBudget(private val limitBytes: Long) : Closeable {
+internal class ResponsesSseMemoryBudget(
+    private val limitBytes: Long,
+    private val sharedLimitBytes: Long = Long.MAX_VALUE
+) : Closeable {
     private val frameCap = minOf(limitBytes, Runtime.getRuntime().maxMemory() / 3L)
     private var reserved = 0L
 
@@ -64,7 +67,7 @@ internal class ResponsesSseMemoryBudget(private val limitBytes: Long) : Closeabl
             // Leave half of actual headroom for non-decoder allocations and the
             // failure recorder/drain. Counting allocated + reserved memory is
             // deliberately conservative rather than relying on a forced GC.
-            if (increase > headroom / 2L - allReserved) fail()
+            if (increase > headroom / 2L - allReserved || increase > sharedLimitBytes - allReserved) fail()
             allReserved += increase
             reserved = bytes
         }

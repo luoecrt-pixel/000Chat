@@ -32,11 +32,13 @@ object OpenAiSseStreamReader {
         val maxLineChars: Int = 128 * 1024 * 1024,
         val maxEventChars: Int = 160 * 1024 * 1024,
         val maxStreamChars: Long = 512L * 1024 * 1024,
-        val maxAllocationBytes: Long = Long.MAX_VALUE
+        val maxAllocationBytes: Long = Long.MAX_VALUE,
+        // Internal deterministic pressure seam. Production uses measured heap.
+        val maxSharedAllocationBytes: Long = Long.MAX_VALUE
     ) {
         init {
             require(maxLineChars > 0 && maxEventChars >= maxLineChars && maxStreamChars >= maxEventChars)
-            require(maxAllocationBytes > 0L)
+            require(maxAllocationBytes > 0L && maxSharedAllocationBytes > 0L)
         }
     }
 
@@ -49,7 +51,7 @@ object OpenAiSseStreamReader {
         var semanticError: String? = null
         var eventChars = 0L
         var streamChars = 0L
-        var allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes)
+        var allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes, limits.maxSharedAllocationBytes)
 
         // BufferedReader.readLine() can allocate an unbounded string *before*
         // we can inspect its length; read incrementally and fail at the boundary.
@@ -113,7 +115,7 @@ object OpenAiSseStreamReader {
                 eventChars = 0L
                 if (consume(frame.data)) break
                 allocation.close()
-                allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes)
+                allocation = ResponsesSseMemoryBudget(limits.maxAllocationBytes, limits.maxSharedAllocationBytes)
             }
             // A final frame without a trailing blank line is still a real SSE record.
             if (terminal == null) parser.finish()?.let { consume(it.data) }
