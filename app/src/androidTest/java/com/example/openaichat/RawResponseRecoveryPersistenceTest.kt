@@ -86,16 +86,20 @@ class RawResponseRecoveryPersistenceTest {
                         .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit()
                     SecureStore(context).setApiKey("sk-only-local-memory-test")
                     field("client").set(activity, http)
+                    // Reproduce the exact optional-metric exception from the CI
+                    // crash; paid output must still commit and clear busy UI.
+                    field("openAiEffortMetricHook").set(activity, { throw android.database.sqlite.SQLiteDatabaseLockedException("Synthetic effort telemetry lock") })
                     (field("input").get(activity) as EditText).setText("Memory source fixture")
                     MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType!!)
                         .apply { isAccessible = true }.invoke(activity, false)
                 }
                 assertEquals("POST", server.takeRequest(20, TimeUnit.SECONDS)!!.method)
+                requestId = ChatDatabase(context).use { it.listRequestAccounting(chatId).single().getString("local_request_id") }
                 val deadline = SystemClock.elapsedRealtime() + 20_000L
                 var finished = false
                 while (SystemClock.elapsedRealtime() < deadline) {
                     finished = ChatDatabase(context).use { db ->
-                        db.getActiveResponse(chatId) == null && db.getChat(chatId)!!.getJSONArray("messages").length() == 2
+                        !db.isActiveRequest(chatId, requestId)
                     }
                     if (finished) break
                     SystemClock.sleep(20)

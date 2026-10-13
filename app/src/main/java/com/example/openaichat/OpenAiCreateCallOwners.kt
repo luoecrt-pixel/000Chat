@@ -16,6 +16,8 @@ internal object OpenAiCreateCallOwners {
         calls.remove(Owner(chatId, requestId), call)
     }
 
+    fun call(chatId: String, requestId: String): Call? = calls[Owner(chatId, requestId)]
+
     fun hasLiveCall(chatId: String, requestId: String): Boolean =
         calls[Owner(chatId, requestId)]?.isCanceled() == false
 

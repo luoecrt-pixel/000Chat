@@ -42,7 +42,16 @@ class OpenAiPreIdLifecycleTest {
     @Test fun receivedCreatedAfterSecondSendCannotFinishOrClearReplacementOwner() =
         assertDelayedCreated(Action.REPLACE)
 
-    private enum class Action { STOP_START, STOP, DELETE, REPLACE }
+    @Test fun archivedCreatedAcrossRecreateCommitsOnceAndReconcilesNewUiWithoutLosingDraft() =
+        assertDelayedCreated(Action.RECREATE)
+
+    @Test fun archivedCreatedAfterRecreateAndStopCancelsOriginalAccountWithoutRevivingNewUi() =
+        assertDelayedCreated(Action.RECREATE_STOP)
+
+    @Test fun connectionLostDuringPreIdRecreateKeepsReceivedPrefixUnknownCostAndOneCreate() =
+        assertDelayedCreated(Action.RECREATE_DISCONNECT)
+
+    private enum class Action { STOP_START, STOP, DELETE, REPLACE, RECREATE, RECREATE_STOP, RECREATE_DISCONNECT }
 
     private fun assertDelayedCreated(action: Action) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -62,6 +71,8 @@ class OpenAiPreIdLifecycleTest {
         val replacementEntered = CountDownLatch(1)
         val replacementRelease = CountDownLatch(1)
         val createNumber = AtomicInteger()
+        val cancelExpected = action in setOf(Action.STOP, Action.DELETE, Action.REPLACE, Action.RECREATE_STOP)
+        val parsedGate = action == Action.RECREATE || action == Action.RECREATE_STOP
         val responseId = "resp_preid_fixture"
         val replacementResponseId = "resp_preid_replacement"
         fun completedStream(id: String, text: String): String {
@@ -77,11 +88,12 @@ class OpenAiPreIdLifecycleTest {
             .setBody(completedStream(responseId, "Canonical result")))
         if (action == Action.REPLACE) server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
             .setBody(completedStream(replacementResponseId, "Replacement result")))
-        if (action != Action.STOP_START) server.enqueue(MockResponse().setHeader("Content-Type", "application/json")
+        if (cancelExpected) server.enqueue(MockResponse().setHeader("Content-Type", "application/json")
             .setBody(JSONObject().put("id", responseId).put("status", "cancelled")
                 .put("usage", JSONObject().put("input_tokens", 17).put("output_tokens", 31)).toString()))
         val createClient = trusted.newBuilder().addInterceptor { chain ->
             val response = chain.proceed(chain.request().newBuilder().url(server.url("/v1/responses")).build())
+            if (parsedGate) return@addInterceptor response
             val body = response.body!!
             val number = createNumber.getAndIncrement()
             val receivedGate = if (number == 0) entered else replacementEntered
@@ -89,6 +101,17 @@ class OpenAiPreIdLifecycleTest {
             val gated = object : ForwardingSource(body.source()) {
                 private var first = true
                 override fun read(sink: Buffer, byteCount: Long): Long {
+                    if (action == Action.RECREATE_DISCONNECT) {
+                        if (first) {
+                            first = false
+                            // This one byte has reached the production archive;
+                            // the next read is still waiting when onDestroy cancels.
+                            return super.read(sink, minOf(byteCount, 1L))
+                        }
+                        entered.countDown()
+                        if (!release.await(30, TimeUnit.SECONDS)) throw IOException("Fixture before-ID gate timed out")
+                        throw IOException("Fixture before-ID source disconnected")
+                    }
                     val received = Buffer()
                     val count = super.read(received, byteCount)
                     if (first && count > 0L) {
@@ -130,6 +153,24 @@ class OpenAiPreIdLifecycleTest {
                     SecureStore(context).setApiKey("sk-only-local-pre-id")
                     field("client").set(activity, createClient)
                     field("pollingClient").set(activity, cancelClient)
+                    if (parsedGate) {
+                        val hook: (JSONObject) -> Unit = { event ->
+                            if (event.optString("type") == "response.created") {
+                                entered.countDown()
+                                // Emulate a parsed callback which cannot unreceive
+                                // its archived bytes when onDestroy interrupts IO.
+                                val deadline = SystemClock.elapsedRealtime() + 30_000L
+                                var interrupted = false
+                                while (release.count > 0L && SystemClock.elapsedRealtime() < deadline) {
+                                    try { release.await(100, TimeUnit.MILLISECONDS) }
+                                    catch (_: InterruptedException) { interrupted = true }
+                                }
+                                if (interrupted) Thread.currentThread().interrupt()
+                                if (release.count > 0L) throw IOException("Parsed callback gate timed out")
+                            }
+                        }
+                        field("openAiReceivedEventHook").set(activity, hook)
+                    }
                     (field("input").get(activity) as EditText).setText("Pre-ID prompt")
                     MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType!!)
                         .apply { isAccessible = true }.invoke(activity, false)
@@ -165,6 +206,28 @@ class OpenAiPreIdLifecycleTest {
                         }
                         ChatDatabase(context).use { assertNull(it.getChat(chatId)) }
                     }
+                    Action.RECREATE, Action.RECREATE_STOP, Action.RECREATE_DISCONNECT -> {
+                        if (parsedGate) {
+                            val archive = OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId).single()
+                            assertTrue("Created bytes must already be in the real archive", archive.readText().contains(responseId))
+                        }
+                        scenario.recreate()
+                        scenario.onActivity { activity ->
+                            SecureStore(context).setApiKey("sk-only-local-new-account")
+                            if (action == Action.RECREATE_STOP) {
+                                MainActivity::class.java.getDeclaredMethod("stopCurrentResponse")
+                                    .apply { isAccessible = true }.invoke(activity)
+                            } else {
+                                (field("input").get(activity) as EditText).setText("Recreated draft")
+                                if (parsedGate) {
+                                    assertFalse("New UI waits for the registered original callback", activity.send.isEnabled)
+                                    ChatDatabase(context).use { db ->
+                                        assertEquals(requestId, db.getActiveResponse(chatId)!!.getString("request_id"))
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Action.STOP, Action.REPLACE -> {
                         scenario.onActivity { activity ->
                             MainActivity::class.java.getDeclaredMethod("stopCurrentResponse")
@@ -198,7 +261,7 @@ class OpenAiPreIdLifecycleTest {
                     SystemClock.sleep(20)
                 assertFalse("The original callback must release its registry owner",
                     OpenAiCreateCallOwners.isRegistered(chatId, requestId))
-                if (action != Action.STOP_START) {
+                if (cancelExpected) {
                     val cancel = server.takeRequest(20, TimeUnit.SECONDS)!!
                     assertEquals("POST", cancel.method)
                     assertEquals("/v1/responses/$responseId/cancel", cancel.path)
@@ -233,7 +296,7 @@ class OpenAiPreIdLifecycleTest {
                     finished = ChatDatabase(context).use { db ->
                         when (action) {
                             Action.DELETE -> db.getChat(chatId) == null
-                            Action.STOP -> db.listRequestAccounting(chatId).single().optString("response_id") == responseId
+                            Action.STOP, Action.RECREATE_STOP -> db.listRequestAccounting(chatId).single().optString("response_id") == responseId
                             else -> db.getChat(chatId)!!.getJSONArray("messages").length() == 2 &&
                                 db.getActiveResponse(chatId) == null
                         }
@@ -256,8 +319,8 @@ class OpenAiPreIdLifecycleTest {
                         assertEquals(0, db.getChat(replacementChatId)!!.getJSONArray("messages").length())
                     } else {
                         val messages = db.getChat(chatId)!!.getJSONArray("messages")
-                        if (action == Action.STOP || action == Action.REPLACE) {
-                            assertEquals(if (action == Action.STOP) 0 else 2, messages.length())
+                        if (cancelExpected && action != Action.DELETE) {
+                            assertEquals(if (action == Action.REPLACE) 2 else 0, messages.length())
                             val accounting = db.listRequestAccounting(chatId).single {
                                 it.getString("local_request_id") == requestId
                             }
@@ -269,17 +332,39 @@ class OpenAiPreIdLifecycleTest {
                             assertEquals("unknown", accounting.getString("cost_kind"))
                             assertFalse(accounting.has("cost_usd"))
                         }
-                        if (action == Action.STOP_START || action == Action.REPLACE) {
+                        if (action == Action.STOP_START || action == Action.REPLACE || action == Action.RECREATE) {
                             assertEquals(if (action == Action.REPLACE) "Replacement result" else "Canonical result",
                                 messages.getJSONObject(1).getString("text"))
                             assertEquals(if (action == Action.REPLACE) replacementResponseId else responseId,
                                 messages.getJSONObject(1).getString("response_id"))
                         }
+                        if (action == Action.RECREATE_DISCONNECT) {
+                            val assistant = messages.getJSONObject(1)
+                            assertTrue(assistant.getBoolean("incomplete"))
+                            assertEquals("", assistant.getString("text"))
+                            assertFalse(assistant.has("openai_protocol_output"))
+                            assertTrue(JsonProtocol.string(assistant, "response_id").isBlank())
+                            val source = java.io.File(assistant.getJSONArray("annotations").getJSONObject(0).getString("local_path"))
+                            assertArrayEquals(byteArrayOf('d'.code.toByte()), source.readBytes())
+                            val account = db.listRequestAccounting(chatId).single()
+                            assertEquals("unknown", account.getString("cost_kind"))
+                            assertFalse(account.has("cost_usd"))
+                        }
                     }
                 }
+                var uiReady = false
+                val uiDeadline = SystemClock.elapsedRealtime() + 20_000L
+                while (!uiReady && SystemClock.elapsedRealtime() < uiDeadline) {
+                    scenario.onActivity { uiReady = it.send.isEnabled }
+                    if (!uiReady) SystemClock.sleep(20)
+                }
+                assertTrue("The current Activity must reconcile the original callback's transaction", uiReady)
                 scenario.onActivity { activity ->
                     assertTrue(activity.send.isEnabled)
-                    if (action == Action.STOP) assertEquals("Pre-ID prompt", (field("input").get(activity) as EditText).text.toString())
+                    if (action == Action.STOP || action == Action.RECREATE_STOP) assertEquals("Pre-ID prompt", (field("input").get(activity) as EditText).text.toString())
+                    if (action == Action.RECREATE || action == Action.RECREATE_DISCONNECT) {
+                        assertEquals("Recreated draft", (field("input").get(activity) as EditText).text.toString())
+                    }
                     if (action == Action.DELETE) {
                         assertEquals(replacementChatId, activity.prefs.getString("current_chat", ""))
                         assertEquals("Deleted-chat draft", (field("input").get(activity) as EditText).text.toString())
@@ -287,7 +372,7 @@ class OpenAiPreIdLifecycleTest {
                     }
                 }
                 assertEquals("Only explicitly requested Creates and old-response cancellation",
-                    when (action) { Action.STOP_START -> 1; Action.REPLACE -> 3; else -> 2 }, server.requestCount)
+                    when (action) { Action.STOP_START, Action.RECREATE, Action.RECREATE_DISCONNECT -> 1; Action.REPLACE -> 3; else -> 2 }, server.requestCount)
             }
         } finally {
             release.countDown()

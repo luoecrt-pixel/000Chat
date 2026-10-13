@@ -136,6 +136,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
     private val pendingOpenAiPreparation = AtomicReference<String?>(null)
     @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
+    @Volatile private var openAiReceivedEventHook: ((JSONObject) -> Unit)? = null
+    @Volatile private var openAiEffortMetricHook: (() -> Unit)? = null
+    private val preIdCreateWatches = ConcurrentHashMap<String, Any>()
     private val githubToolExecutor by lazy {
         GitHubToolExecutor(
             secureStore = secure,
@@ -388,6 +391,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         openAiLegacyConsentDialog = null
         persistComposerStateNow()
         activityVisible = false
+        preIdCreateWatches.clear()
         val active = try { activeResponsePersistence.listActiveResponses() } catch (_: Exception) { emptyList() }
         BackgroundResponseWorkScheduler.rescheduleAll(applicationContext, active)
         activeResumeCalls.remove(currentChatId())?.cancel()
@@ -414,6 +418,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         cancelPendingGitHubConfirmation()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
+        preIdCreateWatches.clear()
         activeResumeCalls.values.forEach { it.cancel() }
         activeResumeCalls.clear()
         // Only close the local HTTP stream. Background Responses keep running on the
@@ -1068,6 +1073,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             openRouterModelPreflightCall.getAndSet(null)?.cancel()
             cancelPendingGitHubConfirmation()
         }
+        requestId?.let { OpenAiCreateCallOwners.call(id, it)?.cancel() }
         activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
@@ -2157,8 +2163,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
-        val originalCredential = (currentCall ?: activeResumeCalls[chatId])?.request()
+        val originalCreate = try {
+            activeResponsePersistence.getActiveResponse(chatId)?.let {
+                OpenAiCreateCallOwners.call(chatId, JsonProtocol.string(it, "request_id"))
+            }
+        } catch (_: Exception) { null }
+        val originalCredential = (currentCall ?: activeResumeCalls[chatId] ?: originalCreate)?.request()
             ?.header("Authorization")?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
+        originalCreate?.cancel()
         currentCall?.cancel()
         cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
@@ -2881,6 +2893,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val sequenceCursor = ResponseStreamSequenceCursor()
 
                     fun handleSseEvent(ev:JSONObject): Boolean {
+                        openAiReceivedEventHook?.invoke(ev)
                         try {
                             val sequenceNumber=ev.optLong("sequence_number",-1L)
                             if(sequenceNumber>=0L){
@@ -3119,7 +3132,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         rawSseArchive?.deleteAfterDurableCommit()
                     }
                     ResponseNotifications.finished(applicationContext, requestChatId, localRequestId, completionState == "completed")
-                    chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost)
+                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost) }
 
                     chatDb.recordRequestAccounting(
                         chatId = requestChatId,
@@ -3201,7 +3214,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     activeResponsePersistence.getActiveResponse(requestChatId)?.optString("request_id") == localRequestId
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
-                    chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName)
+                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName) }
                 }
                 var durablePartial: JSONObject? = null
                 if (!canContinueInBackground && !userStopped) {
@@ -3487,6 +3500,60 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
+    private fun recordOpenAiEffortMetricSafely(write: () -> Unit) {
+        try {
+            openAiEffortMetricHook?.invoke()
+            write()
+        } catch (error: Exception) {
+            // Effort telemetry is optional. It must not crash the exception path
+            // before the paid partial/source and request accounting are saved.
+            diagnostics.log("openai_effort_metric_failed", mapOf("error_type" to error.javaClass.simpleName))
+        }
+    }
+
+    private fun watchOriginalCreateAfterRecreate(chatId: String, requestId: String) {
+        val token = Any()
+        if (preIdCreateWatches.putIfAbsent(chatId, token) != null) return
+        val generation = activeResponseState.state.generation
+        val assistantItem = activeAssistantItemId
+        executor.execute {
+            try {
+                // onDestroy closed the old socket, but parsed/archived bytes can
+                // still be finishing their owned transaction. Observe its exit;
+                // never create a response or touch the old Activity's views.
+                while (OpenAiCreateCallOwners.isRegistered(chatId, requestId) &&
+                    activityVisible && !executor.isShutdown &&
+                    activeResponseState.state.generation == generation &&
+                    preIdCreateWatches[chatId] === token) {
+                    Thread.sleep(50L)
+                }
+                if (preIdCreateWatches[chatId] === token) {
+                    reconcileOriginalCreateUi(chatId, requestId, generation, assistantItem)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } finally {
+                preIdCreateWatches.remove(chatId, token)
+            }
+        }
+    }
+
+    private fun reconcileOriginalCreateUi(
+        chatId: String, requestId: String, generation: Long, assistantItem: String?
+    ) {
+        runOnUiThread {
+            if (!isRequestCurrent(chatId, generation) || activeAssistantItemId != assistantItem) return@runOnUiThread
+            val active = activeResponsePersistence.getActiveResponse(chatId)
+            if (active != null && JsonProtocol.string(active, "request_id") != requestId) return@runOnUiThread
+            persistComposerStateNow()
+            restoreCurrentChat()
+            renderRequestTelemetry()
+            if (active != null && JsonProtocol.string(active, "response_id").isNotBlank()) {
+                resumeBackgroundResponses()
+            }
+        }
+    }
+
     private fun cancelUnownedOpenAiResponse(
         chatId: String, requestId: String, responseId: String, credential: String,
         inline: Boolean = false
@@ -3564,10 +3631,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val startedAt=a.optLong("started_at",0L)
                 val age=System.currentTimeMillis()-startedAt
                 if(requestId!=null && startedAt>0L && age>120_000L &&
-                    !OpenAiCreateCallOwners.hasLiveCall(chatId, requestId)){
-                    BackgroundRequestFailureRecorder.persist(chatDb, chatId, requestId, "",
-                        "unknown", "Original connection lost before response ID", filesDir)
+                    !OpenAiCreateCallOwners.isRegistered(chatId, requestId)){
+                    val generation = activeResponseState.state.generation
+                    val assistantItem = activeAssistantItemId
+                    if (BackgroundRequestFailureRecorder.persist(chatDb, chatId, requestId, "",
+                            "unknown", "Original connection lost before response ID", filesDir)) {
+                        reconcileOriginalCreateUi(chatId, requestId, generation, assistantItem)
+                    }
                     diagnostics.log("background_response_orphaned",mapOf("chat_id" to chatId,"request_id" to requestId,"age_ms" to age))
+                }
+                if (requestId != null && chatId == currentChatId() &&
+                    (currentCall == null || OpenAiCreateCallOwners.call(chatId, requestId) !== currentCall)) {
+                    watchOriginalCreateAfterRecreate(chatId, requestId)
                 }
                 return@forEach
             }
@@ -6336,7 +6411,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             (0 until tools.length()).map { tools.optString(it) }.filter { it.isNotBlank() }.distinct().joinToString("  ")
         }.orEmpty()
         val active=activeResponsePersistence.getActiveResponse(currentChatId())
-        if(active!=null && (active.optString("response_id").isNotBlank() || OpenRouterResponseRuntime.contains(active.optString("request_id")))){
+        if(active!=null && (JsonProtocol.string(active, "response_id").isNotBlank() ||
+            OpenAiCreateCallOwners.isRegistered(currentChatId(), JsonProtocol.string(active, "request_id")) ||
+            OpenRouterResponseRuntime.contains(active.optString("request_id")))){
             val partial=JsonProtocol.string(active, "text")
             val pendingModel = chatDb.getChat(currentChatId())?.optJSONArray("messages")?.let { rows ->
                 (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
