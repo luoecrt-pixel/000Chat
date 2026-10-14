@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 class SecureStore(
     context: Context,
-    @VisibleForTesting internal val encryptOverride: ((ByteArray) -> ByteArray)? = null
+    @get:VisibleForTesting internal val encryptOverride: ((ByteArray) -> ByteArray)? = null
 ) {
     companion object {
         private val keystoreLock = Any()
