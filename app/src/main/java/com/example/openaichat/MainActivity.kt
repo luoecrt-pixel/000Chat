@@ -477,6 +477,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     "chat_id" to chatId, "local_request_id" to localRequestId,
                     "lookup_count" to lookedUp
                 ))
+                if (lookedUp > 0) {
+                    runOnUiThread {
+                        if (activityVisible && !isFinishing && currentChatId() == chatId) {
+                            renderRequestTelemetry()
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 diagnostics.log("openrouter_generation_reconcile_failed", mapOf(
                     "chat_id" to chatId, "local_request_id" to localRequestId,
@@ -1087,17 +1094,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             openRouterModelPreflightCall.getAndSet(null)?.cancel()
             cancelPendingGitHubConfirmation()
         }
-        requestId?.let { OpenAiCreateCallOwners.call(id, it)?.cancel() }
+        requestId?.let {
+            OpenAiCreateCallOwners.call(id, it)?.cancel()
+            OpenRouterResponseRuntime.cancel(it, "Чат удалён")
+        }
+        OpenRouterResponseRuntime.cancelForChat(id, "Чат удалён")
         activeResumeCalls.remove(id)?.cancel()
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         activeResponsePersistence.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId,cancelCredential)
-        localPaths.forEach(::deleteOwnedLocalFile)
         synchronized(composerMergeLock) {
             clearComposerState(id)
             chatDb.deleteChat(id)
         }
+        val remainingOwners = try {
+            val owners = attachmentOwners()
+            owners.durable + owners.active
+        } catch (_: Exception) { emptySet() }
+        localPaths.filter { it !in remainingOwners }.forEach(::deleteOwnedLocalFile)
         if (currentChatId()==id) {
             val newId = newChatId()
             prefs.edit().putString("current_chat",newId).apply()
@@ -1967,7 +1982,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     "\nВетка: " + branch +
                     "\nПуть: " + path +
                     "\nРазмер: " + content.toByteArray(Charsets.UTF_8).size + " байт" +
-                    "\n\nPreview:\n" + preview + if (content.length > 3000) "\n… preview truncated …" else "" +
+                    "\n\nPreview:\n" + preview + (if (content.length > 3000) "\n… preview truncated …" else "") +
                     "\n\nРазрешить?"
             }
             "create_issue_comment", "submit_pull_request_review" ->
@@ -2310,6 +2325,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
             o.put("openrouter_attachments", stored).put("pending_uploads", pending).put("saved_at", System.currentTimeMillis())
             prefs.edit().putString(key, o.toString()).commit()
+            if (Looper.myLooper() == Looper.getMainLooper() && chatId == currentChatId()) {
+                attachments.forEach { attachment ->
+                    if (attachedOpenRouterAttachments.none { it.sha256 == attachment.sha256 && it.name == attachment.name }) {
+                        attachedOpenRouterAttachments.add(attachment)
+                    }
+                }
+                if (completed.isNotEmpty()) {
+                    pendingUploadUris.removeAll { it in completed }
+                }
+            }
         } catch (_: Exception) {}
         }
     }
@@ -2609,8 +2634,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         if (!isRequestCurrent(requestChatId, requestGeneration) ||
                             !pendingOpenRouterPreparation.compareAndSet(localRequestId, null)) return@runOnUiThread
                         capturedHistory.last().optJSONArray("attachments")?.let { sentUserMessage.put("attachments", JsonProtocol.arrayCopy(it)) }
-                        addBubble("Ты", text, true, message = sentUserMessage)
                         chat.add(sentUserMessage)
+                        addBubble("Ты", text, true, message = sentUserMessage)
                         persistCurrentChat()
                         // A new draft may have been entered while files were being encoded.
                         // Never clear it (or its new attachments) with the old request.
@@ -2712,8 +2737,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             attachedFilePaths == filePathsBeforePreparation &&
             pendingImagePath == imagePathBeforePreparation &&
             pendingUploadUris == pendingUrisBeforePreparation
-        addBubble("Ты",text,true, message=sentUserMessage)
         chat.add(sentUserMessage)
+        addBubble("Ты",text,true, message=sentUserMessage)
         persistCurrentChat()
         if (shouldConsumeDraft) {
             input.setText("")
@@ -3192,7 +3217,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         rawSseArchive?.deleteAfterDurableCommit()
                     }
                     ResponseNotifications.finished(applicationContext, requestChatId, localRequestId, completionState == "completed")
-                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(requestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost) }
+                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, completionState=="completed", if(completionState=="completed") null else completionState.ifBlank{"incomplete"}, estimatedCost) }
 
                     chatDb.recordRequestAccounting(
                         chatId = requestChatId,
@@ -3205,7 +3230,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
                         eventType = if (completionState == "completed") "request_completed" else "request_${completionState}",
-                        requestId = requestId ?: localRequestId,
+                        requestId = localRequestId,
                         provider = "openai",
                         requestedModel = model,
                         responseModel = responseModel.model,
@@ -3275,7 +3300,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     activeResponsePersistence.getActiveResponse(requestChatId)?.optString("request_id") == localRequestId
                 val latency=SystemClock.elapsedRealtime()-startedAt
                 if(!canContinueInBackground && (!cancelled || userStopped)){
-                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(requestId ?: localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName) }
+                    recordOpenAiEffortMetricSafely { chatDb.recordEffortMetric(localRequestId, requestChatId, taskClass, effortPref, actualEffort, autoSelected, text.length, requestFileIds.size + if(requestImageFileId!=null) 1 else 0, latency, 0,0,0,0,0, false, if(cancelled) "cancelled" else e.javaClass.simpleName) }
                 }
                 var durablePartial: JSONObject? = null
                 if (!canContinueInBackground && !userStopped) {
@@ -3319,7 +3344,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         )
                         chatDb.recordRequestEvent(
                             chatId = requestChatId, eventType = "request_failed",
-                            requestId = requestId ?: localRequestId, provider = "openai",
+                            requestId = localRequestId, provider = "openai",
                             requestedModel = model, responseModel = null,
                             modelMatch = ModelCatalog.Match.UNKNOWN,
                             status = failureStatus, latencyMs = latency,
@@ -6597,6 +6622,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // Invalidate the persisted request *before* truncating history. UI Stop would
         // restore/remove unrelated bubbles and is not suitable for Edit.
         if (editingRequestId != null) {
+            OpenRouterResponseRuntime.cancel(editingRequestId, "Сообщение изменено")
             chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
             BackgroundResponseWorkScheduler.cancel(applicationContext, editingChatId, editingRequestId)
             activeResumeCalls.remove(editingChatId)?.cancel()

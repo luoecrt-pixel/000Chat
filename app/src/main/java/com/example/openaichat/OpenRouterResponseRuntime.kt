@@ -42,6 +42,10 @@ object OpenRouterResponseRuntime {
     fun count() = work.size
     fun localFilePaths(): Set<String> = work.values.flatMap { w -> w.request.attachments.flatMap { listOfNotNull(it.path, it.textPath, it.wirePath) } }.toSet()
     fun chatFor(requestId: String) = work[requestId]?.request?.chatId
+    fun cancelForChat(chatId: String, reason: String = "Остановлено пользователем") {
+        if (chatId.isBlank()) return
+        work.values.filter { it.request.chatId == chatId }.forEach { cancel(it.request.requestId, reason) }
+    }
     fun start(context: Context, request: OpenRouterRuntimeRequest, client: OpenRouterChatClient) {
         val item = Work(context.applicationContext, request, client)
         check(work.putIfAbsent(request.requestId, item) == null) { "Request is already running" }
@@ -50,8 +54,11 @@ object OpenRouterResponseRuntime {
                 Intent(item.context, OpenRouterResponseService::class.java).putExtra(OpenRouterResponseService.EXTRA_REQUEST_ID, request.requestId))
             else launch(request.requestId)
         } catch (e: Exception) {
-            item.cancelReason = "Не удалось запустить фоновое выполнение: ${e.javaClass.simpleName}"
-            item.cancelled.set(true); launch(request.requestId)
+            if (!OpenRouterUiBridge.viewing(request.chatId)) {
+                item.cancelReason = "Не удалось запустить фоновое выполнение: ${e.javaClass.simpleName}"
+                item.cancelled.set(true)
+            }
+            launch(request.requestId)
         }
     }
     fun launch(requestId: String) {
@@ -79,6 +86,7 @@ object OpenRouterResponseRuntime {
         var protocolNotice: String? = null
         var lastCheckpoint = 0L
         var fatalFailure = false
+        var github: GitHubToolExecutor? = null
         fun active() = !item.cancelled.get() && db.isActiveRequest(r.chatId, r.requestId)
         fun terminal(message: JSONObject, status: String, usage: JSONObject?, responseModel: String?, error: String? = null): Boolean {
             if (artifacts.isNotEmpty()) message.put("annotations", annotations(artifacts))
@@ -110,6 +118,7 @@ object OpenRouterResponseRuntime {
             val fileTools = LocalFileTools(r.attachments, ::active)
             db.listLocalFiles().filter { it.optString("chat_id") == r.chatId }.forEach { a ->
                 val file = File(a.getString("path"))
+                if (!file.isFile) return@forEach
                 val mime = a.optString("mime_type")
                 val name = JsonProtocol.string(a, "filename", file.name)
                 val kind = when {
@@ -122,10 +131,12 @@ object OpenRouterResponseRuntime {
                     textPath = file.path.takeIf { kind == "text" }, textEncoding = "UTF-8".takeIf { kind == "text" }))
             }
             val artifactTools = LocalArtifactToolExecutor(item.context)
-            val github = GitHubToolExecutor(secure, { r.githubRepo }, { r.githubBranches },
-                { name, args -> OpenRouterUiBridge.confirm(r.chatId, r.requestId, name, args) },
-                { name, args -> diagnostics.log("github_write", mapOf("tool" to name, "target" to ToolTraceSummary.entry(name, args, "{}").optJSONObject("target"))) },
-                ::active, File(item.context.cacheDir, "github_text_pages"))
+            if (r.github) {
+                github = GitHubToolExecutor(secure, { r.githubRepo }, { r.githubBranches },
+                    { name, args -> OpenRouterUiBridge.confirm(r.chatId, r.requestId, name, args) },
+                    { name, args -> diagnostics.log("github_write", mapOf("tool" to name, "target" to ToolTraceSummary.entry(name, args, "{}").optJSONObject("target"))) },
+                    ::active, File(item.context.cacheDir, "github_text_pages"))
+            }
             val tools = OpenRouterAppToolCatalog.tools()
             if (r.github) GitHubToolCatalog.tools().let { array -> for (i in 0 until array.length()) tools.put(array.get(i)) }
             OpenRouterServerToolCatalog.tools(r.webSearch, r.webFetch).let { array -> for (i in 0 until array.length()) tools.put(array.get(i)) }
@@ -150,7 +161,7 @@ object OpenRouterResponseRuntime {
                             a.put("file_id", f.id).toString()
                         }
                         name in LocalFileTools.names -> fileTools.execute(name, args)
-                        r.github -> github.execute(name, args)
+                        r.github && github != null -> github!!.execute(name, args)
                         else -> JSONObject().put("ok", false).put("error", "Инструмент отключён").toString()
                     } } catch (e: java.io.IOException) {
                         if (!active()) throw e
@@ -204,13 +215,16 @@ object OpenRouterResponseRuntime {
                 "error_type" to (upstream?.errorType ?: e.javaClass.simpleName), "provider_name" to upstream?.providerName,
                 "provider_code" to upstream?.providerCode, "error_message" to (upstream?.message ?: e.message)?.take(600),
                 "safe_metadata" to upstream?.safeMetadata))
-            val saved = (e as? OpenRouterCompletionException)?.partialText?.takeIf { it.isNotBlank() } ?: partial
+            val completionError = e as? OpenRouterCompletionException
+            val saved = completionError?.partialText?.takeIf { it.isNotBlank() } ?: partial
+            val failedUsage = completionError?.accumulatedUsage
             val error = if (item.cancelled.get()) item.cancelReason else (e.message ?: e.javaClass.simpleName).take(800)
             val status = if (item.cancelled.get()) "disconnected" else "failed"
             val failed = base(saved)
                 .put("status", status).put("error", error)
+            failedUsage?.let { failed.put("usage", JSONObject(it.toString())) }
             db.getOpenRouterCheckpoint(r.chatId, r.requestId)?.let { failed.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(it, failed)) }
-            terminal(failed, status, null, null, error)
+            terminal(failed, status, failedUsage, null, error)
         } catch (fatal: Error) {
             fatalFailure = true
             item.call?.cancel()
@@ -226,13 +240,20 @@ object OpenRouterResponseRuntime {
             throw fatal
         } finally {
             item.call = null
+            try { github?.close() } catch (_: Exception) {}
             try {
                 db.sealOpenRouterRounds(r.chatId, r.requestId)
                 db.clearOpenRouterCheckpoint(r.chatId, r.requestId)
-                if (!fatalFailure && item.client.reconcileGenerations) OpenRouterGenerationReconciler(r.metadataClient, item.client.metadataBaseUrl)
-                    .reconcile(db.listOpenRouterRounds(r.chatId, r.requestId), r.apiKey) { id, metadata ->
-                        db.reconcileOpenRouterGeneration(r.chatId, r.requestId, id, metadata)
-                    }
+                if (!fatalFailure && item.client.reconcileGenerations) {
+                    var anyReconciled = false
+                    OpenRouterGenerationReconciler(r.metadataClient, item.client.metadataBaseUrl)
+                        .reconcile(db.listOpenRouterRounds(r.chatId, r.requestId), r.apiKey) { id, metadata ->
+                            if (db.reconcileOpenRouterGeneration(r.chatId, r.requestId, id, metadata)) {
+                                anyReconciled = true
+                            }
+                        }
+                    if (anyReconciled) OpenRouterUiBridge.changed(r.chatId, r.requestId)
+                }
             } catch (_: Exception) { /* Unknown cost stays unknown. */ }
             work.remove(r.requestId, item)
             if (!fatalFailure) try {

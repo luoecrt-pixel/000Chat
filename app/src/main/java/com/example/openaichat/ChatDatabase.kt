@@ -928,7 +928,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         val existingByPosition = mutableMapOf<Int, ExistingMessageRow>()
         val existingByRequestId = mutableMapOf<String, ExistingMessageRow>()
         val existingRows = mutableListOf<ExistingMessageRow>()
-        db.query(MESSAGE_TABLE, arrayOf("id", "position", "request_id", "content_hash"),
+        db.query(MESSAGE_TABLE, arrayOf("id", "position", "role", "request_id", "content_hash"),
             "chat_id=?",
             arrayOf(id),
             null, null, "position ASC"
@@ -937,19 +937,23 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 val row = ExistingMessageRow(
                     id = c.getLong(0),
                     position = c.getInt(1),
-                    requestId = c.getString(2),
-                    contentHash = c.getString(3)
+                    role = c.getString(2).orEmpty(),
+                    requestId = c.getString(3),
+                    contentHash = c.getString(4)
                 )
                 existingRows += row
                 existingByPosition.putIfAbsent(row.position, row)
-                row.requestId?.takeIf { it.isNotBlank() }?.let { existingByRequestId.putIfAbsent(it, row) }
+                row.requestId?.takeIf { it.isNotBlank() }?.let {
+                    existingByRequestId.putIfAbsent("${row.role}|$it", row)
+                }
             }
         }
 
         val usedIds = HashSet<Long>()
         messages.forEachIndexed { index, message ->
+            val role = message.optString("role")
             val requestId = message.optString("request_id").takeIf { it.isNotBlank() && it != "null" }
-            val candidate = requestId?.let(existingByRequestId::get)?.takeIf { !usedIds.contains(it.id) }
+            val candidate = requestId?.let { existingByRequestId["$role|$it"] }?.takeIf { !usedIds.contains(it.id) }
                 ?: existingByPosition[index]?.takeIf { !usedIds.contains(it.id) }
             val contentHash = ChatMessageFingerprint.of(message)
 
@@ -979,6 +983,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 data class ExistingMessageRow(
         val id: Long,
         val position: Int,
+        val role: String = "",
         val requestId: String?,
         val contentHash: String?
     )
@@ -1345,7 +1350,8 @@ data class ExistingMessageRow(
         if (!account) return
         db.rawQuery("""
             SELECT COUNT(*), COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END),0),
-                COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN CAST(cost_usd AS REAL) ELSE 0 END),0)
+                COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN CAST(cost_usd AS REAL) ELSE 0 END),0),
+                SUM(input_tokens), SUM(output_tokens)
             FROM $OPENROUTER_ROUND_TABLE WHERE chat_id=? AND local_request_id=?
         """.trimIndent(), arrayOf(chatId, localRequestId)).use { c ->
             if (!c.moveToFirst()) return
@@ -1360,6 +1366,8 @@ data class ExistingMessageRow(
                     put("cost_kind", "unknown")
                     putNull("cost_usd")
                 }
+                if (!c.isNull(3)) put("input_tokens", c.getLong(3))
+                if (!c.isNull(4)) put("output_tokens", c.getLong(4))
             }, "chat_id=? AND local_request_id=? AND provider='openrouter'",
                 arrayOf(chatId, localRequestId))
         }
@@ -1576,7 +1584,7 @@ data class ExistingMessageRow(
                 "UPDATE $METRICS_TABLE SET feedback=? WHERE chat_id=? AND request_id=?",
                 arrayOf(v, chatId, requestId)
             )
-            db.query(MESSAGE_TABLE, arrayOf("id"), "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, "position DESC", "1").use { c ->
+            db.query(MESSAGE_TABLE, arrayOf("id"), "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, "CASE WHEN role='assistant' THEN 0 ELSE 1 END ASC, position DESC", "1").use { c ->
                 if (!c.moveToFirst()) return@use
                 val id = c.getLong(c.getColumnIndexOrThrow("id"))
                 val cv = ContentValues().apply { put("feedback", v) }
@@ -1675,6 +1683,7 @@ data class ExistingMessageRow(
                     put("file_paths", paths.toString())
                     put("file_mimes", mimes.toString())
                     put("file_sizes", sizes.toString())
+                    putNull("content_hash")
                 }
                 db.update(MESSAGE_TABLE, values, "id=?", arrayOf(id.toString()))
             }
@@ -1699,6 +1708,7 @@ data class ExistingMessageRow(
                     put("image_path", localPath)
                     if (!mimeType.isNullOrBlank()) put("image_mime", mimeType)
                     if (sizeBytes != null && sizeBytes >= 0L) put("image_size", sizeBytes)
+                    putNull("content_hash")
                 }
                 db.update(MESSAGE_TABLE, values, "id=?", arrayOf(c.getLong(0).toString()))
             }

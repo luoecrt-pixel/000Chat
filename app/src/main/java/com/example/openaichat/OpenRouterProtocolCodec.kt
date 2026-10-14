@@ -59,6 +59,23 @@ object OpenRouterProtocolCodec {
             })
 
     fun withVisibleTail(checkpoint: JSONObject, message: JSONObject): JSONObject = JsonProtocol.objectCopy(checkpoint).apply {
-        getJSONArray("tail").put(JSONObject().put("role", "assistant").put("content", JsonProtocol.string(message, "text")))
+        val tail = getJSONArray("tail")
+        val priorAssistantTexts = (0 until tail.length()).mapNotNull { i ->
+            val item = tail.optJSONObject(i)
+            if (item?.optString("role") == "assistant") {
+                JsonProtocol.string(item, "content").trim().takeIf { it.isNotEmpty() }
+            } else null
+        }
+        val fullText = JsonProtocol.string(message, "text")
+        val priorJoined = priorAssistantTexts.joinToString("\n\n")
+        val unrepresentedText = when {
+            priorJoined.isEmpty() -> fullText
+            fullText == priorJoined -> ""
+            fullText.startsWith("$priorJoined\n\n") -> fullText.removePrefix("$priorJoined\n\n")
+            else -> fullText
+        }
+        if (unrepresentedText.isNotEmpty() || tail.length() == 0) {
+            tail.put(JSONObject().put("role", "assistant").put("content", unrepresentedText))
+        }
     }
 }

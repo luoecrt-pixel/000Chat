@@ -1,5 +1,6 @@
 package com.example.openaichat
 
+import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -24,16 +25,39 @@ object OpenAiLocalContextEncoder {
                 !OpenAiInterruptedTurnReplay.isInterrupted(message)
         }
 
+    private fun escapeXmlAttribute(value: String): String = buildString(value.length) {
+        for (ch in value) {
+            when (ch) {
+                '&' -> append("&amp;")
+                '<' -> append("&lt;")
+                '>' -> append("&gt;")
+                '"' -> append("&quot;")
+                '\'' -> append("&#39;")
+                '\r' -> append("&#13;")
+                '\n' -> append("&#10;")
+                else -> append(ch)
+            }
+        }
+    }
+
     fun encode(
         history: List<JSONObject>,
         containerFiles: Map<String, String> = emptyMap(),
         onManifest: ((JSONObject, JSONObject) -> Unit)? = null
-    ): JSONArray = encode(history, containerFiles, false, onManifest)
+    ): JSONArray = encode(history, containerFiles, false, null, onManifest)
 
     fun encode(
         history: List<JSONObject>,
         containerFiles: Map<String, String>,
         allowLegacyVisibleTextOnly: Boolean,
+        onManifest: ((JSONObject, JSONObject) -> Unit)? = null
+    ): JSONArray = encode(history, containerFiles, allowLegacyVisibleTextOnly, null, onManifest)
+
+    fun encode(
+        history: List<JSONObject>,
+        containerFiles: Map<String, String>,
+        allowLegacyVisibleTextOnly: Boolean,
+        context: Context?,
         onManifest: ((JSONObject, JSONObject) -> Unit)? = null
     ): JSONArray {
         val input = JSONArray()
@@ -90,20 +114,36 @@ object OpenAiLocalContextEncoder {
                     manifest.optJSONObject(idx)?.let { OpenRouterLocalAttachment.fromJson(it) }
                 }
             } else emptyList()
+            // A lost response chain must not silently discard remote IDs.
+            // Validate before mutating the message or persisting its manifest.
+            val filesCount = message.optJSONArray("file_ids")?.length() ?: 0
+            val imagesCount = if (JsonProtocol.string(message, "image_file_id").isNotBlank() &&
+                JsonProtocol.string(message, "image_file_id") != "null") 1 else 0
+            val localFilesCount = message.optJSONArray("file_paths")?.length() ?: 0
+            val hasLocalImage = JsonProtocol.string(message, "image_path").isNotBlank() ||
+                manifestItems.any { it.kind == "image" }
+            if (filesCount > localFilesCount || imagesCount > 0 && !hasLocalImage) {
+                throw IOException("В истории есть вложение без доступных локальных байтов. " +
+                    "Откройте исходный чат и восстановите файл перед переключением.")
+            }
             // A message may combine a preserved OR manifest and local OpenAI files.
             val before = JsonProtocol.objectCopy(message)
             val refreshed = manifestItems.map { item ->
                 val missingText = item.kind in setOf("text", "document", "table") && (item.textPath.isNullOrBlank() || !File(item.textPath!!).isFile)
                 if (missingText) {
                     OpenRouterAttachmentPreflight.verifySources(listOf(item))
-                    val rebuilt = OpenRouterAttachmentStore.classifyLocalFile(File(item.path), item.name, item.mime)
+                    val rebuilt = if (context != null) {
+                        OpenRouterAttachmentStore.classifyLocalFile(context, File(item.path), item.name, item.mime)
+                    } else {
+                        OpenRouterAttachmentStore.classifyLocalFile(File(item.path), item.name, item.mime)
+                    }
                     if (item.kind == "text" && !item.encodingGuessed && item.textEncoding != null) {
                         val selected = OpenRouterAttachmentStore.withTextEncoding(rebuilt, item.textEncoding)
                         rebuilt.textPath?.let { File(it).delete() }; selected
                     } else rebuilt
                 } else item
             }
-            val items = (refreshed + legacyItems(message, containerFiles, refreshed.map { it.path }.toSet())).distinctBy { it.path + "|" + it.name }
+            val items = (refreshed + legacyItems(message, containerFiles, refreshed.map { it.path }.toSet(), context)).distinctBy { it.path + "|" + it.name }
             if (items.isNotEmpty()) message.put("attachments", JSONArray().apply { items.forEach { put(it.toJson()) } })
             if (AttachmentMessageState.fingerprint(before) != AttachmentMessageState.fingerprint(message)) onManifest?.invoke(before, message)
             items.forEach { item ->
@@ -130,7 +170,7 @@ object OpenAiLocalContextEncoder {
                             .put("available", "Complete file in the Code Interpreter container. Choose search, partial reading or all rows as appropriate. Do not infer whole-table results from a preview.").toString()))
                     } else {
                         if (item.kind == "container") throw IOException("Бинарный файл " + item.name + " требует включённого полного анализа файлов")
-                        val prefix = "<file name=\"" + item.name.replace("\"", "&quot;") + "\">\n"
+                        val prefix = "<file name=\"" + escapeXmlAttribute(item.name) + "\">\n"
                         val source = File(item.textPath ?: item.path)
                         if (!source.isFile) throw IOException("Текстовое вложение недоступно: " + item.name)
                         val value: Any = if (source.length() > 64L * 1024L) FileBackedText(source, prefix, "\n</file>")
@@ -141,17 +181,6 @@ object OpenAiLocalContextEncoder {
                         item.name + ". Удалите его из контекста или выберите совместимый файл.")
                 }
             }
-            // A lost response chain must not silently discard remote IDs.
-            val filesCount = message.optJSONArray("file_ids")?.length() ?: 0
-            val imagesCount = if (JsonProtocol.string(message, "image_file_id").isNotBlank() &&
-                JsonProtocol.string(message, "image_file_id") != "null") 1 else 0
-            val localFilesCount = message.optJSONArray("file_paths")?.length() ?: 0
-            val hasLocalImage = JsonProtocol.string(message, "image_path").isNotBlank() ||
-                manifestItems.any { it.kind == "image" }
-            if (filesCount > localFilesCount || imagesCount > 0 && !hasLocalImage) {
-                throw IOException("В истории есть вложение без доступных локальных байтов. " +
-                    "Откройте исходный чат и восстановите файл перед переключением.")
-            }
             if (parts.length() > 0) {
                 input.put(JSONObject().put("role", role).put("content", parts))
             }
@@ -160,16 +189,33 @@ object OpenAiLocalContextEncoder {
     }
 
     /** Persisted manifests keep extraction/encoding stable across requests and provider switches. */
-    fun materialize(history: List<JSONObject>, allowContainer: Boolean, onManifest: (JSONObject, JSONObject) -> Unit) {
+    fun materialize(
+        history: List<JSONObject>,
+        allowContainer: Boolean,
+        context: Context? = null,
+        onManifest: (JSONObject, JSONObject) -> Unit
+    ) {
         history.filter { JsonProtocol.string(it, "role") == "user" }.forEach { message ->
             AttachmentHistoryPolicy.validate(message)
             val before = JsonProtocol.objectCopy(message)
             val manifest = message.optJSONArray("attachments") ?: JSONArray()
+            val imagesCount = if (JsonProtocol.string(message, "image_file_id").isNotBlank() &&
+                JsonProtocol.string(message, "image_file_id") != "null") 1 else 0
+            val hasLocalImage = JsonProtocol.string(message, "image_path").isNotBlank() ||
+                (0 until manifest.length()).any { manifest.optJSONObject(it)?.optString("kind") == "image" }
+            if (imagesCount > 0 && !hasLocalImage) {
+                throw IOException("В истории есть вложение без доступных локальных байтов. " +
+                    "Откройте исходный чат и восстановите файл перед переключением.")
+            }
             val existing = (0 until manifest.length()).mapNotNull { manifest.optJSONObject(it)?.let { o -> OpenRouterLocalAttachment.fromJson(o) } }.map { item ->
                 val missing = item.kind in setOf("text", "document", "table") && (item.textPath.isNullOrBlank() || !File(item.textPath!!).isFile)
                 if (!missing) item else {
                     OpenRouterAttachmentPreflight.verifySources(listOf(item))
-                    val rebuilt = OpenRouterAttachmentStore.classifyLocalFile(File(item.path), item.name, item.mime)
+                    val rebuilt = if (context != null) {
+                        OpenRouterAttachmentStore.classifyLocalFile(context, File(item.path), item.name, item.mime)
+                    } else {
+                        OpenRouterAttachmentStore.classifyLocalFile(File(item.path), item.name, item.mime)
+                    }
                     if (item.kind == "text" && !item.encodingGuessed && item.textEncoding != null) {
                         val selected = OpenRouterAttachmentStore.withTextEncoding(rebuilt, item.textEncoding)
                         rebuilt.textPath?.let { File(it).delete() }; selected
@@ -184,7 +230,7 @@ object OpenAiLocalContextEncoder {
                 val name = JsonProtocol.string(names, i, File(path).name)
                 if (TextFileFormatPolicy.extension(name) in setOf("doc", "ppt", "xls", "zip")) containers[path] = "container_pending"
             }
-            val additions = legacyItems(message, containers, existing.map { it.path }.toSet())
+            val additions = legacyItems(message, containers, existing.map { it.path }.toSet(), context)
             if (existing.isNotEmpty() || additions.isNotEmpty()) {
                 message.put("attachments", JSONArray().apply { (existing + additions).forEach { put(it.toJson()) } })
                 if (AttachmentMessageState.fingerprint(before) != AttachmentMessageState.fingerprint(message)) onManifest(before, message)
@@ -192,7 +238,12 @@ object OpenAiLocalContextEncoder {
         }
     }
 
-    private fun legacyItems(message: JSONObject, containerFiles: Map<String, String>, manifestPaths: Set<String>): List<OpenRouterLocalAttachment> {
+    private fun legacyItems(
+        message: JSONObject,
+        containerFiles: Map<String, String>,
+        manifestPaths: Set<String>,
+        context: Context? = null
+    ): List<OpenRouterLocalAttachment> {
         val result = mutableListOf<OpenRouterLocalAttachment>()
         val paths = message.optJSONArray("file_paths")
         val names = message.optJSONArray("file_names")
@@ -210,17 +261,28 @@ object OpenAiLocalContextEncoder {
                 OpenRouterLocalAttachment("container_" + digest(file), filename,
                     if (TextFileFormatPolicy.extension(filename) in setOf("doc", "docx", "ppt", "pptx")) "container_document" else "container",
                     path, mime, file.length(), digest(file))
-            } else OpenRouterAttachmentStore.classifyLocalFile(file, filename, mime)
+            } else if (context != null) {
+                OpenRouterAttachmentStore.classifyLocalFile(context, file, filename, mime)
+            } else {
+                OpenRouterAttachmentStore.classifyLocalFile(file, filename, mime)
+            }
         }
         JsonProtocol.string(message, "image_path").takeIf { it.isNotBlank() }?.let { path ->
             val file = File(path)
             if (path in manifestPaths) return@let
             if (!file.isFile) throw IOException("Изображение из истории недоступно: " +
                 JsonProtocol.string(message, "image_name"))
-            result += OpenRouterAttachmentStore.classifyLocalFile(
-                file, JsonProtocol.string(message, "image_name", file.name),
-                JsonProtocol.string(message, "image_mime", "image/*")
-            )
+            result += if (context != null) {
+                OpenRouterAttachmentStore.classifyLocalFile(
+                    context, file, JsonProtocol.string(message, "image_name", file.name),
+                    JsonProtocol.string(message, "image_mime", "image/*")
+                )
+            } else {
+                OpenRouterAttachmentStore.classifyLocalFile(
+                    file, JsonProtocol.string(message, "image_name", file.name),
+                    JsonProtocol.string(message, "image_mime", "image/*")
+                )
+            }
         }
         return result
     }
