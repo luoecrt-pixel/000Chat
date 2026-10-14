@@ -135,6 +135,7 @@ class ProcessDeathRecoveryFixture {
         assertEquals(scenario, prefs.getString("scenario", ""))
         assertNotEquals("A DB reopen in the same process is insufficient", prefs.getInt("seed_pid", -1), Process.myPid())
         assertEquals(if (scenario == "background_created") SYNTHETIC_KEY else "", SecureStore(context).getApiKey())
+        if (scenario == "background_created") assertOriginalArchive("before Worker recovery")
         val recoveryTransport = if (scenario == "background_created") trustedRecoveryTransport() else null
         // Same production rescheduling entry point used on Android onStop.
         val manager = WorkManager.getInstance(context)
@@ -177,11 +178,7 @@ class ProcessDeathRecoveryFixture {
                             assertEquals("completed", assistant.getString("status"))
                             assertEquals(prefs.getString("original_fingerprint", ""),
                                 assistant.getString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD))
-                            val archivedPrefix = prefs.getString("seed_source", "")!!
-                            assertTrue("Original paid source survives process death", OpenAiRawSseArchive
-                                .archivesFor(context.filesDir, chatId, requestId).any {
-                                    it.readText(Charsets.UTF_8) == archivedPrefix
-                                })
+                            assertOriginalArchive("after Worker recovery")
                         }
                     }
                     "stopped_pre_id" -> {
@@ -241,6 +238,17 @@ class ProcessDeathRecoveryFixture {
     @Test fun cleanupProcessRecoveryFixture() {
         assumeTrue(arguments.getString("recoveryStage") == "cleanup")
         cleanupFixture()
+    }
+
+    private fun assertOriginalArchive(stage: String) {
+        val expected = prefs.getString("seed_source", "")!!.toByteArray(Charsets.UTF_8)
+        fun digest(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes).joinToString("") { "%02x".format(it) }
+        val files = OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId)
+        val actual = files.map { it.readBytes() }
+        assertTrue("Original paid source survives process death ($stage); expectedBytes=${expected.size} " +
+            "expectedSha=${digest(expected)} archives=" + actual.map { "${it.size}:${digest(it)}" },
+            expected.isNotEmpty() && actual.any { it.contentEquals(expected) })
     }
 
     private fun seedBackgroundCreatedAndWaitForKill() {
