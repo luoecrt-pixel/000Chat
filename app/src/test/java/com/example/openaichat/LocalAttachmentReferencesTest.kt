@@ -54,4 +54,48 @@ class LocalAttachmentReferencesTest {
             "composer_state_invalid" to "[not an object]"
         )).isEmpty())
     }
+
+    @Test
+    fun isOrphanOldEnoughRecognizesCanonicalSymlinkAliasesAndFailsClosed() {
+        val tempDir = kotlin.io.path.createTempDirectory("orphan-canonical-").toFile()
+        try {
+            val nested = java.io.File(tempDir, "sub/dir").apply { mkdirs() }
+            val file = java.io.File(nested, "note.txt").apply { writeText("content") }
+            val nonCanonicalAlias = java.io.File(tempDir, "sub/../sub/dir/note.txt").path
+            val retention = 7L * 24 * 60 * 60 * 1000
+            val now = 100_000_000L + retention * 2
+
+            // Referenced via non-canonical path, queried via canonical path (and vice versa).
+            org.junit.Assert.assertFalse(
+                LocalAttachmentReferences.isOrphanOldEnough(
+                    path = file.canonicalPath,
+                    lastModifiedMs = 1_000L,
+                    nowMs = now,
+                    referencedPaths = setOf(nonCanonicalAlias),
+                    retentionMs = retention
+                )
+            )
+            org.junit.Assert.assertFalse(
+                LocalAttachmentReferences.isOrphanOldEnough(
+                    path = nonCanonicalAlias,
+                    lastModifiedMs = 1_000L,
+                    nowMs = now,
+                    referencedPaths = setOf(file.canonicalPath),
+                    retentionMs = retention
+                )
+            )
+            // Invalid path with NUL character fails closed (never treated as deletable orphan).
+            org.junit.Assert.assertFalse(
+                LocalAttachmentReferences.isOrphanOldEnough(
+                    path = "bad\u0000path",
+                    lastModifiedMs = 1_000L,
+                    nowMs = now,
+                    referencedPaths = emptySet(),
+                    retentionMs = retention
+                )
+            )
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }

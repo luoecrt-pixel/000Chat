@@ -7576,7 +7576,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             var sample=1
             while(bounds.outWidth/sample>maxDim || bounds.outHeight/sample>maxDim)sample*=2
             val opts=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.RGB_565}
-            contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,opts)}
+            val decoded = contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,opts)} ?: return null
+            contentResolver.openInputStream(uri)?.use{ImageOrientation.upright(decoded, it)} ?: decoded
         }catch(_:Exception){null}
     }
 
