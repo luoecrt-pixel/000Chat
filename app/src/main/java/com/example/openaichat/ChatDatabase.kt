@@ -731,10 +731,20 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 )
             }
             queueAnswerNotification(db, id, expectedRequestId, assistant.optString("status") == "completed")
+            // Consuming the active owner must publish its terminal ledger status
+            // in the same transaction. Later accounting only enriches usage/cost.
+            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+                put("local_status", assistant.optString("status").ifBlank { "unknown" })
+                put("updated_at", System.currentTimeMillis())
+            }, "chat_id=? AND local_request_id=? AND local_status='running'",
+                arrayOf(id, expectedRequestId))
         }
-        if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank()) {
+        val clearOpenAiChain = assistant?.optString("provider") == "openai" &&
+            assistant.optString("status") != "completed"
+        if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank() || clearOpenAiChain) {
             db.update(CHAT_TABLE, ContentValues().apply {
-                responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
+                if (clearOpenAiChain) putNull("response_id")
+                else responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
                 baselineEffort?.takeIf { it.isNotBlank() }?.let { put("baseline_effort", it) }
                 put("updated_at", System.currentTimeMillis())
             }, "id=?", arrayOf(id))

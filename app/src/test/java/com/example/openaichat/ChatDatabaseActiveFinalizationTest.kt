@@ -68,6 +68,34 @@ class ChatDatabaseActiveFinalizationTest {
         return committed
     }
 
+    @Test fun terminalClaimPublishesLedgerAndClearsNoncompletedChainBeforeEnrichment() {
+        listOf("completed", "failed", "incomplete", "cancelled").forEach { status ->
+            val chatId = "terminal-$status"
+            ChatDatabase(context).use { db ->
+                prepare(db, chatId)
+                db.upsertCurrentChat(chatId, "Original", "previous-chain", "high",
+                    listOf(db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)))
+                val assistant = finalizedMessages("local_1", "paid partial").last()
+                    .put("provider", "openai").put("status", status)
+                assertTrue(db.finalizeCurrentChatIfActiveRequest(chatId, "Original",
+                    "resp_1".takeIf { status == "completed" }, null, listOf(assistant), "local_1"))
+            }
+            ChatDatabase(context).use { db ->
+                assertNull(db.getActiveResponse(chatId))
+                assertEquals("Ledger outcome is part of the terminal transaction", status,
+                    db.listRequestAccounting(chatId).single().getString("local_status"))
+                assertEquals(if (status == "completed") "resp_1" else null,
+                    JsonProtocol.nonBlank(db.getChat(chatId)!!, "response_id"))
+                assertEquals("unknown", db.listRequestAccounting(chatId).single().getString("cost_kind"))
+                assertTrue(db.recordRequestAccounting(chatId, "local_1", status,
+                    usage = JSONObject().put("input_tokens", 15)))
+                assertEquals(15, db.listRequestAccounting(chatId).single().getInt("input_tokens"))
+                assertFalse(commitOnce(db, chatId))
+                assertEquals(status, db.listRequestAccounting(chatId).single().getString("local_status"))
+            }
+        }
+    }
+
     @Test fun stopEventUsesCurrentIdentityInsteadOfPreviousCostOrLateCallback() {
         ChatDatabase(context).use { db ->
             prepare(db)

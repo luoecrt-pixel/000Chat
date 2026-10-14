@@ -2398,6 +2398,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 return
             }
         }
+        if (provider == "openrouter") {
+            cancelOpenRouterRequest()
+            cancelPendingGitHubConfirmation()
+        }
         // Capture the credential, model and instructions once. Chain reuse,
         // the actual wire request and persisted metadata share this snapshot.
         val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
@@ -2414,10 +2418,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val openAiInstructionFingerprint = OpenAiInstructionChainPolicy.fingerprint(openAiInstructions, key, model)
         // previous_response_id inherits prior role-bearing input. Reuse is safe
         // only for the immediate completed turn under identical instructions.
-        if (provider == "openrouter") {
-            cancelOpenRouterRequest()
-            cancelPendingGitHubConfirmation()
-        }
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {
             if (provider == "openrouter") preparePendingOpenRouterZipsThenSend(regenerate)
             else preparePendingZipsThenSend(regenerate)
