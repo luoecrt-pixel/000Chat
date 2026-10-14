@@ -11,15 +11,73 @@ import java.security.MessageDigest
  * Must run on a worker: history may contain multi-megabyte images and PDFs.
  */
 object OpenAiLocalContextEncoder {
-    fun encode(history: List<JSONObject>, containerFiles: Map<String, String> = emptyMap(), onManifest: ((JSONObject, JSONObject) -> Unit)? = null): JSONArray {
+    /**
+     * For completed pre-v23 OpenAI history the signed reasoning/tool items
+     * were never stored. Only explicit user consent can downgrade that turn
+     * to clearly labelled visible text; never fabricate protocol output.
+     */
+    fun missingCompletedTypedOutput(history: List<JSONObject>): Int =
+        history.count { message ->
+            message.optString("role") == "assistant" &&
+                message.optString("provider") == "openai" &&
+                message.optJSONArray("openai_protocol_output") == null &&
+                !OpenAiInterruptedTurnReplay.isInterrupted(message)
+        }
+
+    fun encode(
+        history: List<JSONObject>,
+        containerFiles: Map<String, String> = emptyMap(),
+        onManifest: ((JSONObject, JSONObject) -> Unit)? = null
+    ): JSONArray = encode(history, containerFiles, false, onManifest)
+
+    fun encode(
+        history: List<JSONObject>,
+        containerFiles: Map<String, String>,
+        allowLegacyVisibleTextOnly: Boolean,
+        onManifest: ((JSONObject, JSONObject) -> Unit)? = null
+    ): JSONArray {
         val input = JSONArray()
         history.forEach { message ->
             AttachmentHistoryPolicy.validate(message)
             val role = message.optString("role")
             if (role != "user" && role != "assistant") return@forEach
-            val text = JsonProtocol.string(message, "text").trim()
+            val text = JsonProtocol.string(message, "text")
             if (role == "assistant") {
-                if (text.isNotEmpty()) {
+                if (message.optString("provider") == "openai") {
+                    val interrupted = OpenAiInterruptedTurnReplay.isInterrupted(message)
+                    val output = message.optJSONArray("openai_protocol_output")
+                    if (output == null && !interrupted) {
+                        if (!allowLegacyVisibleTextOnly) {
+                            throw IOException(
+                                "Старый ответ OpenAI не содержит полного протокольного вывода. " +
+                                "Для безопасного продолжения цепочки необходим исходный Responses output; " +
+                                "только видимый текст не заменяет reasoning и результаты инструментов."
+                            )
+                        }
+                        if (text.isBlank()) {
+                            throw IOException("У старого завершённого ответа OpenAI нет даже видимого текста. " +
+                                "Контекст не может быть безопасно восстановлен.")
+                        }
+                        input.put(JSONObject().put("role", "assistant").put("content",
+                            "[Исторический ответ OpenAI: сохранён ТОЛЬКО видимый текст; " +
+                            "подписанные reasoning и результаты инструментов отсутствуют, " +
+                            "НЕ предполагайте их наличие.]\n" + text))
+                        return@forEach
+                    }
+                    // Retain all actually received signed reasoning/tool/message items.
+                    // These are NOT synthesized from the incomplete visible text.
+                    if (output != null) for (index in 0 until output.length()) {
+                        val item = output.optJSONObject(index)
+                            ?: throw IOException("Недействительный элемент OpenAI output в локальной истории")
+                        input.put(JSONObject(item.toString()))
+                    }
+                    if (interrupted) {
+                        // The marker describes the unsuccessful turn, but only repeats
+                        // fragments not already retained in its typed output above.
+                        // Never strip message items: they also own refusal/annotations.
+                        input.put(OpenAiInterruptedTurnReplay.asVisibleTranscript(message, output))
+                    }
+                } else if (text.isNotEmpty()) {
                     input.put(JSONObject().put("role", role).put("content", text))
                 }
                 return@forEach

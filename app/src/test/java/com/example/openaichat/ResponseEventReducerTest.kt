@@ -4,8 +4,36 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 
 class ResponseEventReducerTest {
+    @Test fun differentCreatedOrTerminalResponseCannotReplaceOwnedPaidPartial() {
+        val owned = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+            JSONObject().put("type", "response.output_text.delta").put("delta", "paid partial")).state
+        for (type in listOf("response.created", "response.completed", "response.failed", "response.in_progress")) {
+            try {
+                ResponseEventReducer.reduce(owned, JSONObject().put("type", type)
+                    .put("response", JSONObject().put("id", "resp_other").put("output", org.json.JSONArray())))
+                fail("A different response must not advance the original state")
+            } catch (_: ResponsesResponseIdentityException) { }
+            assertEquals("resp_owned", owned.responseId)
+            assertEquals("paid partial", owned.text)
+            assertNull(owned.terminalState)
+        }
+    }
+
+    @Test fun topLevelResponseIdentityMustMatchBothOwnerAndNestedIdentity() {
+        for (owner in listOf<String?>(null, "resp_owned")) {
+            try {
+                ResponseEventReducer.reduce(ResponseEventState(responseId = owner), JSONObject()
+                    .put("type", "response.created").put("response_id", "resp_other")
+                    .put("response", JSONObject().put("id", "resp_owned")))
+                fail("Contradictory response identities must fail before mutation")
+            } catch (_: ResponsesResponseIdentityException) { }
+        }
+    }
+
     @Test
     fun accumulatesTextAndReasoningDeltas() {
         var state = ResponseEventState()
@@ -134,6 +162,35 @@ class ResponseEventReducerTest {
         assertEquals("provider fault", result.state.completionError)
     }
 
+    @Test fun streamingErrorRetainsNestedPaidOutputAndErrorFieldsWithoutMutatingReceivedResponse() {
+        val error = JSONObject().put("message", JSONObject.NULL).put("code", "server_error")
+            .put("details", JSONObject().put("retryable", false))
+        val terminal = JSONObject().put("id", "resp_owned").put("status", "in_progress")
+            .put("output", org.json.JSONArray().put(JSONObject().put("type", "message")
+                .put("content", org.json.JSONArray().put(JSONObject().put("type", "refusal")
+                    .put("refusal", "canonical refusal")))))
+        for (type in listOf("error", "response.error")) {
+            val reduced = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+                JSONObject().put("type", type).put("response", terminal).put("error", error)
+                    .put("message", "top-level provider diagnostic")).state
+            assertEquals(ResponseTerminalState.FAILED, reduced.terminalState)
+            assertEquals("canonical refusal", reduced.text)
+            assertEquals("failed", reduced.terminalResponse!!.getString("status"))
+            assertEquals("resp_owned", reduced.terminalResponse!!.getString("id"))
+            val retainedError = reduced.terminalResponse!!.getJSONObject("error")
+            assertEquals("server_error", retainedError.getString("code"))
+            assertEquals(false, retainedError.getJSONObject("details").getBoolean("retryable"))
+            assertEquals("top-level provider diagnostic", reduced.completionError)
+            assertEquals("in_progress", terminal.getString("status"))
+            assertTrue(error.isNull("message"))
+            try {
+                ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_other"),
+                    JSONObject().put("type", type).put("response", terminal).put("error", error))
+                fail("A failed response must not claim a different owner's paid output")
+            } catch (_: ResponsesResponseIdentityException) { }
+        }
+    }
+
     @Test
     fun cancellationIsTerminalWithoutInventingText() {
         val initial = ResponseEventState(text = "partial")
@@ -186,6 +243,106 @@ class ResponseEventReducerTest {
             JSONObject().put("type","response.completed").put("response",response))
         assertTrue(state.textChanged)
         assertEquals("Sorry, not available", state.state.text)
+    }
+
+    @Test
+    fun terminalStateCannotBeResurrectedByLateSseEvents() {
+        val completedResponse = JSONObject().put("id", "resp_done")
+            .put("status", "completed").put("output", org.json.JSONArray().put(
+                JSONObject().put("type", "message").put("content", org.json.JSONArray().put(
+                    JSONObject().put("type", "output_text").put("text", "canonical")
+                ))
+            ))
+        val terminal = ResponseEventReducer.reduce(
+            ResponseEventState(responseId = "resp_done", text = "partial"),
+            JSONObject().put("type", "response.completed").put("response", completedResponse)
+        ).state
+        assertEquals("canonical", terminal.text)
+        val late = listOf(
+            JSONObject().put("type", "response.output_text.delta").put("delta", " stale"),
+            JSONObject().put("type", "response.created").put("response", JSONObject().put("id", "resp_other")),
+            JSONObject().put("type", "response.failed").put("response", JSONObject().put("id", "resp_done")),
+            JSONObject().put("type", "error").put("message", "late")
+        )
+        late.forEach { event ->
+            val decision = ResponseEventReducer.reduce(terminal, event)
+            assertEquals(terminal, decision.state)
+            assertEquals(false, decision.textChanged)
+            assertEquals(false, decision.responseIdChanged)
+        }
+    }
+
+    @Test
+    fun interleavedOutputAndContentIndicesPreserveProviderOrderAndEveryDelta() {
+        var state = ResponseEventState()
+        fun delta(out: Int, content: Int, value: String) {
+            state = ResponseEventReducer.reduce(state, JSONObject()
+                .put("type", "response.output_text.delta")
+                .put("output_index", out)
+                .put("content_index", content)
+                .put("delta", value)).state
+        }
+        delta(2, 0, "third-1 ")
+        delta(0, 1, "first-2 ")
+        delta(1, 0, "second-1 ")
+        delta(0, 0, "first-1 ")
+        delta(2, 0, "third-2 ")
+        delta(0, 1, "first-2b ")
+        assertEquals("first-1 first-2 first-2b second-1 third-1 third-2 ", state.text)
+        assertEquals(4, state.indexedTextParts.size)
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.done")
+            .put("output_index", 1)
+            .put("content_index", 0)
+            .put("text", "second-complete ")).state
+        assertEquals("first-1 first-2 first-2b second-complete third-1 third-2 ", state.text)
+        assertEquals(4, state.indexedTextParts.size)
+    }
+
+    @Test
+    fun indexedRefusalDoneDoesNotEraseOtherOutputsOrDuplicatePart() {
+        var state = ResponseEventState()
+        val events = listOf(
+            JSONObject().put("type", "response.refusal.delta")
+                .put("output_index", 1).put("content_index", 0).put("delta", "No"),
+            JSONObject().put("type", "response.output_text.delta")
+                .put("output_index", 0).put("content_index", 0).put("delta", "Earlier. "),
+            JSONObject().put("type", "response.refusal.done")
+                .put("output_index", 1).put("content_index", 0).put("refusal", "No thanks.")
+        )
+        events.forEach { state = ResponseEventReducer.reduce(state, it).state }
+        assertEquals("Earlier. No thanks.", state.text)
+        val same = ResponseEventReducer.reduce(state, events.last())
+        assertEquals(state, same.state)
+        assertEquals(false, same.textChanged)
+    }
+
+    @Test
+    fun authoritativeTerminalReplacesInterleavedPartialInCanonicalOutputOrder() {
+        var state = ResponseEventState()
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 1).put("content_index", 0).put("delta", "B-before")).state
+        state = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 0).put("content_index", 0).put("delta", "A-before")).state
+        assertEquals("A-beforeB-before", state.text)
+        val terminal = JSONObject().put("id", "resp_interleaved").put("output",
+            org.json.JSONArray()
+                .put(JSONObject().put("type", "message").put("content",
+                    org.json.JSONArray().put(JSONObject().put("type", "output_text")
+                        .put("text", "A-canonical"))))
+                .put(JSONObject().put("type", "message").put("content",
+                    org.json.JSONArray().put(JSONObject().put("type", "output_text")
+                        .put("text", "B-canonical")))))
+        val decision = ResponseEventReducer.reduce(state, JSONObject()
+            .put("type", "response.completed").put("response", terminal))
+        assertEquals("A-canonicalB-canonical", decision.state.text)
+        assertEquals(ResponseTerminalState.COMPLETED, decision.state.terminalState)
+        val late = ResponseEventReducer.reduce(decision.state, JSONObject()
+            .put("type", "response.output_text.delta")
+            .put("output_index", 2).put("content_index", 0).put("delta", "late"))
+        assertEquals(decision.state, late.state)
     }
 
 }

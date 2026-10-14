@@ -144,13 +144,20 @@ for index, expected in enumerate((large, other)):
 # Regression guards for the previously reproduced Android foreground loss:
 # provider HTTP x-request-id must not become the SQLite ownership request_id.
 main_activity = (ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt").read_text()
-parsed = re.search(r'val parsedModel = AstraResponseModel\.fromResponse\(\s*completedResponse,\s*finalText,\s*(\w+)\s*,', main_activity)
+parsed = re.search(r'val parsedModel = AstraResponseModel\.fromResponse\(\s*effectiveResponse,\s*finalText,\s*(\w+)\s*,', main_activity)
 assert parsed and parsed.group(1) == "localRequestId", "Foreground assistant must use its local active request ID"
+assert 'val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)' in main_activity, "Foreground model must include all received typed output before extraction"
 assert 'JsonProtocol.string(messages[0], "request_id") != expectedRequestId) return false' in db, "Mismatched terminal assistant must not consume active ownership"
 assert '"Готово. Ответ не содержит текста."' not in main_activity, "UI status must not enter canonical response"
 assert '"Ответ завершился без полученного текста: "' not in main_activity, "Exception text must stay in metadata"
 worker = (ROOT / "app/src/main/java/com/example/openaichat/BackgroundResponseWorker.kt").read_text()
-assert 'type == "response.refusal.delta"' in worker and 'JsonProtocol.string(event, "delta")' in worker
+# The old lexical guard required naive full.append(delta), which silently
+# scrambled interleaved output after WorkManager resume. Require the shared,
+# durable indexed reducer instead of reintroducing the known P1 regression.
+assert 'ResponseEventReducer.reduce(responseState, event).state' in worker
+assert 'ResponseIndexedCheckpoint.restore(current)' in worker
+assert 'indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState)' in worker
+assert 'full.append' not in worker
 reducer = (ROOT / "app/src/main/java/com/example/openaichat/ResponseEventReducer.kt").read_text()
 assert 'JsonProtocol.string(event, "delta")' in reducer and 'JsonProtocol.nonBlank(it, "message")' in reducer
 xlsx = (ROOT / "app/src/main/java/com/example/openaichat/StructuredDocumentExtractor.kt").read_text()

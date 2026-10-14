@@ -116,7 +116,29 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           disable-linux-hw-accel: false
-          script: gradle --no-daemon --stacktrace connectedDebugAndroidTest
+          script: |
+            gradle --no-daemon --stacktrace connectedDebugAndroidTest
+            python3 tools/test_android_process_recovery.py
+
+      - name: Upload process recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: process-recovery-evidence
+          path: app/build/reports/process-recovery/
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Upload instrumentation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-instrumentation-evidence
+          path: |
+            app/build/reports/androidTests/connected/
+            app/build/outputs/androidTest-results/connected/
+          if-no-files-found: ignore
+          retention-days: 5
 
       - name: Upload APK
         uses: actions/upload-artifact@v7

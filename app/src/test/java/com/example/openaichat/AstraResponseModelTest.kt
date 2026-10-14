@@ -45,4 +45,23 @@ class AstraResponseModelTest {
 
         assertEquals("anthropic/claude-opus-5.5", model.model)
     }
+    @Test
+    fun preservesEveryPaidImageIncludingFifthSixthAndLaterInResponseOrder() {
+        val output = JSONArray()
+        for (i in 0 until 7) {
+            output.put(JSONObject().put("type", "image_generation_call")
+                .put("id", "image_call_${i + 1}")
+                .put("status", "completed")
+                .put("result", "synthetic_image_payload_${i + 1}"))
+        }
+        val model = AstraResponseModel.fromResponse(
+            JSONObject().put("id", "resp_seven_images").put("output", output),
+            fallbackText = "", requestId = "paid_fixture")
+        assertEquals(7, model.generatedImageResults.size)
+        assertEquals((1..7).map { "synthetic_image_payload_$it" },
+            model.generatedImageResults)
+        assertEquals("resp_seven_images", model.id)
+        assertEquals("completed", model.status)
+    }
+
 }

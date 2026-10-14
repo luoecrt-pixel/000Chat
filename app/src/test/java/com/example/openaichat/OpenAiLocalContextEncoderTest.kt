@@ -97,6 +97,110 @@ class OpenAiLocalContextEncoderTest {
         assertFalse(result.contains("file_openai_before"))
     }
 
+    @Test
+    fun fullOpenAiReplayPreservesReasoningPhaseAndToolItemsInOrder() {
+        val output = JSONArray()
+            .put(JSONObject().put("id", "reasoning_1").put("type", "reasoning")
+                .put("summary", JSONArray().put(JSONObject().put("type", "summary_text")
+                    .put("text", "Summary for replay")))
+                .put("encrypted_content", "opaque-signed-reasoning"))
+            .put(JSONObject().put("id", "msg_1").put("type", "message")
+                .put("role", "assistant").put("phase", "final")
+                .put("status", "completed")
+                .put("content", JSONArray().put(JSONObject().put("type", "output_text")
+                    .put("text", "Full answer"))))
+            .put(JSONObject().put("type", "web_search_call")
+                .put("id", "tool_1").put("status", "completed")
+                .put("action", JSONObject().put("type", "search").put("query", "fixture")))
+        val history = listOf(
+            JSONObject().put("role", "user").put("text", "Hello"),
+            JSONObject().put("role", "assistant").put("provider", "openai")
+                .put("text", "Full answer")
+                .put("openai_protocol_output", output),
+            JSONObject().put("role", "user").put("text", "Next")
+        )
+        val result = serialized(OpenAiLocalContextEncoder.encode(history))
+        assertEquals(5, result.length())
+        assertEquals("reasoning", result.getJSONObject(1).getString("type"))
+        assertEquals("opaque-signed-reasoning", result.getJSONObject(1).getString("encrypted_content"))
+        assertEquals("final", result.getJSONObject(2).getString("phase"))
+        assertEquals("web_search_call", result.getJSONObject(3).getString("type"))
+        assertEquals("tool_1", result.getJSONObject(3).getString("id"))
+        assertEquals("Next", result.getJSONObject(4).getJSONArray("content")
+            .getJSONObject(0).getString("text"))
+        // Exactly one assistant output message: no second plain-text copy.
+        assertEquals(1, (0 until result.length()).count {
+            result.optJSONObject(it)?.optString("type") == "message"
+        })
+        assertEquals(3, output.length())
+    }
+
+    @Test
+    fun legacyOpenAiAssistantWithoutTypedOutputMustNotSilentlyDropPaidItems() {
+        val old = JSONObject().put("role", "assistant").put("provider", "openai")
+            .put("response_id", "resp_legacy").put("text", "Only visible text")
+        try {
+            OpenAiLocalContextEncoder.encode(listOf(old,
+                JSONObject().put("role", "user").put("text", "Follow-up")))
+            fail("A legacy assistant reply has no safely replayable Responses items")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message.orEmpty().contains("полного протокольного вывода"))
+        }
+        assertEquals("Only visible text", old.getString("text"))
+    }
+
+    @Test
+    fun legacyOnlyVisibleTextRequiresOptInAndNeverCreatesFakeSignedOutput() {
+        val legacy = JSONObject().put("role", "assistant").put("provider", "openai")
+            .put("response_id", "resp_legacy").put("status", "completed")
+            .put("text", "Previously visible answer")
+        val signed = JSONObject().put("type", "reasoning")
+            .put("encrypted_content", "real-opaque-signed-reasoning")
+        val modern = JSONObject().put("role", "assistant").put("provider", "openai")
+            .put("status", "completed").put("text", "Modern")
+            .put("openai_protocol_output", JSONArray().put(signed))
+        val history = listOf(
+            JSONObject().put("role", "user").put("text", "Past prompt"),
+            legacy,
+            JSONObject().put("role", "user").put("text", "Modern prompt"),
+            modern,
+            JSONObject().put("role", "user").put("text", "Next")
+        )
+        assertEquals(1, OpenAiLocalContextEncoder.missingCompletedTypedOutput(history))
+        try {
+            OpenAiLocalContextEncoder.encode(history)
+            fail("Never downgrade silently")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message.orEmpty().contains("протокольного вывода"))
+        }
+        val original = legacy.toString()
+        val replay = serialized(OpenAiLocalContextEncoder.encode(
+            history, emptyMap(), allowLegacyVisibleTextOnly = true))
+        assertEquals(5, replay.length())
+        val plain = replay.getJSONObject(1)
+        assertEquals("assistant", plain.getString("role"))
+        assertTrue(plain.getString("content").contains("ТОЛЬКО видимый текст"))
+        assertTrue(plain.getString("content").contains("Previously visible answer"))
+        assertEquals("reasoning", replay.getJSONObject(3).getString("type"))
+        assertEquals("real-opaque-signed-reasoning",
+            replay.getJSONObject(3).getString("encrypted_content"))
+        assertEquals(original, legacy.toString())
+        assertFalse(legacy.has("openai_protocol_output"))
+    }
+
+    @Test
+    fun legacyWithNoVisibleTextCannotBeReplayedEvenWithConsent() {
+        val legacy = JSONObject().put("role", "assistant").put("provider", "openai")
+            .put("status", "completed").put("text", "")
+        try {
+            OpenAiLocalContextEncoder.encode(
+                listOf(legacy), emptyMap(), allowLegacyVisibleTextOnly = true)
+            fail("Unavailable data cannot be invented")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message.orEmpty().contains("нет даже видимого текста"))
+        }
+    }
+
     private fun digest(bytes: ByteArray) =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 }

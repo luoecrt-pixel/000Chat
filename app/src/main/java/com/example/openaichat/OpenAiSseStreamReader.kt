@@ -24,20 +24,39 @@ data class OpenAiSseReadResult(
  * Callers own response state, event sequencing and UI/persistence ownership.
  */
 object OpenAiSseStreamReader {
-    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult {
-        val parser = SseEventParser()
+    // Hard limits on *decoded characters* (UTF-8 bytes can be up to 4x).
+    // Limits are deliberately larger than ordinary text events because tool
+    // image_generation_call results may contain PNG base64 in terminal JSON.
+    // Exceeding a limit is an explicit failure, never a truncated success.
+    internal data class Limits(
+        val maxLineChars: Int = 128 * 1024 * 1024,
+        val maxEventChars: Int = 160 * 1024 * 1024,
+        val maxStreamChars: Long = 512L * 1024 * 1024,
+        val maxAllocationBytes: Long = Long.MAX_VALUE,
+        // Internal deterministic pressure seam. Production uses measured heap.
+        val maxSharedAllocationBytes: Long = Long.MAX_VALUE
+    ) {
+        init {
+            require(maxLineChars > 0 && maxEventChars >= maxLineChars && maxStreamChars >= maxEventChars)
+            require(maxAllocationBytes > 0L && maxSharedAllocationBytes > 0L)
+        }
+    }
+
+    fun read(reader: BufferedReader, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult =
+        read(reader, Limits(), onEvent)
+
+    internal fun read(reader: BufferedReader, limits: Limits, onEvent: (JSONObject) -> Boolean): OpenAiSseReadResult {
         var terminal: OpenAiStreamEnd? = null
         var semanticError: String? = null
-
         fun consume(data: String): Boolean {
             if (data == "[DONE]") return true
             val event = try {
                 JSONObject(data)
             } catch (e: Exception) {
-                throw IOException("Malformed Responses SSE JSON", e)
+                throw UnrecoverableResponsesStreamException("Malformed Responses SSE JSON", e)
             }
             val type = JsonProtocol.string(event, "type")
-            if (type.isBlank()) throw IOException("Responses SSE event has no type")
+            if (type.isBlank()) throw UnrecoverableResponsesStreamException("Responses SSE event has no type")
             // Duplicated/out-of-order frames rejected by the sequence owner must
             // not supply a terminal event or close the transport prematurely.
             if (!onEvent(event)) return false
@@ -56,13 +75,13 @@ object OpenAiSseStreamReader {
             return terminal != null
         }
 
-        while (true) {
-            val line = reader.readLine() ?: break
-            val frame = parser.acceptLine(line) ?: continue
-            if (consume(frame.data)) break
-        }
-        // A final frame without a trailing blank line is still a real SSE record.
-        if (terminal == null) parser.finish()?.let { consume(it.data) }
+        BoundedResponseDecoder.readSse(reader, BoundedResponseDecoder.SseLimits(
+            maxLineChars = limits.maxLineChars,
+            maxEventChars = limits.maxEventChars,
+            maxStreamChars = limits.maxStreamChars,
+            maxAllocationBytes = limits.maxAllocationBytes,
+            maxSharedAllocationBytes = limits.maxSharedAllocationBytes
+        )) { frame -> consume(frame.data) }
 
         return OpenAiSseReadResult(
             end = terminal ?: OpenAiStreamEnd.DISCONNECTED,

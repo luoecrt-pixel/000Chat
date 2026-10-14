@@ -84,20 +84,22 @@ class OpenAiSseStreamReaderTest {
     }
 
     @Test fun terminalReturnsWithoutReadingAnotherLineFromOpenStream() {
-        val lines = listOf(
-            """data: {"type":"response.completed","response":{"id":"resp"}}""",
-            ""
+        val source = frames(
+            """{"type":"response.completed","response":{"id":"resp"}}""",
+            """{"type":"response.failed","response":{"id":"late"}}"""
         )
+        val firstFrameChars = source.indexOf("\n\n") + 2
         val reader = object : BufferedReader(StringReader("")) {
             var reads = 0
-            override fun readLine(): String? {
-                if (reads >= lines.size) error("Reader must not wait for EOF after terminal")
-                return lines[reads++]
+            override fun read(): Int {
+                if (reads >= firstFrameChars)
+                    error("Reader must not read any character after terminal SSE")
+                return source[reads++].code
             }
         }
         val result = OpenAiSseStreamReader.read(reader) { true }
         assertEquals(OpenAiStreamEnd.COMPLETED, result.end)
-        assertEquals(2, reader.reads)
+        assertEquals(firstFrameChars, reader.reads)
     }
 
     @Test fun malformedJsonIsNotSilentlyIgnored() {
@@ -169,4 +171,61 @@ class OpenAiSseStreamReaderTest {
         )))) { callbacks++; true }
         assertEquals(1, callbacks)
     }
+    @Test fun oversizedSingleLineFailsBeforeParsingOrDispatch() {
+        val source = "data: " + "A".repeat(50) + "\n\n"
+        var callbacks = 0
+        try {
+            OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
+                OpenAiSseStreamReader.Limits(maxLineChars = 20, maxEventChars = 40,
+                    maxStreamChars = 120)) { callbacks++; true }
+            throw AssertionError("Expected explicit SSE line limit")
+        } catch (e: IOException) {
+            assertTrue(e.message.orEmpty().contains("line limit"))
+        }
+        assertEquals(0, callbacks)
+    }
+
+    @Test fun repeatedDataLinesCannotEvadeEventLimit() {
+        val source = "data: AAAAAAAAAA\ndata: BBBBBBBBBB\ndata: CCCCCCCCCC\n\n"
+        try {
+            OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
+                OpenAiSseStreamReader.Limits(maxLineChars = 24, maxEventChars = 30,
+                    maxStreamChars = 300)) { true }
+            throw AssertionError("Expected explicit SSE event limit")
+        } catch (e: IOException) {
+            assertTrue(e.message.orEmpty().contains("event limit"))
+        }
+    }
+
+    @Test fun manyNormalFramesCannotEvadeTotalStreamLimit() {
+        val source = frames(
+            """{"type":"response.output_text.delta","delta":"a"}""",
+            """{"type":"response.output_text.delta","delta":"b"}""",
+            """{"type":"response.output_text.delta","delta":"c"}"""
+        )
+        val frameLen = frames("""{"type":"response.output_text.delta","delta":"a"}""").length
+        try {
+            OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
+                OpenAiSseStreamReader.Limits(maxLineChars = frameLen,
+                    maxEventChars = frameLen + 1, maxStreamChars = (frameLen * 2 + 1).toLong())
+            ) { true }
+            throw AssertionError("Expected cumulative SSE limit")
+        } catch (e: IOException) {
+            assertTrue(e.message.orEmpty().contains("stream limit"))
+        }
+    }
+
+    @Test fun malformedOversizeThenTerminalCannotBeSilentlyTreatedAsSuccess() {
+        val source = "data: " + "z".repeat(50) + "\n\n" +
+            frames("""{"type":"response.completed","response":{"id":"resp"}}""")
+        try {
+            OpenAiSseStreamReader.read(BufferedReader(StringReader(source)),
+                OpenAiSseStreamReader.Limits(maxLineChars = 25, maxEventChars = 40,
+                    maxStreamChars = 400)) { true }
+            throw AssertionError("Limit exceeded before paid output terminal")
+        } catch (e: IOException) {
+            assertTrue(e.message.orEmpty().contains("line limit"))
+        }
+    }
+
 }

@@ -44,7 +44,9 @@ class BackgroundResponseWorker(
             .callTimeout(60, TimeUnit.SECONDS)
             .build()
     }
+    private val streamClient by lazy { ResumableResponseStreamClient(applicationContext) }
 
+    @OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
     override suspend fun doWork(): Result {
         val chatId = inputData.getString(KEY_CHAT_ID).orEmpty()
         val responseId = inputData.getString(KEY_RESPONSE_ID).orEmpty()
@@ -53,9 +55,12 @@ class BackgroundResponseWorker(
 
         val db = ChatDatabase(applicationContext)
         val diagnostics = AstraDiagnostics(applicationContext)
-        val streamClient = ResumableResponseStreamClient(applicationContext)
         var activeCall: okhttp3.Call? = null
-        currentCoroutineContext().job.invokeOnCompletion {
+        var resumeLease: Any? = null
+        val recoveryJob = currentCoroutineContext().job
+        // Cancel the blocking HTTP reader when cancellation STARTS. Waiting for
+        // job completion would keep the resume lease until the socket deadline.
+        recoveryJob.invokeOnCompletion(onCancelling = true, invokeImmediately = true) {
             activeCall?.cancel()
         }
 
@@ -79,6 +84,42 @@ class BackgroundResponseWorker(
             var retryDelayMs = 1_500L
 
             while (!isStopped) {
+                val current = db.getActiveResponse(chatId)
+                    ?: return Result.success()
+                if (current.optString("request_id") != requestId) return Result.success()
+                if (!current.optBoolean("background_enabled", true)) return Result.success()
+
+                // Scheduling is durable as soon as a stopped Activity receives
+                // response.created. Its primary reader still owns received bytes
+                // and SQLite finalization until its finally releases the registry.
+                // A cancelled socket is not proof that its callback has finished.
+                if (OpenAiCreateCallOwners.isRegistered(chatId, requestId)) {
+                    if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt,
+                            System.currentTimeMillis()) <= 0L) {
+                        OpenAiCreateCallOwners.call(chatId, requestId)?.cancel()
+                    }
+                    delay(250L)
+                    continue
+                }
+                if (resumeLease == null) {
+                    resumeLease = OpenAiCreateCallOwners.acquireResume(chatId, requestId)
+                    if (resumeLease == null) { delay(250L); continue }
+                }
+
+                val cursor = current.optLong("last_sequence_number", -1L)
+                var responseState = try {
+                    ResponseIndexedCheckpoint.restore(current)
+                } catch (e: UnrecoverableResponsesCheckpointException) {
+                    failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
+                    return Result.failure()
+                }
+                responseState.terminalResponse?.let { terminal ->
+                    // Paid terminal already arrived before process death.
+                    // Complete its owned one-shot commit with NO network call.
+                    finalize(chatId, responseId, requestId, terminal, db, diagnostics)
+                    return if (responseState.terminalState == ResponseTerminalState.FAILED)
+                        Result.failure() else Result.success()
+                }
                 if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {
                     diagnostics.log("worker_recovery_timeout", mapOf(
                         "chat_id" to chatId,
@@ -86,18 +127,10 @@ class BackgroundResponseWorker(
                         "request_id" to requestId
                     ))
                     BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                        "failed", "recovery_timeout")
+                        "failed", "recovery_timeout", applicationContext.filesDir)
                     db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
-
-                val current = db.getActiveResponse(chatId)
-                    ?: return Result.success()
-                if (current.optString("request_id") != requestId) return Result.success()
-                if (!current.optBoolean("background_enabled", true)) return Result.success()
-
-                val cursor = current.optLong("last_sequence_number", -1L)
-                val full = StringBuilder(if (cursor >= 0L) JsonProtocol.string(current, "text").orEmpty() else "")
                 var lastSequence = cursor
                 var lastCheckpointAt = SystemClock.elapsedRealtime()
 
@@ -105,7 +138,12 @@ class BackgroundResponseWorker(
                     val result = streamClient.stream(
                         responseId = responseId,
                         startingAfter = cursor,
-                        onCallCreated = { call -> activeCall = call },
+                        ownerChatId = chatId,
+                        ownerRequestId = requestId,
+                        onCallCreated = { call ->
+                            activeCall = call
+                            if (isStopped || !recoveryJob.isActive) call.cancel()
+                        },
                         startedAtEpochMs = requestStartedAt
                     ) { event ->
                         val sequence = event.optLong("sequence_number", -1L)
@@ -113,31 +151,24 @@ class BackgroundResponseWorker(
                             lastSequence = sequence
                         }
 
+                        // Identical indexed assembly as the foreground and
+                        // resumed Activity paths. Never append interleaved deltas
+                        // in arrival order or discard .done corrections.
+                        responseState = ResponseEventReducer.reduce(responseState, event).state
                         val type = JsonProtocol.string(event, "type")
-                        if (type == "response.output_text.delta" || type == "response.refusal.delta") {
-                            val delta = JsonProtocol.string(event, "delta")
-                            if (delta.isNotEmpty()) full.append(delta)
-                        }
 
-                        val terminal = type == "response.completed" ||
-                            type == "response.failed" ||
-                            type == "response.incomplete" ||
-                            type == "response.cancelled"
+                        val terminal = responseState.terminalState != null
                         val now = SystemClock.elapsedRealtime()
-                        if (terminal || now - lastCheckpointAt >= 500L) {
+                        if (terminal || type == "response.output_item.done" ||
+                            now - lastCheckpointAt >= 500L) {
                             lastCheckpointAt = now
                             db.updateActiveResponse(
                                 chatId,
                                 responseId = responseId,
-                                text = full.toString(),
-                                status = when (type) {
-                                    "response.completed" -> "completed"
-                                    "response.failed" -> "failed"
-                                    "response.incomplete" -> "incomplete"
-                                    "response.cancelled" -> "cancelled"
-                                    else -> "in_progress"
-                                },
+                                text = responseState.text,
+                                status = responseState.terminalState?.wireStatus ?: "in_progress",
                                 lastSequenceNumber = lastSequence,
+                                indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                 expectedRequestId = requestId
                             )
                         }
@@ -151,15 +182,10 @@ class BackgroundResponseWorker(
                         db.updateActiveResponse(
                             chatId,
                             responseId = responseId,
-                            text = full.toString(),
-                            status = when (result.terminalEventType) {
-                                "response.completed" -> "completed"
-                                "response.failed" -> "failed"
-                                "response.incomplete" -> "incomplete"
-                                "response.cancelled" -> "cancelled"
-                                else -> "in_progress"
-                            },
+                            text = responseState.text,
+                            status = responseState.terminalState?.wireStatus ?: "failed",
                             lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                            indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                             expectedRequestId = requestId
                         )
                         finalize(
@@ -170,21 +196,33 @@ class BackgroundResponseWorker(
                             db,
                             diagnostics
                         )
-                        return if (result.terminalEventType == "response.failed") Result.failure() else Result.success()
+                        return if (responseState.terminalState == ResponseTerminalState.FAILED)
+                            Result.failure() else Result.success()
                     }
 
                     db.updateActiveResponse(
                         chatId,
                         responseId = responseId,
-                        text = full.toString(),
+                        text = responseState.text,
                         status = "in_progress",
                         lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
+                        indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                         expectedRequestId = requestId
                     )
 
                     if (isStopped) return Result.success()
                     delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
                     retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                } catch (e: UnrecoverableResponsesStreamException) {
+                    activeCall = null
+                    BackgroundRequestFailureRecorder.persist(
+                        db, chatId, requestId, responseId, "failed",
+                        e.message.orEmpty(), applicationContext.filesDir)
+                    return Result.failure()
+                } catch (e: UnrecoverableResponsesCheckpointException) {
+                    activeCall = null
+                    failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
+                    return Result.failure()
                 } catch (e: ResponseStreamSequenceGapException) {
                     activeCall = null
                     diagnostics.log("worker_sequence_gap", mapOf(
@@ -206,7 +244,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "failed", "recovery_auth_${e.statusCode}")
+                                "failed", "recovery_auth_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -217,7 +255,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "unknown", "response_gone_${e.statusCode}")
+                                "unknown", "response_gone_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
@@ -240,7 +278,7 @@ class BackgroundResponseWorker(
                                 "status" to e.statusCode
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
-                                "failed", "recovery_http_${e.statusCode}")
+                                "failed", "recovery_http_${e.statusCode}", applicationContext.filesDir)
                             db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
@@ -248,6 +286,11 @@ class BackgroundResponseWorker(
                 } catch (e: Exception) {
                     activeCall = null
                     if (isStopped) return Result.success()
+                    if (ResponsesStreamFailurePolicy.isUnrecoverable(e)) {
+                        BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                            "failed", e.message.orEmpty(), applicationContext.filesDir)
+                        return Result.failure()
+                    }
                     diagnostics.log("worker_stream_failed", mapOf(
                         "chat_id" to chatId,
                         "response_id" to responseId,
@@ -260,11 +303,32 @@ class BackgroundResponseWorker(
             return Result.success()
         } finally {
             activeCall?.cancel()
+            resumeLease?.let { OpenAiCreateCallOwners.releaseResume(chatId, requestId, it) }
             try { db.close() } catch (_: Exception) {}
             try { streamClient.close() } catch (_: Exception) {}
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }
+    }
+
+    private fun failUnrecoverableCheckpoint(
+        db: ChatDatabase,
+        diagnostics: AstraDiagnostics,
+        chatId: String,
+        responseId: String,
+        requestId: String,
+        cause: UnrecoverableResponsesCheckpointException
+    ) {
+        diagnostics.log("worker_checkpoint_unrecoverable", mapOf(
+            "chat_id" to chatId,
+            "response_id" to responseId,
+            "request_id" to requestId,
+            "error" to cause.message.orEmpty().take(300)
+        ))
+        BackgroundRequestFailureRecorder.persist(
+            db, chatId, requestId, responseId, "failed",
+            "unrecoverable_checkpoint: " + cause.message.orEmpty(), applicationContext.filesDir
+        )
     }
 
     private fun extractResponseText(response: JSONObject?): String =
@@ -273,15 +337,19 @@ class BackgroundResponseWorker(
     private fun finalize(chatId: String, responseId: String, requestId: String, response: JSONObject, db: ChatDatabase, diagnostics: AstraDiagnostics) {
         val active = db.getActiveResponse(chatId) ?: return
         if (active.optString("request_id") != requestId) return
-        val state = response.optString("status").ifBlank { active.optString("status") }
+        val recovered = ResponseIndexedCheckpoint.restore(active)
+        val effectiveResponse = OpenAiEffectiveResponse.assemble(response, recovered)
+        val state = effectiveResponse.optString("status").ifBlank { active.optString("status") }
         val fallbackText = JsonProtocol.string(active, "text")
-        val text = extractResponseText(response).ifBlank { fallbackText }
-        val model = AstraResponseModel.fromResponse(
-            response, text, requestId, state,
-            OpenAiFileFailure.recover(applicationContext, response.optJSONObject("error"))
-                ?: response.optJSONObject("error")?.optString("message")
-                ?: response.optJSONObject("incomplete_details")?.optString("reason")
+        val text = fallbackText.ifBlank { extractResponseText(effectiveResponse) }
+        val parsedModel = AstraResponseModel.fromResponse(
+            effectiveResponse, text, requestId, state,
+            OpenAiFileFailure.recover(applicationContext, effectiveResponse.optJSONObject("error"))
+                ?: effectiveResponse.optJSONObject("error")?.optString("message")
+                ?: effectiveResponse.optJSONObject("incomplete_details")?.optString("reason")
         )
+        val model = parsedModel.copy(reasoningSummary = parsedModel.reasoningSummary?.takeIf { it.isNotBlank() }
+            ?: recovered.reasoningSummary.takeIf { it.isNotBlank() })
         val savedImages = saveGeneratedImages(model.generatedImageResults, diagnostics)
         val requestMeta = db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
             (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
@@ -291,10 +359,19 @@ class BackgroundResponseWorker(
             .ifBlank { requestMeta?.optString("model").orEmpty() }.takeIf { it.isNotBlank() }
         val assistant = model.toChatJson().apply {
             put("provider", "openai")
+            effectiveResponse.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
+            requestMeta?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
             requestedModel?.let { put("requested_model", it) }
             model.model?.let { put("response_model", it) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
             if (savedImages.length() > 0) put("generated_images", savedImages)
+            if (state != "completed" || (0 until savedImages.length()).any {
+                    savedImages.optJSONObject(it)?.optString("state") != "READY"
+                }) {
+                OpenAiRawSseArchive.attachToMessage(this, applicationContext.filesDir, chatId, requestId)
+            }
         }
 
         val chatObj = db.getChat(chatId) ?: return
@@ -306,13 +383,13 @@ class BackgroundResponseWorker(
             if (message.optString("response_id") == responseId) already = true
             messages += JSONObject(message.toString())
         }
-        if (!already && state != "cancelled") messages += assistant
+        if (!already) messages += assistant
 
         val effortPref = active.optString("effort_pref").ifBlank { "high" }
         val effectiveEffort = active.optString("effective_effort").ifBlank { "high" }
         val startedAt = active.optLong("started_at", System.currentTimeMillis())
         val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-        val usage = response.optJSONObject("usage")
+        val usage = model.usage
         val inTok = usage?.optLong("input_tokens", 0L) ?: 0L
         val outTok = usage?.optLong("output_tokens", 0L) ?: 0L
         val cachedTok = usage?.optJSONObject("input_tokens_details")?.optLong("cached_tokens", 0L) ?: 0L
@@ -320,7 +397,8 @@ class BackgroundResponseWorker(
         val reasoningTok = usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens", 0L) ?: 0L
         val cost = estimateCost(inTok, cachedTok, cacheWriteTok, outTok)
         val committed = db.finalizeCurrentChatIfActiveRequest(
-            chatId, chatObj.optString("title", "Новый чат"), responseId.takeIf { it.isNotBlank() }, effectiveEffort, messages, requestId
+            chatId, chatObj.optString("title", "Новый чат"),
+            responseId.takeIf { state == "completed" && it.isNotBlank() }, effectiveEffort, messages, requestId
         )
         if (!committed) {
             diagnostics.log("worker_stale_finalization_ignored", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))
@@ -364,27 +442,11 @@ class BackgroundResponseWorker(
         return (uncached * (10.0 * inMultiplier) + cachedTokens * (1.0 * inMultiplier) + cacheWriteTokens * (12.50 * inMultiplier) + outputTokens * (50.0 * outMultiplier)) / 1_000_000.0
     }
 
-    private fun saveGeneratedImages(results: List<String>, diagnostics: AstraDiagnostics): JSONArray {
-        val out = JSONArray()
-        if (results.isEmpty()) return out
-        val maxEncodedBytes = 72L * 1024L * 1024L
-        val maxDecodedBytes = 50L * 1024L * 1024L
-        val dir = File(applicationContext.filesDir, "generated_images").apply { mkdirs() }
-        results.take(4).forEachIndexed { index, encoded ->
-            try {
-                if (encoded.length.toLong() > maxEncodedBytes) throw IOException("generated image too large")
-                val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
-                if (bytes.size.toLong() > maxDecodedBytes) throw IOException("generated image too large")
-                if (bytes.size < 8 || (bytes[0].toInt() and 0xFF) != 0x89 || (bytes[1].toInt() and 0xFF) != 0x50 || (bytes[2].toInt() and 0xFF) != 0x4E || (bytes[3].toInt() and 0xFF) != 0x47) throw IOException("expected PNG")
-                val file = File(dir, "astra_${System.currentTimeMillis()}_${System.nanoTime()}_$index.png")
-                file.outputStream().use { it.write(bytes) }
-                out.put(JSONObject().put("filename", file.name).put("local_path", file.absolutePath).put("mime_type", "image/png").put("size_bytes", file.length()).put("state", "READY"))
-            } catch (e: Exception) {
-                diagnostics.log("generated_image_failed", mapOf("error" to (e.message ?: e.toString()).take(300)))
-            }
+    private fun saveGeneratedImages(results: List<String>, diagnostics: AstraDiagnostics): JSONArray =
+        GeneratedImageStore.save(applicationContext.filesDir, results) { index, failure ->
+            diagnostics.log("generated_image_failed", mapOf(
+                "error" to failure.message.orEmpty().take(300), "index" to index))
         }
-        return out
-    }
 
     private fun createForegroundInfo(title: String): ForegroundInfo {
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

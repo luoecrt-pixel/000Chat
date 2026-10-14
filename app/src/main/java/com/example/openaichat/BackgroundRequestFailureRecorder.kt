@@ -1,6 +1,7 @@
 package com.example.openaichat
 
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Records a Worker terminal failure only for the still-owned active request.
@@ -14,7 +15,9 @@ object BackgroundRequestFailureRecorder {
         localRequestId: String,
         responseId: String,
         status: String,
-        error: String
+        error: String,
+        receivedFilesDir: File? = null,
+        latencyMs: Long = 0L
     ): Boolean {
         val active = db.getActiveResponse(chatId) ?: return false
         if (active.optString("request_id") != localRequestId) return false
@@ -30,7 +33,23 @@ object BackgroundRequestFailureRecorder {
             .takeIf { it.isNotBlank() }
 
         val partial = JsonProtocol.string(active, "text")
-        if (partial.isNotBlank() && items.none {
+        // A provider may finish signed reasoning/tool output_item.done BEFORE
+        // emitting its first visible text delta. Persist the exact received
+        // typed items and readable summary even if the assistant text is empty.
+        // Otherwise the Worker clears the owned checkpoint and loses paid data.
+        val recovered = try {
+            ResponseIndexedCheckpoint.restore(active)
+        } catch (_: UnrecoverableResponsesCheckpointException) {
+            null
+        }
+        val typed = recovered?.typedOutputItems?.toSortedMap()?.values.orEmpty()
+        val summary = recovered?.reasoningSummary.orEmpty()
+        val sourceMessage = JSONObject()
+        receivedFilesDir?.let {
+            OpenAiRawSseArchive.attachToMessage(sourceMessage, it, chatId, localRequestId)
+        }
+        if ((partial.isNotBlank() || typed.isNotEmpty() || summary.isNotBlank() ||
+                sourceMessage.has("annotations")) && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {
             items += JSONObject()
@@ -43,6 +62,17 @@ object BackgroundRequestFailureRecorder {
                 .put("incomplete", true)
                 .put("error", error.take(1200))
                 .apply { requestedModel?.let { put("requested_model", it) } }
+                .apply {
+                    userMessage?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
+                    sourceMessage.optJSONArray("annotations")?.let { put("annotations", it) }
+                    if (summary.isNotBlank()) put("reasoning_summary", summary)
+                    if (typed.isNotEmpty()) put("openai_protocol_output",
+                        org.json.JSONArray().apply {
+                            typed.forEach { item -> put(JSONObject(item.toString())) }
+                        })
+                }
         }
         val previousResponseId = chat.optString("response_id")
             .takeIf { it.isNotBlank() && it != "null" }
@@ -66,6 +96,7 @@ object BackgroundRequestFailureRecorder {
             responseModel = null,
             modelMatch = ModelCatalog.Match.UNKNOWN,
             status = status,
+            latencyMs = latencyMs,
             error = error
         )
         return true

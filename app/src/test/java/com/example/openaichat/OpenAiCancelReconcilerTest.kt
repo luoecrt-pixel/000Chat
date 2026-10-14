@@ -280,4 +280,58 @@ class OpenAiCancelReconcilerTest {
             server.shutdown()
         }
     }
+
+    @Test fun lateCreatedIdBindsOnlyStoppedOwnerAndReconcilesWithoutChangingReplacement() {
+        ChatDatabase(context).use { db ->
+            db.ensureChat("chat")
+            assertTrue(db.startRequestAccounting("chat", "old", "openai", "model", "openai_api_key"))
+            db.setActiveResponse("chat", null, "old", "", "starting", 123L,
+                "high", "high", false, 6, 0, true)
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "old", "resp_late"))
+            assertTrue(db.stopActiveRequestOnce("chat", "old"))
+            assertTrue(db.startRequestAccounting("chat", "new", "openai", "model", "openai_api_key"))
+            db.setActiveResponse("chat", null, "new", "", "starting", 124L,
+                "high", "high", false, 6, 0, true)
+
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "missing", "resp_late"))
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "new", "resp_late"))
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "old", "resp_x/other"))
+            assertTrue(db.captureStoppedOpenAiResponseId("chat", "old", "resp_late"))
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "old", "resp_other"))
+            assertTrue(db.reconcileStoppedOpenAiResponse("chat", "old", "resp_late",
+                JSONObject("""{"id":"resp_late","status":"cancelled","usage":{"input_tokens":17,"output_tokens":31}}""")))
+            assertEquals("new", db.getActiveResponse("chat")!!.getString("request_id"))
+        }
+        ChatDatabase(context).use { db ->
+            val rows = db.listRequestAccounting("chat").associateBy { it.getString("local_request_id") }
+            val old = rows.getValue("old")
+            assertEquals("resp_late", old.getString("response_id"))
+            assertEquals("stopped", old.getString("local_status"))
+            assertEquals("cancelled", old.getString("provider_status"))
+            assertEquals(17L, old.getLong("input_tokens"))
+            assertEquals(31L, old.getLong("output_tokens"))
+            assertEquals("unknown", old.getString("cost_kind"))
+            assertFalse(old.has("cost_usd"))
+            assertEquals("running", rows.getValue("new").getString("local_status"))
+            assertFalse(rows.getValue("new").has("response_id"))
+            assertEquals(1, db.listRequestEvents("chat").size)
+            assertEquals(0, db.getChat("chat")!!.getJSONArray("messages").length())
+            db.deleteChat("chat")
+            db.ensureChat("chat")
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "old", "resp_late"))
+            assertTrue(db.listRequestAccounting("chat").isEmpty())
+        }
+    }
+
+    @Test fun lateCreatedIdCannotBindStoppedOtherProvider() {
+        ChatDatabase(context).use { db ->
+            db.ensureChat("chat")
+            assertTrue(db.startRequestAccounting("chat", "other", "openrouter", "model", "openrouter_api_key"))
+            db.setActiveResponse("chat", null, "other", "", "starting", 123L,
+                "high", "high", false, 6, 0, true)
+            assertTrue(db.stopActiveRequestOnce("chat", "other"))
+            assertFalse(db.captureStoppedOpenAiResponseId("chat", "other", "resp_late"))
+            assertFalse(db.listRequestAccounting("chat").single().has("response_id"))
+        }
+    }
 }

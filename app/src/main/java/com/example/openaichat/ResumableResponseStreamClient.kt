@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.Context
 import okhttp3.Call
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -28,7 +29,19 @@ data class ResumableStreamResult(
 class ResumableResponseStreamClient(
     context: Context
 ) {
+    companion object {
+        /** Trusted local HTTPS transport for instrumentation; never enabled in release. */
+        @Volatile internal var transportForTests: Pair<OkHttpClient, HttpUrl>? = null
+            set(value) {
+                check(value == null || BuildConfig.DEBUG) { "Test transport requires a Debug build" }
+                require(value == null || value.second.scheme == "https") { "Test transport requires HTTPS" }
+                field = value
+            }
+    }
+
+    private val appContext = context.applicationContext
     private val secureStore = SecureStore(context.applicationContext)
+    private val rawFilesDir = context.applicationContext.filesDir
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
@@ -43,15 +56,31 @@ class ResumableResponseStreamClient(
     fun stream(
         responseId: String,
         startingAfter: Long,
+        ownerChatId: String? = null,
+        ownerRequestId: String? = null,
         onCallCreated: (Call) -> Unit = {},
         startedAtEpochMs: Long? = null,
         onEvent: (JSONObject) -> Unit = {}
     ): ResumableStreamResult {
         if (responseId.isBlank()) throw IllegalArgumentException("responseId is blank")
         val key = secureStore.getApiKey()
-        if (key.isBlank()) throw IOException("API key is not configured")
+        if (key.isBlank() && (ownerChatId.isNullOrBlank() || ownerRequestId.isNullOrBlank()))
+            throw IOException("API key is not configured")
+        if (!ownerChatId.isNullOrBlank() && !ownerRequestId.isNullOrBlank()) {
+            val binding = ChatDatabase(appContext).use { db ->
+                db.getOpenAiRequestFingerprint(ownerChatId, ownerRequestId)
+            }
+            if (!OpenAiInstructionChainPolicy.matchesCredential(binding, key)) {
+                throw UnrecoverableResponsesStreamException(
+                    "Исходный API-ключ фонового ответа изменён или его привязка отсутствует; " +
+                        "полученные данные сохранены локально")
+            }
+        }
 
-        val url = ResumableResponseRequest.url(responseId, startingAfter)
+        val transport = transportForTests
+        val productionUrl = ResumableResponseRequest.url(responseId, startingAfter)
+        val url = if (transport == null) productionUrl else productionUrl.newBuilder()
+            .host(transport.second.host).port(transport.second.port).build()
 
         val request = Request.Builder()
             .url(url)
@@ -59,7 +88,7 @@ class ResumableResponseStreamClient(
             .addHeader("Accept", "text/event-stream")
             .build()
 
-        val call = httpClient.newCall(request)
+        val call = (transport?.first ?: httpClient).newCall(request)
         startedAtEpochMs?.let { ResponseDeadlinePolicy.boundCall(call, it, System.currentTimeMillis()) }
         onCallCreated(call)
 
@@ -85,6 +114,11 @@ class ResumableResponseStreamClient(
                     terminalEventType = type
                     terminalResponse = event.optJSONObject("response")
                 }
+                "error", "response.error" -> {
+                    terminalEventType = type
+                    terminalResponse = ResponseEventReducer.reduce(
+                        ResponseEventState(responseId = responseId), event).state.terminalResponse
+                }
             }
 
             onEvent(event)
@@ -93,15 +127,19 @@ class ResumableResponseStreamClient(
 
         call.execute().use { response ->
             if (!response.isSuccessful) {
-                val raw = response.body?.string().orEmpty()
+                val raw = BoundedResponseDecoder.readErrorBody(response.body)
                 val retryAfterMs = response.header("Retry-After")?.trim()?.toLongOrNull()
                     ?.coerceIn(1L, 300L)?.times(1000L)
                 throw ApiHttpException(response.code, retryAfterMs, raw.take(4096))
             }
             val body = response.body ?: throw IOException("Empty Responses SSE body")
-            body.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                val outcome = OpenAiSseStreamReader.read(reader) { consume(it) }
-                if (outcome.errorMessage != null) {
+            val source = if (!ownerChatId.isNullOrBlank() && !ownerRequestId.isNullOrBlank()) {
+                OpenAiRawSseArchive.begin(
+                    body.byteStream(), rawFilesDir, ownerChatId, ownerRequestId)
+            } else body.byteStream()
+            OpenAiSseUtf8Reader.open(OpenAiSseWireByteLimitStream(source)).use { reader ->
+                val outcome = OpenAiReceivedSseReader.read(reader, source as? OpenAiRawSseArchive) { consume(it) }
+                if (outcome.errorMessage != null && terminalResponse == null) {
                     // A semantic SSE error is a terminal failure, not a transient
                     // disconnect to retry. Preserve the owned response identity.
                     terminalEventType = "response.failed"

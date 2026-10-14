@@ -14,7 +14,12 @@ import org.json.JSONObject
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
     companion object {
         private const val DB_NAME = "astra_chats.db"
-        private const val DB_VERSION = 22
+        // The app opens this file via independent SQLiteOpenHelpers in Activity,
+        // WorkManager and lifecycle callbacks. Android sets PRAGMA journal_mode
+        // during connection initialization. Concurrent helper opens can race
+        // for its exclusive journal-mode transition and raise SQLITE_BUSY.
+        private val CONNECTION_OPEN_LOCK = Any()
+        private const val DB_VERSION = 24
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -22,6 +27,46 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
         private const val OPENROUTER_ROUND_TABLE = "openrouter_request_rounds"
     }
+
+    init {
+        // All Activity, Worker and instrumentation helpers open the same
+        // persistent database. Using the platform's rollback journal default
+        // makes SQLiteConnection.setJournalMode attempt exclusive PRAGMA
+        // journal_mode transitions while other owners have active writes.
+        // WAL preserves atomic CAS/transactions while allowing readers to
+        // open during a writer's transaction. Set it on EVERY helper before
+        // its first database open, never by running PRAGMA in an active query.
+        setWriteAheadLoggingEnabled(true)
+    }
+
+    /**
+     * Serialize only opening/configuring SQLite connections, NOT user queries
+     * or transactions. An open helper may race an already-running transaction
+     * in another helper; retry SQLITE_BUSY only while the helper itself is
+     * opening/configuring its connection (including idempotent onOpen schema
+     * ensures). Never replay a caller's transaction or mutate a chat on retry.
+     * Non-lock SQL/upgrade errors propagate untouched.
+     */
+    private fun <T> openConnection(operation: () -> T): T = synchronized(CONNECTION_OPEN_LOCK) {
+        var pauseMs = 35L
+        repeat(8) { attempt ->
+            try {
+                return@synchronized operation()
+            } catch (e: android.database.sqlite.SQLiteDatabaseLockedException) {
+                if (attempt == 7) throw e
+                try { Thread.sleep(pauseMs) } catch (interrupt: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw e
+                }
+                pauseMs = (pauseMs * 2).coerceAtMost(1_000L)
+            }
+        }
+        error("Unreachable SQLite connection opener")
+    }
+
+    override fun getWritableDatabase(): SQLiteDatabase = openConnection { super.getWritableDatabase() }
+
+    override fun getReadableDatabase(): SQLiteDatabase = openConnection { super.getReadableDatabase() }
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
@@ -136,7 +181,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 active_prompt_chars INTEGER NOT NULL DEFAULT 0,
                 active_attachments INTEGER NOT NULL DEFAULT 0,
                 active_background_enabled INTEGER NOT NULL DEFAULT 1,
-                active_last_sequence_number INTEGER NOT NULL DEFAULT -1
+                active_last_sequence_number INTEGER NOT NULL DEFAULT -1,
+                active_indexed_checkpoint TEXT
             )
         """.trimIndent())
         db.execSQL("""
@@ -176,6 +222,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 finish_reason TEXT,
                 openrouter_protocol TEXT,
                 protocol_context_state TEXT,
+                openai_instructions_sha256 TEXT,
+                openai_protocol_output TEXT,
                 FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
             )
         """.trimIndent())
@@ -329,7 +377,10 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN attachments TEXT")
         }
         if (oldVersion < 17) {
-            MessageMetadataCodec.allKeys.filter { it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state") }.forEach { key ->
+            MessageMetadataCodec.allKeys.filter {
+                it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state",
+                    "openai_instructions_sha256", "openai_protocol_output")
+            }.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
             }
         }
@@ -373,6 +424,31 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 found
             }
             if (!hasProtocolContext) db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN protocol_context_state TEXT")
+        }
+        if (oldVersion < 23) {
+            // Older chats never contained these typed protocol columns: retain
+            // their existing history and treat missing output/digests as unknown.
+            // No synthetic fingerprints or output are fabricated in migration.
+            val existing = db.rawQuery("PRAGMA table_info($MESSAGE_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameColumn = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names += c.getString(nameColumn)
+                names
+            }
+            if ("openai_instructions_sha256" !in existing)
+                db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_instructions_sha256 TEXT")
+            if ("openai_protocol_output" !in existing)
+                db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN openai_protocol_output TEXT")
+        }
+        if (oldVersion < 24 && newVersion >= 24) {
+            val columns = db.rawQuery("PRAGMA table_info($CHAT_TABLE)", null).use { c ->
+                val names = mutableSetOf<String>()
+                val nameIndex = c.getColumnIndexOrThrow("name")
+                while (c.moveToNext()) names += c.getString(nameIndex)
+                names
+            }
+            if ("active_indexed_checkpoint" !in columns)
+                db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_indexed_checkpoint TEXT")
         }
     }
 
@@ -428,6 +504,17 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (id.isBlank()) return null
         SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE, arrayOf("title"), "id=?", arrayOf(id), null, null, null, "1").use { c ->
             return if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow("title")) else null
+        }
+    }
+
+    /** Recovery needs only this small binding, never another copy of the full history. */
+    fun getOpenAiRequestFingerprint(chatId: String, requestId: String): String? {
+        if (chatId.isBlank() || requestId.isBlank()) return null
+        readableDatabase.query(MESSAGE_TABLE, arrayOf(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD),
+            "chat_id=? AND request_id=? AND role='user' AND provider='openai' " +
+                "AND length(openai_instructions_sha256)=132",
+            arrayOf(chatId, requestId), null, null, "position ASC", "1").use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getString(0) else null
         }
     }
 
@@ -644,10 +731,20 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 )
             }
             queueAnswerNotification(db, id, expectedRequestId, assistant.optString("status") == "completed")
+            // Consuming the active owner must publish its terminal ledger status
+            // in the same transaction. Later accounting only enriches usage/cost.
+            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+                put("local_status", assistant.optString("status").ifBlank { "unknown" })
+                put("updated_at", System.currentTimeMillis())
+            }, "chat_id=? AND local_request_id=? AND local_status='running'",
+                arrayOf(id, expectedRequestId))
         }
-        if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank()) {
+        val clearOpenAiChain = assistant?.optString("provider") == "openai" &&
+            assistant.optString("status") != "completed"
+        if (!responseId.isNullOrBlank() || !baselineEffort.isNullOrBlank() || clearOpenAiChain) {
             db.update(CHAT_TABLE, ContentValues().apply {
-                responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
+                if (clearOpenAiChain) putNull("response_id")
+                else responseId?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
                 baselineEffort?.takeIf { it.isNotBlank() }?.let { put("baseline_effort", it) }
                 put("updated_at", System.currentTimeMillis())
             }, "id=?", arrayOf(id))
@@ -697,6 +794,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 putNull("active_response_id")
                 putNull("active_request_id")
                 putNull("active_text")
+                putNull("active_indexed_checkpoint")
                 putNull("active_status")
                 putNull("active_started_at")
                 putNull("active_effort_pref")
@@ -747,7 +845,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     ): Boolean {
         if (chatId.isBlank() || expectedRequestId.isBlank()) return false
         var committed = false
-        writableDatabase.transaction { db ->
+        terminalClaimWritableDatabase().transaction { db ->
             // CAS inside an SQLite write transaction serializes simultaneous
             // Worker/Activity claims even when they use separate helpers.
             val activeId = db.query(CHAT_TABLE, arrayOf("active_request_id"), "id=?",
@@ -763,6 +861,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 putNull("active_response_id")
                 putNull("active_request_id")
                 putNull("active_text")
+                putNull("active_indexed_checkpoint")
                 putNull("active_status")
                 putNull("active_started_at")
                 putNull("active_effort_pref")
@@ -780,6 +879,32 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ) == 1
         }
         return committed
+    }
+
+    /**
+     * Activity and recovery Worker may open distinct SQLiteOpenHelper instances
+     * while the app is setting its journal mode. Opening a connection can then
+     * raise SQLITE_BUSY *before* our owned terminal transaction starts. Retry
+     * only that side-effect-free connection open, never the HTTP request or an
+     * already-started terminal claim.
+     */
+    private fun terminalClaimWritableDatabase(): SQLiteDatabase {
+        var pauseMs = 80L
+        repeat(4) { attempt ->
+            try {
+                return writableDatabase
+            } catch (busy: android.database.sqlite.SQLiteDatabaseLockedException) {
+                if (attempt == 3) throw busy
+                try {
+                    Thread.sleep(pauseMs)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw busy
+                }
+                pauseMs *= 2L
+            }
+        }
+        error("Unreachable terminal database opener")
     }
 
     private fun upsertCurrentChatInDb(
@@ -1066,6 +1191,26 @@ data class ExistingMessageRow(
                 "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId)) == 1
         }
         return written
+    }
+
+    /**
+     * Bind an ID delivered by the original Create after local Stop. Only its
+     * existing, stopped OpenAI accounting row with no captured ID can change;
+     * this never recreates a row, replaces an ID, or touches the active owner.
+     */
+    fun captureStoppedOpenAiResponseId(chatId: String, localRequestId: String, responseId: String): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank() ||
+            !Regex("resp_[A-Za-z0-9_-]+").matches(responseId)) return false
+        return writableDatabase.update(
+            REQUEST_ACCOUNTING_TABLE,
+            ContentValues().apply {
+                put("response_id", responseId)
+                put("updated_at", System.currentTimeMillis())
+            },
+            "chat_id=? AND local_request_id=? AND provider='openai' AND local_status='stopped' " +
+                "AND (response_id IS NULL OR response_id='')",
+            arrayOf(chatId, localRequestId)
+        ) == 1
     }
 
     /**
@@ -1689,6 +1834,7 @@ data class ExistingMessageRow(
             put("active_attachments", attachments.coerceAtLeast(0))
             put("active_background_enabled", if (backgroundEnabled) 1 else 0)
             put("active_last_sequence_number", -1)
+            putNull("active_indexed_checkpoint")
             put("updated_at", System.currentTimeMillis())
         }
         writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
@@ -1700,19 +1846,83 @@ data class ExistingMessageRow(
         text: String? = null,
         status: String? = null,
         lastSequenceNumber: Long? = null,
-        expectedRequestId: String? = null
+        expectedRequestId: String? = null,
+        indexedCheckpoint: String? = null
     ) {
         if (chatId.isBlank()) return
+        if (indexedCheckpoint != null && (text == null || lastSequenceNumber == null || expectedRequestId == null))
+            throw IllegalArgumentException("Indexed checkpoint must be atomic with text, sequence and owner")
         val values = ContentValues().apply {
             if (responseId != null) putStringOrNull("active_response_id", responseId)
-            if (text != null) put("active_text", text)
+            if (text != null) {
+                put("active_text", text)
+                if (indexedCheckpoint == null) putNull("active_indexed_checkpoint")
+            }
+            if (indexedCheckpoint != null) put("active_indexed_checkpoint", indexedCheckpoint)
             if (status != null) put("active_status", status)
             if (lastSequenceNumber != null) put("active_last_sequence_number", lastSequenceNumber.coerceAtLeast(-1L))
             put("updated_at", System.currentTimeMillis())
         }
-        val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
-        val args = if (expectedRequestId != null) arrayOf(chatId, expectedRequestId) else arrayOf(chatId)
-        writableDatabase.update(CHAT_TABLE, values, where, args)
+        // Request ownership by itself is not sufficient: Activity and Worker can
+        // race with checkpoints from the *same* request. Guard the sequence and
+        // terminal status in the UPDATE predicate so the comparison is atomic.
+        val where = StringBuilder("id=? AND active_status IS NOT NULL")
+        val args = mutableListOf(chatId)
+        if (expectedRequestId != null) {
+            where.append(" AND active_request_id=?")
+            args.add(expectedRequestId)
+        }
+        where.append(" AND active_status NOT IN ('completed','incomplete','failed','cancelled')")
+        val isTerminalWrite = status in setOf("completed", "incomplete", "failed", "cancelled")
+        if (lastSequenceNumber != null) {
+            val sequence = lastSequenceNumber.coerceAtLeast(-1L)
+            where.append(" AND active_last_sequence_number <= ?")
+            args.add(sequence.toString())
+            // Any strictly newer event may advance in-progress state. For equal
+            // sequence, a nonterminal retry must leave text/status/ID identical,
+            // except a first response ID can fill an empty persisted field.
+            // A terminal event may replace partial text with canonical output,
+            // but may not replace a *different* response identity.
+            if (!isTerminalWrite) {
+                where.append(" AND (active_last_sequence_number < ? OR (")
+                args.add(sequence.toString())
+                if (status != null) {
+                    where.append("active_status = ? AND ")
+                    args.add(status)
+                }
+                if (text != null) {
+                    where.append("active_text = ? AND ")
+                    args.add(text)
+                }
+                if (indexedCheckpoint != null) {
+                    where.append("active_indexed_checkpoint = ? AND ")
+                    args.add(indexedCheckpoint)
+                }
+                where.append("1=1))")
+            }
+        } else {
+            // A callback without a sequence must never roll back an established
+            // SSE cursor. Before the first event, only the initial
+            // starting->in_progress transition is allowed to change status.
+            where.append(" AND active_last_sequence_number = -1")
+            if (status != null && !isTerminalWrite) {
+                where.append(" AND (active_status = ?")
+                args.add(status)
+                if (status == "in_progress") {
+                    where.append(" OR active_status = 'starting'")
+                }
+                where.append(")")
+            }
+            if (text != null && !isTerminalWrite) {
+                where.append(" AND active_text = ?")
+                args.add(text)
+            }
+        }
+        if (responseId != null) {
+            where.append(" AND (active_response_id IS NULL OR active_response_id = ?)")
+            args.add(responseId)
+        }
+        writableDatabase.update(CHAT_TABLE, values, where.toString(), args.toTypedArray())
     }
 
     /** Ownership checks must not materialize the accumulating answer on every SSE event. */
@@ -1727,7 +1937,7 @@ data class ExistingMessageRow(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
                 "active_auto_selected", "active_prompt_chars", "active_attachments",
-                "active_background_enabled", "active_last_sequence_number"
+                "active_background_enabled", "active_last_sequence_number", "active_indexed_checkpoint"
             ),
             "id=? AND active_status IS NOT NULL",
             arrayOf(chatId), null, null, null, "1"
@@ -1747,6 +1957,7 @@ data class ExistingMessageRow(
                 .put("attachments", c.getInt(9))
                 .put("background_enabled", c.getInt(10) != 0)
                 .put("last_sequence_number", c.getLong(11))
+                .apply { c.getString(12)?.let { put("indexed_checkpoint", it) } }
         }
     }
 
@@ -1757,7 +1968,7 @@ data class ExistingMessageRow(
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
                 "active_effective_effort", "active_auto_selected", "active_prompt_chars",
-                "active_attachments", "active_background_enabled", "active_last_sequence_number"
+                "active_attachments", "active_background_enabled", "active_last_sequence_number", "active_indexed_checkpoint"
             ),
             "active_status IS NOT NULL",
             null, null, null, "updated_at DESC"
@@ -1778,6 +1989,7 @@ data class ExistingMessageRow(
                     .put("attachments", c.getInt(11))
                     .put("background_enabled", c.getInt(12) != 0)
                     .put("last_sequence_number", c.getLong(13))
+                    .apply { c.getString(14)?.let { put("indexed_checkpoint", it) } }
             }
         }
         return out
@@ -1789,6 +2001,7 @@ data class ExistingMessageRow(
             putNull("active_response_id")
             putNull("active_request_id")
             putNull("active_text")
+                putNull("active_indexed_checkpoint")
             putNull("active_status")
             putNull("active_started_at")
             putNull("active_effort_pref")
@@ -1798,6 +2011,7 @@ data class ExistingMessageRow(
             put("active_attachments", 0)
             put("active_background_enabled", 1)
             put("active_last_sequence_number", -1)
+            putNull("active_indexed_checkpoint")
             put("updated_at", System.currentTimeMillis())
         }
         val where = if (expectedRequestId != null) "id=? AND active_request_id=?" else "id=?"
@@ -2128,6 +2342,16 @@ data class ExistingMessageRow(
                 if (!c.isNull(c.getColumnIndexOrThrow("feedback"))) m.put("feedback", c.getInt(c.getColumnIndexOrThrow("feedback")))
                 MessageMetadataCodec.allKeys.forEach { key ->
                     MessageMetadataCodec.decodeInto(m, key, c.getString(c.getColumnIndexOrThrow(key)))
+                }
+                // SQLite stores the durable OpenAI assistant status, not the
+                // transient JSON flag "incomplete". Reconstruct that flag
+                // only for interrupted OpenAI assistant turns on reopen.
+                // Without it, a Worker failure saved with incomplete=true
+                // reopens as an apparently complete assistant message.
+                if (m.optString("role") == "assistant" &&
+                    m.optString("provider") == "openai" &&
+                    m.optString("status") in setOf("failed", "disconnected", "incomplete", "cancelled")) {
+                    m.put("incomplete", true)
                 }
                 arr.put(m)
             }

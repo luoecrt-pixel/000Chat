@@ -16,14 +16,16 @@ import org.json.JSONObject
 class OpenAiCancelReconciler(
     private val http: OkHttpClient,
     private val baseUrl: HttpUrl = "https://api.openai.com/v1/".toHttpUrl(),
-    private val maxRetrieves: Int = 2
+    private val maxRetrieves: Int = 2,
+    private val bodyLimits: BoundedResponseDecoder.BodyLimits = BoundedResponseDecoder.BodyLimits()
 ) {
     data class Outcome(
         val cancelStatus: Int,
         val retrievals: Int,
         val acceptedSnapshots: Int,
         val terminalStatus: String?,
-        val hasUsage: Boolean
+        val hasUsage: Boolean,
+        val decoderDiagnostic: String? = null
     )
 
     fun reconcile(
@@ -40,6 +42,7 @@ class OpenAiCancelReconciler(
         var terminal: String? = null
         var hasUsage = false
         var terminalWithUsage = false
+        var decoderDiagnostic: String? = null
         fun observe(body: String?) {
             if (body.isNullOrBlank()) return
             val json = try { JSONObject(body) } catch (_: Exception) { return }
@@ -65,25 +68,31 @@ class OpenAiCancelReconciler(
             .build()
         val code = http.newCall(cancel).execute().use { response ->
             val status = response.code
-            if (status in 200..299) observe(response.body?.string())
+            if (status in 200..299) observe(BoundedResponseDecoder.readBody(response.body, bodyLimits))
+            else BoundedResponseDecoder.readErrorBody(response.body, onDecodeFailure = {
+                decoderDiagnostic = "HTTP $status ${it.javaClass.simpleName}: ${it.message.orEmpty()}"
+            })
             status
         }
         // Authentication, rate-limit and server failures do not trigger extra calls.
         if (code !in 200..299 && code != 404 && code != 409) {
-            return Outcome(code, 0, accepted, terminal, hasUsage)
+            return Outcome(code, 0, accepted, terminal, hasUsage, decoderDiagnostic)
         }
-        if (terminalWithUsage) return Outcome(code, 0, accepted, terminal, hasUsage)
+        if (terminalWithUsage) return Outcome(code, 0, accepted, terminal, hasUsage, decoderDiagnostic)
         var count = 0
         for (attempt in 0 until maxRetrieves.coerceIn(0, 2)) {
             val get = Request.Builder().url(endpoint).header("Authorization", "Bearer $apiKey").get().build()
             val responseCode = http.newCall(get).execute().use { response ->
                 val status = response.code
-                if (status in 200..299) observe(response.body?.string())
+                if (status in 200..299) observe(BoundedResponseDecoder.readBody(response.body, bodyLimits))
+                else BoundedResponseDecoder.readErrorBody(response.body, onDecodeFailure = {
+                    decoderDiagnostic = "HTTP $status ${it.javaClass.simpleName}: ${it.message.orEmpty()}"
+                })
                 status
             }
             count++
             if (responseCode !in 200..299 || terminalWithUsage) break
         }
-        return Outcome(code, count, accepted, terminal, hasUsage)
+        return Outcome(code, count, accepted, terminal, hasUsage, decoderDiagnostic)
     }
 }

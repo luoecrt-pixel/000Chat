@@ -49,7 +49,8 @@ private data class OpenRouterStreamToolCall(
 class OpenRouterChatClient(
     private val baseUrl: String = "https://openrouter.ai/api/v1",
     httpClientOverride: OkHttpClient? = null,
-    internal val reconcileGenerations: Boolean = true
+    internal val reconcileGenerations: Boolean = true,
+    internal val sseLimits: BoundedResponseDecoder.SseLimits = BoundedResponseDecoder.SseLimits()
 ) {
     internal val metadataBaseUrl get() = (baseUrl.trimEnd('/') + "/").toHttpUrl()
     private companion object {
@@ -335,22 +336,18 @@ class OpenRouterChatClient(
                 call.execute().use { httpResponse ->
                     ensureActive()
                     if (!httpResponse.isSuccessful) {
-                        val raw = httpResponse.body?.string().orEmpty()
+                        val raw = BoundedResponseDecoder.readErrorBody(httpResponse.body)
                         val error = runCatching { JSONObject(raw).optJSONObject("error") }.getOrNull()
                         if (error != null) throw upstreamError(error, "HTTP", roundIndex, httpResponse.code)
                         throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(320)}")
                     }
                     val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
-                    val parser = SseEventParser()
-                    bodyResponse.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
-                        while (true) {
-                            val line = reader.readLine() ?: break
-                            ensureWithinBudget()
-                            parser.acceptLine(line)?.let { event -> consume(event.data) }
-                            if (sawDone) break
+                    BoundedResponseDecoder.openSse(bodyResponse.byteStream(), sseLimits).use { reader ->
+                        BoundedResponseDecoder.readSse(reader, sseLimits, onLine = { ensureWithinBudget() }) { event ->
+                            consume(event.data)
+                            sawDone
                         }
                     }
-                    if (!sawDone) parser.finish()?.let { event -> consume(event.data) }
                     if (!sawDone) throw IOException("OpenRouter SSE ended before [DONE]")
                 }
             } catch (e: Exception) {

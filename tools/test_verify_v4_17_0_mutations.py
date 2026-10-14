@@ -11,7 +11,7 @@ VERIFY = ROOT / "tools/verify_v4_17_0.py"
 MAIN = ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt"
 DB = ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt"
 RESUME = ROOT / "app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt"
-STREAM = ROOT / "app/src/main/java/com/example/openaichat/OpenAiSseStreamReader.kt"
+STREAM = ROOT / "app/src/main/java/com/example/openaichat/BoundedResponseDecoder.kt"
 
 METHOD_START = "private fun renderVectorStoreList(vsId:String)"
 NEXT_METHOD = "    private fun pickFileForVectorStore()"
@@ -27,6 +27,8 @@ MUTATIONS = [
     "remove_foreground_stream_reader",
     "remove_resume_stream_reader",
     "disable_stream_terminal_break",
+    "drop_foreground_received_typed_output",
+    "replace_local_assistant_request_id_with_http_id",
 ]
 
 STREAM_MUTATIONS = {
@@ -45,6 +47,14 @@ def render_method(source: str):
 
 
 def mutate(source: str, name: str) -> str:
+    if name == "drop_foreground_received_typed_output":
+        old = "OpenAiEffectiveResponse.assemble(completedResponse, responseState)"
+        assert old in source
+        return source.replace(old, "completedResponse ?: JSONObject()")
+    if name == "replace_local_assistant_request_id_with_http_id":
+        old = "effectiveResponse,\n                        finalText,\n                        localRequestId,"
+        assert old in source
+        return source.replace(old, "effectiveResponse,\n                        finalText,\n                        requestId,", 1)
     start, end = render_method(source)
     block = source[start:end]
 
@@ -83,15 +93,15 @@ def mutate_db(source: str, name: str) -> str:
 
 def mutate_stream(source: str, name: str, target: str) -> str:
     if name == "remove_foreground_stream_reader" and target == "main":
-        old = "OpenAiSseStreamReader.read(reader)"
+        old = "OpenAiReceivedSseReader.read(reader, rawSseArchive)"
         assert old in source
         return source.replace(old, "BrokenSseReader.read(reader)", 1)
     if name == "remove_resume_stream_reader" and target == "resume":
-        old = "OpenAiSseStreamReader.read(reader)"
+        old = "OpenAiReceivedSseReader.read(reader, source as? OpenAiRawSseArchive)"
         assert old in source
         return source.replace(old, "BrokenSseReader.read(reader)", 1)
     if name == "disable_stream_terminal_break" and target == "stream":
-        old = "if (consume(frame.data)) break"
+        old = "if (frame != null && consume(frame)) { stopped = true; break }"
         assert old in source
         return source.replace(old, "if (false) break", 1)
     return source
@@ -129,7 +139,7 @@ def main() -> int:
         temp_main = temp_root / "app/src/main/java/com/example/openaichat/MainActivity.kt"
         temp_db = temp_root / "app/src/main/java/com/example/openaichat/ChatDatabase.kt"
         temp_resume = temp_root / "app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt"
-        temp_stream = temp_root / "app/src/main/java/com/example/openaichat/OpenAiSseStreamReader.kt"
+        temp_stream = temp_root / "app/src/main/java/com/example/openaichat/BoundedResponseDecoder.kt"
 
         for case_name, mutation, expected_pass in cases:
             db_case = mutation and mutation.startswith(("remove_v18_",))
@@ -155,7 +165,7 @@ def main() -> int:
                 reason = output.splitlines()[-1] if output else "no diagnostic"
                 print(f"PASS {case_name}: verifier rejects mutation ({reason})")
 
-    print("Verifier mutation matrix: PASS (8 targeted negative mutations + positive control)")
+    print(f"Verifier mutation matrix: PASS ({len(MUTATIONS)} targeted negative mutations + positive control)")
     # Keep the new offline checks in the existing CI step instead of adding a workflow.
     subprocess.run([sys.executable, str(ROOT / "tools/test_verify_implementation_mutations.py")], check=True)
     return 0
