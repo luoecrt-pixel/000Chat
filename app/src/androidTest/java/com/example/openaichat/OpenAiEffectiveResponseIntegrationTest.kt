@@ -114,7 +114,7 @@ class OpenAiEffectiveResponseIntegrationTest {
                 val requestId = ChatDatabase(context).use { it.listRequestAccounting(chatId).single().getString("local_request_id") }
                 ownedChats[chatId] = requestId
                 waitForFinalization(chatId, requestId)
-                instrumentation.waitForIdleSync()
+                waitForUiFinalization(scenario)
                 assertArtifacts(chatId, requestId, if (damagedFrame) "failed" else "cancelled", source.toByteArray())
                 scenario.onActivity { activity ->
                     val adapter = field("messageAdapter").get(activity) as ChatMessageAdapter
@@ -155,6 +155,8 @@ class OpenAiEffectiveResponseIntegrationTest {
                         OpenAiInstructionChainPolicy.fingerprint(GenerationInstructions("", "", ""), SecureStore(context).getApiKey(), "gpt-6-astra"))))
             db.setActiveResponse(chatId, responseId, requestId, "", "starting", System.currentTimeMillis(),
                 "high", "high", false, 6, 0, true)
+            // A crash-gap snapshot starts with the ledger captured by original Send.
+            assertTrue(db.startRequestAccounting(chatId, requestId, "openai", "gpt-6-astra", "openai_api_key"))
             db.updateActiveResponse(chatId, responseId, state.text, "cancelled", 6, requestId,
                 ResponseIndexedCheckpoint.serialize(state))
             assertEquals("cancelled", db.getActiveResponse(chatId)!!.getString("status"))
@@ -170,7 +172,7 @@ class OpenAiEffectiveResponseIntegrationTest {
         assertTrue(prefs.edit().putString("current_chat", chatId).commit())
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             waitForFinalization(chatId, requestId)
-            instrumentation.waitForIdleSync()
+            waitForUiFinalization(scenario)
             assertArtifacts(chatId, requestId, "cancelled", rawBytes)
             scenario.onActivity { activity -> assertTrue(activity.send.isEnabled) }
         }
@@ -187,6 +189,20 @@ class OpenAiEffectiveResponseIntegrationTest {
         assertArtifacts(chatId, requestId, "cancelled", rawBytes)
         assertEquals(ListenableWorker.Result.success(), runBlocking { worker.doWork() })
         ChatDatabase(context).use { assertEquals(2, it.getChat(chatId)!!.getJSONArray("messages").length()) }
+    }
+
+    private fun waitForUiFinalization(scenario: ActivityScenario<MainActivity>) {
+        // SQLite terminal commit precedes metrics and the queued main-thread
+        // callback. An idle queue alone does not wait for that future post.
+        val deadline = SystemClock.elapsedRealtime() + 20_000L
+        var enabled = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            scenario.onActivity { enabled = it.send.isEnabled }
+            if (enabled) break
+            SystemClock.sleep(20)
+        }
+        assertTrue("Owned finalization must enable Send, not leave a busy UI", enabled)
+        instrumentation.waitForIdleSync()
     }
 
     private fun waitForFinalization(chatId: String, requestId: String) {
