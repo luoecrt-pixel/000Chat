@@ -3,7 +3,9 @@ package com.example.openaichat
 import java.io.File
 import java.nio.charset.Charset
 import java.util.Base64
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -60,6 +62,50 @@ class OpenRouterAttachmentStoreTest {
         assertEquals("text", a.kind)
         assertEquals("windows-1251", a.textEncoding)
         assertEquals("Привет, мир", OpenRouterAttachmentStore.textContent(a))
+    }
+
+    @Test
+    fun withTextEncodingPreservesPreviousNormalizedFileReferencedByAnotherOwner() {
+        val dir = createTempDir()
+        try {
+            val text = "Shared text attachment"
+            val source = File(dir, "shared.txt").apply {
+                writeText(text, Charsets.UTF_8)
+            }
+            val initial = OpenRouterAttachmentStore.classifyLocalFile(source, source.name, "text/plain")
+            assertEquals("UTF-8", initial.textEncoding)
+            // Another chat or active request keeps the initial attachment manifest.
+            val otherOwnerPaths = LocalAttachmentReferences.openRouterPaths(JSONArray().put(initial.toJson()))
+            val previousFile = File(initial.textPath!!)
+
+            val updated = OpenRouterAttachmentStore.withTextEncoding(initial, "windows-1251")
+            assertEquals("windows-1251", updated.textEncoding)
+            val updatedFile = File(updated.textPath!!)
+            val updatedOwnerPaths = LocalAttachmentReferences.openRouterPaths(JSONArray().put(updated.toJson()))
+
+            assertTrue(initial.textPath != updated.textPath)
+            assertTrue(previousFile.isFile)
+            assertTrue(updatedFile.isFile)
+            assertEquals(text, previousFile.readText(Charsets.UTF_8))
+            assertEquals(text, updatedFile.readText(Charsets.UTF_8))
+            assertTrue(previousFile.absolutePath in otherOwnerPaths)
+            assertFalse(previousFile.absolutePath in updatedOwnerPaths)
+
+            val nowMs = System.currentTimeMillis()
+            assertTrue(previousFile.setLastModified(nowMs - 8L * 24 * 60 * 60 * 1000))
+            assertFalse(LocalAttachmentReferences.isOrphanOldEnough(
+                previousFile.absolutePath, previousFile.lastModified(), nowMs,
+                otherOwnerPaths + updatedOwnerPaths
+            ))
+            // Once the other owner releases it, normal orphan cleanup may reclaim the old copy.
+            assertTrue(LocalAttachmentReferences.isOrphanOldEnough(
+                previousFile.absolutePath, previousFile.lastModified(), nowMs, updatedOwnerPaths
+            ))
+            assertTrue(previousFile.isFile)
+            assertTrue(updatedFile.isFile)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     @Test(expected = java.io.IOException::class)

@@ -6906,14 +6906,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         } else runOnUiThread {
                             val index = attachedOpenRouterAttachments.indexOfFirst { it.id == attachment.id && it.textPath == attachment.textPath }
                             if (index < 0) File(updated.textPath!!).delete()
-                            else {
-                                val oldTextPath = attachedOpenRouterAttachments[index].textPath
-                                attachedOpenRouterAttachments[index] = updated
-                                if (oldTextPath != null && oldTextPath != updated.textPath && oldTextPath != attachment.path) {
-                                    File(oldTextPath).takeIf { it.name.startsWith("derived_") }?.delete()
-                                }
-                                refreshAttachChips(); persistComposerStateNow()
-                            }
+                            else { attachedOpenRouterAttachments[index] = updated; refreshAttachChips(); persistComposerStateNow() }
                         }
                     } catch (e: Exception) { runOnUiThread { status.text = "Не удалось изменить кодировку: " + e.message } }
                 }
