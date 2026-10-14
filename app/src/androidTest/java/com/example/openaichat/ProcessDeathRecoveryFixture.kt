@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.os.Bundle
 import android.os.Process
 import android.os.SystemClock
+import android.util.Base64
 import android.widget.EditText
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -241,7 +242,7 @@ class ProcessDeathRecoveryFixture {
     }
 
     private fun assertOriginalArchive(stage: String) {
-        val expected = prefs.getString("seed_source", "")!!.toByteArray(Charsets.UTF_8)
+        val expected = Base64.decode(prefs.getString("seed_source_base64", "")!!, Base64.NO_WRAP)
         fun digest(bytes: ByteArray) = java.security.MessageDigest.getInstance("SHA-256")
             .digest(bytes).joinToString("") { "%02x".format(it) }
         val files = OpenAiRawSseArchive.archivesFor(context.filesDir, chatId, requestId)
@@ -366,8 +367,12 @@ class ProcessDeathRecoveryFixture {
             BackgroundResponseWorkScheduler.enqueue(context, chatId, responseId, requestId, 120_000L)
             val pending = manager.getWorkInfosForUniqueWork(name).get(15, TimeUnit.SECONDS)
             assertTrue(pending.any { it.state == WorkInfo.State.ENQUEUED })
+            // SharedPreferences XML indentation can append spaces after a
+            // multiline string's trailing newline. Preserve the wire bytes
+            // losslessly instead of normalizing either side of the assertion.
             assertTrue(prefs.edit().putInt("seed_pid", Process.myPid()).putString("scenario", scenario)
-                .putString("seed_source", prefix).putInt("seed_create_count", server.requestCount).commit())
+                .putString("seed_source_base64", Base64.encodeToString(prefix.toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
+                .putInt("seed_create_count", server.requestCount).commit())
             instrumentation.sendStatus(2, Bundle().apply {
                 putString("stream", "PROCESS_RECOVERY_SEEDED scenario=$scenario pid=${Process.myPid()}\n")
             })
