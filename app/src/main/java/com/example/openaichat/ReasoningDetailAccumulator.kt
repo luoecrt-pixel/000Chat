@@ -14,13 +14,35 @@ class ReasoningDetailAccumulator {
             val key = when {
                 item.has("index") && !item.isNull("index") -> {
                     val prefix = "index:${item.opt("index")}:type:"
-                    if (type.isNotBlank()) prefix + type else {
+                    if (type.isNotBlank()) {
+                        val exactKey = prefix + type
+                        if (!indexes.containsKey(exactKey) && indexes.containsKey(prefix)) {
+                            val idx = indexes.remove(prefix)!!
+                            indexes[exactKey] = idx
+                        }
+                        exactKey
+                    } else {
                         val candidates = indexes.keys.filter { it.startsWith(prefix) }
                         if (candidates.size > 1) throw java.io.IOException("Ambiguous reasoning block identity: missing type")
                         candidates.singleOrNull() ?: prefix
                     }
                 }
-                JsonProtocol.nonBlank(item, "id") != null -> "$type:id:${item.getString("id")}"
+                JsonProtocol.nonBlank(item, "id") != null -> {
+                    val id = item.getString("id")
+                    val suffix = ":id:$id"
+                    if (type.isNotBlank()) {
+                        val exactKey = "$type$suffix"
+                        if (!indexes.containsKey(exactKey) && indexes.containsKey(suffix)) {
+                            val idx = indexes.remove(suffix)!!
+                            indexes[exactKey] = idx
+                        }
+                        exactKey
+                    } else {
+                        val candidates = indexes.keys.filter { it.endsWith(suffix) }
+                        if (candidates.size > 1) throw java.io.IOException("Ambiguous reasoning block identity: missing type")
+                        candidates.singleOrNull() ?: suffix
+                    }
+                }
                 else -> null
             }
             val existing = key?.let { indexes[it] }

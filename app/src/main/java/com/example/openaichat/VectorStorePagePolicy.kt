@@ -20,12 +20,12 @@ object VectorStorePagePolicy {
             ?: throw IOException("Vector Store response has no data array")
         if (data.length() > PAGE_SIZE) throw IOException("Vector Store returned too many items")
         val ids = (0 until data.length()).map { index ->
-            data.optJSONObject(index)?.optString("id").orEmpty()
-                .takeIf { it.isNotBlank() } ?: throw IOException("Vector Store file without ID")
+            data.optJSONObject(index)?.let { JsonProtocol.nonBlank(it, "id") }
+                ?: throw IOException("Vector Store file without ID")
         }
         if (ids.distinct().size != ids.size) throw IOException("Vector Store duplicate file IDs")
         val more = json.optBoolean("has_more", false)
-        val after = if (more) json.optString("last_id").ifBlank { ids.lastOrNull().orEmpty() } else null
+        val after = if (more) JsonProtocol.nonBlank(json, "last_id") ?: ids.lastOrNull().orEmpty() else null
         if (more && after.isNullOrBlank()) throw IOException("Vector Store reports more files but no cursor")
         return VectorStorePage(ids, more, after)
     }

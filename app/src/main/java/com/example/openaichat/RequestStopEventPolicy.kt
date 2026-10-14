@@ -2,7 +2,7 @@ package com.example.openaichat
 
 import org.json.JSONObject
 
-/** A stopped event can display newer cost only from its own stopped ledger row. */
+/** A stopped event can display newer cost and token usage only from its own stopped ledger row. */
 object RequestStopEventPolicy {
     fun enrich(event: JSONObject, accounting: JSONObject?): JSONObject {
         val row = accounting ?: return event
@@ -19,6 +19,12 @@ object RequestStopEventPolicy {
             } else {
                 put("cost_kind", "unknown")
                 remove("cost_usd")
+            }
+            for (tokenKey in listOf("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens")) {
+                if (row.has(tokenKey) && !row.isNull(tokenKey)) {
+                    val value = row.optLong(tokenKey, -1L)
+                    if (value >= 0L) put(tokenKey, value)
+                }
             }
         }
     }

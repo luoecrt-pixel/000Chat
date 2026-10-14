@@ -40,7 +40,10 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
             else -> throw IOException("Неизвестный файловый инструмент")
         }.put("ok", true).toString()
         }
-    } catch (e: Exception) { JSONObject().put("ok", false).put("error", e.message).toString() }
+    } catch (e: Exception) {
+        if (!active() && e is IOException) throw e
+        JSONObject().put("ok", false).put("error", e.message).toString()
+    }
     private fun list(args: JSONObject): JSONObject {
         val offset = args.optInt("offset", 0); val limit = args.optInt("limit", 30)
         require(offset >= 0 && limit in 1..50)
@@ -68,6 +71,7 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
         var carry = ""
         var scannedTo = start
         var eof = true
+        val carryWindow = maxOf(query.length - 1, 100)
         strictReader(textFile(a)).use { reader ->
             val buf = CharArray(8192)
             while (position < start) {
@@ -97,7 +101,7 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
                 }
                 position += n
                 if (!eof) break
-                carry = chunk.takeLast((query.length - 1).coerceAtLeast(0))
+                carry = chunk.takeLast(carryWindow)
                 scannedTo = position
             }
         }

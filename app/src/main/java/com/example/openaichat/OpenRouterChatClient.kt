@@ -25,7 +25,8 @@ data class OpenRouterCompletionResult(
 class OpenRouterCompletionException(
     message: String,
     val partialText: String,
-    cause: Throwable? = null
+    cause: Throwable? = null,
+    val accumulatedUsage: JSONObject? = null
 ) : IOException(message, cause)
 
 class OpenRouterUpstreamException(
@@ -168,10 +169,16 @@ class OpenRouterChatClient(
             }
         }
 
+        fun snapshotAccumulatedUsage(): JSONObject? =
+            JSONObject(accumulatedUsage.toString()).apply {
+                if (!everyRoundCostKnown) remove("cost")
+            }.takeIf { it.length() > 0 }
+
         fun budgetException(message: String): OpenRouterCompletionException =
             OpenRouterCompletionException(
                 message = message,
-                partialText = accumulatedText.joinToString("\n\n").trim()
+                partialText = accumulatedText.joinToString("\n\n").trim(),
+                accumulatedUsage = snapshotAccumulatedUsage()
             )
 
         fun ensureActive() {
@@ -224,10 +231,11 @@ class OpenRouterChatClient(
                 it.isNotBlank() && OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
             }?.let { body.put("verbosity", it) }
 
-            val roundIndex = nextRoundIndex++
-            onRoundObserved(roundIndex, null, null)
             val wireBody = StreamingJsonRequestBody(body)
             OpenRouterAttachmentPreflight.validateRequestBytes(model, wireBody.contentLength(), claudeRoute)
+            ensureActive()
+            val roundIndex = nextRoundIndex++
+            onRoundObserved(roundIndex, null, null)
             onPayloadObserved(roundIndex, wireBody.contentLength().coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
             val request = Request.Builder()
                 .url(baseUrl.trimEnd('/') + "/chat/completions")
@@ -309,7 +317,10 @@ class OpenRouterChatClient(
                 JsonProtocol.nonBlank(choice, "finish_reason")?.let { finishReason = it }
                 val delta = choice.optJSONObject("delta") ?: return
 
-                JsonProtocol.nonBlank(delta, "role")?.let { role = it }
+                JsonProtocol.nonBlank(delta, "role")?.let { incomingRole ->
+                    if (incomingRole != "assistant") throw IOException("Invalid OpenRouter delta role: $incomingRole")
+                    role = incomingRole
+                }
                 JsonProtocol.text(delta, "content")?.takeIf { it.isNotEmpty() }?.let { chunk ->
                     contentParts.append(chunk)
                     emitTextSnapshot()
@@ -322,10 +333,18 @@ class OpenRouterChatClient(
                         val call = calls.optJSONObject(i) ?: continue
                         val index = call.optInt("index", i)
                         val target = toolCallsByIndex.getOrPut(index) { OpenRouterStreamToolCall() }
-                        JsonProtocol.nonBlank(call, "id")?.let { target.id = it }
+                        JsonProtocol.nonBlank(call, "id")?.let { incomingId ->
+                            if (target.id.isNotEmpty() && target.id != incomingId) {
+                                throw IOException("Conflicting streamed tool call id at index $index")
+                            }
+                            target.id = incomingId
+                        }
                         JsonProtocol.nonBlank(call, "type")?.let { target.type = it }
                         call.optJSONObject("function")?.let { function ->
-                            JsonProtocol.nonBlank(function, "name")?.let { target.name += it }
+                            JsonProtocol.nonBlank(function, "name")?.let { incomingName ->
+                                if (target.name.isEmpty()) target.name = incomingName
+                                else if (incomingName != target.name) target.name += incomingName
+                            }
                             JsonProtocol.text(function, "arguments")?.takeIf { it.isNotEmpty() }?.let { target.arguments.append(it) }
                         }
                     }
@@ -335,6 +354,12 @@ class OpenRouterChatClient(
             try {
                 call.execute().use { httpResponse ->
                     ensureActive()
+                    val headerGenId = httpResponse.header("X-Generation-Id")?.trim()
+                        ?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) }
+                    if (headerGenId != null && generationId == null) {
+                        generationId = headerGenId
+                        onRoundObserved(roundIndex, headerGenId, null)
+                    }
                     if (!httpResponse.isSuccessful) {
                         val raw = BoundedResponseDecoder.readErrorBody(httpResponse.body)
                         val error = runCatching { JSONObject(raw).optJSONObject("error") }.getOrNull()
@@ -361,7 +386,8 @@ class OpenRouterChatClient(
                     throw OpenRouterCompletionException(
                         message = e.message ?: e.javaClass.simpleName,
                         partialText = partial,
-                        cause = e.cause ?: e
+                        cause = e.cause ?: e,
+                        accumulatedUsage = e.accumulatedUsage ?: snapshotAccumulatedUsage()
                     )
                 }
                 if (contentParts.isNotEmpty()) {
@@ -403,9 +429,13 @@ class OpenRouterChatClient(
             }
             if (toolCallsByIndex.isNotEmpty()) {
                 val toolCalls = JSONArray()
+                val seenToolCallIds = mutableSetOf<String>()
                 toolCallsByIndex.forEach { (_, call) ->
                     if (finishReason in setOf("tool_calls", "stop") && (call.id.isBlank() || call.name.isBlank())) {
                         throw IOException("Malformed streamed tool call")
+                    }
+                    if (call.id.isNotBlank() && !seenToolCallIds.add(call.id)) {
+                        throw IOException("Duplicate streamed tool call id: ${call.id}")
                     }
                     toolCalls.put(
                         JSONObject()
@@ -461,10 +491,7 @@ class OpenRouterChatClient(
                     return OpenRouterCompletionResult(
                         text = (accumulatedText + JsonProtocol.string(message, "content"))
                             .filter { it.isNotBlank() }.joinToString("\n\n").trim(),
-                        usage = JSONObject(accumulatedUsage.toString()).apply {
-                            // Never present a tool-loop subtotal as a complete charge.
-                            if (!everyRoundCostKnown) remove("cost")
-                        }.takeIf { it.length() > 0 },
+                        usage = snapshotAccumulatedUsage(),
                         responseModel = responseModel,
                         assistantMessage = JSONObject(message.toString()),
                         toolNames = toolNames.distinct(),
@@ -512,13 +539,24 @@ class OpenRouterChatClient(
                     .put("wire_input_sha256", inputHash).put("binding_sha256", binding).put("tail", checkpointTail))
             }
         } catch (e: Exception) {
-            if (e is OpenRouterCompletionException) throw e
+            if (e is CancellationException) throw e
+            val partialUsage = snapshotAccumulatedUsage()
+            if (e is OpenRouterCompletionException) {
+                if (e.accumulatedUsage != null || partialUsage == null) throw e
+                throw OpenRouterCompletionException(
+                    message = e.message ?: e.javaClass.simpleName,
+                    partialText = e.partialText,
+                    cause = e.cause ?: e,
+                    accumulatedUsage = partialUsage
+                )
+            }
             val partialText = accumulatedText.joinToString("\n\n").trim()
-            if (partialText.isNotBlank()) {
+            if (partialText.isNotBlank() || partialUsage != null) {
                 throw OpenRouterCompletionException(
                     message = e.message ?: e.javaClass.simpleName,
                     partialText = partialText,
-                    cause = e
+                    cause = e,
+                    accumulatedUsage = partialUsage
                 )
             }
             throw e

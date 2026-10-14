@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.SharedPreferences
 import android.content.Intent
+import android.database.sqlite.SQLiteException
 import android.os.SystemClock
 import android.widget.LinearLayout
 import android.widget.Button
@@ -1858,6 +1859,97 @@ class MainActivityLifecycleTest {
             assertTrue(status.text.toString().contains("Не удалось подготовить ZIP"))
         }
         scenario.close()
+    }
+
+    @Test
+    fun deleteChatPreservesAttachmentStillOwnedByAnotherChat() {
+        assertSharedFileSurvivesChatDeletion(failOwnersRead = false)
+    }
+
+    @Test
+    fun deleteChatDefersPhysicalFileDeletionWhenSqliteOwnersReadFails() {
+        assertSharedFileSurvivesChatDeletion(failOwnersRead = true)
+    }
+
+    private fun assertSharedFileSurvivesChatDeletion(failOwnersRead: Boolean) {
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            scenario.onActivity { activity ->
+                val database = privateField(activity, "chatDb") as ChatDatabase
+                val fixtureId = java.util.UUID.randomUUID().toString()
+                val chatA = "delete-owners-a-$fixtureId"
+                val chatB = "delete-owners-b-$fixtureId"
+                val directory = java.io.File(activity.filesDir, "attachments").apply { mkdirs() }
+                val shared = java.io.File(directory, "shared-$fixtureId.txt").canonicalFile
+                val exclusive = java.io.File(directory, "exclusive-$fixtureId.txt").canonicalFile
+                var columnRenamed = false
+                try {
+                    shared.writeText("shared original bytes")
+                    exclusive.writeText("exclusive original bytes")
+                    database.upsertCurrentChat(chatA, "Owner A", null, null, listOf(JSONObject()
+                        .put("role", "user").put("text", "A attachments")
+                        .put("file_paths", JSONArray().put(shared.path).put(exclusive.path))))
+                    database.upsertCurrentChat(chatB, "Owner B", null, null, listOf(JSONObject()
+                        .put("role", "user").put("text", "B attachment")
+                        .put("file_paths", JSONArray().put(shared.path))))
+                    assertTrue(shared.path in database.listLocalFilePaths(chatA))
+                    assertTrue(shared.path in database.listLocalFilePaths(chatB))
+                    assertTrue(exclusive.path in database.listLocalFilePaths(chatA))
+
+                    // Keep real deletion candidates available from the draft even
+                    // when the SQLite path query fails before owner enumeration.
+                    activity.prefs.edit().putString("composer_state_$chatA", JSONObject()
+                        .put("file_paths", JSONArray().put(shared.path).put(exclusive.path))
+                        .toString()).commit()
+                    var ownersReadError: SQLiteException? = null
+                    if (failOwnersRead) {
+                        // Corrupt only the owner-path projection. Chat deletion
+                        // and message ownership remain usable; restore in finally.
+                        database.writableDatabase.execSQL(
+                            "ALTER TABLE local_artifacts RENAME COLUMN path TO unreadable_path")
+                        columnRenamed = true
+                        ownersReadError = try {
+                            database.listAllLocalFilePaths()
+                            throw AssertionError("Owner enumeration must throw SQLiteException")
+                        } catch (e: SQLiteException) {
+                            e
+                        }
+                    }
+
+                    activity.deleteChat(chatA)
+
+                    assertTrue("Chat A must be deleted", database.getChat(chatA) == null)
+                    assertTrue("Chat B must remain", database.getChat(chatB) != null)
+                    assertEquals(shared.path, database.getChat(chatB)!!.getJSONArray("messages")
+                        .getJSONObject(0).getJSONArray("file_paths").getString(0))
+                    assertTrue("Shared file still belongs to chat B", shared.isFile)
+                    assertEquals("shared original bytes", shared.readText())
+                    if (failOwnersRead) {
+                        assertTrue("Unknown owners must defer every physical deletion", exclusive.isFile)
+                        assertEquals("exclusive original bytes", exclusive.readText())
+                        val diagnostic = (privateField(activity, "diagnostics") as AstraDiagnostics)
+                            .tail(300).lineSequence().firstOrNull {
+                                it.contains("local_file_delete_deferred") && it.contains("chat_id=$chatA")
+                            }
+                        assertTrue("The real owner-query failure must be logged",
+                            diagnostic?.contains("error_type=${ownersReadError!!.javaClass.simpleName}") == true)
+                    } else {
+                        assertFalse("An unshared file must still be deleted normally", exclusive.exists())
+                        assertTrue(shared.path in database.listAllLocalFilePaths())
+                    }
+                } finally {
+                    if (columnRenamed) database.writableDatabase.execSQL(
+                        "ALTER TABLE local_artifacts RENAME COLUMN unreadable_path TO path")
+                    activity.prefs.edit().remove("composer_state_$chatA").commit()
+                    database.deleteChat(chatA)
+                    database.deleteChat(chatB)
+                    shared.delete()
+                    exclusive.delete()
+                }
+            }
+        } finally {
+            scenario.close()
+        }
     }
 
     @Test

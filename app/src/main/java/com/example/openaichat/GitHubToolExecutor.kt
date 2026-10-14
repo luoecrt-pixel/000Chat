@@ -26,7 +26,14 @@ class GitHubToolExecutor(
         .callTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    fun close() {
+        httpClient.dispatcher.executorService.shutdown()
+        httpClient.connectionPool.evictAll()
+        httpClient.cache?.close()
+    }
+
     fun execute(name: String, arguments: JSONObject): String = try {
+        if (!canExecute()) throw IOException("GitHub request owner is no longer current")
         when (name) {
             "get_pull_request" -> getPullRequest(arguments)
             "list_pull_requests" -> listPullRequests(arguments)
@@ -43,7 +50,12 @@ class GitHubToolExecutor(
             "trigger_workflow_dispatch" -> triggerWorkflowDispatch(arguments)
             else -> errorResult("Unknown GitHub tool: $name")
         }
+    } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        if (!canExecute()) throw IOException("GitHub request owner is no longer current", e)
+        errorResult("GitHub request interrupted")
     } catch (e: Exception) {
+        if (!canExecute() && e is IOException) throw e
         errorResult(e.message ?: e.javaClass.simpleName)
     }
 
@@ -65,6 +77,15 @@ class GitHubToolExecutor(
         }
     }
 
+    private fun validateRelativePath(rawPath: String, allowEmpty: Boolean = false): String {
+        val normalized = rawPath.trim().removePrefix("/")
+        if (!allowEmpty && normalized.isBlank()) throw IOException("Invalid path")
+        if (normalized.contains('\\') || normalized.split('/').any { it == ".." || it == "." }) {
+            throw IOException("Invalid path")
+        }
+        return normalized
+    }
+
     private fun url(owner: String, repo: String, path: String) =
         "https://api.github.com/repos/$owner/$repo/$path"
 
@@ -82,11 +103,20 @@ class GitHubToolExecutor(
             if (!canExecute()) throw IOException("GitHub request owner is no longer current")
             httpClient.newCall(request).execute().use { httpResponse ->
                 code = httpResponse.code
-                body = httpResponse.body?.string().orEmpty()
+                body = if (httpResponse.isSuccessful) {
+                    BoundedResponseDecoder.readBody(httpResponse.body)
+                } else {
+                    BoundedResponseDecoder.readErrorBody(httpResponse.body)
+                }
                 if (code != 403 && code != 429) return code to body
                 val retryMs = httpResponse.header("Retry-After")?.toLongOrNull()
                     ?.coerceIn(0L, 10L)?.times(1000L) ?: 750L * (attempt + 1)
-                Thread.sleep(retryMs)
+                try {
+                    Thread.sleep(retryMs)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException("GitHub retry interrupted", interrupted)
+                }
             }
             attempt++
         }
@@ -95,7 +125,7 @@ class GitHubToolExecutor(
 
     private fun ok(result: Pair<Int, String>): String {
         if (result.first !in 200..299) {
-            throw IOException("GitHub HTTP ${result.first}: ${result.second.take(1600)}")
+            throw IOException("GitHub HTTP ${result.first}:${result.second.take(1600)}")
         }
         return result.second
     }
@@ -135,8 +165,7 @@ class GitHubToolExecutor(
 
     private fun getFile(a: JSONObject): String {
         val (owner, repo) = repo(a)
-        val path = a.getString("path").trim()
-        if (path.isBlank() || path.contains("..")) throw IOException("Invalid path")
+        val path = validateRelativePath(a.getString("path"))
         val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
         val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
@@ -149,7 +178,9 @@ class GitHubToolExecutor(
         }
         val (owner, repo) = repo(a)
         val path = a.getString("path").trim()
-        if (path.isBlank() || path.startsWith("/") || path.split('/').any { it == ".." }) throw IOException("Invalid path")
+        if (path.isBlank() || path.startsWith("/") || path.contains('\\') || path.split('/').any { it == ".." || it == "." }) {
+            throw IOException("Invalid path")
+        }
         val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
         val endpoint = url(owner, repo, "contents/${Uri.encode(path, "/")}?ref=${Uri.encode(ref)}")
         if (!canExecute()) throw IOException("GitHub request owner is no longer current")
@@ -201,8 +232,7 @@ class GitHubToolExecutor(
 
     private fun listDirectory(a: JSONObject): String {
         val (owner, repo) = repo(a)
-        val path = a.getString("path").trim().removePrefix("/")
-        if (path.contains("..")) throw IOException("Invalid path")
+        val path = validateRelativePath(a.getString("path"), allowEmpty = true)
         val ref = GitHubAllowedRefPolicy.validate(a.optString("ref"), allowedBranches())
         val suffix = "?ref=${Uri.encode(ref)}"
         val raw = ok(call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}$suffix")).get().build()))
@@ -280,11 +310,11 @@ class GitHubToolExecutor(
 
     private fun createOrUpdateFile(a: JSONObject): String {
         val (owner, repo) = repo(a)
-        val path = a.getString("path").trim().removePrefix("/")
+        val path = validateRelativePath(a.getString("path"))
         val branchName = a.getString("branch").trim()
         val contentBase64 = if (!a.isNull("content")) {
             Base64.encodeToString(
-                a.getString("content").toByteArray(Charsets.UTF_8),
+                JsonProtocol.string(a, "content").toByteArray(Charsets.UTF_8),
                 Base64.NO_WRAP
             )
         } else {
@@ -292,12 +322,11 @@ class GitHubToolExecutor(
                 ?: throw IOException("content is required; content_base64 is supported for compatibility")
         }
         branch(branchName)
-        if (path.isBlank() || path.contains("..")) throw IOException("Invalid path")
         var sha = a.optString("sha").trim().takeIf { it.isNotBlank() }
         if (sha == null) {
             val lookup = call(request(url(owner, repo, "contents/${Uri.encode(path, "/")}?ref=${Uri.encode(branchName)}")).get().build())
             if (lookup.first in 200..299) sha = JSONObject(lookup.second).optString("sha").takeIf { it.isNotBlank() }
-            else if (lookup.first != 404) throw IOException("GitHub HTTP ${lookup.first}: ${lookup.second.take(1600)}")
+            else if (lookup.first != 404) throw IOException("GitHub HTTP ${lookup.first}:${lookup.second.take(1600)}")
         }
         requireConfirmation("create_or_update_file", a)
         val body = JSONObject().put("message", a.getString("message")).put("content", contentBase64).put("branch", branchName)
@@ -314,6 +343,9 @@ class GitHubToolExecutor(
     private fun triggerWorkflowDispatch(a: JSONObject): String {
         val (owner, repo) = repo(a)
         val workflowId = a.getString("workflow_id").trim()
+        if (workflowId.isBlank() || workflowId.contains('/') || workflowId.contains('\\') || workflowId.contains("..")) {
+            throw IOException("Invalid workflow_id")
+        }
         val ref = a.getString("ref").trim()
         branch(ref)
         requireConfirmation("trigger_workflow_dispatch", a)
