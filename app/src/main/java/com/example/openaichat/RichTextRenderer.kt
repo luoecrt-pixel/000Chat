@@ -59,21 +59,24 @@ object RichTextRenderer {
                 if (close > i + 1) {
                     val urlEnd = source.indexOf(')', close + 2)
                     if (urlEnd > close + 2) {
-                        val url = source.substring(close + 2, urlEnd)
                         val label = source.substring(i + 1, close)
-                        val outStart = out.length
-                        out.append(label)
-                        val outEnd = out.length
-                        for (k in i + 1 until close) sourceToOutput[k] = outStart + (k - (i + 1))
-                        sourceToOutput[i] = outStart
-                        sourceToOutput[close] = outEnd
-                        sourceToOutput[close + 1] = outEnd
-                        sourceToOutput[urlEnd] = outEnd
-                        if (url.startsWith("http://") || url.startsWith("https://")) {
-                            out.setSpan(URLSpan(url), outStart, outEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        val url = source.substring(close + 2, urlEnd)
+                        if ('\n' !in label && '[' !in label && ']' !in label &&
+                            url.none { it.isWhitespace() }) {
+                            val outStart = out.length
+                            out.append(label)
+                            val outEnd = out.length
+                            for (k in i + 1 until close) sourceToOutput[k] = outStart + (k - (i + 1))
+                            sourceToOutput[i] = outStart
+                            sourceToOutput[close] = outEnd
+                            sourceToOutput[close + 1] = outEnd
+                            sourceToOutput[urlEnd] = outEnd
+                            if (url.startsWith("http://") || url.startsWith("https://")) {
+                                out.setSpan(URLSpan(url), outStart, outEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            }
+                            i = urlEnd + 1
+                            continue
                         }
-                        i = urlEnd + 1
-                        continue
                     }
                 }
             }
@@ -115,10 +118,13 @@ object RichTextRenderer {
             if (source[i] == '*' || source[i] == '_') {
                 val marker = source[i]
                 val end = source.indexOf(marker, i + 1)
-                val intrawordUnderscore = marker == '_' &&
-                    ((i > 0 && source[i - 1].isLetterOrDigit()) ||
-                        (end + 1 < source.length && source[end + 1].isLetterOrDigit()))
-                if (end > i + 1 && !intrawordUnderscore && !source.startsWith("**", i)) {
+                val intraword = (i > 0 && source[i - 1].isLetterOrDigit()) ||
+                    (end + 1 < source.length && source[end + 1].isLetterOrDigit())
+                val spacedAsterisk = marker == '*' &&
+                    ((i + 1 < source.length && source[i + 1].isWhitespace()) ||
+                        (end > i + 1 && source[end - 1].isWhitespace()))
+                val crossesLine = end > i + 1 && '\n' in source.substring(i + 1, end)
+                if (end > i + 1 && !intraword && !spacedAsterisk && !crossesLine && !source.startsWith("**", i)) {
                     val outStart = out.length
                     appendPlain(i + 1, end)
                     out.setSpan(StyleSpan(Typeface.ITALIC), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)

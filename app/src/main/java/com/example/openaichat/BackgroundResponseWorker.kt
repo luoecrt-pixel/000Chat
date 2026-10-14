@@ -37,13 +37,7 @@ class BackgroundResponseWorker(
         // One-response recovery window; this is not a session-wide chat limit.
     }
 
-    private val client by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(45, TimeUnit.SECONDS)
-            .callTimeout(60, TimeUnit.SECONDS)
-            .build()
-    }
+
     private val streamClient by lazy { ResumableResponseStreamClient(applicationContext) }
 
     @OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
@@ -306,8 +300,6 @@ class BackgroundResponseWorker(
             resumeLease?.let { OpenAiCreateCallOwners.releaseResume(chatId, requestId, it) }
             try { db.close() } catch (_: Exception) {}
             try { streamClient.close() } catch (_: Exception) {}
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
         }
     }
 

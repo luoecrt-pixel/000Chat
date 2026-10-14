@@ -18,13 +18,19 @@ class OpenRouterResponseService : Service() {
             ServiceCompat.startForeground(this, 41063, ResponseNotifications.running(this, chat, OpenRouterResponseRuntime.count()),
                 if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0)
         } catch (e: Exception) {
-            OpenRouterResponseRuntime.cancel(id, "Android не разрешил запустить фоновую службу: ${e.javaClass.simpleName}")
+            if (!OpenRouterUiBridge.viewing(chat)) {
+                OpenRouterResponseRuntime.cancel(id, "Android не разрешил запустить фоновую службу: ${e.javaClass.simpleName}")
+            }
             OpenRouterResponseRuntime.launch(id)
-            stopSelf(startId)
+            if (OpenRouterResponseRuntime.count() == 0) stopSelf(startId)
             return START_NOT_STICKY
         }
-        // Even a stale/redelivered intent must satisfy the startForegroundService deadline.
-        if (chat.isBlank()) { stopSelf(startId); return START_NOT_STICKY }
+        // Even a stale/redelivered intent must satisfy the startForegroundService deadline,
+        // without stopping the service while another active request is still running.
+        if (chat.isBlank()) {
+            if (OpenRouterResponseRuntime.count() == 0) stopSelf(startId)
+            return START_NOT_STICKY
+        }
         OpenRouterResponseRuntime.launch(id)
         return START_NOT_STICKY // Chat Completions has no safe provider-side stream-resume ID.
     }

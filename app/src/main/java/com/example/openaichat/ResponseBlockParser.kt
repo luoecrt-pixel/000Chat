@@ -15,12 +15,19 @@ object ResponseBlockParser {
     private val summary = Regex("^ {0,3}<summary>(.*?)</summary>[ \\t]*$", RegexOption.IGNORE_CASE)
     private data class Line(val start: Int, val end: Int, val text: String)
 
-    fun parse(source: String, cancelled: () -> Boolean = { false }): List<Block> {
+    fun parse(source: String, cancelled: () -> Boolean = { false }): List<Block> =
+        parse(source, cancelled, allowWholeDocumentJson = true)
+
+    internal fun parse(
+        source: String,
+        cancelled: () -> Boolean = { false },
+        allowWholeDocumentJson: Boolean = true
+    ): List<Block> {
         fun checkpoint() { if (Thread.currentThread().isInterrupted || cancelled()) throw java.util.concurrent.CancellationException("Superseded response presentation") }
         checkpoint()
         if (source.isEmpty()) return emptyList()
         val trimmed = source.trim()
-        if (source.length <= 100_000 && (trimmed.startsWith('{') || trimmed.startsWith('['))) {
+        if (allowWholeDocumentJson && source.length <= 100_000 && (trimmed.startsWith('{') || trimmed.startsWith('['))) {
             val json = StrictJsonValue.isObjectOrArray(trimmed)
             if (json) return listOf(Block.Code(source, "json", source, true))
         }
@@ -87,7 +94,7 @@ object ResponseBlockParser {
                             if (Regex("^ {0,3}${Regex.escape(marker[0].toString())}{${marker.length},}[ \\t]*$").matches(candidate)) inFence = null
                         } else {
                             val found = fence.matchEntire(candidate)
-                            if (found != null) inFence = found.groupValues[1]
+                            if (found != null && !(found.groupValues[1][0] == '`' && '`' in found.groupValues[2])) inFence = found.groupValues[1]
                             else if (file.matches(candidate)) inFile = true
                             else if (details.matches(candidate)) depth++
                             else if (candidate.trim().equals("</details>", true)) { depth--; if (depth == 0) break }
@@ -144,7 +151,7 @@ object ResponseBlockParser {
             }
             val base = if (append) committed else emptyList()
             val start = if (append) committedChars else 0
-            val tail = parse(source.substring(start), cancelled)
+            val tail = parse(source.substring(start), cancelled, allowWholeDocumentJson = start == 0)
             val blocks = base + tail
             var end = start
             var stableCount = base.size
@@ -176,11 +183,18 @@ object ResponseBlockParser {
         var index = 0
         var ticks = 0
         val text = line.trim()
+        fun isUnescapedEndPipe(s: String): Boolean {
+            if (!s.endsWith('|')) return false
+            var slashes = 0
+            var k = s.length - 2
+            while (k >= 0 && s[k] == '\\') { slashes++; k-- }
+            return slashes % 2 == 0
+        }
         while (index < text.length) {
             if (index % 4096 == 0 && (Thread.currentThread().isInterrupted || cancelled())) throw java.util.concurrent.CancellationException("Superseded table presentation")
             val c = text[index]
-            if (c == '\\' && index + 1 < text.length && text[index + 1] == '|') {
-                value.append("\\|"); index += 2; continue
+            if (c == '\\' && index + 1 < text.length && (text[index + 1] == '|' || text[index + 1] == '\\')) {
+                value.append('\\').append(text[index + 1]); index += 2; continue
             }
             if (c == '`') {
                 var end = index + 1
@@ -195,7 +209,7 @@ object ResponseBlockParser {
         }
         values.add(value.toString().trim())
         if (text.startsWith('|') && values.isNotEmpty()) values.removeAt(0)
-        if (text.endsWith('|') && !text.endsWith("\\|") && values.isNotEmpty()) values.removeAt(values.lastIndex)
+        if (isUnescapedEndPipe(text) && values.isNotEmpty()) values.removeAt(values.lastIndex)
         return values
     }
 }

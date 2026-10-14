@@ -54,6 +54,12 @@ class AstraDiagnostics(context: Context) {
             Regex("(?i)(data:[a-z0-9.+/-]+;base64,)[A-Za-z0-9+/=]+"),
             "$1[BASE64 OMITTED]"
         )
+        // Redact bare API keys and PATs in arbitrary error strings while preserving
+        // safe request, response and file IDs (req_, resp_, local_, file-, chat_, vs_).
+        value = value.replace(
+            Regex("\\b(?:sk-[A-Za-z0-9._-]{8,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\\b"),
+            "[REDACTED]"
+        )
         return value
     }
 
