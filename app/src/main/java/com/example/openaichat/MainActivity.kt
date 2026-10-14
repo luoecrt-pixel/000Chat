@@ -1641,9 +1641,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
-                secure.setApiKey(key.text.toString().trim())
-                secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
-                secure.setGitHubToken(githubToken.text.toString().trim())
+                val openAiKeySaved = secure.setApiKey(key.text.toString().trim())
+                val openRouterKeySaved = secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
+                val githubTokenSaved = secure.setGitHubToken(githubToken.text.toString().trim())
+                val allSecretsSaved = openAiKeySaved && openRouterKeySaved && githubTokenSaved
                 prefs.edit()
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
@@ -1671,7 +1672,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 updateModelBadge()
                 updateEffortBadge()
                 if (notifications.isChecked) requestAnswerNotificationPermission()
-                status.text="Настройки сохранены"
+                if (!allSecretsSaved) {
+                    diagnostics.log("secure_store_save_failed", mapOf(
+                        "openai_saved" to openAiKeySaved,
+                        "openrouter_saved" to openRouterKeySaved,
+                        "github_saved" to githubTokenSaved
+                    ))
+                }
+                status.text = if (allSecretsSaved) {
+                    "Настройки сохранены"
+                } else {
+                    "Ошибка сохранения ключей в Android Keystore — старый ключ сброшен, повторите ввод"
+                }
             }.show()
     }
 

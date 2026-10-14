@@ -1,19 +1,28 @@
 package com.example.openaichat
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.annotation.VisibleForTesting
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 
-class SecureStore(context: Context) {
+class SecureStore(
+    context: Context,
+    @VisibleForTesting internal val encryptOverride: ((ByteArray) -> ByteArray)? = null
+) {
     companion object {
         private val keystoreLock = Any()
+        @Volatile
+        @VisibleForTesting
+        internal var failWritesForTesting: Boolean = false
     }
+
     private val prefs = context.getSharedPreferences("secure", Context.MODE_PRIVATE)
     private val alias = "OpenAIApiChatKey"
 
@@ -34,18 +43,32 @@ class SecureStore(context: Context) {
         gen.generateKey()
     }
 
-    private fun setSecret(name: String, value: String) = synchronized(keystoreLock) {
+    private fun setSecret(name: String, value: String): Boolean = synchronized(keystoreLock) {
         if (value.isBlank()) {
-            prefs.edit().remove(name).apply()
-            return@synchronized
+            return@synchronized prefs.edit().remove(name).commit()
         }
         try {
-            val c = Cipher.getInstance("AES/GCM/NoPadding")
-            c.init(Cipher.ENCRYPT_MODE, key())
-            val p = c.iv + c.doFinal(value.toByteArray(Charsets.UTF_8))
-            prefs.edit().putString(name, Base64.encodeToString(p, Base64.NO_WRAP)).apply()
+            if (failWritesForTesting) {
+                throw GeneralSecurityException("Synthetic Keystore write failure")
+            }
+            val raw = value.toByteArray(Charsets.UTF_8)
+            val payload = if (encryptOverride != null) {
+                encryptOverride.invoke(raw)
+            } else {
+                val c = Cipher.getInstance("AES/GCM/NoPadding")
+                c.init(Cipher.ENCRYPT_MODE, key())
+                c.iv + c.doFinal(raw)
+            }
+            val encoded = Base64.encodeToString(payload, Base64.NO_WRAP)
+            if (!prefs.edit().putString(name, encoded).commit()) {
+                prefs.edit().remove(name).commit()
+                return@synchronized false
+            }
+            true
         } catch (_: Exception) {
-            // Do not crash the UI thread if the device keystore is temporarily locked.
+            // Never leave an older account's credential active when a key replacement fails.
+            prefs.edit().remove(name).commit()
+            false
         }
     }
 
@@ -61,12 +84,12 @@ class SecureStore(context: Context) {
         } catch (_: Exception) { "" }
     }
 
-    fun setApiKey(v: String) = setSecret("key", v)
+    fun setApiKey(v: String): Boolean = setSecret("key", v)
     fun getApiKey(): String = getSecret("key")
 
-    fun setOpenRouterApiKey(v: String) = setSecret("openrouter_key", v)
+    fun setOpenRouterApiKey(v: String): Boolean = setSecret("openrouter_key", v)
     fun getOpenRouterApiKey(): String = getSecret("openrouter_key")
 
-    fun setGitHubToken(v: String) = setSecret("github_pat", v)
+    fun setGitHubToken(v: String): Boolean = setSecret("github_pat", v)
     fun getGitHubToken(): String = getSecret("github_pat")
 }
