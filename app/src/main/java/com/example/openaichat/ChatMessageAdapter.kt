@@ -85,6 +85,7 @@ class ChatMessageAdapter(
 
         override fun areContentsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
             oldItem.contentSignature == newItem.contentSignature &&
+                oldItem.text == newItem.text &&
                 oldItem.reasoningSummary == newItem.reasoningSummary
     })
 
@@ -198,15 +199,55 @@ class ChatMessageAdapter(
 
     fun updateText(id: String, text: String): Boolean {
         val index = itemIndexById[id] ?: return false
-        refreshModelItem(index, items[index].copy(text = text))
-        displayPositionById[id]?.let { notifyItemChanged(it, PAYLOAD_TEXT) }
+        val current = items[index]
+        val updated = if (current.message == null) {
+            ChatBubbleItem.create(
+                id = current.id,
+                label = current.label,
+                text = text,
+                user = current.user,
+                annotations = current.annotations,
+                message = null,
+                chatIndex = current.chatIndex,
+                reasoningSummary = current.reasoningSummary
+            )
+        } else {
+            current.copy(text = text)
+        }
+        refreshModelItem(index, updated)
+        val displayPosition = displayPositionById[id]
+        if (displayPosition != null) {
+            notifyItemChanged(displayPosition, PAYLOAD_TEXT)
+        } else {
+            submitModel()
+        }
         return true
     }
 
     fun updateReasoningSummary(id: String, summary: String): Boolean {
         val index = itemIndexById[id] ?: return false
-        refreshModelItem(index, items[index].copy(reasoningSummary = summary))
-        displayPositionById[id]?.let { notifyItemChanged(it) }
+        val current = items[index]
+        val updated = if (current.message == null) {
+            ChatBubbleItem.create(
+                id = current.id,
+                label = current.label,
+                text = current.text,
+                user = current.user,
+                annotations = current.annotations,
+                message = null,
+                chatIndex = current.chatIndex,
+                reasoningSummary = summary
+            )
+        } else {
+            current.copy(reasoningSummary = summary)
+        }
+        refreshModelItem(index, updated)
+        val displayPosition = displayPositionById[id]
+        if (displayPosition != null) {
+            notifyItemChanged(displayPosition)
+        } else {
+            submitModel()
+        }
         return true
     }
 

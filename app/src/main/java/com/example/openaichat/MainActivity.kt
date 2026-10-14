@@ -1641,9 +1641,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
-                secure.setApiKey(key.text.toString().trim())
-                secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
-                secure.setGitHubToken(githubToken.text.toString().trim())
+                val openAiKeySaved = secure.setApiKey(key.text.toString().trim())
+                val openRouterKeySaved = secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
+                val githubTokenSaved = secure.setGitHubToken(githubToken.text.toString().trim())
+                val allSecretsSaved = openAiKeySaved && openRouterKeySaved && githubTokenSaved
                 prefs.edit()
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
@@ -1671,7 +1672,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 updateModelBadge()
                 updateEffortBadge()
                 if (notifications.isChecked) requestAnswerNotificationPermission()
-                status.text="Настройки сохранены"
+                if (!allSecretsSaved) {
+                    diagnostics.log("secure_store_save_failed", mapOf(
+                        "openai_saved" to openAiKeySaved,
+                        "openrouter_saved" to openRouterKeySaved,
+                        "github_saved" to githubTokenSaved
+                    ))
+                }
+                status.text = if (allSecretsSaved) {
+                    "Настройки сохранены"
+                } else {
+                    "Ошибка сохранения ключей в Android Keystore — старый ключ сброшен, повторите ввод"
+                }
             }.show()
     }
 
@@ -2531,10 +2543,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val requestImagePath = imagePath
         val requestImageFileId = imageFileId
-        if(!regenerate && text.isBlank() && requestImageFileId==null &&
+        if(text.isBlank() && requestImageFileId==null &&
             requestFileIds.isEmpty() && requestFilePaths.isEmpty() &&
             imagePath == null && requestOpenRouterAttachments.isEmpty()) return
-        if(regenerate && text.isBlank()) return
 
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
@@ -2880,10 +2891,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val vs=prefs.getString("vector_store","")?.trim().orEmpty()
             if(vs.isNotBlank()) tools.put(JSONObject().put("type","file_search").put("vector_store_ids",JSONArray().put(vs)).put("max_num_results",20))
         }
-        val enableCodeInterpreter = prefs.getBoolean("code_interpreter", false) || (fileAnalysisEnabled && containerFiles.isNotEmpty())
+        val nonVisualContainerFiles = containerFiles.filterKeys { path ->
+            val ext = TextFileFormatPolicy.extension(path)
+            ext !in setOf("jpg", "jpeg", "png", "webp", "gif", "pdf")
+        }
+        val enableCodeInterpreter = prefs.getBoolean("code_interpreter", false) || (fileAnalysisEnabled && nonVisualContainerFiles.isNotEmpty())
         if(enableCodeInterpreter){
             val c=JSONObject().put("type","auto").put("memory_limit","4g")
-            val wholeFileIds = (requestFileIds.mapIndexed { i, id -> requestFilePaths.getOrNull(i)?.let { containerFiles[it] } ?: id } + containerFiles.values).filter { it.isNotBlank() }.distinct()
+            val wholeFileIds = (requestFileIds.mapIndexedNotNull { i, id ->
+                val path = requestFilePaths.getOrNull(i)
+                val mime = requestFileMimes.getOrNull(i).orEmpty()
+                if (mime.startsWith("image/")) null else (path?.let { nonVisualContainerFiles[it] ?: containerFiles[it] } ?: id)
+            } + nonVisualContainerFiles.values).filter { it.isNotBlank() }.distinct()
             if(wholeFileIds.isNotEmpty()){
                 val ids=JSONArray(); wholeFileIds.forEach{ids.put(it)}; c.put("file_ids",ids)
             }
@@ -3495,7 +3514,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     historySnapshot.filter { JsonProtocol.string(it, "role") == "user" }.forEach { message ->
                         chatDb.cachedAttachmentManifest(requestChatId, message)?.let { message.put("attachments", it) }
                     }
-                    OpenAiLocalContextEncoder.materialize(historySnapshot, fileAnalysisEnabled) { before, after ->
+                    OpenAiLocalContextEncoder.materialize(historySnapshot, fileAnalysisEnabled, this@MainActivity) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     }
                     val containerFiles = if (fileAnalysisEnabled) OpenAiFileAnalysis.prepare(historySnapshot,
@@ -3506,7 +3525,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             else uploadLocalUserFile(file, filename, mime, credential = key, active = ownerActive).id
                         }) else emptyMap()
                     val prepared = if (typedHistoryNeeded) OpenAiLocalContextEncoder.encode(
-                        historySnapshot, containerFiles, allowLegacyVisibleTextOnly
+                        historySnapshot, containerFiles, allowLegacyVisibleTextOnly, this@MainActivity
                     ) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     } else null
@@ -4040,7 +4059,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     "expected_sequence_number" to e.expectedSequenceNumber,
                     "received_sequence_number" to e.receivedSequenceNumber
                 ))
-                if (!sleepBackgroundRetry(retryDelayMs)) return
+                if (!sleepBackgroundRetry(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))) return
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
             } catch (e: ApiHttpException) {
                 activeResumeCalls.remove(chatId)
@@ -4065,7 +4084,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                     429 -> {
                         val waitMs = e.retryAfterMs?.coerceIn(1_000L, 300_000L)
-                            ?: retryDelayMs.coerceAtMost(60_000L)
+                            ?: BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs.coerceAtMost(60_000L))
                         diagnostics.log("background_resume_rate_limited", mapOf(
                             "chat_id" to chatId,
                             "response_id" to responseId,
@@ -4157,8 +4176,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             "Не удалось безопасно восстановить ответ; полученный текст сохранён")
     }
 
-    private fun sleepBackgroundRetry(baseDelayMs:Long):Boolean {
-        val actual = BackgroundRecoveryPolicy.jitteredDelayMs(baseDelayMs)
+    private fun sleepBackgroundRetry(delayMs:Long):Boolean {
+        val actual = delayMs.coerceIn(1_000L, 300_000L)
         return try {
             Thread.sleep(actual)
             true
@@ -4182,7 +4201,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (BackgroundRequestFailureRecorder.persist(
                 chatDb, chatId, owner, JsonProtocol.string(active, "response_id"),
                 "failed", message, filesDir, latency
-            )) renderOwnedBackgroundRecoveryFailure(uiSnapshot, message)
+            )) {
+            ResponseNotifications.finished(applicationContext, chatId, owner, false)
+            renderOwnedBackgroundRecoveryFailure(uiSnapshot, message)
+        }
     }
 
     private fun renderOwnedBackgroundRecoveryFailure(
@@ -7813,8 +7835,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 saveFile = { block -> saveTaggedResponseFile(sourceChatId, item, block) },
                 continueAnswer = {
                     if (currentChatId() != sourceChatId) status.text = "Откройте исходный чат для продолжения"
-                    else if (input.text.toString().isNotBlank()) status.text = "Сначала сохраните или отправьте текущий черновик"
-                    else {
+                    else if (input.text.toString().isNotBlank() || attachedOpenRouterAttachments.isNotEmpty() ||
+                        attachedFileIds.isNotEmpty() || pendingImagePath != null || pendingUploadUris.isNotEmpty()) {
+                        status.text = "Сначала сохраните или отправьте текущий черновик"
+                    } else {
                         input.setText("Продолжи предыдущий прерванный ответ с места остановки. Не повторяй уже написанное.")
                         sendMessage(false)
                     }

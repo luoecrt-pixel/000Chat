@@ -37,4 +37,31 @@ class AstraDiagnosticsPrivacyTest {
             log.clear()
         }
     }
+
+    @Test
+    fun redactsBareApiKeysInArbitraryErrorMessagesWhilePreservingSafeIds() {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val diagnostics = AstraDiagnostics(context)
+        diagnostics.clear()
+        val syntheticOpenAiKey = "sk-proj-SyntheticSecretKey1234567890"
+        val syntheticOpenRouterKey = "sk-or-v1-SyntheticRouterSecret1234567890"
+        val syntheticPat = "github_pat_11ABCDEF0123456789_secretTokenValue"
+        diagnostics.log(
+            "provider_error",
+            mapOf(
+                "request_id" to "req_safe_12345",
+                "response_id" to "resp_safe_67890",
+                "local_id" to "local_safe_abcdef",
+                "error_message" to "Upstream rejected $syntheticOpenAiKey and $syntheticOpenRouterKey and $syntheticPat for file-safe123"
+            )
+        )
+        val output = diagnostics.tail(20)
+        org.junit.Assert.assertFalse(output.contains(syntheticOpenAiKey))
+        org.junit.Assert.assertFalse(output.contains(syntheticOpenRouterKey))
+        org.junit.Assert.assertFalse(output.contains(syntheticPat))
+        org.junit.Assert.assertTrue(output.contains("req_safe_12345"))
+        org.junit.Assert.assertTrue(output.contains("resp_safe_67890"))
+        org.junit.Assert.assertTrue(output.contains("local_safe_abcdef"))
+        org.junit.Assert.assertTrue(output.contains("file-safe123"))
+    }
 }

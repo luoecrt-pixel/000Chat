@@ -1,23 +1,35 @@
 package com.example.openaichat
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.annotation.VisibleForTesting
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 
-class SecureStore(context: Context) {
-    private val prefs=context.getSharedPreferences("secure",Context.MODE_PRIVATE)
-    private val alias="OpenAIApiChatKey"
+class SecureStore(
+    context: Context,
+    @get:VisibleForTesting internal val encryptOverride: ((ByteArray) -> ByteArray)? = null
+) {
+    companion object {
+        private val keystoreLock = Any()
+        @Volatile
+        @VisibleForTesting
+        internal var failWritesForTesting: Boolean = false
+    }
 
-    private fun key():SecretKey{
-        val ks=KeyStore.getInstance("AndroidKeyStore").apply{load(null)}
-        (ks.getKey(alias,null) as? SecretKey)?.let{return it}
-        val gen=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore")
+    private val prefs = context.getSharedPreferences("secure", Context.MODE_PRIVATE)
+    private val alias = "OpenAIApiChatKey"
+
+    private fun key(): SecretKey = synchronized(keystoreLock) {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (ks.getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
+        val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         gen.init(
             KeyGenParameterSpec.Builder(
                 alias,
@@ -28,38 +40,56 @@ class SecureStore(context: Context) {
                 .setRandomizedEncryptionRequired(true)
                 .build()
         )
-        return gen.generateKey()
+        gen.generateKey()
     }
 
-    private fun setSecret(name:String, value:String){
-        if(value.isBlank()){
-            prefs.edit().remove(name).apply()
-            return
+    private fun setSecret(name: String, value: String): Boolean = synchronized(keystoreLock) {
+        if (value.isBlank()) {
+            return@synchronized prefs.edit().remove(name).commit()
         }
-        val c=Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.ENCRYPT_MODE,key())
-        val p=c.iv+c.doFinal(value.toByteArray(Charsets.UTF_8))
-        prefs.edit().putString(name,Base64.encodeToString(p,Base64.NO_WRAP)).apply()
+        try {
+            if (failWritesForTesting) {
+                throw GeneralSecurityException("Synthetic Keystore write failure")
+            }
+            val raw = value.toByteArray(Charsets.UTF_8)
+            val payload = if (encryptOverride != null) {
+                encryptOverride.invoke(raw)
+            } else {
+                val c = Cipher.getInstance("AES/GCM/NoPadding")
+                c.init(Cipher.ENCRYPT_MODE, key())
+                c.iv + c.doFinal(raw)
+            }
+            val encoded = Base64.encodeToString(payload, Base64.NO_WRAP)
+            if (!prefs.edit().putString(name, encoded).commit()) {
+                prefs.edit().remove(name).commit()
+                return@synchronized false
+            }
+            true
+        } catch (_: Exception) {
+            // Never leave an older account's credential active when a key replacement fails.
+            prefs.edit().remove(name).commit()
+            false
+        }
     }
 
-    private fun getSecret(name:String):String{
-        return try{
-            val p=Base64.decode(prefs.getString(name,null)?:return "",Base64.NO_WRAP)
-            if(p.size<13)return ""
-            val iv=p.copyOfRange(0,12)
-            val d=p.copyOfRange(12,p.size)
-            val c=Cipher.getInstance("AES/GCM/NoPadding")
-            c.init(Cipher.DECRYPT_MODE,key(),GCMParameterSpec(128,iv))
-            String(c.doFinal(d),Charsets.UTF_8)
-        }catch(_:Exception){""}
+    private fun getSecret(name: String): String = synchronized(keystoreLock) {
+        try {
+            val p = Base64.decode(prefs.getString(name, null) ?: return@synchronized "", Base64.NO_WRAP)
+            if (p.size < 13) return@synchronized ""
+            val iv = p.copyOfRange(0, 12)
+            val d = p.copyOfRange(12, p.size)
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
+            String(c.doFinal(d), Charsets.UTF_8)
+        } catch (_: Exception) { "" }
     }
 
-    fun setApiKey(v:String)=setSecret("key",v)
-    fun getApiKey():String=getSecret("key")
+    fun setApiKey(v: String): Boolean = setSecret("key", v)
+    fun getApiKey(): String = getSecret("key")
 
-    fun setOpenRouterApiKey(v:String)=setSecret("openrouter_key",v)
-    fun getOpenRouterApiKey():String=getSecret("openrouter_key")
+    fun setOpenRouterApiKey(v: String): Boolean = setSecret("openrouter_key", v)
+    fun getOpenRouterApiKey(): String = getSecret("openrouter_key")
 
-    fun setGitHubToken(v:String)=setSecret("github_pat",v)
-    fun getGitHubToken():String=getSecret("github_pat")
+    fun setGitHubToken(v: String): Boolean = setSecret("github_pat", v)
+    fun getGitHubToken(): String = getSecret("github_pat")
 }

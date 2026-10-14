@@ -62,7 +62,8 @@ object StructuredDocumentExtractor {
     private fun text(zip: ZipFile, target: File, extension: String, budget: Budget) {
         val entries = when (extension) {
             "docx" -> listOf("word/document.xml") + zip.entries().asSequence().map { it.name }
-                .filter { it.matches(Regex("word/(header|footer)[0-9]+\\.xml")) || it in setOf("word/footnotes.xml", "word/endnotes.xml") }.sorted().toList()
+                .filter { it.matches(Regex("word/(header|footer)[0-9]+\\.xml")) || it in setOf("word/footnotes.xml", "word/endnotes.xml") }
+                .sortedWith(compareBy({ it.replace(Regex("[0-9]+"), "") }, { Regex("[0-9]+").find(it)?.value?.toIntOrNull() ?: 0 })).toList()
             "pptx" -> zip.entries().asSequence().map { it.name }
                 .filter { it.matches(Regex("ppt/(slides/slide|notesSlides/notesSlide)[0-9]+\\.xml")) }
                 .sortedBy { Regex("[0-9]+").find(it)?.value?.toIntOrNull() ?: 0 }.toList()
@@ -73,13 +74,18 @@ object StructuredDocumentExtractor {
             entries.forEach { path ->
                 out.write("\n[$path]\n")
                 var depth = 0
+                var ignoredDepth = 0
                 parse(zip, path, budget) { p, type ->
                     val n = name(p)
+                    if (type == XmlPullParser.START_TAG && n in setOf("delText", "instrText")) ignoredDepth++
                     if (type == XmlPullParser.START_TAG && n in setOf("t", "p", "h")) depth++
-                    if (type in setOf(XmlPullParser.TEXT, XmlPullParser.CDSECT) && depth > 0) out.write(p.text.orEmpty())
-                    if (type == XmlPullParser.ENTITY_REF && depth > 0) {
+                    if (type in setOf(XmlPullParser.TEXT, XmlPullParser.CDSECT) && depth > 0 && ignoredDepth == 0) out.write(p.text.orEmpty())
+                    if (type == XmlPullParser.ENTITY_REF && depth > 0 && ignoredDepth == 0) {
                         val value = p.text ?: throw IOException("Неизвестная XML-сущность")
                         out.write(value)
+                    }
+                    if (type == XmlPullParser.END_TAG && n in setOf("delText", "instrText")) {
+                        ignoredDepth = (ignoredDepth - 1).coerceAtLeast(0)
                     }
                     if (type == XmlPullParser.END_TAG && n in setOf("t", "p", "h")) {
                         depth = (depth - 1).coerceAtLeast(0)
@@ -143,9 +149,21 @@ object StructuredDocumentExtractor {
                     val id = attribute(p, "Id") ?: return@parse
                     val raw = attribute(p, "Target") ?: return@parse
                     if (attribute(p, "TargetMode") == "External") return@parse
-                    val uri = URI("xl/").resolve(raw).normalize()
-                    if (uri.isAbsolute) return@parse
-                    relationships[id] = uri.path.removePrefix("/")
+                    val normalizedRaw = raw.replace('\\', '/')
+                    if (normalizedRaw.contains("://")) return@parse
+                    val baseParts = if (normalizedRaw.startsWith("/")) emptyList() else listOf("xl")
+                    val resolvedParts = mutableListOf<String>()
+                    for (segment in baseParts + normalizedRaw.trimStart('/').split('/')) {
+                        if (segment.isEmpty() || segment == ".") continue
+                        if (segment == "..") {
+                            if (resolvedParts.isEmpty()) throw IOException("Недопустимый путь листа XLSX: $raw")
+                            resolvedParts.removeAt(resolvedParts.lastIndex)
+                        } else {
+                            resolvedParts.add(segment)
+                        }
+                    }
+                    if (resolvedParts.isEmpty()) return@parse
+                    relationships[id] = resolvedParts.joinToString("/")
                 }
             }
             val sheets = linkedMapOf<String, String>()
@@ -158,6 +176,8 @@ object StructuredDocumentExtractor {
                 }
             }
             if (sheets.isEmpty()) throw IOException("В XLSX не найдены листы")
+            index.beginTransactionNonExclusive()
+            try {
             target.writer(Charsets.UTF_8).use { out ->
                 sheets.forEach { (sheet, path) ->
                     out.write(JSONObject().put("sheet", sheet).put("record", "sheet").toString()); out.write("\n")
@@ -211,6 +231,10 @@ object StructuredDocumentExtractor {
                         }
                     }
                 }
+            }
+            index.setTransactionSuccessful()
+            } finally {
+                index.endTransaction()
             }
         } finally {
             index.close()
