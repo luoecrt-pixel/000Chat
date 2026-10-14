@@ -34,6 +34,116 @@ class BackgroundResponseWorkerCheckpointIntegrationTest {
                 .build())
             .build()
 
+    @Test fun everyTerminalEventSurvivesSQLiteReopenAndRealWorkerFinalizesItOnlyOnce() {
+        for (type in listOf("response.completed", "response.incomplete", "response.failed",
+            "response.cancelled", "error", "response.error")) {
+            val chatId = "worker-six-terminals-" + UUID.randomUUID()
+            val requestId = "req_" + type
+            val responseId = "resp_" + type
+            val status = when (type) {
+                "error", "response.error" -> "failed"
+                else -> type.removePrefix("response.")
+            }
+            try {
+                var state = ResponseEventState(responseId = responseId)
+                val signed = JSONObject().put("type", "reasoning").put("id", "rs_paid")
+                    .put("encrypted_content", "signed-exact-$type")
+                val tool = JSONObject().put("type", "web_search_call").put("id", "tool_paid")
+                    .put("status", "completed")
+                for ((index, item) in listOf(signed, tool).withIndex()) {
+                    state = ResponseEventReducer.reduce(state, JSONObject()
+                        .put("type", "response.output_item.done").put("output_index", index)
+                        .put("item", item)).state
+                }
+                state = ResponseEventReducer.reduce(state, JSONObject()
+                    .put("type", "response.reasoning_summary_text.delta")
+                    .put("delta", "Readable received summary")).state
+                state = ResponseEventReducer.reduce(state, JSONObject()
+                    .put("type", "response.output_text.delta").put("output_index", 2)
+                    .put("content_index", 0).put("delta", "paid partial")).state
+                val receivedMessage = JSONObject().put("type", "message").put("id", "msg_paid")
+                    .put("role", "assistant").put("content", JSONArray()
+                        .put(JSONObject().put("type", "output_text").put("text", "paid ")
+                            .put("annotations", JSONArray().put(JSONObject().put("type", "url_citation")
+                                .put("url", "https://example.test/source").put("title", "Paid citation"))))
+                        .put(JSONObject().put("type", "refusal").put("refusal", "partial")))
+                state = ResponseEventReducer.reduce(state, JSONObject()
+                    .put("type", "response.output_item.done").put("output_index", 2)
+                    .put("item", receivedMessage)).state
+                val event = JSONObject().put("type", type)
+                if (type == "error" || type == "response.error") {
+                    event.put("error", JSONObject().put("code", "server_error")
+                        .put("message", "provider failure"))
+                } else {
+                    // A valid terminal may omit output already received in
+                    // done events. Finalization must merge the stored fallback.
+                    event.put("response", JSONObject().put("id", responseId).put("status", status)
+                        .put("usage", JSONObject().put("input_tokens", 13).put("output_tokens", 23))
+                        .apply {
+                            if (status == "failed") put("error", JSONObject().put("message", "provider failure"))
+                            if (status == "incomplete") put("incomplete_details", JSONObject().put("reason", "max_output_tokens"))
+                        })
+                }
+                state = ResponseEventReducer.reduce(state, event).state
+                ChatDatabase(context).use { db ->
+                    db.ensureChat(chatId, "Six terminal kinds")
+                    db.upsertCurrentChat(chatId, "Six terminal kinds", null, "high",
+                        listOf(JSONObject().put("role", "user").put("text", "Prompt")
+                            .put("provider", "openai").put("request_id", requestId)))
+                    db.setActiveResponse(chatId, responseId, requestId, "", "starting",
+                        System.currentTimeMillis(), "high", "high", false, 6, 0, true)
+                    db.updateActiveResponse(chatId, responseId, state.text, status, 6,
+                        requestId, ResponseIndexedCheckpoint.serialize(state))
+                }
+                ChatDatabase(context).use { db ->
+                    val active = db.getActiveResponse(chatId)!!
+                    assertEquals(type, status, active.getString("status"))
+                    val reopened = ResponseIndexedCheckpoint.restore(active)
+                    assertEquals(type, status, reopened.terminalState!!.wireStatus)
+                    assertEquals(responseId, reopened.terminalResponse!!.getString("id"))
+                    assertEquals("paid partial", reopened.text)
+                    if (status == "failed") assertEquals("provider failure", reopened.completionError)
+                }
+                val expectedResult = if (status == "failed") ListenableWorker.Result.failure()
+                    else ListenableWorker.Result.success()
+                assertEquals(type, expectedResult, runBlocking { worker(chatId, responseId, requestId).doWork() })
+                ChatDatabase(context).use { db ->
+                    assertNull(type, db.getActiveResponse(chatId))
+                    val chat = db.getChat(chatId)!!
+                    val messages = chat.getJSONArray("messages")
+                    assertEquals(type, 2, messages.length())
+                    val assistant = messages.getJSONObject(1)
+                    assertEquals(type, status, assistant.getString("status"))
+                    assertEquals("paid partial", assistant.getString("text"))
+                    assertEquals("Readable received summary", assistant.getString("reasoning_summary"))
+                    assertEquals("signed-exact-$type", assistant.getJSONArray("openai_protocol_output")
+                        .getJSONObject(0).getString("encrypted_content"))
+                    assertEquals("tool_paid", assistant.getJSONArray("openai_protocol_output")
+                        .getJSONObject(1).getString("id"))
+                    assertTrue(assistant.getJSONArray("tools").toString().contains("Web Search"))
+                    val retainedMessage = assistant.getJSONArray("openai_protocol_output").getJSONObject(2)
+                    assertEquals("message", retainedMessage.getString("type"))
+                    assertEquals("partial", retainedMessage.getJSONArray("content")
+                        .getJSONObject(1).getString("refusal"))
+                    assertEquals("https://example.test/source", assistant.getJSONArray("annotations")
+                        .getJSONObject(0).getString("url"))
+                    val replay = OpenAiLocalContextEncoder.encode(listOf(assistant))
+                    assertEquals(receivedMessage.toString(), replay.getJSONObject(2).toString())
+                    val occurrences = Regex("paid partial").findAll(replay.toString()).count()
+                    assertEquals("Interrupted marker must not repeat structured visible text", 0, occurrences)
+                    if (status == "completed") assertEquals(responseId, JsonProtocol.nonBlank(chat, "response_id"))
+                    else assertNull("Only completed terminals can extend the server chain",
+                        JsonProtocol.nonBlank(chat, "response_id"))
+                }
+                assertEquals(ListenableWorker.Result.success(),
+                    runBlocking { worker(chatId, responseId, requestId).doWork() })
+                ChatDatabase(context).use { db ->
+                    assertEquals(type, 2, db.getChat(chatId)!!.getJSONArray("messages").length())
+                }
+            } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
+        }
+    }
+
     @Test fun completedTerminalOnDiskIsFinalizedByRealWorkerWithoutNetworkOrDoubleCommit() {
         val chatId = "worker-terminal-" + UUID.randomUUID()
         val requestId = "req_completed"
@@ -92,6 +202,40 @@ class BackgroundResponseWorkerCheckpointIntegrationTest {
         } finally {
             ChatDatabase(context).use { it.deleteChat(chatId) }
         }
+    }
+
+    @Test fun damagedTerminalWithoutProviderResponseFailsClosedAfterSQLiteReopen() {
+        val chatId = "worker-damaged-terminal-" + UUID.randomUUID()
+        val requestId = "req_damaged_terminal"
+        val responseId = "resp_damaged_terminal"
+        try {
+            val partial = ResponseEventReducer.reduce(ResponseEventState(responseId = responseId),
+                JSONObject().put("type", "response.output_text.delta").put("output_index", 0)
+                    .put("content_index", 0).put("delta", "paid fragment")).state
+            val damaged = JSONObject(ResponseIndexedCheckpoint.serialize(partial))
+                .put("terminal_state", "completed") // canonical response was lost
+            ChatDatabase(context).use { db ->
+                db.ensureChat(chatId, "Damaged terminal")
+                db.upsertCurrentChat(chatId, "Damaged terminal", null, "high",
+                    listOf(JSONObject().put("role", "user").put("text", "Prompt")
+                        .put("provider", "openai").put("request_id", requestId)))
+                db.setActiveResponse(chatId, responseId, requestId, "", "starting",
+                    System.currentTimeMillis(), "high", "high", false, 6, 0, true)
+                db.updateActiveResponse(chatId, responseId, partial.text, "completed", 5,
+                    requestId, damaged.toString())
+            }
+            assertEquals(ListenableWorker.Result.failure(),
+                runBlocking { worker(chatId, responseId, requestId).doWork() })
+            ChatDatabase(context).use { db ->
+                assertNull(db.getActiveResponse(chatId))
+                val chat = db.getChat(chatId)!!
+                assertNull(JsonProtocol.nonBlank(chat, "response_id"))
+                val assistant = chat.getJSONArray("messages").getJSONObject(1)
+                assertEquals("paid fragment", assistant.getString("text"))
+                assertEquals("failed", assistant.getString("status"))
+                assertTrue(assistant.getString("error").contains("not preserved"))
+            }
+        } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
     }
 
     @Test fun stoppedOrReplacedOwnerCannotBeRevivedByRealWorker() {

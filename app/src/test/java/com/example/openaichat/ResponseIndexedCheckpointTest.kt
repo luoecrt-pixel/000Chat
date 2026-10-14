@@ -195,16 +195,80 @@ class ResponseIndexedCheckpointTest {
     @Test fun missingTerminalProviderOutputIsUnrecoverableNotRetryable() {
         val state = ResponseEventReducer.reduce(ResponseEventState(),
             delta(2, 0, 0, "visible")).state
-        val broken = JSONObject(ResponseIndexedCheckpoint.serialize(state))
-            .put("terminal_state", "completed")
-        val active = JSONObject().put("status", "completed")
-            .put("text", "visible").put("last_sequence_number", 3)
-            .put("indexed_checkpoint", broken.toString())
-        try {
-            ResponseIndexedCheckpoint.restore(active)
-            fail("A paid terminal output cannot be regenerated from a flat string")
-        } catch (e: UnrecoverableResponsesCheckpointException) {
-            assertTrue(e.message.orEmpty().contains("not preserved"))
+        for (terminal in ResponseTerminalState.values()) {
+            val broken = JSONObject(ResponseIndexedCheckpoint.serialize(state))
+                .put("terminal_state", terminal.wireStatus)
+            val active = JSONObject().put("status", terminal.wireStatus)
+                .put("text", "visible").put("last_sequence_number", 3)
+                .put("indexed_checkpoint", broken.toString())
+            try {
+                ResponseIndexedCheckpoint.restore(active)
+                fail("A paid terminal output cannot be regenerated from a flat string")
+            } catch (e: UnrecoverableResponsesCheckpointException) {
+                assertTrue(e.message.orEmpty().contains("not preserved"))
+            }
+        }
+    }
+
+    @Test fun streamingErrorsRestoreAsOwnedFailedTerminalWithOriginalErrorAndPartial() {
+        for (type in listOf("error", "response.error")) {
+            var state = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+                delta(1, 0, 0, "paid partial")).state
+            state = ResponseEventReducer.reduce(state, JSONObject().put("type", type)
+                .put("error", JSONObject().put("code", "server_error")
+                    .put("message", "provider failed"))).state
+            assertEquals(ResponseTerminalState.FAILED, state.terminalState)
+            val reopened = ResponseIndexedCheckpoint.restore(JSONObject().put("response_id", "resp_owned")
+                .put("text", state.text).put("status", "failed")
+                .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state)))
+            assertEquals("paid partial", reopened.text)
+            assertEquals("resp_owned", reopened.terminalResponse!!.getString("id"))
+            assertEquals("failed", reopened.terminalResponse!!.getString("status"))
+            assertEquals("server_error", reopened.terminalResponse!!.getJSONObject("error").getString("code"))
+            assertEquals("provider failed", reopened.completionError)
+            val late = ResponseEventReducer.reduce(reopened, delta(2, 0, 0, "late mutation"))
+            assertEquals(reopened, late.state)
+        }
+    }
+
+    @Test fun doneStructuredMessageSurvivesMissingTerminalOutputAndReplayButAddedMessageIsNotTrusted() {
+        val message = JSONObject().put("type", "message").put("id", "msg_paid")
+            .put("role", "assistant").put("content", org.json.JSONArray()
+                .put(JSONObject().put("type", "output_text").put("text", "Received text")
+                    .put("annotations", org.json.JSONArray().put(JSONObject()
+                        .put("type", "url_citation").put("url", "https://example.test/paid"))))
+                .put(JSONObject().put("type", "refusal").put("refusal", "Received refusal")))
+        val initial = ResponseEventState(responseId = "resp_owned")
+        val provisional = ResponseEventReducer.reduce(initial, JSONObject()
+            .put("type", "response.output_item.added").put("output_index", 0).put("item", message)).state
+        assertTrue("Provisional messages cannot be replayed as completed typed output",
+            provisional.typedOutputItems.isEmpty())
+        for (type in listOf("response.completed", "response.incomplete", "response.failed",
+            "response.cancelled", "error", "response.error")) {
+            var state = ResponseEventReducer.reduce(initial, JSONObject()
+                .put("type", "response.output_item.done").put("output_index", 0).put("item", message)).state
+            val event = JSONObject().put("type", type)
+            if (type == "error" || type == "response.error")
+                event.put("error", JSONObject().put("message", "provider failure"))
+            else event.put("response", JSONObject().put("id", "resp_owned")
+                .put("status", type.removePrefix("response.")))
+            state = ResponseEventReducer.reduce(state, event).state
+            val reopened = ResponseIndexedCheckpoint.restore(JSONObject().put("response_id", "resp_owned")
+                .put("text", state.text).put("status", state.terminalState!!.wireStatus)
+                .put("indexed_checkpoint", ResponseIndexedCheckpoint.serialize(state)))
+            val effective = OpenAiEffectiveResponse.assemble(reopened.terminalResponse, reopened)
+            val canonical = OpenAiSseStreamReader.terminalOutputText(effective)
+            assertEquals("Received textReceived refusal", canonical)
+            val model = AstraResponseModel.fromResponse(effective, canonical)
+            assertEquals("https://example.test/paid", model.annotations.getJSONObject(0).getString("url"))
+            val assistant = model.toChatJson().put("provider", "openai")
+                .put("openai_protocol_output", effective.getJSONArray("output"))
+            val replay = OpenAiLocalContextEncoder.encode(listOf(assistant))
+            assertEquals(type, message.toString(), replay.getJSONObject(0).toString())
+            if (replay.length() > 1) {
+                assertFalse(replay.getJSONObject(1).getString("content").contains("Received text"))
+                assertFalse(replay.getJSONObject(1).getString("content").contains("Received refusal"))
+            }
         }
     }
 

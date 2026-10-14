@@ -129,6 +129,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+      - name: Upload instrumentation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-instrumentation-evidence
+          path: |
+            app/build/reports/androidTests/connected/
+            app/build/outputs/androidTest-results/connected/
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:

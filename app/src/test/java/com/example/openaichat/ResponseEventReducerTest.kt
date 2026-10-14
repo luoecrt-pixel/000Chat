@@ -162,6 +162,35 @@ class ResponseEventReducerTest {
         assertEquals("provider fault", result.state.completionError)
     }
 
+    @Test fun streamingErrorRetainsNestedPaidOutputAndErrorFieldsWithoutMutatingReceivedResponse() {
+        val error = JSONObject().put("message", JSONObject.NULL).put("code", "server_error")
+            .put("details", JSONObject().put("retryable", false))
+        val terminal = JSONObject().put("id", "resp_owned").put("status", "in_progress")
+            .put("output", org.json.JSONArray().put(JSONObject().put("type", "message")
+                .put("content", org.json.JSONArray().put(JSONObject().put("type", "refusal")
+                    .put("refusal", "canonical refusal")))))
+        for (type in listOf("error", "response.error")) {
+            val reduced = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_owned"),
+                JSONObject().put("type", type).put("response", terminal).put("error", error)
+                    .put("message", "top-level provider diagnostic")).state
+            assertEquals(ResponseTerminalState.FAILED, reduced.terminalState)
+            assertEquals("canonical refusal", reduced.text)
+            assertEquals("failed", reduced.terminalResponse!!.getString("status"))
+            assertEquals("resp_owned", reduced.terminalResponse!!.getString("id"))
+            val retainedError = reduced.terminalResponse!!.getJSONObject("error")
+            assertEquals("server_error", retainedError.getString("code"))
+            assertEquals(false, retainedError.getJSONObject("details").getBoolean("retryable"))
+            assertEquals("top-level provider diagnostic", reduced.completionError)
+            assertEquals("in_progress", terminal.getString("status"))
+            assertTrue(error.isNull("message"))
+            try {
+                ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_other"),
+                    JSONObject().put("type", type).put("response", terminal).put("error", error))
+                fail("A failed response must not claim a different owner's paid output")
+            } catch (_: ResponsesResponseIdentityException) { }
+        }
+    }
+
     @Test
     fun cancellationIsTerminalWithoutInventingText() {
         val initial = ResponseEventState(text = "partial")

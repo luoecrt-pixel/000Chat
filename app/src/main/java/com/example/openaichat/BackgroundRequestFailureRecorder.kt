@@ -63,6 +63,9 @@ object BackgroundRequestFailureRecorder {
                 .put("error", error.take(1200))
                 .apply { requestedModel?.let { put("requested_model", it) } }
                 .apply {
+                    userMessage?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
                     sourceMessage.optJSONArray("annotations")?.let { put("annotations", it) }
                     if (summary.isNotBlank()) put("reasoning_summary", summary)
                     if (typed.isNotEmpty()) put("openai_protocol_output",

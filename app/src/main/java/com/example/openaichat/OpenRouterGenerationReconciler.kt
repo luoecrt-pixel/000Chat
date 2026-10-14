@@ -5,6 +5,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.IOException
 
 /**
  * Bounded read-only OpenRouter generation reconciliation. Every request is
@@ -14,7 +15,9 @@ import org.json.JSONObject
 class OpenRouterGenerationReconciler(
     private val http: OkHttpClient,
     private val baseUrl: HttpUrl = "https://openrouter.ai/api/v1/".toHttpUrl(),
-    private val maxLookups: Int = 4
+    private val maxLookups: Int = 4,
+    private val bodyLimits: BoundedResponseDecoder.BodyLimits = BoundedResponseDecoder.BodyLimits(),
+    private val onDiagnostic: (Int, String) -> Unit = { _, _ -> }
 ) {
     fun reconcile(
         rounds: List<JSONObject>,
@@ -23,6 +26,10 @@ class OpenRouterGenerationReconciler(
     ): Int {
         if (apiKey.isBlank()) return 0
         var attempts = 0
+        fun report(status: Int, failure: IOException) {
+            try { onDiagnostic(status, "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}") }
+            catch (_: Exception) { /* Optional diagnostics do not replace unknown accounting. */ }
+        }
         val candidates = rounds.asSequence()
             .filter { it.optString("cost_kind", "unknown") != "provider_reported" }
             .mapNotNull { it.optString("generation_id").takeIf { id ->
@@ -41,10 +48,18 @@ class OpenRouterGenerationReconciler(
                 http.newCall(request).execute().use { response ->
                     code = response.code
                     metadata = if (response.isSuccessful) {
-                        try { JSONObject(response.body?.string().orEmpty()).optJSONObject("data") }
+                        val raw = BoundedResponseDecoder.readBody(response.body, bodyLimits)
+                        try { JSONObject(raw).optJSONObject("data") }
                         catch (_: Exception) { null }
-                    } else null
+                    } else {
+                        BoundedResponseDecoder.readErrorBody(response.body, onDecodeFailure = { report(code, it) })
+                        null
+                    }
                 }
+            } catch (failure: IOException) {
+                report(code, failure)
+                if (code != 0) attempts++
+                break
             } catch (_: Exception) {
                 break
             }

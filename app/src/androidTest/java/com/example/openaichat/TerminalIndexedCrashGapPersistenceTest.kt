@@ -25,8 +25,13 @@ class TerminalIndexedCrashGapPersistenceTest {
         // Positive native-processing fixture within the real heap budget;
         // oversized output is separately covered by full-source refusal tests.
         val characterBudget = Runtime.getRuntime().maxMemory() / 3L / 32L
-        val fragment = "x".repeat(minOf(256L, characterBudget / 3L / 4_096L).toInt()) + "😀\u0000"
-        val signed = "opaque-signature-\u0000😀".repeat(minOf(65_536L, characterBudget / 2L / 20L).toInt())
+        // Charge old/canonical text, typed output and terminal JSON together.
+        // Escaped signed bytes keep the SQLite checkpoint multi-megabyte even
+        // when the emulator heap safely allows fewer native characters.
+        val fragment = "x".repeat(minOf(256L, characterBudget / 12L / 4_096L).toInt()) + "😀\u0000"
+        val signedFragment = "opaque-signature-\u0000😀" + "\u0000".repeat(12)
+        val signed = signedFragment.repeat(minOf(65_536L,
+            characterBudget / 4L / signedFragment.length).toInt())
         val reasoning = JSONObject().put("type", "reasoning").put("id", "rs_large")
             .put("encrypted_content", signed)
         val user = JSONObject().put("role", "user").put("text", "Large checkpoint fixture")

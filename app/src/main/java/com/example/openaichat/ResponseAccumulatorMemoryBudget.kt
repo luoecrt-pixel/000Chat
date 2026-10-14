@@ -17,6 +17,7 @@ internal object ResponseAccumulatorMemoryBudget {
         summaryCharacters: Long = current.reasoningSummary.length.toLong(),
         replacementIndex: Int? = null,
         replacementItem: JSONObject? = null,
+        terminalResponse: JSONObject? = null,
         limitBytes: Long = Long.MAX_VALUE
     ) {
         val limit = minOf(limitBytes, Runtime.getRuntime().maxMemory() / 3L)
@@ -55,6 +56,10 @@ internal object ResponseAccumulatorMemoryBudget {
             }
         }
         replacementItem?.let { bytes += 256L + jsonBytes(it) }
+        // A terminal frame retains provider JSON as well as the assembled
+        // transcript and already received signed/tool items. Charge that JSON
+        // before the caller allocates the canonical StringBuilder/string.
+        terminalResponse?.let { bytes += jsonBytes(it) }
         if (bytes > limit) fail()
     }
 

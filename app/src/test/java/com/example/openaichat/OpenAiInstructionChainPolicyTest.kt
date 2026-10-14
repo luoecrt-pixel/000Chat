@@ -14,6 +14,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenAiInstructionChainPolicyTest {
+    private fun fingerprint(instructions: GenerationInstructions, key: String = "sk-chain-fixture",
+                            model: String = "gpt-6-astra") =
+        OpenAiInstructionChainPolicy.fingerprint(instructions, key, model)
+
     private fun instructions(system: String? = "system", developer: String? = "developer",
                              presentation: String? = "format") =
         GenerationInstructions(system, developer, presentation)
@@ -26,7 +30,7 @@ class OpenAiInstructionChainPolicyTest {
         .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, signature)
 
     @Test fun reuseOnlyForMatchingCompletedImmediateAssistant() {
-        val signature = OpenAiInstructionChainPolicy.fingerprint(instructions())
+        val signature = fingerprint(instructions())
         val previous = completed("resp_1", signature)
         assertTrue(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous), signature))
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_2", listOf(previous), signature))
@@ -38,24 +42,46 @@ class OpenAiInstructionChainPolicyTest {
 
     @Test fun changingEitherInstructionRoleOrPresentationBreaksChain() {
         val current = instructions()
-        val signature = OpenAiInstructionChainPolicy.fingerprint(current)
+        val signature = fingerprint(current)
         val previous = completed("resp_1", signature)
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous),
-            OpenAiInstructionChainPolicy.fingerprint(instructions(system = "changed"))))
+            fingerprint(instructions(system = "changed"))))
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous),
-            OpenAiInstructionChainPolicy.fingerprint(instructions(developer = "changed"))))
+            fingerprint(instructions(developer = "changed"))))
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous),
-            OpenAiInstructionChainPolicy.fingerprint(instructions(presentation = null))))
-        assertEquals(signature, OpenAiInstructionChainPolicy.fingerprint(
+            fingerprint(instructions(presentation = null))))
+        assertEquals(signature, fingerprint(
             instructions(system = " system ", developer = " developer ", presentation = " format ")))
         // Same words in different privileged roles must not reuse the chain.
-        assertFalse(signature == OpenAiInstructionChainPolicy.fingerprint(
+        assertFalse(signature == fingerprint(
             instructions(system = "developer", developer = "system")))
         assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous), ""))
     }
 
+    @Test fun credentialModelAndLegacyInstructionOnlyHashCannotInheritChain() {
+        val signature = fingerprint(instructions())
+        val previous = completed("resp_1", signature)
+        assertTrue(OpenAiInstructionChainPolicy.matchesCredential(signature, "sk-chain-fixture"))
+        assertFalse(OpenAiInstructionChainPolicy.matchesCredential(signature, "sk-other-account"))
+        assertFalse(OpenAiInstructionChainPolicy.matchesCredential(signature, ""))
+        assertFalse(OpenAiInstructionChainPolicy.matchesCredential(null, "sk-chain-fixture"))
+        assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous),
+            fingerprint(instructions(), key = "sk-other-account")))
+        assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1", listOf(previous),
+            fingerprint(instructions(), model = "gpt-6-sol")))
+        assertEquals(signature, fingerprint(instructions(), model = " gpt-6-astra "))
+        assertFalse(signature == fingerprint(instructions(), model = "GPT-6-ASTRA"))
+        assertFalse(signature.contains("sk-chain-fixture"))
+        // Even identical old instruction-only hashes never acquire a binding.
+        val legacy = "f".repeat(64)
+        assertFalse(OpenAiInstructionChainPolicy.canReuse("resp_1",
+            listOf(completed("resp_1", legacy)), legacy))
+        assertFalse(OpenAiInstructionChainPolicy.matchesCredential(legacy, "sk-chain-fixture"))
+        assertEquals("", fingerprint(instructions(), key = ""))
+    }
+
     @Test fun legacyIncompleteFailedAndForeignTurnsForceReplay() {
-        val signature = OpenAiInstructionChainPolicy.fingerprint(instructions())
+        val signature = fingerprint(instructions())
         val previous = completed("resp_1", signature)
         val mutations = listOf(
             JSONObject(previous.toString()).apply { remove(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD) },
@@ -73,7 +99,7 @@ class OpenAiInstructionChainPolicyTest {
 
     @Test fun matchingChainDoesNotRepeatRoleMessagesAndFallbackPreservesTypedInput() {
         val instructions = instructions()
-        val signature = OpenAiInstructionChainPolicy.fingerprint(instructions)
+        val signature = fingerprint(instructions)
         val previous = completed("resp_1", signature)
         val nextTurn = JSONObject().put("role", "user").put("content", JSONArray()
             .put(JSONObject().put("type", "input_text").put("text", "Next"))
@@ -116,7 +142,7 @@ class OpenAiInstructionChainPolicyTest {
             }
 
             val settings = instructions()
-            val fingerprint = OpenAiInstructionChainPolicy.fingerprint(settings)
+            val fingerprint = fingerprint(settings)
             val first = JSONObject().put("input", JSONArray().put(
                 JSONObject().put("role", "user").put("content", "first")))
             settings.applyToOpenAiRequest(first)
@@ -132,7 +158,7 @@ class OpenAiInstructionChainPolicyTest {
             send(second)
 
             val changed = instructions(developer = "new developer")
-            val changedFingerprint = OpenAiInstructionChainPolicy.fingerprint(changed)
+            val changedFingerprint = fingerprint(changed)
             val third = JSONObject().put("input", JSONArray()
                 .put(JSONObject().put("role", "user").put("content", JSONArray()
                     .put(JSONObject().put("type", "input_image")

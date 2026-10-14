@@ -72,10 +72,10 @@ object OpenAiLocalContextEncoder {
                         input.put(JSONObject(item.toString()))
                     }
                     if (interrupted) {
-                        // No terminal output: keep exact visible partial and received
-                        // summary, with an explicit limitation about inaccessible
-                        // reasoning/tool state. This only happens on a NEW user Send.
-                        input.put(OpenAiInterruptedTurnReplay.asVisibleTranscript(message))
+                        // The marker describes the unsuccessful turn, but only repeats
+                        // fragments not already retained in its typed output above.
+                        // Never strip message items: they also own refusal/annotations.
+                        input.put(OpenAiInterruptedTurnReplay.asVisibleTranscript(message, output))
                     }
                 } else if (text.isNotEmpty()) {
                     input.put(JSONObject().put("role", role).put("content", text))

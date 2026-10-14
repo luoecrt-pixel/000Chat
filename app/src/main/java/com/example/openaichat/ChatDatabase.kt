@@ -507,6 +507,17 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
     }
 
+    /** Recovery needs only this small binding, never another copy of the full history. */
+    fun getOpenAiRequestFingerprint(chatId: String, requestId: String): String? {
+        if (chatId.isBlank() || requestId.isBlank()) return null
+        readableDatabase.query(MESSAGE_TABLE, arrayOf(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD),
+            "chat_id=? AND request_id=? AND role='user' AND provider='openai' " +
+                "AND length(openai_instructions_sha256)=132",
+            arrayOf(chatId, requestId), null, null, "position ASC", "1").use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
     fun listChats(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE, null, null, null, null, null, "updated_at DESC, id DESC").use { c ->

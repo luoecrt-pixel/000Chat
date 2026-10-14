@@ -308,15 +308,29 @@ assert 'pollingClient' in main
 # Responses SSE framing moved into a shared foreground/recovery reader in STREAM-01.
 reader = (ROOT / 'app/src/main/java/com/example/openaichat/OpenAiSseStreamReader.kt').read_text()
 resumable = (ROOT / 'app/src/main/java/com/example/openaichat/ResumableResponseStreamClient.kt').read_text()
-assert 'SseEventParser()' in reader
+bounded_decoder = (ROOT / 'app/src/main/java/com/example/openaichat/BoundedResponseDecoder.kt').read_text()
+router_client = (ROOT / 'app/src/main/java/com/example/openaichat/OpenRouterChatClient.kt').read_text()
+assert 'SseEventParser()' in bounded_decoder
+assert 'BoundedResponseDecoder.readSse(reader' in reader
+assert 'BoundedResponseDecoder.readSse(reader' in router_client
+assert 'BoundedResponseDecoder.openSse(bodyResponse.byteStream(), sseLimits)' in router_client
+assert 'if (frame != null && consume(frame)) { stopped = true; break }' in bounded_decoder
+assert 'CodingErrorAction.REPORT' in bounded_decoder
+assert 'allocation.framingCharacters' in bounded_decoder
+assert 'allocation.json' in bounded_decoder
+assert 'ERROR_BODY_LIMITS' in bounded_decoder
+for transport in (main, resumable, router_client):
+    assert 'body?.string()' not in transport
+    assert 'BoundedResponseDecoder.readErrorBody' in transport
+assert 'reader.readLine()' not in router_client
 assert 'OpenAiReceivedSseReader.read(reader, rawSseArchive)' in main
 assert 'OpenAiReceivedSseReader.read(reader, source as? OpenAiRawSseArchive)' in resumable
 received_reader = (ROOT / 'app/src/main/java/com/example/openaichat/OpenAiReceivedSseReader.kt').read_text()
 assert 'OpenAiSseStreamReader.read(reader, limits, onEvent)' in received_reader
 assert 'archive?.receiveRemaining()' in received_reader
-assert 'if (consume(frame.data)) break' in reader
 assert 'OpenAiStreamEnd.DISCONNECTED' in reader
-assert 'terminalOutputText(completedResponse)' in main
+assert 'OpenAiEffectiveResponse.assemble(completedResponse, responseState)' in main
+assert 'terminalOutputText(effectiveResponse)' in main
 assert 'pollingClient.newCall(req)' in main
 assert 'ApiHttpException' in main or (ROOT / 'app/src/main/java/com/example/openaichat/ApiHttpException.kt').exists()
 assert 'sse_event_sequence_gap' in main

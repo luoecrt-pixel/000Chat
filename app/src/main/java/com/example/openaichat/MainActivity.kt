@@ -326,7 +326,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingPickerProvider = null
         }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
-        chatDb = ChatDatabase(this)
+        chatDb = ChatDatabase(applicationContext)
         activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
         diagnostics = AstraDiagnostics(this)
         chatDb.migrateLegacyPrefs(prefs)
@@ -431,7 +431,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         OpenRouterUiBridge.detach(this)
         try { if (!OpenRouterResponseRuntime.uses(openRouterClient)) openRouterClient.close() } catch (_: Exception) {}
         try { resumableResponseClient.close() } catch (_: Exception) {}
-        try { chatDb.close() } catch (_: Exception) {}
+        // shutdownNow can leave a parsed/archived Create callback alive. It
+        // still owns its SQLite claim and compensating /cancel; close only
+        // after all Activity executor callbacks have exited, off the UI thread.
+        val destroyedDatabase = chatDb
+        ExecutorResourceCloser.closeAfterTermination(executor) {
+            try { destroyedDatabase.close() } catch (_: Exception) {}
+        }
         super.onDestroy()
     }
 
@@ -456,7 +462,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         it.optString("cost_kind", "unknown") != "provider_reported" }) return@execute
                 val key = secure.getOpenRouterApiKey()
                 if (key.isBlank()) return@execute
-                val lookedUp = OpenRouterGenerationReconciler(pollingClient).reconcile(rounds, key) {
+                val lookedUp = OpenRouterGenerationReconciler(pollingClient, onDiagnostic = { status, reason ->
+                    diagnostics.log("openrouter_generation_decode_failed", mapOf(
+                        "chat_id" to chatId, "local_request_id" to localRequestId,
+                        "http_status" to status, "reason" to reason))
+                }).reconcile(rounds, key) {
                     generationId, metadata ->
                     chatDb.reconcileOpenRouterGeneration(chatId, localRequestId, generationId, metadata)
                 }
@@ -1062,6 +1072,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val requestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val backgroundEnabled=active?.optBoolean("background_enabled", true) == true
+        val cancelCredential = captureOpenAiRequestCredential(id, active)
         val localPaths=linkedSetOf<String>().apply{
             try{addAll(chatDb.listLocalFilePaths(id))}catch(_:Exception){}
             addAll(listComposerLocalFilePaths(id))
@@ -1078,7 +1089,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         synchronized(activeResumeChats){activeResumeChats.remove(id)}
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         activeResponsePersistence.clearActiveResponse(id, expectedRequestId = requestId)
-        if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId)
+        if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId,cancelCredential)
         localPaths.forEach(::deleteOwnedLocalFile)
         synchronized(composerMergeLock) {
             clearComposerState(id)
@@ -2132,11 +2143,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
 
-    private fun cancelRemoteResponse(chatId:String,responseId:String){
+    private fun captureOpenAiRequestCredential(chatId: String, active: JSONObject?): String? {
+        val requestId = active?.let { JsonProtocol.nonBlank(it, "request_id") } ?: return null
+        val binding = chatDb.getOpenAiRequestFingerprint(chatId, requestId)
+        val original = OpenAiCreateCallOwners.call(chatId, requestId)
+            ?: activeResumeCalls[chatId]?.takeIf {
+                it.request().url.pathSegments.lastOrNull() == JsonProtocol.nonBlank(active, "response_id")
+            }
+        val key = original?.request()?.header("Authorization")
+            ?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ") ?: secure.getApiKey()
+        return key.takeIf { OpenAiInstructionChainPolicy.matchesCredential(binding, it) }
+    }
+
+    private fun cancelRemoteResponse(chatId:String,responseId:String,key:String?){
+        if (key.isNullOrBlank()) return
         executor.execute{
             try{
-                val key=secure.getApiKey()
-                if(key.isBlank())return@execute
                 val req=Request.Builder()
                     .url("https://api.openai.com/v1/responses/$responseId/cancel")
                     .addHeader("Authorization","Bearer $key")
@@ -2163,20 +2185,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
+        val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
+        val originalCredential = captureOpenAiRequestCredential(chatId, active)
         val originalCreate = try {
             activeResponsePersistence.getActiveResponse(chatId)?.let {
                 OpenAiCreateCallOwners.call(chatId, JsonProtocol.string(it, "request_id"))
             }
         } catch (_: Exception) { null }
-        val originalCredential = (currentCall ?: activeResumeCalls[chatId] ?: originalCreate)?.request()
-            ?.header("Authorization")?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
         originalCreate?.cancel()
         currentCall?.cancel()
         cancelOpenRouterRequest()
         openRouterModelPreflightCall.getAndSet(null)?.cancel()
         cancelPendingGitHubConfirmation()
         activeResumeCalls.remove(chatId)?.cancel()
-        val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
         val responseId=active?.optString("response_id").takeIf{!it.isNullOrBlank() && it!="null"}
         val activeRequestId=active?.optString("request_id").takeIf{!it.isNullOrBlank() && it!="null"}
             ?: chat.lastOrNull { it.optString("role") == "user" }?.let { JsonProtocol.nonBlank(it, "request_id") }
@@ -2202,9 +2223,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         // OpenAI only permits /cancel for background=true Responses.
         if (stopped && active?.optBoolean("background_enabled", false) == true &&
-            responseId != null && activeRequestId != null) {
+            responseId != null && activeRequestId != null && originalCredential != null) {
             cancelUnownedOpenAiResponse(chatId, activeRequestId, responseId,
-                originalCredential ?: secure.getApiKey())
+                originalCredential)
         }
         if(!activeRequestRegenerate){
             restoringComposer=true
@@ -2320,7 +2341,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         openRouterModelModalitiesRetryAfter[model] = now + 120_000L
                         return true
                     }
-                    val arr = JSONObject(response.body?.string().orEmpty()).optJSONArray("data")
+                    val arr = JSONObject(BoundedResponseDecoder.readBody(response.body)).optJSONArray("data")
                     if (arr == null) {
                         openRouterModelModalitiesRetryAfter[model] = now + 120_000L
                         return true
@@ -2377,22 +2398,26 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 return
             }
         }
-        // Capture instructions once: the chain decision, actual wire request and
-        // persisted assistant metadata must reflect the same settings snapshot.
+        // Capture the credential, model and instructions once. Chain reuse,
+        // the actual wire request and persisted metadata share this snapshot.
+        val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
+        if(key.isBlank()){showSettings();return}
+        val modelDefault = if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
+        val configuredModel = prefs.getString("model", modelDefault) ?: modelDefault
+        val model = if (provider == "openai") OpenAiInstructionChainPolicy.normalizedModel(configuredModel)
+            else configuredModel
         val openAiInstructions = GenerationInstructions(
             systemPrompt = prefs.getString("system_prompt", ""),
             developerInstructions = prefs.getString("instructions", ""),
             presentationInstructions = presentationInstructionsForRequest()
         )
-        val openAiInstructionFingerprint = OpenAiInstructionChainPolicy.fingerprint(openAiInstructions)
+        val openAiInstructionFingerprint = OpenAiInstructionChainPolicy.fingerprint(openAiInstructions, key, model)
         // previous_response_id inherits prior role-bearing input. Reuse is safe
         // only for the immediate completed turn under identical instructions.
         if (provider == "openrouter") {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
         }
-        val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
-        if(key.isBlank()){showSettings();return}
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {
             if (provider == "openrouter") preparePendingOpenRouterZipsThenSend(regenerate)
             else preparePendingZipsThenSend(regenerate)
@@ -2475,8 +2500,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             imagePath == null && requestOpenRouterAttachments.isEmpty()) return
         if(regenerate && text.isBlank()) return
 
-        val modelDefault = if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
-        val model=prefs.getString("model",modelDefault) ?: modelDefault
         val localRequestId = "local_" + UUID.randomUUID().toString()
         val effortPref=prefs.getString("reasoning","high") ?: "high"
         val hasAttachments = requestFileIds.isNotEmpty() || requestImageFileId != null ||
@@ -2874,6 +2897,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val toolItems=mutableListOf<String>()
             var lastUiUpdate=0L
             var lastActiveCheckpoint=0L
+            val destroyedCallbackCleanup = DestroyedActivityCallbackCleanup { executor.isShutdown }
             try {
                 ResponseDeadlinePolicy.boundCall(call, requestWallStartedAt, System.currentTimeMillis())
                 call.execute().use { response ->
@@ -2881,7 +2905,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     activeResponsePersistence.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
                     if(!response.isSuccessful) throw IOException("HTTP ${response.code}: " +
-                        OpenAiFileFailure.fromHttp(applicationContext, response.body?.string().orEmpty(), response.code))
+                        OpenAiFileFailure.fromHttp(applicationContext, BoundedResponseDecoder.readErrorBody(response.body), response.code))
                     var rawSseArchive: OpenAiRawSseArchive? = null
                     val reader=response.body?.byteStream()?.let { input ->
                         val archived = OpenAiRawSseArchive.begin(
@@ -2894,6 +2918,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
                     fun handleSseEvent(ev:JSONObject): Boolean {
                         openAiReceivedEventHook?.invoke(ev)
+                        // The hook intentionally retains shutdownNow's interrupt.
+                        // SQLite open retries and late-ID cancellation must finish
+                        // before that flag is restored in the task's finally.
+                        destroyedCallbackCleanup.enter()
                         try {
                             val sequenceNumber=ev.optLong("sequence_number",-1L)
                             if(sequenceNumber>=0L){
@@ -2937,6 +2965,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                     lastSequenceNumber = sequenceCursor.lastSequenceNumber,
                                     expectedRequestId = localRequestId
                                 )
+                                if (!activityVisible && backgroundEnabled &&
+                                    activeResponsePersistence.getActiveResponse(requestChatId)
+                                        ?.optString("request_id") == localRequestId) {
+                                    // Persist recovery work before reading another frame.
+                                    // The Worker waits for the registered Create callback,
+                                    // retaining the original Send's started_at and CAS owner.
+                                    BackgroundResponseWorkScheduler.enqueueImmediate(
+                                        applicationContext, requestChatId, newId!!, localRequestId)
+                                }
                                 diagnostics.log("response_created", mapOf(
                                     "request_id" to requestId,
                                     "response_id" to newId,
@@ -2973,12 +3010,26 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                         requestChatId,
                                         responseId = newId,
                                         text = responseState.text,
-                                        status = "in_progress",
+                                        status = responseState.terminalState?.wireStatus ?: "in_progress",
                                         lastSequenceNumber = sequenceCursor.lastSequenceNumber,
                                         indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                         expectedRequestId = localRequestId
                                     )
                                 }
+                            }
+
+                            // Text throttling is independent from the terminal
+                            // commit. Even a text-free failed/cancelled/error frame
+                            // must leave a consistent checkpoint before finalization.
+                            if (responseState.terminalState != null) {
+                                activeResponsePersistence.updateActiveResponse(
+                                    requestChatId, responseId = newId,
+                                    text = responseState.text,
+                                    status = responseState.terminalState!!.wireStatus,
+                                    lastSequenceNumber = sequenceCursor.lastSequenceNumber,
+                                    indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
+                                    expectedRequestId = localRequestId
+                                )
                             }
 
                             if (responseDecision.reasoningChanged) {
@@ -3066,16 +3117,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         )
                         throw IOException("Responses SSE disconnected before terminal event")
                     }
+                    destroyedCallbackCleanup.enter()
+                    // Extract artifacts/tools/summary from all received paid output,
+                    // even when the terminal envelope omits output_item.done items.
+                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
                     // Canonical response text must contain provider output only. Status
                     // notices are UI metadata, never future model context.
                     val finalText = responseState.text.ifBlank {
-                        OpenAiSseStreamReader.terminalOutputText(completedResponse)
+                        OpenAiSseStreamReader.terminalOutputText(effectiveResponse)
                     }
                     val answerAnnotations=JSONArray()
                     fileCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
                     urlCites.forEach{ answerAnnotations.put(JSONObject(it.toString())) }
                     val parsedModel = AstraResponseModel.fromResponse(
-                        completedResponse,
+                        effectiveResponse,
                         finalText,
                         localRequestId,
                         completionState,
@@ -3083,7 +3138,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     )
                     val streamedSummary=responseState.reasoningSummary.trim()
                     val responseSummary=parsedModel.reasoningSummary?.takeIf{it.isNotBlank()}
-                        ?: extractReasoningSummary(completedResponse).takeIf{it.isNotBlank()}
+                        ?: extractReasoningSummary(effectiveResponse).takeIf{it.isNotBlank()}
                         ?: streamedSummary.takeIf{it.isNotBlank()}
                     val responseModel = parsedModel.copy(
                         id = newId ?: parsedModel.id,
@@ -3096,7 +3151,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         .put("requested_model", model)
                         .put("provider", "openai")
                         .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, openAiInstructionFingerprint)
-                    completedResponse?.optJSONArray("output")?.let { output ->
+                    effectiveResponse.optJSONArray("output")?.let { output ->
                         assistantMessage.put("openai_protocol_output", JSONArray(output.toString()))
                     }
                     responseModel.usage?.let { assistantMessage.put("usage", JSONObject(it.toString())) }
@@ -3118,7 +3173,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val reasoningTok=usageObj?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
                     val finalized = chatDb.finalizeCurrentChatIfActiveRequest(
-                        requestChatId, "", newId, actualEffort, listOf(assistantMessage), localRequestId
+                        requestChatId, "", newId.takeIf { completionState == "completed" },
+                        actualEffort, listOf(assistantMessage), localRequestId
                     )
                     if (!finalized) return@execute
                     if (completionState == "completed" && (0 until savedGeneratedImages.length()).all {
@@ -3204,6 +3260,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 }
             } catch(e:Exception) {
+                destroyedCallbackCleanup.enter()
                 val cancelled=call.isCanceled()
                 // stopCurrentResponse() invalidates this request generation and already restores
                 // the composer/chat UI. The worker must not replay those mutations after the stop.
@@ -3218,35 +3275,31 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
                 var durablePartial: JSONObject? = null
                 if (!canContinueInBackground && !userStopped) {
-                    val failureStatus = if (completionState == "disconnected" || cancelled)
-                        "disconnected" else "failed"
-                    // Preserve only actual streamed text. Errors have their own metadata field.
-                    val partial = responseState.text
-                    val assistant = JSONObject().put("role", "assistant")
-                        .put("text", partial)
-                        .put("status", failureStatus)
+                    val failureStatus = responseState.terminalState?.wireStatus
+                        ?: if (completionState == "disconnected" || cancelled) "disconnected" else "failed"
+                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
+                    val parsedPartial = AstraResponseModel.fromResponse(
+                        effectiveResponse, responseState.text.ifBlank {
+                            OpenAiSseStreamReader.terminalOutputText(effectiveResponse)
+                        }, localRequestId, failureStatus, (e.message ?: failureStatus).take(1200)
+                    )
+                    val partialModel = parsedPartial.copy(
+                        id = newId ?: parsedPartial.id,
+                        tools = (parsedPartial.tools + toolItems).distinct(),
+                        reasoningSummary = parsedPartial.reasoningSummary?.takeIf { it.isNotBlank() }
+                            ?: responseState.reasoningSummary.takeIf { it.isNotBlank() }
+                    )
+                    val assistant = partialModel.toChatJson()
                         .put("incomplete", true)
-                        .put("error", (e.message ?: failureStatus).take(1200))
                         .put("provider", "openai")
                         .put("requested_model", model)
-                        .put("request_id", localRequestId)
-                    // On nonterminal EOF/exceptions there is no response.output.
-                    // Keep every visible fragment we actually received; next Send
-                    // explicitly labels this as incomplete instead of deadlocking
-                    // or fabricating a completed reasoning/tool protocol.
-                    responseState.reasoningSummary.takeIf { it.isNotEmpty() }
-                        ?.let { assistant.put("reasoning_summary", it) }
-                    if (responseState.typedOutputItems.isNotEmpty()) {
-                        assistant.put("openai_protocol_output", JSONArray().apply {
-                            responseState.typedOutputItems.toSortedMap().values.forEach {
-                                put(JSONObject(it.toString()))
-                            }
-                        })
+                        .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, openAiInstructionFingerprint)
+                    effectiveResponse.optJSONArray("output")?.let {
+                        assistant.put("openai_protocol_output", JSONArray(it.toString()))
                     }
-                    if (toolItems.isNotEmpty()) {
-                        assistant.put("tools", JSONArray().apply { toolItems.forEach { put(it) } })
-                    }
-                    newId?.let { assistant.put("response_id", it) }
+                    partialModel.usage?.let { assistant.put("usage", JSONObject(it.toString())) }
+                    val savedPartialImages = saveGeneratedImages(partialModel.generatedImageResults)
+                    if (savedPartialImages.length() > 0) assistant.put("generated_images", savedPartialImages)
                     OpenAiRawSseArchive.attachToMessage(assistant, filesDir, requestChatId, localRequestId)
                     val claimed = chatDb.finalizeCurrentChatIfActiveRequest(
                         requestChatId, "", null, null, listOf(assistant), localRequestId
@@ -3304,6 +3357,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             }
                         }
                         if(active!=null){
+                            // The primary reader has exited its response.use
+                            // before this catch handoff. Release its registry
+                            // lease before entering the replacement GET reader.
+                            OpenAiCreateCallOwners.release(requestChatId, localRequestId, call)
                             streamBackgroundResponse(
                                 active,
                                 BackgroundResponseUiSnapshot(
@@ -3318,7 +3375,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
                 runOnUiThread{
                     if(!isRequestCurrent(requestChatId,requestGeneration)) {
-                        renderRequestTelemetry()
+                        if (activityVisible && !isDestroyed) renderRequestTelemetry()
                         return@runOnUiThread
                     }
                     setBusy(false)
@@ -3367,13 +3424,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         status.text="Остановлено — сообщение и вложения возвращены в поле ввода"
                     } else {
                         activeResponsePersistence.clearActiveResponse(requestChatId, expectedRequestId = localRequestId)
-                        val friendly = friendlyApiError(e.message)
-                        status.text="Ошибка"
-                        addBubble("Ошибка",friendly,false)
+                        if (durablePartial == null) {
+                            val friendly = friendlyApiError(e.message)
+                            status.text="Ошибка"
+                            addBubble("Ошибка",friendly,false)
+                        }
                     }
                 }
             } finally {
                 OpenAiCreateCallOwners.release(requestChatId, localRequestId, call)
+                destroyedCallbackCleanup.close()
             }
         }
         }
@@ -3576,7 +3636,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         "chat_id" to chatId, "response_id" to responseId,
                         "cancel_http_status" to result.cancelStatus,
                         "retrieve_count" to result.retrievals,
-                        "provider_status" to result.terminalStatus, "usage_present" to result.hasUsage))
+                        "provider_status" to result.terminalStatus, "usage_present" to result.hasUsage,
+                        "decoder_diagnostic" to result.decoderDiagnostic))
                 }
             } catch (error: Exception) {
                 diagnostics.log("background_response_cancel_failed", mapOf(
@@ -3731,7 +3792,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
         val requestStartedAt = active.optLong("started_at", -1L)
         var retryDelayMs = 1_500L
+        var resumeLease: Any? = null
 
+        try {
         while (!executor.isShutdown) {
             if (!activityVisible) {
                 BackgroundResponseWorkScheduler.enqueueImmediate(applicationContext, chatId, responseId, requestId)
@@ -3740,6 +3803,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
             val current = try { activeResponsePersistence.getActiveResponse(chatId) } catch (_: Exception) { null }
             if (current?.optString("request_id") != requestId) return
+            if (OpenAiCreateCallOwners.isRegistered(chatId, requestId)) return
+            if (resumeLease == null) {
+                resumeLease = OpenAiCreateCallOwners.acquireResume(chatId, requestId)
+                if (resumeLease == null) {
+                    try { Thread.sleep(100L) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt(); return
+                    }
+                    continue
+                }
+            }
             if (!current.optBoolean("background_enabled", true)) {
                 activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = requestId)
                 return
@@ -3879,13 +3952,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         chatId,
                         responseId = responseId,
                         text = responseState.text,
-                        status = when (result.terminalEventType) {
-                            "response.completed" -> "completed"
-                            "response.failed" -> "failed"
-                            "response.incomplete" -> "incomplete"
-                            "response.cancelled" -> "cancelled"
-                            else -> "in_progress"
-                        },
+                        status = responseState.terminalState?.wireStatus ?: "failed",
                         lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
                         indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                         expectedRequestId = requestId
@@ -4011,6 +4078,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
             }
         }
+        } finally {
+            resumeLease?.let { OpenAiCreateCallOwners.releaseResume(chatId, requestId, it) }
+        }
     }
 
 
@@ -4101,18 +4171,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     ) {
         val chatId=active.optString("chat_id")
         val responseId=active.optString("response_id")
-        val state=response.optString("status").ifBlank{active.optString("status")}
+        val recovered = ResponseIndexedCheckpoint.restore(active)
+        val effectiveResponse = OpenAiEffectiveResponse.assemble(response, recovered)
+        val state=effectiveResponse.optString("status").ifBlank{active.optString("status")}
         val fallbackText=JsonProtocol.string(active, "text")
-        val text=extractResponseText(response).ifBlank{fallbackText}
+        val text=fallbackText.ifBlank{extractResponseText(effectiveResponse)}
         val requestId=active.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
-        val model=AstraResponseModel.fromResponse(response,text,requestId,state,
-            OpenAiFileFailure.recover(applicationContext, response.optJSONObject("error"))
-                ?: response.optJSONObject("error")?.optString("message")
-                ?: response.optJSONObject("incomplete_details")?.optString("reason"))
+        val parsedModel=AstraResponseModel.fromResponse(effectiveResponse,text,requestId,state,
+            OpenAiFileFailure.recover(applicationContext, effectiveResponse.optJSONObject("error"))
+                ?: effectiveResponse.optJSONObject("error")?.optString("message")
+                ?: effectiveResponse.optJSONObject("incomplete_details")?.optString("reason"))
+        val model=parsedModel.copy(reasoningSummary = parsedModel.reasoningSummary?.takeIf { it.isNotBlank() }
+            ?: recovered.reasoningSummary.takeIf { it.isNotBlank() })
         val savedImages=saveGeneratedImages(model.generatedImageResults)
         val assistant=model.toChatJson().apply{
             put("provider", "openai")
-            response.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
+            effectiveResponse.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
             if(savedImages.length()>0)put("generated_images",savedImages)
             if (state != "completed" || (0 until savedImages.length()).any {
@@ -4129,12 +4203,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(m.optString("response_id")==responseId){already=true;break}
         }
         val msgs=jsonArrayToMutableList(arr)
-        if(!already && state!="cancelled") msgs.add(assistant)
+        if(!already) msgs.add(assistant)
         val effortPref=active.optString("effort_pref").ifBlank{"high"}
         val effectiveEffort=active.optString("effective_effort").ifBlank{"high"}
         val startedAt=active.optLong("started_at",System.currentTimeMillis())
         val latency=(System.currentTimeMillis()-startedAt).coerceAtLeast(0L)
-        val usage=response.optJSONObject("usage")
+        val usage=model.usage
         val inTok=usage?.optLong("input_tokens",0L) ?: 0L
         val outTok=usage?.optLong("output_tokens",0L) ?: 0L
         val cachedTok=usage?.optJSONObject("input_tokens_details")?.optLong("cached_tokens",0L) ?: 0L
@@ -4153,7 +4227,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val committed = chatDb.finalizeCurrentChatIfActiveRequest(
             chatId,
             chatObj.optString("title","Новый чат"),
-            responseId.takeIf{it.isNotBlank()},
+            responseId.takeIf{state == "completed" && it.isNotBlank()},
             effectiveEffort,
             msgs,
             requestId
@@ -4209,7 +4283,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 activeResponsePersistence.getActiveResponse(chatId) == null) {
                 persistComposerStateNow()
                 activeResponseState.nextGeneration()
-                currentResponseId=responseId.takeIf{it.isNotBlank()}
+                currentResponseId=responseId.takeIf{success && it.isNotBlank()}
                 baselineEffort=effectiveEffort
                 activeAssistantItemId=null
                 restoreCurrentChat()
@@ -5285,8 +5359,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val request = Request.Builder().url(requestUrl)
                 .addHeader("Authorization", "Bearer " + key).get().build()
             val page = vsControlClient.newCall(request).execute().use { response ->
-                val raw = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw IOException("Vector Store HTTP " + response.code)
+                val raw = if (response.isSuccessful) BoundedResponseDecoder.readBody(response.body)
+                    else BoundedResponseDecoder.readErrorBody(response.body)
+                if (!response.isSuccessful) throw IOException("Vector Store HTTP ${response.code}: $raw")
                 VectorStorePagePolicy.parse(JSONObject(raw))
             }
             ids.addAll(page.ids)
@@ -5311,8 +5386,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val req=Request.Builder().url("https://api.openai.com/v1/files/$fileId")
             .addHeader("Authorization","Bearer $key").get().build()
         vsControlClient.newCall(req).execute().use{resp->
-            val raw=resp.body?.string().orEmpty()
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}")
+            val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                else BoundedResponseDecoder.readErrorBody(resp.body)
+            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
             return JSONObject(raw).optString("filename",fileId)
         }
     }
@@ -5322,7 +5398,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores")
             .addHeader("Authorization","Bearer $key").post(reqBody).build()
         vsControlClient.newCall(req).execute().use{resp->
-            val raw=resp.body?.string().orEmpty()
+            val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                else BoundedResponseDecoder.readErrorBody(resp.body)
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
             return JSONObject(raw).getString("id")
         }
@@ -5333,7 +5410,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores/$vsId/files")
             .addHeader("Authorization","Bearer $key").post(reqBody).build()
         vsControlClient.newCall(req).execute().use{resp->
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${resp.body?.string()}")
+            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${BoundedResponseDecoder.readErrorBody(resp.body)}")
         }
     }
     private fun removeFileFromVectorStore(vsId:String, fileId:String){
@@ -5341,7 +5418,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val req=Request.Builder().url("https://api.openai.com/v1/vector_stores/$vsId/files/$fileId")
             .addHeader("Authorization","Bearer $key").delete().build()
         vsControlClient.newCall(req).execute().use{resp->
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${resp.body?.string()}")
+            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: ${BoundedResponseDecoder.readErrorBody(resp.body)}")
         }
     }
     private fun uploadFileForVectorStore(uri:Uri):Pair<String,String>{
@@ -5360,8 +5437,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .build()
             val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
             client.newCall(req).execute().use { resp ->
-                val raw = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IOException("HTTP " + resp.code)
+                val raw = if (resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                    else BoundedResponseDecoder.readErrorBody(resp.body)
+                if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: $raw")
                 return JSONObject(raw).getString("id") to name
             }
         } finally {
@@ -5927,7 +6005,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .build()
         val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
         client.newCall(req).execute().use{resp->
-            val raw=resp.body?.string().orEmpty()
+            val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                else BoundedResponseDecoder.readErrorBody(resp.body)
             if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
             return Triple(JSONObject(raw).getString("id"), name, temp.length())
         }
@@ -5960,7 +6039,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(key!=null)uploadCalls[key]=call
             try{
                 call.execute().use{resp->
-                    val raw=resp.body?.string().orEmpty()
+                    val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                        else BoundedResponseDecoder.readErrorBody(resp.body)
                     if(!resp.isSuccessful) throw IOException("HTTP ${resp.code}: $raw")
                     JSONObject(raw).getString("id")
                 }
@@ -5992,7 +6072,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(key!=null)uploadCalls[key]=call
             try{
                 call.execute().use{resp->
-                    val raw=resp.body?.string().orEmpty()
+                    val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
+                        else BoundedResponseDecoder.readErrorBody(resp.body)
                     if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
                     JSONObject(raw).getString("id")
                 }
@@ -6507,6 +6588,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(chat[idx].optString("role")!="user") return
         val editingChatId = currentChatId()
         val active = activeResponsePersistence.getActiveResponse(editingChatId)
+        val cancelCredential = captureOpenAiRequestCredential(editingChatId, active)
         val editingRequestId = active?.optString("request_id").takeIf { !it.isNullOrBlank() && it != "null" }
         // Invalidate the persisted request *before* truncating history. UI Stop would
         // restore/remove unrelated bubbles and is not suitable for Edit.
@@ -6516,7 +6598,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             activeResumeCalls.remove(editingChatId)?.cancel()
             val activeId = active?.optString("response_id")?.takeIf { it.isNotBlank() && it != "null" }
             if (activeId != null && active?.optBoolean("background_enabled", false) == true) {
-                cancelRemoteResponse(editingChatId, activeId)
+                cancelRemoteResponse(editingChatId, activeId, cancelCredential)
             }
         }
         activeResponseState.nextGeneration()

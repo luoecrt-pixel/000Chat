@@ -8,6 +8,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Before
+import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
@@ -28,6 +30,21 @@ import android.widget.EditText
 class RawResponseRecoveryPersistenceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
+    private var savedNotificationPreference: Boolean? = null
+
+    @Before fun suppressUnrelatedNotificationPermissionDialog() {
+        val preferences = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        savedNotificationPreference = if (preferences.contains("response_notifications"))
+            preferences.getBoolean("response_notifications", true) else null
+        preferences.edit().putBoolean("response_notifications", false).commit()
+    }
+
+    @After fun restoreNotificationPreference() {
+        val edit = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE).edit()
+        savedNotificationPreference?.let { edit.putBoolean("response_notifications", it) }
+            ?: edit.remove("response_notifications")
+        edit.commit()
+    }
 
     @Test fun actualSendAllocationFailurePreservesSignedPartialAndCompleteReceivedSourceAfterReopen() =
         assertActualSendMemoryFailure(accumulated = false)

@@ -44,6 +44,7 @@ class BackgroundResponseWorker(
             .callTimeout(60, TimeUnit.SECONDS)
             .build()
     }
+    private val streamClient by lazy { ResumableResponseStreamClient(applicationContext) }
 
     override suspend fun doWork(): Result {
         val chatId = inputData.getString(KEY_CHAT_ID).orEmpty()
@@ -53,8 +54,8 @@ class BackgroundResponseWorker(
 
         val db = ChatDatabase(applicationContext)
         val diagnostics = AstraDiagnostics(applicationContext)
-        val streamClient = ResumableResponseStreamClient(applicationContext)
         var activeCall: okhttp3.Call? = null
+        var resumeLease: Any? = null
         currentCoroutineContext().job.invokeOnCompletion {
             activeCall?.cancel()
         }
@@ -83,6 +84,23 @@ class BackgroundResponseWorker(
                     ?: return Result.success()
                 if (current.optString("request_id") != requestId) return Result.success()
                 if (!current.optBoolean("background_enabled", true)) return Result.success()
+
+                // Scheduling is durable as soon as a stopped Activity receives
+                // response.created. Its primary reader still owns received bytes
+                // and SQLite finalization until its finally releases the registry.
+                // A cancelled socket is not proof that its callback has finished.
+                if (OpenAiCreateCallOwners.isRegistered(chatId, requestId)) {
+                    if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt,
+                            System.currentTimeMillis()) <= 0L) {
+                        OpenAiCreateCallOwners.call(chatId, requestId)?.cancel()
+                    }
+                    delay(250L)
+                    continue
+                }
+                if (resumeLease == null) {
+                    resumeLease = OpenAiCreateCallOwners.acquireResume(chatId, requestId)
+                    if (resumeLease == null) { delay(250L); continue }
+                }
 
                 val cursor = current.optLong("last_sequence_number", -1L)
                 var responseState = try {
@@ -132,10 +150,7 @@ class BackgroundResponseWorker(
                         responseState = ResponseEventReducer.reduce(responseState, event).state
                         val type = JsonProtocol.string(event, "type")
 
-                        val terminal = type == "response.completed" ||
-                            type == "response.failed" ||
-                            type == "response.incomplete" ||
-                            type == "response.cancelled"
+                        val terminal = responseState.terminalState != null
                         val now = SystemClock.elapsedRealtime()
                         if (terminal || type == "response.output_item.done" ||
                             now - lastCheckpointAt >= 500L) {
@@ -144,13 +159,7 @@ class BackgroundResponseWorker(
                                 chatId,
                                 responseId = responseId,
                                 text = responseState.text,
-                                status = when (type) {
-                                    "response.completed" -> "completed"
-                                    "response.failed" -> "failed"
-                                    "response.incomplete" -> "incomplete"
-                                    "response.cancelled" -> "cancelled"
-                                    else -> "in_progress"
-                                },
+                                status = responseState.terminalState?.wireStatus ?: "in_progress",
                                 lastSequenceNumber = lastSequence,
                                 indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                                 expectedRequestId = requestId
@@ -167,13 +176,7 @@ class BackgroundResponseWorker(
                             chatId,
                             responseId = responseId,
                             text = responseState.text,
-                            status = when (result.terminalEventType) {
-                                "response.completed" -> "completed"
-                                "response.failed" -> "failed"
-                                "response.incomplete" -> "incomplete"
-                                "response.cancelled" -> "cancelled"
-                                else -> "in_progress"
-                            },
+                            status = responseState.terminalState?.wireStatus ?: "failed",
                             lastSequenceNumber = maxOf(lastSequence, result.lastSequenceNumber),
                             indexedCheckpoint = ResponseIndexedCheckpoint.serialize(responseState),
                             expectedRequestId = requestId
@@ -186,7 +189,8 @@ class BackgroundResponseWorker(
                             db,
                             diagnostics
                         )
-                        return if (result.terminalEventType == "response.failed") Result.failure() else Result.success()
+                        return if (responseState.terminalState == ResponseTerminalState.FAILED)
+                            Result.failure() else Result.success()
                     }
 
                     db.updateActiveResponse(
@@ -292,6 +296,7 @@ class BackgroundResponseWorker(
             return Result.success()
         } finally {
             activeCall?.cancel()
+            resumeLease?.let { OpenAiCreateCallOwners.releaseResume(chatId, requestId, it) }
             try { db.close() } catch (_: Exception) {}
             try { streamClient.close() } catch (_: Exception) {}
             client.dispatcher.executorService.shutdown()
@@ -325,15 +330,19 @@ class BackgroundResponseWorker(
     private fun finalize(chatId: String, responseId: String, requestId: String, response: JSONObject, db: ChatDatabase, diagnostics: AstraDiagnostics) {
         val active = db.getActiveResponse(chatId) ?: return
         if (active.optString("request_id") != requestId) return
-        val state = response.optString("status").ifBlank { active.optString("status") }
+        val recovered = ResponseIndexedCheckpoint.restore(active)
+        val effectiveResponse = OpenAiEffectiveResponse.assemble(response, recovered)
+        val state = effectiveResponse.optString("status").ifBlank { active.optString("status") }
         val fallbackText = JsonProtocol.string(active, "text")
-        val text = extractResponseText(response).ifBlank { fallbackText }
-        val model = AstraResponseModel.fromResponse(
-            response, text, requestId, state,
-            OpenAiFileFailure.recover(applicationContext, response.optJSONObject("error"))
-                ?: response.optJSONObject("error")?.optString("message")
-                ?: response.optJSONObject("incomplete_details")?.optString("reason")
+        val text = fallbackText.ifBlank { extractResponseText(effectiveResponse) }
+        val parsedModel = AstraResponseModel.fromResponse(
+            effectiveResponse, text, requestId, state,
+            OpenAiFileFailure.recover(applicationContext, effectiveResponse.optJSONObject("error"))
+                ?: effectiveResponse.optJSONObject("error")?.optString("message")
+                ?: effectiveResponse.optJSONObject("incomplete_details")?.optString("reason")
         )
+        val model = parsedModel.copy(reasoningSummary = parsedModel.reasoningSummary?.takeIf { it.isNotBlank() }
+            ?: recovered.reasoningSummary.takeIf { it.isNotBlank() })
         val savedImages = saveGeneratedImages(model.generatedImageResults, diagnostics)
         val requestMeta = db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
             (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
@@ -343,7 +352,7 @@ class BackgroundResponseWorker(
             .ifBlank { requestMeta?.optString("model").orEmpty() }.takeIf { it.isNotBlank() }
         val assistant = model.toChatJson().apply {
             put("provider", "openai")
-            response.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
+            effectiveResponse.optJSONArray("output")?.let { put("openai_protocol_output", JSONArray(it.toString())) }
             requestMeta?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
                 ?.takeIf { it.isNotBlank() }
                 ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
@@ -367,13 +376,13 @@ class BackgroundResponseWorker(
             if (message.optString("response_id") == responseId) already = true
             messages += JSONObject(message.toString())
         }
-        if (!already && state != "cancelled") messages += assistant
+        if (!already) messages += assistant
 
         val effortPref = active.optString("effort_pref").ifBlank { "high" }
         val effectiveEffort = active.optString("effective_effort").ifBlank { "high" }
         val startedAt = active.optLong("started_at", System.currentTimeMillis())
         val latency = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-        val usage = response.optJSONObject("usage")
+        val usage = model.usage
         val inTok = usage?.optLong("input_tokens", 0L) ?: 0L
         val outTok = usage?.optLong("output_tokens", 0L) ?: 0L
         val cachedTok = usage?.optJSONObject("input_tokens_details")?.optLong("cached_tokens", 0L) ?: 0L
@@ -381,7 +390,8 @@ class BackgroundResponseWorker(
         val reasoningTok = usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens", 0L) ?: 0L
         val cost = estimateCost(inTok, cachedTok, cacheWriteTok, outTok)
         val committed = db.finalizeCurrentChatIfActiveRequest(
-            chatId, chatObj.optString("title", "Новый чат"), responseId.takeIf { it.isNotBlank() }, effectiveEffort, messages, requestId
+            chatId, chatObj.optString("title", "Новый чат"),
+            responseId.takeIf { state == "completed" && it.isNotBlank() }, effectiveEffort, messages, requestId
         )
         if (!committed) {
             diagnostics.log("worker_stale_finalization_ignored", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId))

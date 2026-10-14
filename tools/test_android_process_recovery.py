@@ -15,13 +15,14 @@ from pathlib import Path
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 
 PACKAGE = "com.example.openaichat"
 RUNNER = PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"
 FIXTURE = PACKAGE + ".ProcessDeathRecoveryFixture"
-SCENARIOS = ("terminal", "expired_partial", "stopped_pre_id", "replaced")
+SCENARIOS = ("terminal", "expired_partial", "stopped_pre_id", "replaced", "background_created")
 
 
 def main() -> None:
@@ -61,7 +62,7 @@ def main() -> None:
     args.reports.mkdir(parents=True, exist_ok=True)
     summary: list[dict] = []
 
-    for scenario in SCENARIOS:
+    def run_scenario(scenario: str) -> None:
         seed_args = ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                      FIXTURE + "#seedAndWaitForHostProcessKill", "-e", "recoveryStage", "seed",
                      "-e", "recoveryScenario", scenario, RUNNER]
@@ -130,6 +131,28 @@ def main() -> None:
                         "live_process_killed": True, "production_workmanager": "passed"})
         (args.reports / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print(f"Process recovery: {scenario} PASS (live PID {seed_pid} killed; new-process WorkManager)", flush=True)
+
+    for scenario in SCENARIOS:
+        try:
+            run_scenario(scenario)
+        finally:
+            # A killed seed cannot run @After/finally. Restore durable fixture
+            # preferences and the synthetic credential even if verification
+            # timed out, failed, or never started. No app data is cleared.
+            failed = sys.exc_info()[0] is not None
+            try:
+                command("shell", "am", "force-stop", PACKAGE)
+                cleanup = command("shell", "am", "instrument", "-w", "-r", "-e", "class",
+                                  FIXTURE + "#cleanupProcessRecoveryFixture", "-e", "recoveryStage", "cleanup",
+                                  "-e", "recoveryScenario", scenario, RUNNER, timeout=90)
+                (args.reports / f"{scenario}-cleanup.log").write_text(cleanup + "\n", encoding="utf-8")
+                if ("OK (1 test)" not in cleanup or "FAILURES!!!" in cleanup or
+                        "INSTRUMENTATION_FAILED" in cleanup):
+                    raise RuntimeError(f"Recovery fixture cleanup failed: {scenario}\n{cleanup}")
+            except Exception as cleanup_error:
+                if not failed:
+                    raise
+                print(f"Process recovery cleanup also failed: {scenario}: {cleanup_error}", file=sys.stderr)
 
 
 if __name__ == "__main__":

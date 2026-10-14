@@ -120,7 +120,8 @@ class MainActivityLifecycleTest {
                 setPrivateField(activity, "client", secureClient)
                 val presentation = invoke(activity, "presentationInstructionsForRequest") as String?
                 val fingerprint = OpenAiInstructionChainPolicy.fingerprint(
-                    GenerationInstructions("System fixture", "Developer fixture", presentation))
+                    GenerationInstructions("System fixture", "Developer fixture", presentation),
+                    "sk-synthetic-only", "gpt-6-astra")
                 @Suppress("UNCHECKED_CAST")
                 val history = privateField(activity, "chat") as MutableList<JSONObject>
                 history.clear()

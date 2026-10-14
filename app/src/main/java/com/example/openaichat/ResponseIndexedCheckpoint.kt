@@ -97,7 +97,7 @@ object ResponseIndexedCheckpoint {
                 val index = entry.optInt("output_index", -1)
                 val item = entry.optJSONObject("item")
                     ?: throw UnrecoverableResponsesCheckpointException("Missing typed Responses item")
-                if (index < 0 || item.optString("type") == "message" ||
+                if (index < 0 || JsonProtocol.nonBlank(item, "type") == null ||
                     typedItems.put(index, JSONObject(item.toString())) != null) {
                     throw UnrecoverableResponsesCheckpointException(
                         "Duplicated or unsafe typed Responses output item")
@@ -125,6 +125,16 @@ object ResponseIndexedCheckpoint {
             legacyFlatCheckpoint = snapshot.optBoolean("legacy_flat_checkpoint", false),
             terminalState = terminalState,
             terminalResponse = terminalResponse,
+            completionError = when (terminalState) {
+                ResponseTerminalState.FAILED -> terminalResponse?.optJSONObject("error")?.let {
+                    JsonProtocol.nonBlank(it, "message")
+                } ?: terminalResponse?.let { JsonProtocol.nonBlank(it, "error") }
+                ResponseTerminalState.INCOMPLETE -> terminalResponse?.optJSONObject("incomplete_details")?.let {
+                    JsonProtocol.nonBlank(it, "reason")
+                }
+                else -> null
+            },
+            usage = terminalResponse?.optJSONObject("usage"),
             typedOutputItems = typedItems)
     }
 }

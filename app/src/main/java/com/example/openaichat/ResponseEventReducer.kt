@@ -25,9 +25,10 @@ data class ResponseEventState(
     val unindexedText: String = "",
     /** v23 had only flattened text; indexed replay must fail closed. */
     val legacyFlatCheckpoint: Boolean = false,
-    /** Fully received, provider-authored non-message output items only.
+    /** Fully received, provider-authored output items only.
      * Do not fabricate encrypted reasoning from a summary or a provisional
-     * output_item.added event. Includes signed reasoning and completed tools.
+     * output_item.added event. Includes signed reasoning, completed tools and
+     * structured messages (refusals/annotations can outlive missing terminal output).
      */
     val typedOutputItems: Map<Int, JSONObject> = emptyMap()
 )
@@ -71,10 +72,10 @@ object ResponseEventReducer {
             "response.output_item.done" -> {
                 val outputIndex = event.optInt("output_index", -1)
                 val item = event.optJSONObject("item")
-                // The visible message (possibly partial) is separately preserved
-                // as a clearly labelled transcript. Only fully done non-message
-                // items are safe to forward verbatim as typed Responses output.
-                if (outputIndex < 0 || item == null || item.optString("type") == "message")
+                // Preserve fully received messages too: their refusals and
+                // annotations are not reconstructible from visible deltas.
+                // Provisional output_item.added still cannot enter typed replay.
+                if (outputIndex < 0 || item == null || JsonProtocol.nonBlank(item, "type") == null)
                     ResponseEventDecision(current)
                 else {
                     ResponseAccumulatorMemoryBudget.check(current, replacementIndex = outputIndex,
@@ -104,22 +105,22 @@ object ResponseEventReducer {
                     ResponseEventDecision(current.copy(reasoningSummary = current.reasoningSummary + delta), reasoningChanged = true)
                 }
             }
-            "response.completed" -> terminal(current, event, ResponseTerminalState.COMPLETED)
+            "response.completed" -> terminal(current, event, ResponseTerminalState.COMPLETED,
+                maxStateAllocationBytes)
             "response.failed" -> terminal(current, event, ResponseTerminalState.FAILED,
+                maxStateAllocationBytes,
                 event.optJSONObject("response")?.let { response ->
                     response.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
                         ?: JsonProtocol.nonBlank(response, "error")
                 })
             "response.incomplete" -> terminal(current, event, ResponseTerminalState.INCOMPLETE,
+                maxStateAllocationBytes,
                 event.optJSONObject("response")?.optJSONObject("incomplete_details")?.let {
                     JsonProtocol.nonBlank(it, "reason")
                 })
-            "response.cancelled" -> terminal(current, event, ResponseTerminalState.CANCELLED)
-            "error", "response.error" -> ResponseEventDecision(current.copy(
-                terminalState = ResponseTerminalState.FAILED,
-                completionError = event.optJSONObject("error")?.let { JsonProtocol.nonBlank(it, "message") }
-                    ?: JsonProtocol.nonBlank(event, "message") ?: "Responses streaming error"
-            ))
+            "response.cancelled" -> terminal(current, event, ResponseTerminalState.CANCELLED,
+                maxStateAllocationBytes)
+            "error", "response.error" -> streamingError(current, event, maxStateAllocationBytes)
             else -> ResponseEventDecision(current)
         }
     }
@@ -170,10 +171,65 @@ object ResponseEventReducer {
         return ResponseEventDecision(updated, textChanged = updated.text != current.text)
     }
 
+    private fun streamingError(current: ResponseEventState, event: JSONObject,
+                               maxStateAllocationBytes: Long): ResponseEventDecision {
+        val receivedResponse = event.optJSONObject("response")
+        val receivedError = event.optJSONObject("error") ?: receivedResponse?.optJSONObject("error")
+        val errorMessage = receivedError?.let { JsonProtocol.nonBlank(it, "message") }
+            ?: JsonProtocol.nonBlank(event, "message") ?: "Responses streaming error"
+        val error = JSONObject().put("message", errorMessage)
+        receivedError?.keys()?.let { keys ->
+            while (keys.hasNext()) {
+                val key = keys.next()
+                error.put(key, receivedError.opt(key))
+            }
+        }
+        // Keep code/details but normalize a missing/non-string message to the
+        // readable diagnostic, without mutating the received event object.
+        error.put("message", errorMessage)
+        if (!error.has("code")) JsonProtocol.nonBlank(event, "code")?.let { error.put("code", it) }
+        // error/response.error are terminal too. Preserve the received partial
+        // response if present, but bind this failed snapshot to the owned ID.
+        // Copy references without serializing an unbounded frame first.
+        val response = JSONObject()
+        receivedResponse?.keys()?.let { keys ->
+            while (keys.hasNext()) {
+                val key = keys.next()
+                response.put(key, receivedResponse.opt(key))
+            }
+        }
+        response.put("status", "failed").put("error", error)
+        (current.responseId ?: receivedResponse?.let { JsonProtocol.nonBlank(it, "id") }
+            ?: JsonProtocol.nonBlank(event, "response_id"))?.let { response.put("id", it) }
+        return terminal(current, JSONObject().put("response", response),
+            ResponseTerminalState.FAILED, maxStateAllocationBytes,
+            errorMessage)
+    }
+
     private fun terminal(current: ResponseEventState, event: JSONObject,
-                         terminalState: ResponseTerminalState, completionError: String? = null): ResponseEventDecision {
+                         terminalState: ResponseTerminalState, maxStateAllocationBytes: Long,
+                         completionError: String? = null): ResponseEventDecision {
         val response = event.optJSONObject("response")
         val responseId = response?.let { JsonProtocol.nonBlank(it, "id") }
+        var canonicalCharacters = 0L
+        response?.optJSONArray("output")?.let { output ->
+            for (i in 0 until output.length()) {
+                val item = output.optJSONObject(i) ?: continue
+                if (JsonProtocol.string(item, "type") != "message") continue
+                val content = item.optJSONArray("content") ?: continue
+                for (j in 0 until content.length()) {
+                    val part = content.optJSONObject(j) ?: continue
+                    canonicalCharacters += when (JsonProtocol.string(part, "type")) {
+                        "output_text" -> JsonProtocol.string(part, "text").length.toLong()
+                        "refusal" -> JsonProtocol.string(part, "refusal").length.toLong()
+                        else -> 0L
+                    }
+                }
+            }
+        }
+        ResponseAccumulatorMemoryBudget.check(current,
+            textCharacters = current.text.length.toLong() + canonicalCharacters,
+            terminalResponse = response, limitBytes = maxStateAllocationBytes)
         val canonical = OpenAiSseStreamReader.terminalOutputText(response)
         val hasCanonical = canonical.isNotBlank()
         val state = current.copy(
