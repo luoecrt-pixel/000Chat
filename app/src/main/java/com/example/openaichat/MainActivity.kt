@@ -1108,11 +1108,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             clearComposerState(id)
             chatDb.deleteChat(id)
         }
-        val remainingOwners = try {
+        val remainingOwners: Set<String>? = try {
             val owners = attachmentOwners()
             owners.durable + owners.active
-        } catch (_: Exception) { emptySet() }
-        localPaths.filter { it !in remainingOwners }.forEach(::deleteOwnedLocalFile)
+        } catch (e: Exception) {
+            diagnostics.log("local_file_delete_deferred", mapOf(
+                "chat_id" to id,
+                "error_type" to e.javaClass.simpleName
+            ))
+            null
+        }
+        if (remainingOwners != null) {
+            localPaths.filter { it !in remainingOwners }.forEach(::deleteOwnedLocalFile)
+        }
         if (currentChatId()==id) {
             val newId = newChatId()
             prefs.edit().putString("current_chat",newId).apply()
