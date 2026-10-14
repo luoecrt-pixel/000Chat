@@ -8,6 +8,7 @@ import androidx.work.Data
 import androidx.work.ListenableWorker
 import androidx.work.testing.TestListenableWorkerBuilder
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -143,6 +144,40 @@ class OpenAiRecoveryCredentialOwnershipTest {
 
     @Test fun originalCredentialHttp401PreservesPaidPartialAndDoesNotRetryOrRegenerate() = assertAuthFailure(401)
     @Test fun originalCredentialHttp403PreservesPaidPartialAndDoesNotRetryOrRegenerate() = assertAuthFailure(403)
+
+    @Test fun cancellingWorkerClosesBlockedSocketAndReleasesActivityResumeLease() {
+        seed()
+        val certificate = HeldCertificate.Builder().commonName("localhost").addSubjectAlternativeName("localhost").build()
+        val serverTrust = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTrust = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        MockWebServer().use { server ->
+            server.useHttps(serverTrust.sslSocketFactory(), false); server.start()
+            server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
+            val fixture = worker()
+            setTransport(fixture, OkHttpClient.Builder()
+                .sslSocketFactory(clientTrust.sslSocketFactory(), clientTrust.trustManager)
+                .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().url(server.url("/blocked")).build()) }
+                .build())
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+            val execution = scope.launch { fixture.doWork() }
+            try {
+                assertEquals("GET", server.takeRequest(10, TimeUnit.SECONDS)!!.method)
+                assertNull("Worker holds the exclusive lease", OpenAiCreateCallOwners.acquireResume(chatId, requestId))
+                execution.cancel()
+                runBlocking { kotlinx.coroutines.withTimeout(5_000L) { execution.join() } }
+                val activityLease = OpenAiCreateCallOwners.acquireResume(chatId, requestId)!!
+                OpenAiCreateCallOwners.releaseResume(chatId, requestId, activityLease)
+                ChatDatabase(context).use { db ->
+                    assertTrue("Cancellation must leave the original checkpoint for Activity", db.isActiveRequest(chatId, requestId))
+                    assertEquals("Original received partial", db.getActiveResponse(chatId)!!.getString("text"))
+                }
+                assertEquals("No retry or paid Create", 1, server.requestCount)
+            } finally {
+                execution.cancel()
+                server.shutdown()
+            }
+        }
+    }
 
     private fun assertAuthFailure(code: Int) {
         seed()

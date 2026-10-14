@@ -46,6 +46,7 @@ class BackgroundResponseWorker(
     }
     private val streamClient by lazy { ResumableResponseStreamClient(applicationContext) }
 
+    @OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
     override suspend fun doWork(): Result {
         val chatId = inputData.getString(KEY_CHAT_ID).orEmpty()
         val responseId = inputData.getString(KEY_RESPONSE_ID).orEmpty()
@@ -56,7 +57,10 @@ class BackgroundResponseWorker(
         val diagnostics = AstraDiagnostics(applicationContext)
         var activeCall: okhttp3.Call? = null
         var resumeLease: Any? = null
-        currentCoroutineContext().job.invokeOnCompletion {
+        val recoveryJob = currentCoroutineContext().job
+        // Cancel the blocking HTTP reader when cancellation STARTS. Waiting for
+        // job completion would keep the resume lease until the socket deadline.
+        recoveryJob.invokeOnCompletion(onCancelling = true, invokeImmediately = true) {
             activeCall?.cancel()
         }
 
@@ -136,7 +140,10 @@ class BackgroundResponseWorker(
                         startingAfter = cursor,
                         ownerChatId = chatId,
                         ownerRequestId = requestId,
-                        onCallCreated = { call -> activeCall = call },
+                        onCallCreated = { call ->
+                            activeCall = call
+                            if (isStopped || !recoveryJob.isActive) call.cancel()
+                        },
                         startedAtEpochMs = requestStartedAt
                     ) { event ->
                         val sequence = event.optLong("sequence_number", -1L)

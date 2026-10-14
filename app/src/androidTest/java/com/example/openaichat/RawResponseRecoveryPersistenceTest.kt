@@ -103,6 +103,12 @@ class RawResponseRecoveryPersistenceTest {
                         .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit()
                     SecureStore(context).setApiKey("sk-only-local-memory-test")
                     field("client").set(activity, http)
+                    if (accumulated) {
+                        // Force the actual accumulator guard before the decoder's
+                        // dynamic free-heap guard. Only lowers the processing budget;
+                        // the entire original heap-sized wire body must still archive.
+                        field("openAiAccumulatorLimitForTests").setLong(activity, 3L * 1024 * 1024)
+                    }
                     // Reproduce the exact optional-metric exception from the CI
                     // crash; paid output must still commit and clear busy UI.
                     field("openAiEffortMetricHook").set(activity, { throw android.database.sqlite.SQLiteDatabaseLockedException("Synthetic effort telemetry lock") })
@@ -147,6 +153,14 @@ class RawResponseRecoveryPersistenceTest {
                     assertEquals("failed", accounting.getString("local_status"))
                     assertEquals("unknown", accounting.getString("cost_kind"))
                     assertFalse(accounting.has("cost_usd"))
+                }
+                // SQLite ownership release precedes the queued UI callback.
+                val uiDeadline = SystemClock.elapsedRealtime() + 20_000L
+                var enabled = false
+                while (SystemClock.elapsedRealtime() < uiDeadline) {
+                    scenario.onActivity { enabled = it.send.isEnabled }
+                    if (enabled) break
+                    SystemClock.sleep(20)
                 }
                 scenario.onActivity { activity -> assertTrue(activity.send.isEnabled) }
                 assertEquals("One original Create; no automatic paid regeneration", 1, server.requestCount)

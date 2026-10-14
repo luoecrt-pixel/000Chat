@@ -137,6 +137,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pendingOpenAiPreparation = AtomicReference<String?>(null)
     @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
     @Volatile private var openAiReceivedEventHook: ((JSONObject) -> Unit)? = null
+    // Deterministic lower budget for instrumentation; reducer always caps this
+    // by the production heap budget, so a test cannot raise the safety limit.
+    @Volatile private var openAiAccumulatorLimitForTests: Long = Long.MAX_VALUE
     @Volatile private var openAiEffortMetricHook: (() -> Unit)? = null
     private val preIdCreateWatches = ConcurrentHashMap<String, Any>()
     private val githubToolExecutor by lazy {
@@ -2937,7 +2940,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                     }
                                 }
                             }
-                            val responseDecision = ResponseEventReducer.reduce(responseState, ev)
+                            val responseDecision = ResponseEventReducer.reduce(responseState, ev,
+                                openAiAccumulatorLimitForTests)
                             responseState = responseDecision.state
                             responseState.responseId?.let { newId = it }
                             responseState.terminalState?.let { completionState = it.wireStatus }
