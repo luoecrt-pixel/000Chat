@@ -1399,8 +1399,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val model = normalizedModelId()
         val openAi = provider == "openai"
         val supportsMode = ModelRequestPolicy.supportsReasoningMode(provider, model)
+        val theme = currentTheme()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(theme.rootBg)
             setPadding(dp(18), dp(4), dp(18), dp(8))
         }
         fun sectionHeader(titleText: String) {
@@ -1408,7 +1410,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 text = titleText
                 textSize = 12.5f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.rgb(138, 180, 248))
+                setTextColor(theme.accent)
                 setPadding(0, dp(14), 0, dp(4))
             })
         }
@@ -1416,7 +1418,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             box.addView(TextView(this).apply {
                 text = label
                 textSize = 12f
-                setTextColor(Color.rgb(170,180,195))
+                setTextColor(theme.textSecondary)
                 setPadding(0, dp(10), 0, dp(4))
             })
             val input = Spinner(this)
@@ -1427,7 +1429,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         fun chk(label: String, pref: String, def: Boolean = false) = CheckBox(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             isChecked = prefs.getBoolean(pref, def)
         }
 
@@ -1688,12 +1690,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun showSettings() {
-        val cardBg = Color.rgb(36,38,44)
-        val accent = Color.rgb(138,180,248)
-        val subtext = Color.rgb(150,155,165)
-        val divider = Color.rgb(52,54,60)
+        val theme = currentTheme()
+        val cardBg = theme.cardBg
+        val accent = theme.accent
+        val subtext = theme.textSecondary
+        val divider = theme.divider
 
-        val box = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(14),dp(6),dp(14),dp(10)) }
+        val box = LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL
+            setBackgroundColor(theme.rootBg)
+            setPadding(dp(14),dp(6),dp(14),dp(10))
+        }
 
         fun section(titleText:String){
             box.addView(TextView(this).apply{
@@ -3302,6 +3309,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 if (!OpenAiCreateCallOwners.replace(requestChatId, localRequestId, ownedCreateCall, next)) next.cancel()
                                 else { ownedCreateCall = next; currentCall = next }
                                 if (!chatDb.isActiveRequest(requestChatId, localRequestId)) next.cancel()
+                            },
+                            onStatus = { progressText ->
+                                runOnUiThread {
+                                    if (isRequestCurrent(requestChatId, requestGeneration)) {
+                                        toolLabel.text = progressText
+                                        status.text = progressText
+                                    }
+                                }
                             })
                         newId = effectiveResponse.optString("id").takeIf { it.isNotBlank() } ?: newId
                         completionState = effectiveResponse.optString("status", completionState)
@@ -5844,6 +5859,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
                 return
             }
+            if (r == pickImage) return
         }
         if(r==pickImage){
             val imageUris = urisFromIntent(d)

@@ -52,6 +52,7 @@ object OpenAiLocalFileToolBridge {
 
     fun finish(context: Context, db: ChatDatabase, chatId: String, requestId: String, initial: JSONObject,
         client: OkHttpClient, active: () -> Boolean = { true }, onCall: (Call) -> Unit = {},
+        onStatus: (String) -> Unit = {},
         credential: () -> String = { SecureStore(context).getApiKey() }): JSONObject {
         val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId) ?: return initial
         if (checkpoint.optInt("version") != 1) throw UnrecoverableResponsesStreamException("Неизвестная версия файлового checkpoint OpenAI")
@@ -172,6 +173,9 @@ object OpenAiLocalFileToolBridge {
                 if (Thread.currentThread().isInterrupted || !active()) throw CancellationException("Подготовка инструмента остановлена")
                 throw UnrecoverableResponsesStreamException("Изменился или недоступен исходник файлового инструмента: ${error.message}")
             }
+            val nextRound = checkpoint.getInt("round") + 1
+            val toolLabels = calls.mapNotNull { it.optString("name").takeIf(String::isNotBlank) }.distinct().joinToString(", ")
+            onStatus("🔧 Локальные файлы ($nextRound/$MAX_ROUNDS): $toolLabels")
             val local = LocalFileTools(files) { active() && db.isActiveRequest(chatId, requestId) && !Thread.currentThread().isInterrupted }
             val results = JSONArray()
             for ((id, name, args) in validated) {
