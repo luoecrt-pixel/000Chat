@@ -11,8 +11,16 @@ enum class OpenRouterClaudeRoute(val preference: String, val label: String, val 
     ANTHROPIC("anthropic", "Прямой Anthropic", 10_000_000L, 32_000_000L);
 
     companion object {
-        fun fromPreference(value: String?): OpenRouterClaudeRoute =
-            entries.firstOrNull { it.preference == value } ?: AUTO
+        /**
+         * Task 12: Direct Anthropic provider inside OpenRouter is the default when no
+         * preference was explicitly saved; an explicit "auto" choice is respected.
+         */
+        fun fromPreference(value: String?): OpenRouterClaudeRoute = when (value?.trim()?.lowercase()) {
+            "auto" -> AUTO
+            "anthropic" -> ANTHROPIC
+            else -> ANTHROPIC
+        }
+
         fun isClaude(model: String): Boolean = model.removePrefix("~").startsWith("anthropic/")
     }
 

@@ -12,6 +12,8 @@ import org.json.JSONObject
  * Settings remain in SharedPreferences; chat history no longer lives in one giant JSON blob.
  */
 class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+    private val appContext: Context = context.applicationContext ?: context
+
     companion object {
         private const val DB_NAME = "astra_chats.db"
         // The app opens this file via independent SQLiteOpenHelpers in Activity,
@@ -537,17 +539,81 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         return out
     }
 
-    /** Lightweight list for the chat picker; never loads full message histories. */
+    private fun activeComposerDraftPreviews(): Map<String, String> {
+        val prefs = try {
+            appContext.getSharedPreferences("app", Context.MODE_PRIVATE)
+        } catch (_: Exception) {
+            return emptyMap()
+        }
+        val result = mutableMapOf<String, String>()
+        for ((key, raw) in prefs.all) {
+            if (!key.startsWith("composer_state_") || raw !is String || raw.isBlank()) continue
+            val chatId = key.removePrefix("composer_state_").takeIf { it.isNotBlank() } ?: continue
+            val json = try { JSONObject(raw) } catch (_: Exception) { continue }
+            val draftText = JsonProtocol.string(json, "text").trim()
+            val hasAttachments =
+                (json.optJSONArray("openrouter_attachments")?.length() ?: 0) > 0 ||
+                (json.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
+                (json.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
+                (json.optJSONArray("pending_uploads")?.length() ?: 0) > 0 ||
+                JsonProtocol.string(json, "image_path").isNotBlank() ||
+                JsonProtocol.nonBlank(json, "image_file_id")?.takeIf { it != "null" } != null
+            if (draftText.isNotEmpty() || hasAttachments) {
+                val preview = if (draftText.isNotEmpty()) {
+                    "Черновик: " + draftText.replace(Regex("\\s+"), " ").take(28)
+                } else {
+                    "Черновик (вложение)"
+                }
+                result[chatId] = preview
+            }
+        }
+        return result
+    }
+
+    /**
+     * Lightweight list for the chat picker; never loads full message histories.
+     * Task 2: Truly empty provisional sessions stay hidden, while sessions with
+     * sent messages, active requests, custom titles, or non-empty composer drafts
+     * remain reachable in the drawer.
+     */
     fun listChatSummaries(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
+        val draftPreviews = activeComposerDraftPreviews()
+        val publishedIds = HashSet<String>()
+        readableDatabase.rawQuery(
+            """
+            SELECT id FROM $CHAT_TABLE
+            WHERE title != 'Новый чат'
+               OR active_status IS NOT NULL
+               OR response_id IS NOT NULL
+               OR EXISTS (SELECT 1 FROM $MESSAGE_TABLE m WHERE m.chat_id=$CHAT_TABLE.id)
+               OR EXISTS (SELECT 1 FROM $REQUEST_ACCOUNTING_TABLE a WHERE a.chat_id=$CHAT_TABLE.id)
+            """.trimIndent(),
+            null
+        ).use { c ->
+            while (c.moveToNext()) publishedIds.add(c.getString(0))
+        }
         SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
             arrayOf("id", "title", "response_id", "baseline_effort", "updated_at"),
             null, null, null, null, "updated_at DESC, id DESC"
         ).use { c ->
             while (c.moveToNext()) {
+                val id = c.getString(c.getColumnIndexOrThrow("id"))
+                val isPublished = id in publishedIds
+                val draftPreview = draftPreviews[id]
+                if (!isPublished && draftPreview == null) continue
+                val dbTitle = c.getString(c.getColumnIndexOrThrow("title"))
+                val displayTitle = if (!isPublished && dbTitle == "Новый чат" && draftPreview != null) {
+                    draftPreview
+                } else {
+                    dbTitle
+                }
                 val obj = JSONObject()
-                    .put("id", c.getString(c.getColumnIndexOrThrow("id")))
-                    .put("title", c.getString(c.getColumnIndexOrThrow("title")))
+                    .put("id", id)
+                    .put("title", displayTitle)
+                if (!isPublished && draftPreview != null) {
+                    obj.put("is_draft", true)
+                }
                 val responseId = c.getString(c.getColumnIndexOrThrow("response_id"))
                 val baseline = c.getString(c.getColumnIndexOrThrow("baseline_effort"))
                 if (!responseId.isNullOrBlank()) obj.put("response_id", responseId)

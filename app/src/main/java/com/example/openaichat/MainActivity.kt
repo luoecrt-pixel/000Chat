@@ -180,6 +180,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private lateinit var activeResponsePersistence: ActiveResponsePersistence
     private lateinit var diagnostics: AstraDiagnostics
     private lateinit var scroll: RecyclerView
+    private lateinit var jumpToBottomBtn: TextView
+    private val perChatScrollAnchors = mutableMapOf<String, Pair<Int, Int>>()
+    private val userScrollLockedChats = mutableSetOf<String>()
     private lateinit var messageAdapter: ChatMessageAdapter
     private lateinit var input: EditText
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -622,8 +625,49 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             itemAnimator = null
             clipToPadding = false
             setPadding(dp(10), dp(6), dp(10), dp(12))
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                        if (!isAtBottomPixels()) userScrollLockedChats.add(currentChatId())
+                    } else if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                        if (isAtBottomPixels()) userScrollLockedChats.remove(currentChatId())
+                        captureCurrentScrollAnchor()
+                    }
+                    updateJumpToBottomButtonVisibility()
+                }
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    if (dy < -dp(2) && !isAtBottomPixels()) {
+                        userScrollLockedChats.add(currentChatId())
+                    } else if (isAtBottomPixels()) {
+                        userScrollLockedChats.remove(currentChatId())
+                    }
+                    if (recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                        captureCurrentScrollAnchor()
+                    }
+                    updateJumpToBottomButtonVisibility()
+                }
+            })
         }
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        jumpToBottomBtn = TextView(this).apply {
+            text = "↓"
+            textSize = 16f
+            setTextColor(Color.rgb(220, 228, 242))
+            gravity = Gravity.CENTER
+            alpha = 0.72f
+            background = rippleRounded(Color.argb(185, 34, 38, 46), 19)
+            contentDescription = "Прокрутить к ответу"
+            visibility = View.GONE
+            setOnClickListener { handleTwoStageJumpClick() }
+        }
+        val scrollContainer = FrameLayout(this).apply {
+            addView(scroll, FrameLayout.LayoutParams(-1, -1))
+            addView(jumpToBottomBtn, FrameLayout.LayoutParams(dp(38), dp(38)).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                rightMargin = dp(14)
+                bottomMargin = dp(10)
+            })
+        }
+        root.addView(scrollContainer, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
             textSize = 12f
@@ -731,7 +775,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             status.ellipsize = TextUtils.TruncateAt.END
             toolLabel.maxLines = if (keyboard) 1 else 4
             attachScroll.layoutParams = attachScroll.layoutParams.apply { height = ViewGroup.LayoutParams.WRAP_CONTENT }
-            if (keyboard) scroll.post { scrollToLatest() }
+            if (keyboard && currentChatId() !in userScrollLockedChats) scroll.post { scrollToLatest() }
             WindowInsetsCompat.CONSUMED
         }
         ViewCompat.requestApplyInsets(root)
@@ -776,6 +820,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun showChats() {
+        persistComposerStateNow()
         refreshChatDrawer()
         drawerLayout.openDrawer(GravityCompat.START)
     }
@@ -1302,6 +1347,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val mode = if (supportsMode) spinner("Режим ответа (standard/pro)", modes, "reasoning_mode", "standard") else null
         val summaries = arrayOf("auto","concise","detailed","null")
         val summary = if (openAi) spinner("Краткий ход рассуждений", summaries, "reasoning_summary", "auto") else null
+        val containerLimits = arrayOf("1g","4g","16g","64g")
+        val containerMemorySpinner = if (openAi) spinner("Память контейнера Code Interpreter (1g по умолчанию)", containerLimits, "openai_container_memory", "1g") else null
         val verbosities = arrayOf("low","medium","high")
         val verbosity = spinner("Подробность ответа", verbosities, "verbosity", "medium")
         val canSetVerbosity = provider != "openrouter" ||
@@ -1365,6 +1412,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     .putBoolean("response_scientific_preview", scientificPreview.isChecked)
                 if (mode != null) editor.putString("reasoning_mode", modes[mode.selectedItemPosition])
                 if (summary != null) editor.putString("reasoning_summary", summaries[summary.selectedItemPosition])
+                if (containerMemorySpinner != null) editor.putString("openai_container_memory", containerLimits[containerMemorySpinner.selectedItemPosition])
                 editor.putString(formatKey, formats[format.selectedItemPosition])
                 editor.putString(schemaKey, schema.text.toString())
                 editor.apply()
@@ -1537,7 +1585,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             isChecked = prefs.getBoolean("background_responses", true)
         }
         val notifications = chk("Уведомлять о готовом ответе", "response_notifications").apply { isChecked = prefs.getBoolean("response_notifications", true) }
-        val fileAnalysis = chk("Полные файлы для анализа (Code Interpreter; тарификация OpenAI)", "file_analysis_tools").apply { isChecked = prefs.getBoolean("file_analysis_tools", true) }
+        val fileAnalysis = chk("Анализ файлов с Python (Code Interpreter; платный контейнер OpenAI)", "file_analysis_tools").apply { isChecked = prefs.getBoolean("file_analysis_tools", false) }
         val autoCompaction = chk("OpenAI: автосжатие контекста (порог по окну модели, до 800 тыс.)", "openai_auto_compaction").apply { isChecked = prefs.getBoolean("openai_auto_compaction", true) }
         val toolsCard=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
@@ -1564,7 +1612,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val claudeRoute = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 arrayOf("Автоматический: с резервными провайдерами", "Прямой Anthropic: без резервного провайдера"))
-            setSelection(if (OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", "auto")) == OpenRouterClaudeRoute.ANTHROPIC) 1 else 0)
+            setSelection(if (OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null)) == OpenRouterClaudeRoute.ANTHROPIC) 1 else 0)
         }
         labeled("Маршрут Claude: авто — до 5 МБ Base64 на фото и 20 МБ на запрос; прямой Anthropic — до 10 и 32 МБ. При сбое Anthropic прямой маршрут не переключается; доступность и цена могут отличаться. Оригиналы сохраняются.", claudeRoute)
         val pdfEngine = spinner(arrayOf("native", "auto", "cloudflare-ai", "mistral-ocr"), "openrouter_pdf_engine", "native")
@@ -2120,6 +2168,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun switchChat(id:String) {
+        captureCurrentScrollAnchor()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         cancelPendingGitHubConfirmation()
@@ -2623,7 +2672,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val capturedParallelTools = prefs.getBoolean("parallel_tools", true)
             val capturedPdfEngine = prefs.getString("openrouter_pdf_engine", "native") ?: "native"
             val capturedCacheMode = prefs.getString("openrouter_cache_mode", "1h") ?: "1h"
-            val capturedClaudeRoute = OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", "auto"))
+            val capturedClaudeRoute = OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null))
             val capturedCompatibleImages = prefs.getString("openrouter_image_mode", "original") == "compatible"
             val originalComposerText = input.text.toString()
             val originalAttachmentIds = attachedOpenRouterAttachments.map { Triple(it.id, it.textPath, it.textEncoding) }
@@ -2746,7 +2795,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val filePathsBeforePreparation = attachedFilePaths.toList()
         val imagePathBeforePreparation = pendingImagePath
         val pendingUrisBeforePreparation = pendingUploadUris.toList()
-        val fileAnalysisEnabled = prefs.getBoolean("file_analysis_tools", true)
+        val fileAnalysisEnabled = prefs.getBoolean("file_analysis_tools", false)
         val capturedFileHistory = chat.map { JSONObject(it.toString()) } + JSONObject(sentUserMessage.toString())
         fun commitPreparedOpenAi(typedInput: JSONArray?, containerFiles: Map<String, String> = emptyMap()) {
         // Repeat creates a new user request under current settings without touching a newer draft.
@@ -2898,7 +2947,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val enableCodeInterpreter = prefs.getBoolean("code_interpreter", false) || (fileAnalysisEnabled && nonVisualContainerFiles.isNotEmpty())
         if(enableCodeInterpreter){
-            val containerMemory = if (knownFileBytes >= 15L * 1024L * 1024L) "4g" else "1g"
+            val containerMemory = prefs.getString("openai_container_memory", "1g")
+                ?.takeIf { it in setOf("1g", "4g", "16g", "64g") } ?: "1g"
             val c=JSONObject().put("type","auto").put("memory_limit",containerMemory)
             val wholeFileIds = (requestFileIds.mapIndexedNotNull { i, id ->
                 val path = requestFilePaths.getOrNull(i)
@@ -6559,8 +6609,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         chatDb.upsertUiSnapshotPreservingTail(id,chatTitle,currentResponseId,baselineEffort,chat)
         if(::title.isInitialized) title.text=chatTitle
+        if(::drawerList.isInitialized) refreshChatDrawer()
     }
     private fun restoreCurrentChat(){
+        val targetChatId = currentChatId()
+        val savedAnchor = perChatScrollAnchors[targetChatId]
         messageAdapter.clearItems()
         chat.clear()
         clearAttachedSelection()
@@ -6616,6 +6669,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setBusy(false)
         }
         restoreComposerState()
+        if (savedAnchor != null && restoredItems.isNotEmpty()) {
+            scroll.post {
+                val lm = scroll.layoutManager as? LinearLayoutManager ?: return@post
+                val pos = savedAnchor.first.coerceIn(0, (messageAdapter.itemCount - 1).coerceAtLeast(0))
+                lm.scrollToPositionWithOffset(pos, savedAnchor.second)
+                updateJumpToBottomButtonVisibility()
+            }
+        } else {
+            scroll.post { updateJumpToBottomButtonVisibility() }
+        }
     }
 
     private fun restoreAttachmentSelectionFromMessage(message:JSONObject){
@@ -7749,23 +7812,104 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
+    private fun pixelDistanceFromBottom(): Int {
+        if (!::scroll.isInitialized) return 0
+        val range = scroll.computeVerticalScrollRange()
+        val offset = scroll.computeVerticalScrollOffset()
+        val extent = scroll.computeVerticalScrollExtent()
+        return (range - offset - extent).coerceAtLeast(0)
+    }
+
+    private fun isAtBottomPixels(): Boolean = pixelDistanceFromBottom() <= dp(64)
+
+    private fun captureCurrentScrollAnchor() {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return
+        val firstPos = lm.findFirstVisibleItemPosition()
+        if (firstPos < 0) return
+        val firstView = lm.findViewByPosition(firstPos)
+        val topOffset = (firstView?.top ?: 0) - scroll.paddingTop
+        perChatScrollAnchors[currentChatId()] = firstPos to topOffset
+    }
+
+    private fun updateJumpToBottomButtonVisibility() {
+        if (!::jumpToBottomBtn.isInitialized || !::messageAdapter.isInitialized) return
+        val shouldShow = messageAdapter.itemCount > 0 && !isAtBottomPixels()
+        jumpToBottomBtn.visibility = if (shouldShow) View.VISIBLE else View.GONE
+    }
+
+    private fun fastSmoothScrollTo(targetPosition: Int, snapToStart: Boolean) {
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return
+        val scroller = object : androidx.recyclerview.widget.LinearSmoothScroller(this) {
+            override fun getVerticalSnapPreference(): Int =
+                if (snapToStart) SNAP_TO_START else SNAP_TO_END
+            override fun calculateSpeedPerPixel(displayMetrics: android.util.DisplayMetrics): Float =
+                9f / displayMetrics.densityDpi
+            override fun calculateTimeForScrolling(dx: Int): Int =
+                super.calculateTimeForScrolling(dx).coerceAtMost(110)
+        }
+        scroller.targetPosition = targetPosition.coerceIn(0, (messageAdapter.itemCount - 1).coerceAtLeast(0))
+        lm.startSmoothScroll(scroller)
+    }
+
+    private fun handleTwoStageJumpClick() {
+        if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return
+        val lastIndex = messageAdapter.itemCount - 1
+        val firstVisible = lm.findFirstVisibleItemPosition()
+        val lastViewTop = lm.findViewByPosition(lastIndex)?.top
+        val target = ChatScrollPolicy.jumpTarget(
+            itemCount = messageAdapter.itemCount,
+            firstVisiblePosition = firstVisible,
+            lastItemTopPx = lastViewTop,
+            topThresholdPx = dp(28)
+        )
+        if (target == JumpButtonTarget.LAST_MESSAGE_START) {
+            userScrollLockedChats.add(currentChatId())
+            fastSmoothScrollTo(lastIndex, snapToStart = true)
+            scroll.postDelayed({
+                captureCurrentScrollAnchor()
+                updateJumpToBottomButtonVisibility()
+            }, 130L)
+        } else {
+            userScrollLockedChats.remove(currentChatId())
+            scroll.scrollBy(0, pixelDistanceFromBottom())
+            scroll.scrollToPosition(lastIndex)
+            scroll.post {
+                captureCurrentScrollAnchor()
+                updateJumpToBottomButtonVisibility()
+            }
+        }
+    }
+
     private fun isNearLatest(): Boolean {
         if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return true
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return true
         val lastVisible = lm.findLastVisibleItemPosition()
+        val locked = currentChatId() in userScrollLockedChats ||
+            (scroll.scrollState == RecyclerView.SCROLL_STATE_DRAGGING)
         return ChatScrollPolicy.shouldScrollToLatest(
             itemCount = messageAdapter.itemCount,
-            lastVisiblePosition = lastVisible
+            lastVisiblePosition = lastVisible,
+            pixelDistanceFromBottom = if (scroll.width > 0 && scroll.height > 0) pixelDistanceFromBottom() else null,
+            maxFollowDistancePx = dp(64),
+            userScrollLocked = locked
         )
     }
 
     private fun scrollToLatest(force: Boolean = false){
         if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
-        if(!force && !isNearLatest()) return
+        if (force) userScrollLockedChats.remove(currentChatId())
+        if(!force && !isNearLatest()) {
+            updateJumpToBottomButtonVisibility()
+            return
+        }
         scroll.post{
             if(messageAdapter.itemCount>0 && (force || isNearLatest())) {
                 scroll.scrollToPosition(messageAdapter.itemCount-1)
+                captureCurrentScrollAnchor()
             }
+            updateJumpToBottomButtonVisibility()
         }
     }
 

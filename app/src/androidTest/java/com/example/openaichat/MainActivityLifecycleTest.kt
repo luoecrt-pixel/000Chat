@@ -733,6 +733,70 @@ class MainActivityLifecycleTest {
     }
 
     @Test
+    fun unsentDraftRemainsReachableThroughDrawerAcrossEmptyChatsAndRestoresOnSelection() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val previousChat = prefs.getString("current_chat", null)
+        val created = mutableListOf<String>()
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            scenario.onActivity { activity ->
+                val draftText = "Неотправленный черновик А"
+                val input = privateField(activity, "input") as android.widget.EditText
+                val drawerList = privateField(activity, "drawerList") as LinearLayout
+                fun drawerTitles() = (0 until drawerList.childCount).map {
+                    (drawerList.getChildAt(it) as android.widget.TextView).text.toString()
+                }
+                activity.newChat()
+                val chatA = activity.currentChatIdForTesting().also { created += it }
+                input.setText(draftText)
+                // Open the drawer in the same main-thread callback, before debounce can run.
+                assertFalse(prefs.contains("composer_state_$chatA"))
+                invoke(activity, "showChats")
+                assertEquals(draftText, JSONObject(prefs.getString("composer_state_$chatA", "{}")!!).getString("text"))
+
+                activity.newChat()
+                val chatB = activity.currentChatIdForTesting().also { created += it }
+                activity.newChat()
+                val chatC = activity.currentChatIdForTesting().also { created += it }
+                invoke(activity, "showChats")
+                val summaries = ChatDatabase(context).use { it.listChatSummaries() }
+                val ids = summaries.map { it.getString("id") }.toSet()
+                assertTrue(chatA in ids)
+                assertFalse(chatB in ids)
+                assertFalse(chatC in ids)
+                val draft = summaries.single { it.getString("id") == chatA }
+                assertTrue(draft.getBoolean("is_draft"))
+                val preview = draft.getString("title")
+                assertTrue(preview.startsWith("Черновик: "))
+                assertEquals(summaries.map { it.getString("title") }, drawerTitles())
+                val row = (0 until drawerList.childCount).map { drawerList.getChildAt(it) }
+                    .filterIsInstance<android.widget.TextView>().single { it.text.toString() == preview }
+                assertTrue(row.performClick())
+                assertEquals(chatA, activity.currentChatIdForTesting())
+                assertEquals(draftText, input.text.toString())
+
+                input.setText("")
+                invoke(activity, "switchChat", chatB)
+                invoke(activity, "showChats")
+                ChatDatabase(context).use { db ->
+                    assertTrue(db.listChatSummaries().none { it.getString("id") in created })
+                    assertEquals("Новый чат", db.getChatTitle(chatA))
+                    assertEquals(0, db.getChat(chatA)!!.getJSONArray("messages").length())
+                }
+                assertFalse(preview in drawerTitles())
+            }
+        } finally {
+            scenario.close()
+            ChatDatabase(context).use { db -> created.forEach(db::deleteChat) }
+            val editor = prefs.edit()
+            created.forEach { editor.remove("composer_state_$it") }
+            if (previousChat == null) editor.remove("current_chat") else editor.putString("current_chat", previousChat)
+            editor.commit()
+        }
+    }
+
+    @Test
     fun concurrentSourceCompletionsKeepBothAttachmentsAndOriginalText() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->

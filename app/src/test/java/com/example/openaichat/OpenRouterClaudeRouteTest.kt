@@ -16,6 +16,21 @@ class OpenRouterClaudeRouteTest {
     private fun stream(event: String) = MockResponse().setHeader("Content-Type", "text/event-stream")
         .setBody("data: $event\n\ndata: [DONE]\n\n")
 
+    @Test fun missingPreferencePinsAnthropicWhileExplicitAutoRemainsAvailable() {
+        for (value in listOf(null, "", "unknown", "anthropic", " ANTHROPIC ")) {
+            val route = OpenRouterClaudeRoute.fromPreference(value)
+            assertEquals(OpenRouterClaudeRoute.ANTHROPIC, route)
+            val provider = route.provider(model, false)!!
+            assertEquals("anthropic", provider.getJSONArray("order").getString(0))
+            assertFalse(provider.getBoolean("allow_fallbacks"))
+        }
+        for (value in listOf("auto", " AUTO ")) {
+            val route = OpenRouterClaudeRoute.fromPreference(value)
+            assertEquals(OpenRouterClaudeRoute.AUTO, route)
+            assertNull(route.provider(model, false))
+        }
+    }
+
     @Test fun routeAndStructuredOutputStayMergedAcrossToolRoundsEvenWhenSettingChanges() {
         for (route in OpenRouterClaudeRoute.entries) for (structured in listOf(false, true)) {
             val server = MockWebServer(); server.start()
