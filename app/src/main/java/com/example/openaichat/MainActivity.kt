@@ -332,6 +332,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingPickerProvider = null
         }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
+        ModelCatalog.syncFromPreferences(prefs)
         chatDb = ChatDatabase(applicationContext)
         activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
         diagnostics = AstraDiagnostics(this)
@@ -1279,6 +1280,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .setTitle("Источник и модель")
             .setView(box)
             .setNegativeButton("Отмена", null)
+            .setNeutralButton("✎ Редактор моделей") { _, _ ->
+                val source = sources[provider.selectedItemPosition.coerceAtLeast(0)]
+                showModelCatalogEditor(source.id)
+            }
             .setPositiveButton("Применить") { _, _ ->
                 val source = sources[provider.selectedItemPosition.coerceAtLeast(0)]
                 val selectedModel = modelIds.getOrNull(model.selectedItemPosition)
@@ -1290,6 +1295,132 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     .apply()
                 updateModelBadge()
                 status.text = "${source.label} · ${ModelCatalog.displayName(source.id, selectedModel)}"
+            }
+            .show()
+    }
+
+    private fun showModelCatalogEditor(initialProviderId: String) {
+        ModelCatalog.syncFromPreferences(prefs)
+        val sources = ModelCatalog.sources
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(8))
+        }
+        val providerSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                sources.map { it.label }
+            )
+            setSelection(sources.indexOfFirst { it.id == initialProviderId }.coerceAtLeast(0))
+        }
+        val idInput = EditText(this).apply {
+            hint = "ID модели (например: openai/gpt-5 или anthropic/claude-sonnet-4.5)"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(130, 135, 145))
+            setSingleLine(true)
+        }
+        val labelInput = EditText(this).apply {
+            hint = "Отображаемое имя (необязательно)"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(130, 135, 145))
+            setSingleLine(true)
+        }
+        val windowInput = EditText(this).apply {
+            hint = "Окно контекста в токенах (необязательно, напр. 1050000)"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(130, 135, 145))
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val existingList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(4))
+        }
+
+        fun renderExisting(providerId: String) {
+            existingList.removeAllViews()
+            val models = ModelCatalog.source(providerId).models
+            models.forEach { item ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(4))
+                }
+                row.addView(TextView(this).apply {
+                    text = "${item.label} (${item.id})" + (item.contextWindow?.let { " · ${it / 1000}K" } ?: "")
+                    textSize = 12.5f
+                    setTextColor(Color.rgb(200, 205, 215))
+                    setOnClickListener {
+                        idInput.setText(item.id)
+                        labelInput.setText(item.label)
+                        windowInput.setText(item.contextWindow?.toString().orEmpty())
+                    }
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                if (item.custom && !ModelCatalog.isBuiltIn(providerId, item.id)) {
+                    row.addView(TextView(this).apply {
+                        text = "✕"
+                        textSize = 14f
+                        setTextColor(Color.rgb(230, 120, 120))
+                        setPadding(dp(10), dp(4), dp(6), dp(4))
+                        setOnClickListener {
+                            ModelCatalog.removeCustomModel(prefs, providerId, item.id)
+                            renderExisting(providerId)
+                            updateModelBadge()
+                            status.text = "Модель удалена из списка: ${item.id}"
+                        }
+                    })
+                }
+                existingList.addView(row)
+            }
+        }
+
+        providerSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                renderExisting(sources[position].id)
+            }
+        }
+        renderExisting(initialProviderId)
+
+        box.addView(TextView(this).apply {
+            text = "Источник API"
+            textSize = 12f
+            setTextColor(Color.rgb(150, 155, 165))
+        })
+        box.addView(providerSpinner)
+        box.addView(TextView(this).apply {
+            text = "Добавить или изменить модель (нажмите на строку ниже для редактирования)"
+            textSize = 12f
+            setTextColor(Color.rgb(150, 155, 165))
+            setPadding(0, dp(10), 0, dp(4))
+        })
+        box.addView(idInput)
+        box.addView(labelInput)
+        box.addView(windowInput)
+        box.addView(existingList)
+
+        AlertDialog.Builder(this)
+            .setTitle("Редактор списка моделей")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Назад") { _, _ -> showModelPicker() }
+            .setPositiveButton("Сохранить и выбрать") { _, _ ->
+                val providerId = sources[providerSpinner.selectedItemPosition.coerceAtLeast(0)].id
+                val rawId = idInput.text.toString().trim().removePrefix("~")
+                val rawLabel = labelInput.text.toString().trim().ifBlank { rawId }
+                val rawWindow = windowInput.text.toString().trim().toIntOrNull()
+                if (!ModelCatalog.upsertCustomModel(prefs, providerId, rawId, rawLabel, rawWindow)) {
+                    status.text = "Укажите корректный ID модели без пробелов"
+                } else {
+                    val source = ModelCatalog.source(providerId)
+                    prefs.edit()
+                        .putString("provider", source.id)
+                        .putString("provider_label", source.label)
+                        .putString("model", rawId)
+                        .apply()
+                    updateModelBadge()
+                    status.text = "Модель сохранена и выбрана: ${ModelCatalog.displayName(source.id, rawId)}"
+                }
             }
             .show()
     }
@@ -2034,33 +2165,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun githubConfirmationText(name: String, arguments: JSONObject): String {
-        return when (name) {
-            "merge_pull_request" ->
-                GitHubConfirmationPreview.text(name, arguments)
-            "create_or_update_file" -> {
-                val repo = arguments.optString("owner") + "/" + arguments.optString("repo")
-                val path = JsonProtocol.string(arguments, "path")
-                val branch = arguments.optString("branch")
-                val content = if (!arguments.isNull("content")) JsonProtocol.string(arguments, "content") else {
-                    try { String(Base64.decode(arguments.optString("content_base64"), Base64.DEFAULT), Charsets.UTF_8) } catch (_:Exception) { "" }
-                }
-                val preview = content.take(3000)
-                "Модель хочет записать файл в GitHub.\nРепозиторий: " + repo +
-                    "\nВетка: " + branch +
-                    "\nПуть: " + path +
-                    "\nРазмер: " + content.toByteArray(Charsets.UTF_8).size + " байт" +
-                    "\n\nPreview:\n" + preview + (if (content.length > 3000) "\n… preview truncated …" else "") +
-                    "\n\nРазрешить?"
-            }
-            "create_issue_comment", "submit_pull_request_review" ->
-                GitHubConfirmationPreview.text(name, arguments)
-            "trigger_workflow_dispatch" ->
-                "Модель хочет запустить GitHub Actions workflow " + arguments.optString("workflow_id") +
-                    " на ref " + arguments.optString("ref") + ".\n\nРазрешить?"
-            else -> "Модель хочет выполнить GitHub-действие " + name + ".\n\nРазрешить?"
-        }
-    }
+    private fun githubConfirmationText(name: String, arguments: JSONObject): String =
+        GitHubConfirmationPreview.text(name, arguments)
 
     private fun completePendingGitHubConfirmation(
         decision: CompletableFuture<Boolean>,
