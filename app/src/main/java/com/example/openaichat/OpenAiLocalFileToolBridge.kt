@@ -89,7 +89,12 @@ object OpenAiLocalFileToolBridge {
             onCall(call)
             ensureActive()
             val received = call.execute().use { response ->
-                if (!response.isSuccessful) throw UnrecoverableResponsesStreamException("Ошибка продолжения OpenAI HTTP ${response.code}; автоматический повтор POST запрещён")
+                if (!response.isSuccessful) {
+                    if (body == null) throw ApiHttpException(response.code,
+                        response.header("Retry-After")?.toLongOrNull()?.coerceIn(1, 300)?.times(1000),
+                        BoundedResponseDecoder.readErrorBody(response.body))
+                    throw UnrecoverableResponsesStreamException("Ошибка продолжения OpenAI HTTP ${response.code}; автоматический повтор POST запрещён")
+                }
                 JSONObject(BoundedResponseDecoder.readBody(response.body))
             }
             try { ensureActive() } catch (cancelled: CancellationException) {
@@ -131,7 +136,7 @@ object OpenAiLocalFileToolBridge {
                     val id = checkpoint.getString("response_id")
                     if (response.optString("id") != id || response.optString("status") in setOf("queued", "in_progress")) response = http(null, id)
                     if (response.optString("status") in setOf("queued", "in_progress")) {
-                        Thread.sleep(250L); continue
+                        Thread.sleep(1_500L); continue
                     }
                     checkpoint.put("phase", "idle")
                 }
@@ -171,7 +176,15 @@ object OpenAiLocalFileToolBridge {
             val results = JSONArray()
             for ((id, name, args) in validated) {
                 ensureActive()
-                results.put(JSONObject().put("type", "function_call_output").put("call_id", id).put("output", local.execute(name, args)))
+                val result = local.execute(name, args)
+                val wireResult = if (name == "file_list") {
+                    JSONObject(result).apply {
+                        optJSONArray("files")?.let { list -> for (i in 0 until list.length()) {
+                            list.optJSONObject(i)?.put("reading", "Use search_attached_file, read_attached_file or read_attached_table with this file_id.")
+                        } }
+                    }.toString()
+                } else result
+                results.put(JSONObject().put("type", "function_call_output").put("call_id", id).put("output", wireResult))
             }
             val prior = checkpoint.getJSONArray("prior_output")
             for (i in 0 until output.length()) prior.put(JsonProtocol.copy(output.get(i)))
@@ -181,6 +194,17 @@ object OpenAiLocalFileToolBridge {
                 .put("next_input", results).put("phase", "prepared")
             persist()
         }
+    }
+
+    /** Preserve paid prior rounds even if the current child fails before emitting any text. */
+    fun receivedOutput(db: ChatDatabase, chatId: String, requestId: String, responseId: String?, current: JSONArray): JSONArray {
+        val saved = db.getOpenAiToolCheckpoint(chatId, requestId) ?: return current
+        if (saved.optString("phase") == "finished") return saved.optJSONObject("final_response")?.optJSONArray("output") ?: current
+        val prior = saved.optJSONArray("prior_output") ?: return current
+        if (prior.length() == 0) return current
+        val result = JsonProtocol.arrayCopy(prior)
+        if (responseId != saved.optString("parent_id")) for (i in 0 until current.length()) result.put(JsonProtocol.copy(current.get(i)))
+        return result
     }
 
     /** Replay of an interrupted turn must pair every received call without executing it again. */

@@ -3477,7 +3477,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val failureStatus = if (toolCheckpoint != null && toolCheckpoint.optString("phase") != "finished") "failed"
                         else responseState.terminalState?.wireStatus
                             ?: if (completionState == "disconnected" || cancelled) "disconnected" else "failed"
-                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
+                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState).apply {
+                        put("output", OpenAiLocalFileToolBridge.receivedOutput(chatDb, requestChatId, localRequestId,
+                            optString("id"), optJSONArray("output") ?: JSONArray()))
+                    }
                     val parsedPartial = AstraResponseModel.fromResponse(
                         effectiveResponse, responseState.text.ifBlank {
                             OpenAiSseStreamReader.terminalOutputText(effectiveResponse)
@@ -4034,8 +4037,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             // A paid terminal event was checkpointed but the app crashed before
             // the one-shot final commit. Finalize locally; never resume or
             // regenerate an already completed provider response.
-            OpenAiLocalFileToolBridge.durableTerminal(chatDb, chatId, requestId, responseState.terminalResponse)?.let { terminal ->
-                finalizeBackgroundResponse(current, terminal, uiSnapshot)
+            val durableTerminal = OpenAiLocalFileToolBridge.durableTerminal(chatDb, chatId, requestId, responseState.terminalResponse)
+            if (durableTerminal != null) {
+                try {
+                    finalizeBackgroundResponse(current, durableTerminal, uiSnapshot)
+                } catch (error: IOException) {
+                    val retryHttp = error !is ApiHttpException ||
+                        BackgroundRecoveryPolicy.actionForHttpStatus(error.statusCode) == BackgroundRecoveryAction.RETRY
+                    if (!ResponsesStreamFailurePolicy.isUnrecoverable(error) && retryHttp &&
+                        chatDb.getOpenAiToolCheckpoint(chatId, requestId)?.optString("phase") == "waiting") {
+                        try { Thread.sleep(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs)) }
+                        catch (_: InterruptedException) { Thread.currentThread().interrupt(); return }
+                        retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                        continue
+                    }
+                    finishBackgroundRecovery(chatId, error.message.orEmpty(), requestId, uiSnapshot)
+                }
                 return
             }
             if (ResponseDeadlinePolicy.remainingMillis(requestStartedAt, System.currentTimeMillis()) <= 0L) {

@@ -112,12 +112,32 @@ class BackgroundResponseWorker(
                     failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
                     return Result.failure()
                 }
-                OpenAiLocalFileToolBridge.durableTerminal(db, chatId, requestId, responseState.terminalResponse)?.let { terminal ->
+                val durableTerminal = OpenAiLocalFileToolBridge.durableTerminal(db, chatId, requestId, responseState.terminalResponse)
+                if (durableTerminal != null) {
                     // Paid terminal already arrived before process death.
                     // Complete its owned one-shot commit with NO network call.
                     try {
-                        finalize(chatId, responseId, requestId, terminal, db, diagnostics)
+                        finalize(chatId, responseId, requestId, durableTerminal, db, diagnostics)
+                    } catch (error: ApiHttpException) {
+                        if (BackgroundRecoveryPolicy.actionForHttpStatus(error.statusCode) == BackgroundRecoveryAction.RETRY) {
+                            delay(error.retryAfterMs ?: BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
+                            retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                            continue
+                        }
+                        BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                            "failed", "recovery_http_${error.statusCode}", applicationContext.filesDir)
+                        return Result.failure()
                     } catch (error: UnrecoverableResponsesStreamException) {
+                        BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                            "failed", error.message.orEmpty(), applicationContext.filesDir)
+                        return Result.failure()
+                    } catch (error: IOException) {
+                        if (isStopped) return Result.success()
+                        if (db.getOpenAiToolCheckpoint(chatId, requestId)?.optString("phase") == "waiting") {
+                            delay(BackgroundRecoveryPolicy.jitteredDelayMs(retryDelayMs))
+                            retryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(retryDelayMs)
+                            continue
+                        }
                         BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
                             "failed", error.message.orEmpty(), applicationContext.filesDir)
                         return Result.failure()

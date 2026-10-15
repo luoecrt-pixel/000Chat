@@ -101,7 +101,7 @@ class OpenAiLocalToolsIntegrationTest {
         assertEquals("function_call_output", output.getString("type")); assertEquals("call_h", output.getString("call_id"))
         assertTrue(JSONObject(output.getString("output")).getJSONArray("matches").getJSONObject(0).getString("snippet").contains("needle"))
     }
-    private fun awaitFinal(chatId: String) {
+    private fun awaitFinal(chatId: String, expectTools: Boolean = true) {
         val deadline = SystemClock.elapsedRealtime() + 20_000
         while (SystemClock.elapsedRealtime() < deadline) {
             val message = ChatDatabase(context).use { it.getChat(chatId)?.optJSONArray("messages")?.let { all ->
@@ -109,7 +109,7 @@ class OpenAiLocalToolsIntegrationTest {
             } }
             if (message?.optString("response_id") == "resp_h_final") {
                 assertEquals("Found needle", message.getString("text"))
-                assertTrue(message.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
+                if (expectTools) assertTrue(message.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
                 return
             }
             SystemClock.sleep(50)
@@ -191,6 +191,7 @@ class OpenAiLocalToolsIntegrationTest {
             val imageBlocks = (0 until content.length()).map { content.getJSONObject(it) }.filter { it.optString("type") == "input_image" }
             assertEquals(2, imageBlocks.size)
             imageBlocks.forEach { assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
+            awaitFinal(chatId, expectTools = false)
         }
     }
 }

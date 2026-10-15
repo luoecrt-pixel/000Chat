@@ -21,6 +21,7 @@ object BackgroundRequestFailureRecorder {
     ): Boolean {
         val active = db.getActiveResponse(chatId) ?: return false
         if (active.optString("request_id") != localRequestId) return false
+        val ownedResponseId = JsonProtocol.nonBlank(active, "response_id") ?: responseId
         val chat = db.getChat(chatId) ?: return false
         val messages = chat.optJSONArray("messages") ?: return false
         val items = (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
@@ -32,7 +33,6 @@ object BackgroundRequestFailureRecorder {
             .ifBlank { userMessage?.optString("model").orEmpty() }
             .takeIf { it.isNotBlank() }
 
-        val partial = JsonProtocol.string(active, "text")
         // A provider may finish signed reasoning/tool output_item.done BEFORE
         // emitting its first visible text delta. Persist the exact received
         // typed items and readable summary even if the assistant text is empty.
@@ -42,7 +42,14 @@ object BackgroundRequestFailureRecorder {
         } catch (_: UnrecoverableResponsesCheckpointException) {
             null
         }
-        val typed = recovered?.typedOutputItems?.toSortedMap()?.values.orEmpty()
+        val received = OpenAiLocalFileToolBridge.receivedOutput(db, chatId, localRequestId,
+            JsonProtocol.nonBlank(active, "response_id"), org.json.JSONArray().apply {
+                recovered?.typedOutputItems?.toSortedMap()?.values?.forEach { put(it) }
+            })
+        val typed = (0 until received.length()).mapNotNull { received.optJSONObject(it) }
+        val partial = JsonProtocol.string(active, "text").ifBlank {
+            OpenAiSseStreamReader.terminalOutputText(JSONObject().put("output", received))
+        }
         val summary = recovered?.reasoningSummary.orEmpty()
         val sourceMessage = JSONObject()
         receivedFilesDir?.let {
@@ -57,7 +64,7 @@ object BackgroundRequestFailureRecorder {
                 .put("text", partial)
                 .put("provider", "openai")
                 .put("request_id", localRequestId)
-                .put("response_id", responseId)
+                .put("response_id", ownedResponseId)
                 .put("status", status)
                 .put("incomplete", true)
                 .put("error", error.take(1200))
@@ -85,7 +92,7 @@ object BackgroundRequestFailureRecorder {
 
         db.recordRequestAccounting(
             chatId = chatId, localRequestId = localRequestId,
-            status = status, responseId = responseId, error = error
+            status = status, responseId = ownedResponseId, error = error
         )
         db.recordRequestEvent(
             chatId = chatId,

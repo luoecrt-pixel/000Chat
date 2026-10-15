@@ -70,6 +70,19 @@ class OpenAiLocalFileToolBridgeTest {
             assertFalse(schema.getBoolean("strict")); assertEquals("object", schema.getJSONObject("parameters").getString("type"))
         }
     }
+    @Test fun listedFilesDescribeOnlyResponsesToolNames() {
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val response = call("resp_first", "list_attached_files")
+        response.getJSONArray("output").getJSONObject(1).put("arguments", "{}")
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", response, http, credential = { "mock-only" })
+        val output = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+            .getJSONArray("input").getJSONObject(0).getString("output")
+        val descriptor = JSONObject(output).getJSONArray("files").getJSONObject(0)
+        assertEquals(attachment.id, descriptor.getString("file_id"))
+        assertTrue(descriptor.getString("reading").contains("read_attached_file"))
+        assertFalse(descriptor.getString("reading").contains("file_read_range"))
+    }
+
     @Test fun twoToolRoundsPreserveSignedItemsOutputsAndAggregateUsage() {
         server.enqueue(MockResponse().setBody(call("resp_second", callId = "call_2").toString()))
         server.enqueue(MockResponse().setBody(finalResponse().toString()))
@@ -137,6 +150,21 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals("posting", db.getOpenAiToolCheckpoint("chat", "request")!!.getString("phase"))
     }
 
+    @Test fun failedChildRetainsPriorSignedToolProtocolInChatHistory() {
+        val checkpoint = db.getOpenAiToolCheckpoint("chat", "request")!!
+        val prior = call("resp_first").getJSONArray("output").put(JSONObject()
+            .put("type", "function_call_output").put("call_id", "call_1").put("output", "exact durable result"))
+        checkpoint.put("phase", "waiting").put("round", 1).put("parent_id", "resp_first")
+            .put("response_id", "resp_child").put("prior_output", prior)
+        assertTrue(db.advanceOpenAiToolResponse("chat", "request", "resp_first", "resp_child", checkpoint))
+        assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", "request", "resp_first", "failed", "network failure"))
+        val history = db.getChat("chat")!!.getJSONArray("messages")
+        assertEquals("resp_child", history.getJSONObject(history.length() - 1).getString("response_id"))
+        val output = history.getJSONObject(history.length() - 1).getJSONArray("openai_protocol_output")
+        assertEquals("signed-resp_first", output.getJSONObject(0).getString("encrypted_content"))
+        assertEquals("exact durable result", output.getJSONObject(2).getString("output"))
+    }
+
     @Test fun staleCheckpointAndForeignRoundCannotOverwriteCurrentOwner() {
         val initial = db.getOpenAiToolCheckpoint("chat", "request")!!
         assertTrue(db.compareOpenAiToolCheckpoint("chat", "request", initial.toString(), JsonProtocol.objectCopy(initial).put("phase", "posting")))
@@ -145,6 +173,20 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals("posting", db.getOpenAiToolCheckpoint("chat", "request")!!.getString("phase"))
         db.deleteChat("chat")
         assertNull(db.getOpenAiToolCheckpoint("chat", "request"))
+    }
+
+    @Test fun aTransientChildGetFailureResumesTheKnownChildWithoutRepeatingPost() {
+        server.enqueue(MockResponse().setBody(finalResponse().put("status", "queued").toString()))
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{\"error\":{\"message\":\"busy\"}}"))
+        assertThrows(ApiHttpException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        }
+        assertEquals("waiting", db.getOpenAiToolCheckpoint("chat", "request")!!.getString("phase"))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val result = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        assertEquals("resp_final", result.getString("id"))
+        assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method)
+        repeat(2) { assertEquals("GET", server.takeRequest(2, TimeUnit.SECONDS)!!.method) }
     }
 
     @Test fun waitingChildIsPolledAfterReopenAndFinishedCheckpointNeedsNoNetwork() {
