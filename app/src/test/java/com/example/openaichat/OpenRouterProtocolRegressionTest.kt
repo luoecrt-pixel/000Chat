@@ -7,7 +7,10 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.StringReader
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class OpenRouterProtocolRegressionTest {
     @Test fun structuredOutputIsExplicitAndEnforcedInActualRequest() {
@@ -148,6 +151,122 @@ class OpenRouterProtocolRegressionTest {
             assertEquals("final-data", sent.getJSONObject(3).getJSONArray("reasoning_details").getJSONObject(0).getString("data"))
             assertFalse(sent.toString().contains("_astra_"))
         } finally { client.close(); server.shutdown() }
+    }
+
+    @Test fun stopBetweenToolAAndToolBMarksToolBCancelledWithoutRepeatingToolA() {
+        val server = MockWebServer(); server.start()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        val active = AtomicBoolean(true)
+        val toolACount = AtomicInteger()
+        val toolBCount = AtomicInteger()
+        val checkpoints = mutableListOf<JSONObject>()
+        val originalResult = """{"ok":true,"file":"notes.txt"}"""
+        try {
+            server.enqueue(stream(twoToolCalls()))
+            assertThrows(CancellationException::class.java) {
+                client.complete("mock", "anthropic/claude-sonnet-5.5", input(), tools = OpenRouterAppToolCatalog.tools(),
+                    maxTokens = null, reasoningEffort = "max", verbosity = null, parallelToolCalls = false,
+                    executeTool = { name, _ ->
+                        when (name) {
+                            "file_info" -> { toolACount.incrementAndGet(); active.set(false); originalResult }
+                            "file_read_range" -> { toolBCount.incrementAndGet(); "unexpected" }
+                            else -> throw AssertionError("Unexpected tool $name")
+                        }
+                    },
+                    shouldContinue = { active.get() },
+                    onProtocolCheckpoint = { checkpoints += JSONObject(it.toString()) })
+            }
+            assertEquals(1, toolACount.get()); assertEquals(0, toolBCount.get())
+            assertEquals("Round and completed A must both be checkpointed", 2, checkpoints.size)
+            assertEquals(1, server.requestCount)
+
+            val failedAssistant = JSONObject().put("role", "assistant").put("text", "Inspect notes").put("status", "stopped")
+            failedAssistant.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(checkpoints.last(), failedAssistant))
+            val stored = JSONObject(failedAssistant.toString())
+            val storedBeforeReplay = stored.toString()
+            val replayed = input()
+            assertTrue(OpenRouterProtocolCodec.append(replayed, stored))
+            assertEquals(storedBeforeReplay, stored.toString())
+            assertEquals(4, replayed.length())
+            assertEquals("assistant", replayed.getJSONObject(1).getString("role"))
+            assertEquals(2, replayed.getJSONObject(1).getJSONArray("tool_calls").length())
+            assertEquals("call_A", replayed.getJSONObject(1).getJSONArray("tool_calls").getJSONObject(0).getString("id"))
+            assertEquals("call_B", replayed.getJSONObject(1).getJSONArray("tool_calls").getJSONObject(1).getString("id"))
+            val toolA = replayed.getJSONObject(2)
+            assertEquals("tool", toolA.getString("role")); assertEquals("call_A", toolA.getString("tool_call_id"))
+            assertEquals(originalResult, toolA.getString("content"))
+            val toolB = replayed.getJSONObject(3)
+            assertEquals("tool", toolB.getString("role")); assertEquals("call_B", toolB.getString("tool_call_id"))
+            val cancelled = JSONObject(toolB.getString("content"))
+            assertFalse(cancelled.getBoolean("ok")); assertTrue(cancelled.getBoolean("cancelled"))
+            assertEquals("cancelled", cancelled.getString("status"))
+
+            replayed.put(JSONObject().put("role", "user").put("content", "Continue"))
+            server.enqueue(stream("""{"choices":[{"delta":{"content":"Continued"},"finish_reason":"stop"}]}"""))
+            assertEquals("Continued", complete(client, replayed) { _, _ -> throw AssertionError("Completed tools must not repeat") }.text)
+            assertEquals(1, toolACount.get()); assertEquals(0, toolBCount.get())
+            server.takeRequest(2, TimeUnit.SECONDS)
+            val wire = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("messages")
+            assertEquals(originalResult, wire.getJSONObject(2).getString("content"))
+            assertTrue(JSONObject(wire.getJSONObject(3).getString("content")).getBoolean("cancelled"))
+        } finally { client.close(); server.shutdown() }
+    }
+
+    @Test fun invalidToolBPreventsToolAFromExecutingInTheSameRound() {
+        val server = MockWebServer(); server.start()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        try {
+            for ((name, arguments) in listOf("not_declared" to "{}", "file_read_range" to "{")) {
+                server.enqueue(stream(twoToolCalls(name, arguments)))
+                var executions = 0
+                var checkpoints = 0
+                assertThrows(java.io.IOException::class.java) {
+                    client.complete("mock", "anthropic/claude-sonnet-5.5", input(), tools = OpenRouterAppToolCatalog.tools(),
+                        maxTokens = null, reasoningEffort = "max", verbosity = null, parallelToolCalls = false,
+                        executeTool = { _, _ -> executions++; "{}" },
+                        onProtocolCheckpoint = { checkpoints++ })
+                }
+                assertEquals("Tool A executed before invalid B was rejected", 0, executions)
+                assertEquals("An invalid round must not enter the replay tail", 0, checkpoints)
+            }
+        } finally { client.close(); server.shutdown() }
+    }
+
+    @Test fun successfulTwoToolRoundKeepsOriginalResultsInCheckpointsAndNextRequest() {
+        val server = MockWebServer(); server.start()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        val checkpoints = mutableListOf<JSONObject>()
+        val executions = mutableListOf<String>()
+        try {
+            server.enqueue(stream(twoToolCalls()))
+            server.enqueue(stream("""{"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"""))
+            val result = client.complete("mock", "anthropic/claude-sonnet-5.5", input(), tools = OpenRouterAppToolCatalog.tools(),
+                maxTokens = null, reasoningEffort = "max", verbosity = null, parallelToolCalls = false,
+                executeTool = { name, _ -> executions += name; "result:$name" },
+                onProtocolCheckpoint = { checkpoints += JSONObject(it.toString()) })
+            assertEquals("Inspect notes\n\nDone", result.text)
+            assertEquals(listOf("file_info", "file_read_range"), executions)
+            assertEquals(3, checkpoints.size)
+            assertTrue(JSONObject(checkpoints[0].getJSONArray("tail").getJSONObject(1).getString("content")).getBoolean("cancelled"))
+            assertEquals("result:file_info", checkpoints[1].getJSONArray("tail").getJSONObject(1).getString("content"))
+            assertTrue(JSONObject(checkpoints[1].getJSONArray("tail").getJSONObject(2).getString("content")).getBoolean("cancelled"))
+            assertEquals("result:file_read_range", checkpoints[2].getJSONArray("tail").getJSONObject(2).getString("content"))
+            server.takeRequest(2, TimeUnit.SECONDS)
+            val wire = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("messages")
+            assertEquals("result:file_info", wire.getJSONObject(2).getString("content"))
+            assertEquals("result:file_read_range", wire.getJSONObject(3).getString("content"))
+            assertFalse(wire.toString().contains("cancelled"))
+        } finally { client.close(); server.shutdown() }
+    }
+
+    private fun twoToolCalls(toolB: String = "file_read_range", argumentsB: String = "{}"): String {
+        fun call(index: Int, id: String, name: String, arguments: String) = JSONObject()
+            .put("index", index).put("id", id).put("type", "function")
+            .put("function", JSONObject().put("name", name).put("arguments", arguments))
+        return JSONObject().put("choices", JSONArray().put(JSONObject().put("finish_reason", "tool_calls")
+            .put("delta", JSONObject().put("role", "assistant").put("content", "Inspect notes")
+                .put("tool_calls", JSONArray().put(call(0, "call_A", "file_info", "{}"))
+                    .put(call(1, "call_B", toolB, argumentsB)))))).toString()
     }
 
     @Test fun changedPrefixResetsOldBlocksButKeepsNewBlocksSignedAfterThatChange() {

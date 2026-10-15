@@ -8,11 +8,76 @@ object OpenRouterProtocolCodec {
     private const val BINDING = "_astra_binding_sha256"
     private const val RESET = "_astra_reset_reasoning"
     private const val VALID_PREFIX = "_astra_prefix_valid"
+
+    /**
+     * Every tool_call declared by an assistant message in tail must have a matching
+     * role="tool" message before the next turn is sent, even when the request was
+     * stopped or crashed between tool A and tool B. Already completed tools keep
+     * their exact results and are never re-executed.
+     */
+    fun completePendingToolCalls(tail: JSONArray) {
+        val normalized = mutableListOf<JSONObject>()
+        var i = 0
+        while (i < tail.length()) {
+            val item = tail.optJSONObject(i)
+            if (item == null) {
+                i++
+                continue
+            }
+            normalized.add(item)
+            if (item.optString("role") == "assistant") {
+                val calls = item.optJSONArray("tool_calls")
+                if (calls != null && calls.length() > 0) {
+                    val expectedIds = mutableListOf<String>()
+                    for (c in 0 until calls.length()) {
+                        val id = calls.optJSONObject(c)?.let { JsonProtocol.nonBlank(it, "id") }?.trim()
+                        if (!id.isNullOrEmpty() && id !in expectedIds) {
+                            expectedIds.add(id)
+                        }
+                    }
+                    val seenIds = mutableSetOf<String>()
+                    var j = i + 1
+                    while (j < tail.length()) {
+                        val next = tail.optJSONObject(j) ?: break
+                        if (next.optString("role") != "tool") break
+                        normalized.add(next)
+                        JsonProtocol.nonBlank(next, "tool_call_id")?.trim()?.let { seenIds.add(it) }
+                        j++
+                    }
+                    for (missingId in expectedIds) {
+                        if (missingId !in seenIds) {
+                            normalized.add(
+                                JSONObject()
+                                    .put("role", "tool")
+                                    .put("tool_call_id", missingId)
+                                    .put(
+                                        "content",
+                                        JSONObject()
+                                            .put("ok", false)
+                                            .put("cancelled", true)
+                                            .put("status", "cancelled")
+                                            .put("error", "Выполнение инструмента отменено: запрос был остановлен до запуска.")
+                                            .toString()
+                                    )
+                            )
+                        }
+                    }
+                    i = j
+                    continue
+                }
+            }
+            i++
+        }
+        while (tail.length() > 0) tail.remove(tail.length() - 1)
+        normalized.forEach { tail.put(it) }
+    }
+
     fun append(destination: JSONArray, stored: JSONObject): Boolean {
         if (JsonProtocol.string(stored, "protocol_context_state") == "invalidated") return false
         val protocol = stored.optJSONObject("openrouter_protocol") ?: return false
         if (protocol.optInt("version") != 1) return false
-        val tail = protocol.optJSONArray("tail") ?: return false
+        val rawTail = protocol.optJSONArray("tail") ?: return false
+        val tail = JsonProtocol.arrayCopy(rawTail).also(::completePendingToolCalls)
         val exactPrefix = protocol.optString("input_sha256") == fingerprint(destination)
         for (i in 0 until tail.length()) {
             val message = tail.optJSONObject(i) ?: continue
@@ -24,11 +89,13 @@ object OpenRouterProtocolCodec {
         }
         return true
     }
+
     fun fingerprint(messages: JSONArray): String {
         val clean = JsonProtocol.arrayCopy(messages)
         for (i in 0 until clean.length()) clean.optJSONObject(i)?.apply { remove(BINDING); remove(RESET); remove(VALID_PREFIX) }
         return StreamingJsonRequestBody.sha256(clean)
     }
+
     /** Changing a signed prefix invalidates all subsequent thinking blocks. */
     fun checkBinding(messages: JSONArray, expected: String): Boolean {
         var reset = false
@@ -60,6 +127,7 @@ object OpenRouterProtocolCodec {
 
     fun withVisibleTail(checkpoint: JSONObject, message: JSONObject): JSONObject = JsonProtocol.objectCopy(checkpoint).apply {
         val tail = getJSONArray("tail")
+        completePendingToolCalls(tail)
         val priorAssistantTexts = (0 until tail.length()).mapNotNull { i ->
             val item = tail.optJSONObject(i)
             if (item?.optString("role") == "assistant") {

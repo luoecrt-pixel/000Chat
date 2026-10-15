@@ -211,6 +211,7 @@ class OpenRouterChatClient(
         fun emitProtocolCheckpoint() {
             val checkpointTail = JSONArray()
             for (i in inputCount until history.length()) checkpointTail.put(JsonProtocol.copy(history.get(i)))
+            OpenRouterProtocolCodec.completePendingToolCalls(checkpointTail)
             onProtocolCheckpoint(
                 JSONObject().put("version", 1).put("input_sha256", sourceInputHash)
                     .put("wire_input_sha256", inputHash).put("binding_sha256", binding).put("tail", checkpointTail)
@@ -533,10 +534,8 @@ class OpenRouterChatClient(
                             }
                     )
                 }
-                JsonProtocol.string(message, "content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
-                history.put(JSONObject(message.toString()))
+                val validatedCalls = mutableListOf<Triple<String, String, JSONObject>>()
                 for (i in 0 until calls.length()) {
-                    ensureWithinBudget()
                     val callObject = calls.optJSONObject(i) ?: continue
                     val function = callObject.optJSONObject("function")
                         ?: throw IOException("Malformed tool call")
@@ -554,11 +553,16 @@ class OpenRouterChatClient(
                     } catch (e: Exception) {
                         throw IOException("Invalid tool arguments for $name", e)
                     }
+                    validatedCalls.add(Triple(id, name, arguments))
+                }
+                JsonProtocol.string(message, "content").trim().takeIf { it.isNotBlank() }?.let { accumulatedText += it }
+                history.put(JSONObject(message.toString()))
+                emitProtocolCheckpoint()
+                for ((id, name, arguments) in validatedCalls) {
+                    ensureWithinBudget()
                     toolNames += name
                     ensureActive()
                     val toolResult = executeTool(name, arguments)
-                    ensureActive()
-                    ensureWithinBudget()
                     history.put(
                         JSONObject()
                             .put("role", "tool")
@@ -567,6 +571,7 @@ class OpenRouterChatClient(
                     )
                     // Persist durable checkpoint immediately after each completed tool side effect.
                     emitProtocolCheckpoint()
+                    ensureWithinBudget()
                 }
             }
         } catch (e: Exception) {
