@@ -225,7 +225,8 @@ class RichResponsePanel(
             if (formulas.isNotEmpty()) addView(ScientificMathText(context, native) {
                 val prepared = MathTextTokens.prepare(block.raw, formulas)
                 val node = markwon.parse(prepared.markdown); safeTree(node)
-                ScientificRendererDocument.mathInText(android.text.Html.toHtml(markwon.render(node), android.text.Html.TO_HTML_PARAGRAPH_LINES_INDIVIDUAL), prepared)
+                val rendered = bridgeMarkwonSpansForHtml(markwon.render(node))
+                ScientificRendererDocument.mathInText(android.text.Html.toHtml(rendered, android.text.Html.TO_HTML_PARAGRAPH_LINES_INDIVIDUAL), prepared)
             }) else addView(native)
             if (formulas.isNotEmpty()) addView(button("Превью формул (${formulas.size})") { formulaPreview(formulas) })
         }
@@ -245,12 +246,49 @@ class RichResponsePanel(
         }
     }
 
+    private fun extractNodeText(root: Node): String {
+        val out = StringBuilder()
+        val stack = java.util.ArrayDeque<Node>()
+        stack.add(root)
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            when (current) {
+                is Text -> out.append(current.literal)
+                is org.commonmark.node.Code -> out.append(current.literal)
+            }
+            var child = current.lastChild
+            while (child != null) {
+                stack.add(child)
+                child = child.previous
+            }
+        }
+        return out.toString()
+    }
+
+    private fun bridgeMarkwonSpansForHtml(source: Spanned): Spanned {
+        val out = SpannableStringBuilder(source)
+        val allSpans = out.getSpans(0, out.length, Any::class.java)
+        for (span in allSpans) {
+            val start = out.getSpanStart(span)
+            val end = out.getSpanEnd(span)
+            val flags = out.getSpanFlags(span)
+            if (start < 0 || end <= start) continue
+            when (span.javaClass.simpleName) {
+                "StrongEmphasisSpan" -> out.setSpan(android.text.style.StyleSpan(Typeface.BOLD), start, end, flags)
+                "EmphasisSpan" -> out.setSpan(android.text.style.StyleSpan(Typeface.ITALIC), start, end, flags)
+                "CodeSpan", "CodeBlockSpan" -> out.setSpan(android.text.style.TypefaceSpan("monospace"), start, end, flags)
+                "BlockQuoteSpan" -> out.setSpan(android.text.style.QuoteSpan(), start, end, flags)
+            }
+        }
+        return out
+    }
+
     private fun safeTree(root: Node) {
         val pending = java.util.ArrayDeque<Node>(); pending.add(root)
         while (pending.isNotEmpty()) {
             val node = pending.removeLast()
             val literal = when (node) {
-                is Image -> "[Изображение не загружено: ${(node.firstChild as? Text)?.literal ?: node.title ?: "изображение"}]"
+                is Image -> "[Изображение не загружено: ${extractNodeText(node).ifBlank { node.title ?: "изображение" }}]"
                 is HtmlInline -> when {
                     Regex("<br\\s*/?>", RegexOption.IGNORE_CASE).matches(node.literal) -> "\n"
                     ResponseRenderSafety.nativeInlineTag(node.literal) -> null

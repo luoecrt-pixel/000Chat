@@ -24,7 +24,12 @@ internal object KeyedFileLocks {
         try {
             while (!acquired) {
                 if (!active()) throw IOException("File read cancelled while waiting")
-                acquired = entry.lock.tryLock(100, TimeUnit.MILLISECONDS)
+                acquired = try {
+                    entry.lock.tryLock(100, TimeUnit.MILLISECONDS)
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException("File read cancelled while waiting", interrupted)
+                }
             }
             if (!active()) throw IOException("File read cancelled")
             return action()

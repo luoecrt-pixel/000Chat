@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Paths still owned by persisted chat messages or saved (including inactive) composers.
@@ -42,14 +43,37 @@ object LocalAttachmentReferences {
         return result
     }
 
-    /** File ownership is checked separately by the caller before deletion. */
+    /**
+     * File ownership is checked separately by the caller before deletion.
+     * Compare both raw and canonical paths so Android symlink aliases (/data/data
+     * vs /data/user/0) never cause a referenced attachment to be treated as an orphan.
+     * Fail closed if canonical resolution fails.
+     */
     fun isOrphanOldEnough(
         path: String,
         lastModifiedMs: Long,
         nowMs: Long,
         referencedPaths: Set<String>,
         retentionMs: Long = 7L * 24 * 60 * 60 * 1000
-    ): Boolean =
-        lastModifiedMs > 0L && nowMs >= lastModifiedMs &&
-            path !in referencedPaths && nowMs - lastModifiedMs >= retentionMs
+    ): Boolean {
+        if (path.isBlank() || lastModifiedMs <= 0L || nowMs < lastModifiedMs) return false
+        if (nowMs - lastModifiedMs < retentionMs) return false
+        if (path in referencedPaths) return false
+        val candidateCanonical = try {
+            File(path).canonicalPath
+        } catch (_: Exception) {
+            return false
+        }
+        if (candidateCanonical in referencedPaths) return false
+        for (referenced in referencedPaths) {
+            if (referenced.isBlank()) continue
+            val refCanonical = try {
+                File(referenced).canonicalPath
+            } catch (_: Exception) {
+                return false
+            }
+            if (candidateCanonical == refCanonical) return false
+        }
+        return true
+    }
 }

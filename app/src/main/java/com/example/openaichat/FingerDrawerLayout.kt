@@ -91,7 +91,13 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
                 downX = event.x; downY = event.y; downAt = event.eventTime
                 startFraction = visibleFraction; dragging = false
                 outside = visibleFraction > 0f && event.x > panelWidth * visibleFraction
-                var target = hit(this, event.rawX.toInt(), event.rawY.toInt())
+                val selfGlobal = Rect()
+                val target = if (getGlobalVisibleRect(selfGlobal)) {
+                    hit(this, selfGlobal.left + event.x.toInt(), selfGlobal.top + event.y.toInt())
+                } else {
+                    hit(this, event.rawX.toInt(), event.rawY.toInt())
+                }
+                var current = target
                 // Parent-owned coordinates stay valid when the touch began on
                 // a nested TextView and raw screen coordinates differ in tests.
                 val surface = swipeSurface
@@ -102,10 +108,10 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
                         rect.contains(event.x.toInt(), event.y.toInt())
                     })
                 horizontalChild = null
-                while (target != null && target !== this) {
-                    if (target === swipeSurface) eligible = true
-                    if (target.canScrollHorizontally(-1) || target.canScrollHorizontally(1)) horizontalChild = target
-                    target = target.parent as? View
+                while (current != null && current !== this) {
+                    if (current === swipeSurface) eligible = true
+                    if (current.canScrollHorizontally(-1) || current.canScrollHorizontally(1)) horizontalChild = current
+                    current = current.parent as? View
                 }
                 return outside
             }

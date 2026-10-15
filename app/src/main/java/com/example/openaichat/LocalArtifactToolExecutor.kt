@@ -50,9 +50,11 @@ class LocalArtifactToolExecutor(private val context: Context) {
     }
 
     private fun mimeForFilename(name: String) = when (name.substringAfterLast('.', "").lowercase()) {
-        "txt","log" -> "text/plain"
-        "md","markdown" -> "text/markdown"
-        "kt","java","kotlin","py","js","ts","xml","yaml","yml","csv" -> "text/plain"
+        "txt", "log" -> "text/plain"
+        "md", "markdown" -> "text/markdown"
+        "csv" -> "text/csv"
+        "html", "htm" -> "text/html"
+        "kt", "java", "kotlin", "py", "js", "ts", "xml", "yaml", "yml" -> "text/plain"
         "json" -> "application/json"
         else -> "text/plain"
     }
