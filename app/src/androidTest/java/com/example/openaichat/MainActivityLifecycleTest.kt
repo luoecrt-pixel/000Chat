@@ -292,8 +292,9 @@ class MainActivityLifecycleTest {
         assertEquals("Developer fixture", input.getJSONObject(1).getString("content"))
         assertTrue("Historical assistant output must be replayed",
             input.toString().contains("Earlier answer"))
-        assertTrue("Original local file bytes must reach OpenAI wire request",
+        assertFalse("Selective local reading must not inline the complete document",
             input.toString().contains("ORIGINAL-LOCAL-BYTES-123"))
+        assertTrue(body.getJSONArray("tools").toString().contains("read_attached_file"))
         assertTrue(input.toString().contains("Next question"))
     }
 

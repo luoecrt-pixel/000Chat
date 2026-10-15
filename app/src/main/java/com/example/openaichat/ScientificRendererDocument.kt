@@ -46,6 +46,13 @@ object ScientificRendererDocument {
         })
         return document("math-text", scriptData(JSONObject().put("html", html).put("prefix", prepared.prefix).put("items", items).toString()))
     }
+    fun themed(document: String, theme: ThemeColors): String {
+        fun css(color: Int) = "#%06x".format(color and 0xFFFFFF)
+        return document.replace("color:#fff;background:#1c1d22", "color:${css(theme.textPrimary)};background:${css(theme.assistantBubbleBg)}")
+            .replace("theme:'dark'", "theme:'base',themeVariables:{primaryColor:'${css(theme.cardBg)}',primaryTextColor:'${css(theme.textPrimary)}',lineColor:'${css(theme.accent)}',secondaryColor:'${css(theme.tableRowBg)}'}")
+            .replace("color:#ffb4ab", "color:${css(theme.accent)}")
+    }
+
     private fun document(mode: String, data: String): String {
         val nonce = java.util.UUID.randomUUID().toString().replace("-", "")
         val csp = "default-src 'none'; script-src 'self' 'nonce-$nonce'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"

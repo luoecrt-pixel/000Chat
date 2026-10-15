@@ -9,6 +9,37 @@ import java.security.MessageDigest
 import java.util.Base64
 
 class OpenAiLocalContextEncoderTest {
+    @Test fun twoImagesAndLegacySingleImageRemainReadableInOneTypedMessage() {
+        val dir = kotlin.io.path.createTempDirectory("openai-images").toFile()
+        try {
+            val first = File(dir, "first.jpg").apply { writeBytes(realJpeg()) }
+            val second = File(dir, "second.jpg").apply { writeBytes(realJpeg()) }
+            val a = OpenRouterAttachmentStore.classifyLocalFile(first, first.name, "image/jpeg")
+            val b = OpenRouterAttachmentStore.classifyLocalFile(second, second.name, "image/jpeg")
+            val message = JSONObject().put("role", "user").put("text", "Compare")
+                .put("attachments", JSONArray().put(a.toJson()).put(b.toJson())).put("image_path", first.path)
+            val content = serialized(OpenAiLocalContextEncoder.encode(listOf(message))).getJSONObject(0).getJSONArray("content")
+            val images = (0 until content.length()).map { content.getJSONObject(it) }.filter { it.optString("type") == "input_image" }
+            assertEquals(2, images.size)
+            images.forEach { assertArrayEquals(realJpeg(), Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun localToolsInputContainsDescriptorsWhileContainerModeKeepsItsFileReference() {
+        val dir = kotlin.io.path.createTempDirectory("openai-descriptor").toFile()
+        try {
+            val file = File(dir, "large.txt").apply { writeText("COMPLETE_CONTENT_ONLY_AVAILABLE_ON_REQUEST".repeat(100)) }
+            val attachment = OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "text/plain")
+            val message = JSONObject().put("role", "user").put("text", "Find evidence")
+                .put("attachments", JSONArray().put(attachment.toJson()))
+            val selective = OpenAiLocalContextEncoder.encode(listOf(message), emptyMap(), false, null, localFileTools = true)
+            val wire = serialized(selective).toString()
+            assertFalse(wire.contains("COMPLETE_CONTENT_ONLY_AVAILABLE")); assertTrue(wire.contains(attachment.id))
+            val container = serialized(OpenAiLocalContextEncoder.encode(listOf(message), mapOf(file.path to "file_container"))).toString()
+            assertTrue(container.contains("file_container"))
+        } finally { dir.deleteRecursively() }
+    }
+
     private fun serialized(value: JSONArray): JSONArray {
         val writer = java.io.StringWriter()
         StreamingJsonRequestBody.writeJson(value, writer)

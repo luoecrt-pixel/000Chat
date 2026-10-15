@@ -11,6 +11,19 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class RichTextRendererTest {
+    @Test fun codeSpansUseTheSelectedThemeWithoutChangingSourceText() {
+        for (id in AppThemePalette.themes) {
+            val theme = AppThemePalette.byId(id)
+            val rendered = RichTextRenderer.render("`literal_text`", theme = theme) as Spanned
+            assertEquals("literal_text", rendered.toString())
+            assertEquals(theme.textPrimary, rendered.getSpans(0, rendered.length, android.text.style.ForegroundColorSpan::class.java).single().foregroundColor)
+            assertEquals(theme.cardBg, rendered.getSpans(0, rendered.length, android.text.style.BackgroundColorSpan::class.java).single().backgroundColor)
+            val document = ScientificRendererDocument.themed(ScientificRendererDocument.mermaid("flowchart TD\nA-->B"), theme)
+            assertTrue(document.contains("background:#%06x".format(theme.assistantBubbleBg and 0xFFFFFF)))
+            assertTrue(document.contains("color:#%06x".format(theme.textPrimary and 0xFFFFFF)))
+        }
+    }
+
     @Test fun identifiersAndBareUrlsDoNotLoseUnderscores() {
         val source = "snake_case_name https://example.org/api/file_name_v2?id=some_id"
         val result = RichTextRenderer.render(source)

@@ -76,10 +76,12 @@ columns = {row[1] for row in con.execute("PRAGMA table_info(messages)")}
 assert {"finish_reason", "openrouter_protocol", "protocol_context_state"} <= columns
 con.execute("INSERT INTO chats(id,title,updated_at) VALUES('c','title',0)")
 con.execute("INSERT INTO local_artifacts(path,chat_id,request_id,created_at,metadata) VALUES('p','c','r',0,'{}')")
+con.execute("INSERT INTO openai_tool_checkpoints(chat_id,request_id,request_checkpoint) VALUES('c','r','{}')")
 con.execute("INSERT INTO openrouter_checkpoints(chat_id,request_id,protocol) VALUES('c','r','{}')")
 con.execute("INSERT INTO answer_notifications(chat_id,request_id,completed,created_at) VALUES('c','r',1,0)")
 con.execute("DELETE FROM chats WHERE id='c'")
 assert con.execute("SELECT COUNT(*) FROM local_artifacts").fetchone()[0] == 0
+assert con.execute("SELECT COUNT(*) FROM openai_tool_checkpoints").fetchone()[0] == 0
 assert con.execute("SELECT COUNT(*) FROM openrouter_checkpoints").fetchone()[0] == 0
 assert con.execute("SELECT COUNT(*) FROM answer_notifications").fetchone()[0] == 0
 

@@ -24,6 +24,57 @@ import java.util.Collections
 /** Real APK assets and WebView are needed; no provider API or remote page is called. */
 @RunWith(AndroidJUnit4::class)
 class ScientificRendererDeviceTest {
+    @Test fun richPanelAutomaticallyRendersMathAndMermaidWithThemeColors() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("app", 0)
+        val oldTheme = prefs.getString("app_theme", null)
+        val oldPreview = prefs.all["response_scientific_preview"] as? Boolean
+        fun webViews(view: View): List<WebView> = if (view is WebView) listOf(view) else if (view is ViewGroup)
+            (0 until view.childCount).flatMap { webViews(view.getChildAt(it)) } else emptyList()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            try {
+                for (id in AppThemePalette.themes) {
+                    val ready = CountDownLatch(2)
+                    val dialogRef = AtomicReference<AlertDialog>()
+                    val previews = AtomicReference<List<WebView>>()
+                    scenario.onActivity { activity ->
+                        prefs.edit().putString("app_theme", id).putBoolean("response_scientific_preview", true).commit()
+                        val panel = RichResponsePanel(activity, {}, {})
+                        panel.submit(ChatBubbleItem.create("auto-$id", "Model",
+                            "```math\nx^2\n```\n\n```mermaid\nflowchart TD\nA-->B\n```", false))
+                        val webs = webViews(panel)
+                        assertEquals(2, webs.size)
+                        previews.set(webs)
+                        webs.forEach { web ->
+                            val chrome = web.webChromeClient
+                            web.webChromeClient = object : WebChromeClient() {
+                                override fun onReceivedTitle(view: WebView, title: String?) {
+                                    chrome?.onReceivedTitle(view, title)
+                                    if (title == "renderer:ready") ready.countDown()
+                                }
+                            }
+                        }
+                        dialogRef.set(AlertDialog.Builder(activity).setView(panel).setPositiveButton("Close", null).show())
+                    }
+                    try {
+                        assertTrue("Automatic previews did not render for $id", ready.await(25, TimeUnit.SECONDS))
+                        val theme = AppThemePalette.byId(id)
+                        val expected = "\"rgb(${android.graphics.Color.red(theme.assistantBubbleBg)}, ${android.graphics.Color.green(theme.assistantBubbleBg)}, ${android.graphics.Color.blue(theme.assistantBubbleBg)})\""
+                        previews.get().forEach { web ->
+                            assertEquals(expected, evaluate(scenario, web, "getComputedStyle(document.body).backgroundColor"))
+                            assertEquals("true", evaluate(scenario, web, "!!document.querySelector('.katex, #result svg')"))
+                        }
+                    } finally { scenario.onActivity { dialogRef.get().dismiss() } }
+                }
+            } finally {
+                prefs.edit().apply {
+                    if (oldTheme == null) remove("app_theme") else putString("app_theme", oldTheme)
+                    if (oldPreview == null) remove("response_scientific_preview") else putBoolean("response_scientific_preview", oldPreview)
+                }.commit()
+            }
+        }
+    }
+
     private fun findWeb(view: View): WebView? {
         if (view is WebView) return view
         if (view is ViewGroup) for (index in 0 until view.childCount) findWeb(view.getChildAt(index))?.let { return it }

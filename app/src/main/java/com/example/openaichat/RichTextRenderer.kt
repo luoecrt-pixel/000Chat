@@ -5,6 +5,8 @@ import android.text.Spanned
 import android.text.style.StyleSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.TypefaceSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.BackgroundColorSpan
 import android.text.style.URLSpan
 import android.graphics.Typeface
 import org.json.JSONArray
@@ -17,7 +19,7 @@ object RichTextRenderer {
 
     fun render(response: AstraResponseModel): CharSequence = render(response.text, response.annotations)
 
-    fun render(source: String, urlAnnotations: JSONArray? = null): CharSequence {
+    fun render(source: String, urlAnnotations: JSONArray? = null, theme: ThemeColors? = null): CharSequence {
         if (source.isEmpty()) return ""
         val out = SpannableStringBuilder()
         val sourceToOutput = IntArray(source.length + 1) { -1 }
@@ -43,6 +45,10 @@ object RichTextRenderer {
                     val start = out.length
                     appendPlain(i + 3, end)
                     out.setSpan(TypefaceSpan("monospace"), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    theme?.let {
+                        out.setSpan(ForegroundColorSpan(it.textPrimary), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(BackgroundColorSpan(it.cardBg), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
                     i = end + 3
                     continue
                 }
@@ -110,6 +116,10 @@ object RichTextRenderer {
                     val outStart = out.length
                     appendPlain(i + 1, end)
                     out.setSpan(TypefaceSpan("monospace"), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    theme?.let {
+                        out.setSpan(ForegroundColorSpan(it.textPrimary), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(BackgroundColorSpan(it.cardBg), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
                     sourceToOutput[i]=outStart; sourceToOutput[end]=out.length
                     i = end + 1
                     continue

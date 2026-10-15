@@ -89,20 +89,21 @@ object OpenAiLocalContextEncoder {
         history: List<JSONObject>,
         containerFiles: Map<String, String> = emptyMap(),
         onManifest: ((JSONObject, JSONObject) -> Unit)? = null
-    ): JSONArray = encode(history, containerFiles, false, null, onManifest)
+    ): JSONArray = encode(history, containerFiles, false, null, onManifest = onManifest)
 
     fun encode(
         history: List<JSONObject>,
         containerFiles: Map<String, String>,
         allowLegacyVisibleTextOnly: Boolean,
         onManifest: ((JSONObject, JSONObject) -> Unit)? = null
-    ): JSONArray = encode(history, containerFiles, allowLegacyVisibleTextOnly, null, onManifest)
+    ): JSONArray = encode(history, containerFiles, allowLegacyVisibleTextOnly, null, onManifest = onManifest)
 
     fun encode(
         history: List<JSONObject>,
         containerFiles: Map<String, String>,
         allowLegacyVisibleTextOnly: Boolean,
         context: Context?,
+        localFileTools: Boolean = false,
         onManifest: ((JSONObject, JSONObject) -> Unit)? = null
     ): JSONArray {
         val input = JSONArray()
@@ -114,7 +115,7 @@ object OpenAiLocalContextEncoder {
             if (role == "assistant") {
                 if (message.optString("provider") == "openai") {
                     val interrupted = OpenAiInterruptedTurnReplay.isInterrupted(message)
-                    val output = message.optJSONArray("openai_protocol_output")
+                    val output = message.optJSONArray("openai_protocol_output")?.let(OpenAiLocalFileToolBridge::completePendingOutputs)
                     if (output == null && !interrupted) {
                         if (!allowLegacyVisibleTextOnly) {
                             throw IOException(
@@ -209,7 +210,10 @@ object OpenAiLocalContextEncoder {
                         if (containerFiles.containsKey(item.path)) put("file_id", containerFiles.getValue(item.path))
                         else { put("filename", item.name); put("file_data", OpenRouterAttachmentStore.streamingDataUrl(item)) }
                     })
-                    "text", "document", "table", "container" -> if (containerFiles.containsKey(item.path)) {
+                    "text", "document", "table", "container" -> if (localFileTools && item.kind != "container") {
+                        parts.put(JSONObject().put("type", "input_text").put("text", LocalFileTools.descriptor(item)
+                            .put("reading", "Complete local source is available through search_attached_file, read_attached_file and read_attached_table. Use the file_id, never a path.").toString()))
+                    } else if (containerFiles.containsKey(item.path)) {
                         parts.put(JSONObject().put("type", "input_text").put("text", JSONObject()
                             .put("file_id", containerFiles.getValue(item.path)).put("filename", item.name)
                             .put("available", "Complete file in the Code Interpreter container. Choose search, partial reading or all rows as appropriate. Do not infer whole-table results from a preview.").toString()))

@@ -38,12 +38,15 @@ class BackgroundResponseWorker(
     }
 
 
+    @Volatile private var toolCall: okhttp3.Call? = null
+    private val toolClient = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS).callTimeout(0, TimeUnit.SECONDS).build()
     private val streamClient by lazy { ResumableResponseStreamClient(applicationContext) }
 
     @OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
     override suspend fun doWork(): Result {
         val chatId = inputData.getString(KEY_CHAT_ID).orEmpty()
-        val responseId = inputData.getString(KEY_RESPONSE_ID).orEmpty()
+        var responseId = inputData.getString(KEY_RESPONSE_ID).orEmpty()
         val requestId = inputData.getString(KEY_REQUEST_ID).orEmpty()
         if (chatId.isBlank() || responseId.isBlank() || requestId.isBlank()) return Result.failure()
 
@@ -56,6 +59,7 @@ class BackgroundResponseWorker(
         // job completion would keep the resume lease until the socket deadline.
         recoveryJob.invokeOnCompletion(onCancelling = true, invokeImmediately = true) {
             activeCall?.cancel()
+            toolCall?.cancel()
         }
 
         try {
@@ -100,6 +104,7 @@ class BackgroundResponseWorker(
                     if (resumeLease == null) { delay(250L); continue }
                 }
 
+                responseId = current.optString("response_id").ifBlank { responseId }
                 val cursor = current.optLong("last_sequence_number", -1L)
                 var responseState = try {
                     ResponseIndexedCheckpoint.restore(current)
@@ -107,10 +112,16 @@ class BackgroundResponseWorker(
                     failUnrecoverableCheckpoint(db, diagnostics, chatId, responseId, requestId, e)
                     return Result.failure()
                 }
-                responseState.terminalResponse?.let { terminal ->
+                OpenAiLocalFileToolBridge.durableTerminal(db, chatId, requestId, responseState.terminalResponse)?.let { terminal ->
                     // Paid terminal already arrived before process death.
                     // Complete its owned one-shot commit with NO network call.
-                    finalize(chatId, responseId, requestId, terminal, db, diagnostics)
+                    try {
+                        finalize(chatId, responseId, requestId, terminal, db, diagnostics)
+                    } catch (error: UnrecoverableResponsesStreamException) {
+                        BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
+                            "failed", error.message.orEmpty(), applicationContext.filesDir)
+                        return Result.failure()
+                    }
                     return if (responseState.terminalState == ResponseTerminalState.FAILED)
                         Result.failure() else Result.success()
                 }
@@ -296,7 +307,8 @@ class BackgroundResponseWorker(
             }
             return Result.success()
         } finally {
-            activeCall?.cancel()
+            activeCall?.cancel(); toolCall?.cancel()
+            toolClient.dispatcher.executorService.shutdown(); toolClient.connectionPool.evictAll()
             resumeLease?.let { OpenAiCreateCallOwners.releaseResume(chatId, requestId, it) }
             try { db.close() } catch (_: Exception) {}
             try { streamClient.close() } catch (_: Exception) {}
@@ -326,14 +338,18 @@ class BackgroundResponseWorker(
     private fun extractResponseText(response: JSONObject?): String =
         OpenAiSseStreamReader.terminalOutputText(response)
 
-    private fun finalize(chatId: String, responseId: String, requestId: String, response: JSONObject, db: ChatDatabase, diagnostics: AstraDiagnostics) {
+    private fun finalize(chatId: String, originalResponseId: String, requestId: String, response: JSONObject, db: ChatDatabase, diagnostics: AstraDiagnostics) {
         val active = db.getActiveResponse(chatId) ?: return
         if (active.optString("request_id") != requestId) return
         val recovered = ResponseIndexedCheckpoint.restore(active)
-        val effectiveResponse = OpenAiEffectiveResponse.assemble(response, recovered)
+        val initialResponse = OpenAiEffectiveResponse.assemble(response, recovered)
+        val effectiveResponse = OpenAiLocalFileToolBridge.finish(applicationContext, db, chatId, requestId,
+            initialResponse, toolClient, active = { !isStopped && db.isActiveRequest(chatId, requestId) },
+            onCall = { next -> toolCall = next; if (isStopped || !db.isActiveRequest(chatId, requestId)) next.cancel() })
+        val responseId = effectiveResponse.optString("id").ifBlank { originalResponseId }
         val state = effectiveResponse.optString("status").ifBlank { active.optString("status") }
         val fallbackText = JsonProtocol.string(active, "text")
-        val text = fallbackText.ifBlank { extractResponseText(effectiveResponse) }
+        val text = if (effectiveResponse === initialResponse) fallbackText.ifBlank { extractResponseText(effectiveResponse) } else extractResponseText(effectiveResponse)
         val parsedModel = AstraResponseModel.fromResponse(
             effectiveResponse, text, requestId, state,
             OpenAiFileFailure.recover(applicationContext, effectiveResponse.optJSONObject("error"))

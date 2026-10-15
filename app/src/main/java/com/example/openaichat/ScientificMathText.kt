@@ -12,7 +12,7 @@ import android.widget.TextView
 import org.json.JSONArray
 
 /** Explicit inline typesetting: one disposable, isolated renderer only while the user views it. */
-class ScientificMathText(context: Context, private val original: TextView, private val document: () -> String) : LinearLayout(context) {
+open class ScientificMathText(context: Context, private val original: TextView, autoPreview: Boolean = false, private val document: () -> String) : LinearLayout(context) {
     private val handler = Handler(Looper.getMainLooper())
     private var web: WebView? = null
     private var formatted = false
@@ -25,7 +25,7 @@ class ScientificMathText(context: Context, private val original: TextView, priva
         setOnClickListener { if (formatted) source() else typeset() }
     }
     private val timeout = Runnable { source("Форматирование не завершено. Исходник сохранён; можно повторить.") }
-    init { orientation = VERTICAL; addView(toggle); addView(notice); addView(original) }
+    init { orientation = VERTICAL; setBackgroundColor(theme.assistantBubbleBg); addView(toggle); addView(notice); addView(original); if (autoPreview) typeset() }
     private fun destroyRenderer() {
         handler.removeCallbacks(timeout)
         val old = web ?: return
@@ -33,12 +33,12 @@ class ScientificMathText(context: Context, private val original: TextView, priva
     }
     private fun source(message: String = "") {
         formatted = false; destroyRenderer(); original.visibility = View.VISIBLE
-        toggle.text = "Формулы в тексте"; notice.text = message
+        toggle.text = "Превью"; notice.text = message
     }
     private fun typeset() {
         destroyRenderer()
         val html = try { document() } catch (_: Exception) { source("Блок велик или несовместим с оформлением. Исходник доступен полностью."); return }
-        formatted = true; notice.text = "Готовлю формулы…"; toggle.text = "Показать исходное оформление"
+        formatted = true; notice.text = "Готовлю формулы…"; toggle.text = "Исходный код"
         val renderer = ScientificRendererPreview.webView(context, html, { view, title ->
             if (web === view && formatted) when (title) {
                 "renderer:failed" -> source("Не удалось оформить блок. Показан исходник.")

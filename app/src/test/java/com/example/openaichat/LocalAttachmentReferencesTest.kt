@@ -8,6 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalAttachmentReferencesTest {
+    @Test fun pendingMultiImageDraftProtectsOriginalAndWirePaths() {
+        val draft = JSONObject().put("pending_attachments", JSONArray()
+            .put(JSONObject().put("type", "image").put("path", "/files/first.png").put("wire_path", "/files/first.jpg"))
+            .put(JSONObject().put("type", "image").put("path", "/files/second.png")))
+        assertEquals(setOf("/files/first.png", "/files/first.jpg", "/files/second.png"), LocalAttachmentReferences.composerPaths(draft))
+    }
+
     @Test
     fun manifestTracksOriginalTextAndNormalizedWireCopies() {
         val manifest = JSONArray()
