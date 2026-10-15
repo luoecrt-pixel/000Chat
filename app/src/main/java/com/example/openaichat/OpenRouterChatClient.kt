@@ -106,10 +106,11 @@ class OpenRouterChatClient(
         val inputCount = history.length()
         val binding = OpenRouterProtocolCodec.binding(model, tools, apiKey, responseFormat, claudeRoute)
         val sourceInputHash = OpenRouterProtocolCodec.fingerprint(history)
-        if (OpenRouterProtocolCodec.checkBinding(history, binding)) {
+        val bindingReset = OpenRouterProtocolCodec.checkBinding(history, binding)
+        if (bindingReset) {
             onProtocolWarning("Изменён подписанный контекст Claude. История сообщений сохранена; прежние служебные блоки мышления нельзя повторно использовать с этим запросом.")
         }
-        val inputHash = StreamingJsonRequestBody.sha256(history)
+        val inputHash = if (bindingReset) StreamingJsonRequestBody.sha256(history) else sourceInputHash
         val allowedFunctionTools: Set<String> = buildSet {
             if (tools != null) {
                 for (i in 0 until tools.length()) {

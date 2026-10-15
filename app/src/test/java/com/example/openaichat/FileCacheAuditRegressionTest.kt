@@ -262,8 +262,8 @@ class FileCacheAuditRegressionTest {
             }
             repeat(2) { StreamingJsonRequestBody.writeJson(body, discard) }
             val stats = FileBackedIoTelemetry.snapshot(JSONArray().put(body).put(body))
-            assertEquals(1, stats.files); assertEquals(7L, stats.readPasses)
-            assertEquals(file.length() * 7L, stats.readBytes); assertTrue(stats.workNanos > 0L)
+            assertEquals(1, stats.files); assertEquals(4L, stats.readPasses)
+            assertEquals(file.length() * 4L, stats.readBytes); assertTrue(stats.workNanos > 0L)
             file.writeBytes(ByteArray(1024 * 1024))
             assertThrows(IOException::class.java) { StreamingJsonRequestBody.writeJson(body, discard) }
         } finally { file.delete() }

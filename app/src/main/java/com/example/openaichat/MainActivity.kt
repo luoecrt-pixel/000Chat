@@ -205,6 +205,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
     private lateinit var modelBadge: TextView
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var headerLayout: LinearLayout
+    private lateinit var headerDividerView: View
+    private lateinit var drawerPanelLayout: LinearLayout
+    private lateinit var drawerTitleView: TextView
+    private lateinit var drawerNewChatBtn: Button
     private lateinit var drawerLayout: FingerDrawerLayout
     private lateinit var drawerList: LinearLayout
     private lateinit var requestTelemetryCard: LinearLayout
@@ -332,6 +338,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingPickerProvider = null
         }
         prefs = getSharedPreferences("app", MODE_PRIVATE)
+        migrateLegacySettingsPreferences()
         chatDb = ChatDatabase(applicationContext)
         activeResponsePersistence = ChatDatabaseActiveResponsePersistence(chatDb)
         diagnostics = AstraDiagnostics(this)
@@ -548,11 +555,78 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     // ---------- UI ----------
+    private fun migrateLegacySettingsPreferences() {
+        val editor = prefs.edit()
+        var changed = false
+        if (!prefs.getBoolean("background_responses_migrated_v25", false)) {
+            editor.putBoolean("background_responses", true)
+            editor.putBoolean("background_responses_migrated_v25", true)
+            changed = true
+        }
+        if (!prefs.getBoolean("openai_auto_compaction_opt_in_migrated_v25", false)) {
+            if (!prefs.contains("openai_auto_compaction_user_explicit")) {
+                editor.putBoolean("openai_auto_compaction", false)
+            }
+            editor.putBoolean("openai_auto_compaction_opt_in_migrated_v25", true)
+            changed = true
+        }
+        if (changed) editor.apply()
+    }
+
+    private fun currentTheme(): ThemeColors =
+        AppThemePalette.byId(prefs.getString("app_theme", "dark"))
+
+    private fun applyTheme() {
+        val theme = currentTheme()
+        if (::rootLayout.isInitialized) rootLayout.setBackgroundColor(theme.rootBg)
+        if (::headerLayout.isInitialized) headerLayout.setBackgroundColor(theme.headerBg)
+        if (::headerDividerView.isInitialized) headerDividerView.setBackgroundColor(theme.divider)
+        if (::drawerLayout.isInitialized) drawerLayout.setBackgroundColor(theme.rootBg)
+        if (::drawerPanelLayout.isInitialized) drawerPanelLayout.setBackgroundColor(theme.drawerBg)
+        if (::drawerTitleView.isInitialized) drawerTitleView.setTextColor(theme.textPrimary)
+        if (::drawerNewChatBtn.isInitialized) {
+            drawerNewChatBtn.setTextColor(theme.accent)
+            drawerNewChatBtn.background = rippleRounded(theme.drawerNewChatBg, 10)
+        }
+        if (::title.isInitialized) title.setTextColor(theme.textPrimary)
+        if (::status.isInitialized) status.setTextColor(theme.textSecondary)
+        if (::toolLabel.isInitialized) toolLabel.setTextColor(theme.accent)
+        if (::modelBadge.isInitialized) modelBadge.setTextColor(theme.textPrimary)
+        if (::effortBadge.isInitialized) {
+            effortBadge.setTextColor(theme.accent)
+            effortBadge.background = rippleRounded(theme.buttonBg, 8)
+        }
+        if (::input.isInitialized) {
+            input.setTextColor(theme.textPrimary)
+            input.setHintTextColor(theme.hintText)
+            input.background = rounded(theme.inputBg, 20)
+        }
+        if (::send.isInitialized) {
+            send.setTextColor(theme.onAccent)
+            send.background = rounded(theme.accent, 20)
+        }
+        if (::jumpToBottomBtn.isInitialized) {
+            jumpToBottomBtn.setTextColor(theme.textPrimary)
+            jumpToBottomBtn.background = rippleRounded(theme.buttonBg, 19)
+        }
+        window?.let { win ->
+            win.statusBarColor = theme.headerBg
+            win.navigationBarColor = theme.rootBg
+            WindowCompat.getInsetsController(win, win.decorView)?.apply {
+                isAppearanceLightStatusBars = theme.isLight
+                isAppearanceLightNavigationBars = theme.isLight
+            }
+        }
+        if (::drawerList.isInitialized) refreshChatDrawer()
+        if (::messageAdapter.isInitialized) messageAdapter.notifyDataSetChanged()
+    }
+
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(17,18,21))
         }
+        rootLayout = root
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -560,6 +634,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setPadding(dp(8), dp(3), dp(8), dp(3))
             setBackgroundColor(Color.rgb(22,23,27))
         }
+        headerLayout = header
 
         val chatsBtn = button("☰") { showChats() }.apply {
             contentDescription = "Открыть чаты"
@@ -593,7 +668,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
         updateModelBadge()
-        root.addView(View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }, LinearLayout.LayoutParams(-1,dp(1)))
+        headerDividerView = View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }
+        root.addView(headerDividerView, LinearLayout.LayoutParams(-1,dp(1)))
 
         status = TextView(this).apply {
             text = "Готово"
@@ -807,6 +883,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 else { isEnabled = false; onBackPressedDispatcher.onBackPressed(); isEnabled = true }
             }
         })
+        applyTheme()
         renderRequestTelemetry()
         refreshChatDrawer()
 
@@ -831,20 +908,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setBackgroundColor(Color.rgb(24,25,30))
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
+        drawerPanelLayout = drawer
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), dp(4), 0, dp(10))
         }
-        header.addView(TextView(this).apply {
+        drawerTitleView = TextView(this).apply {
             text = "Чаты"
             textSize = 20f
             setTextColor(Color.WHITE)
             setTypeface(null, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        header.addView(drawerTitleView, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(button("×") { drawerLayout.closeDrawer(GravityCompat.START) })
         drawer.addView(header)
-        drawer.addView(button("＋ Новый чат") {
+        drawerNewChatBtn = button("＋ Новый чат") {
             newChat()
             drawerLayout.closeDrawer(GravityCompat.START)
         }.apply {
@@ -852,7 +931,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setTextColor(Color.rgb(190,215,255))
             background = rippleRounded(Color.rgb(36,44,58), 10)
             gravity = Gravity.LEFT or Gravity.CENTER_VERTICAL
-        }, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
+        }
+        drawer.addView(drawerNewChatBtn, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
         drawerList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -869,13 +949,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun refreshChatDrawer() {
         if (!::drawerList.isInitialized) return
         drawerList.removeAllViews()
+        val theme = currentTheme()
         val currentId = currentChatId()
         val chats = loadAllChats()
         if (chats.isEmpty()) {
             drawerList.addView(TextView(this).apply {
                 text = "Нет сохранённых чатов"
                 textSize = 13f
-                setTextColor(Color.rgb(135,140,150))
+                setTextColor(theme.textSecondary)
                 setPadding(dp(8), dp(14), dp(8), dp(14))
             })
             return
@@ -885,13 +966,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val row = TextView(this).apply {
                 text = chatItem.optString("title", "Новый чат")
                 textSize = 14.5f
-                setTextColor(Color.WHITE)
+                setTextColor(theme.textPrimary)
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(14), 0, dp(10), 0)
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
                 background = rippleRounded(
-                    if (id == currentId) Color.rgb(43,48,60) else Color.TRANSPARENT,
+                    if (id == currentId) theme.drawerSelectedBg else Color.TRANSPARENT,
                     10
                 )
                 setOnClickListener {
@@ -1321,6 +1402,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(4), dp(18), dp(8))
         }
+        fun sectionHeader(titleText: String) {
+            box.addView(TextView(this).apply {
+                text = titleText
+                textSize = 12.5f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.rgb(138, 180, 248))
+                setPadding(0, dp(14), 0, dp(4))
+            })
+        }
         fun spinner(label: String, values: Array<String>, key: String, default: String): Spinner {
             box.addView(TextView(this).apply {
                 text = label
@@ -1334,6 +1424,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             box.addView(input)
             return input
         }
+        fun chk(label: String, pref: String, def: Boolean = false) = CheckBox(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean(pref, def)
+        }
+
+        sectionHeader(if (openAi) "Мышление и формат (OpenAI)" else "Мышление и формат (OpenRouter / Claude)")
         val efforts = arrayOf("auto","low","medium","high","xhigh","max")
         val effort = spinner("Усилие мышления", efforts, "reasoning", "high")
         if (provider == "openrouter") {
@@ -1347,15 +1444,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val mode = if (supportsMode) spinner("Режим ответа (standard/pro)", modes, "reasoning_mode", "standard") else null
         val summaries = arrayOf("auto","concise","detailed","null")
         val summary = if (openAi) spinner("Краткий ход рассуждений", summaries, "reasoning_summary", "auto") else null
-        val containerLimits = arrayOf("1g","4g","16g","64g")
-        val containerMemorySpinner = if (openAi) spinner("Память контейнера Code Interpreter (1g по умолчанию)", containerLimits, "openai_container_memory", "1g") else null
         val verbosities = arrayOf("low","medium","high")
         val verbosity = spinner("Подробность ответа", verbosities, "verbosity", "medium")
         val canSetVerbosity = provider != "openrouter" ||
             OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
         verbosity.isEnabled = canSetVerbosity
         if (!canSetVerbosity) box.addView(TextView(this).apply {
-            text = "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие. Подробность задавайте в сообщении."
+            text = "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие."
             textSize = 11.5f
             setTextColor(Color.rgb(170,180,195))
             setPadding(0, dp(3), 0, dp(6))
@@ -1368,22 +1463,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         })
         val max = EditText(this).apply {
             hint = "Max output tokens"
+            setTextColor(Color.WHITE)
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(prefs.getString("max_output", "").orEmpty().takeUnless { it == "128000" }.orEmpty())
         }
         box.addView(max)
-        val presentation = CheckBox(this).apply {
-            text = "Соглашения оформления Markdown, кода и файлов"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("response_presentation_instructions", true)
-        }
+        val presentation = chk("Соглашения оформления Markdown, кода и файлов", "response_presentation_instructions", true)
         box.addView(presentation)
-        val scientificPreview = CheckBox(this).apply {
-            text = "Офлайн-превью формул и диаграмм"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("response_scientific_preview", true)
-        }
+        val scientificPreview = chk("Офлайн-превью формул и диаграмм", "response_scientific_preview", true)
         box.addView(scientificPreview)
         val formats = arrayOf("text","json_object","json_schema")
         val formatKey = if (openAi) "text_format" else "openrouter_text_format"
@@ -1391,16 +1479,90 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val format = spinner("Формат ответа", formats, formatKey, "text")
         val schema = EditText(this).apply {
             hint = "JSON Schema (только для json_schema)"
+            setTextColor(Color.WHITE)
             setText(prefs.getString(schemaKey, "").orEmpty())
             minLines = 2
         }
         box.addView(schema)
-        if (!openAi) box.addView(TextView(this).apply {
-            text = "JSON поддерживается не всеми моделями/провайдерами. Если выбранный формат не поддерживается, запрос завершится явной ошибкой."
-            setTextColor(Color.rgb(170, 180, 195)); textSize = 12f
-        })
+
+        sectionHeader(if (openAi) "Инструменты и контекст OpenAI" else "Инструменты, маршрут и кэш OpenRouter")
+        val web = if (openAi) chk("Web Search (OpenAI)", "web", false).also { box.addView(it) } else null
+        val fileSearch = if (openAi) chk("File Search (Vector Store)", "file_search", false).also { box.addView(it) } else null
+        val vectorInput = if (openAi) EditText(this).apply {
+            hint = "Vector Store ID"
+            setTextColor(Color.WHITE)
+            setSingleLine(true)
+            setText(prefs.getString("vector_store", "").orEmpty())
+        }.also {
+            box.addView(it)
+            box.addView(button("📁 Управление файлами Vector Store") { showVectorStoreManager() })
+        } else null
+        val codeInterpreter = if (openAi) chk("Code Interpreter (облачный Python OpenAI)", "code_interpreter", false).also { box.addView(it) } else null
+        val fileAnalysis = if (openAi) chk("Анализ прикреплённых файлов через Python (платный контейнер)", "file_analysis_tools", false).also { box.addView(it) } else null
+        val containerLimits = arrayOf("1g","4g","16g","64g")
+        val containerMemorySpinner = if (openAi) spinner("Память контейнера Code Interpreter (1g по умолчанию)", containerLimits, "openai_container_memory", "1g") else null
+        val imageGen = if (openAi) chk("Image Generation (OpenAI)", "image_generation", false).also { box.addView(it) } else null
+        val autoCompaction = if (openAi) chk("Автосжатие контекста на сервере OpenAI (opt-in; сокращает старый контекст)", "openai_auto_compaction", false).also { box.addView(it) } else null
+        val cacheKeyInput = if (openAi) EditText(this).apply {
+            hint = "Prompt cache key (необязательно)"
+            setTextColor(Color.WHITE)
+            setSingleLine(true)
+            setText(prefs.getString("cache_key", "").orEmpty())
+        }.also { box.addView(it) } else null
+
+        val openRouterWebSearch = if (!openAi) chk("OpenRouter: Web Search", "openrouter_web_search", false).also { box.addView(it) } else null
+        val openRouterWebFetch = if (!openAi) chk("OpenRouter: Web Fetch", "openrouter_web_fetch", false).also { box.addView(it) } else null
+        val githubTools = if (!openAi) chk("Разрешить GitHub-инструменты", "github_tools", false).also { box.addView(it) } else null
+        val claudeRoute = if (!openAi) Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                arrayOf("Автоматический: с резервными провайдерами", "Прямой Anthropic: без резервного провайдера"))
+            setSelection(if (OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null)) == OpenRouterClaudeRoute.ANTHROPIC) 1 else 0)
+        }.also {
+            box.addView(TextView(this).apply {
+                text = "Маршрут Claude (по умолчанию Прямой Anthropic)"
+                textSize = 12f
+                setTextColor(Color.rgb(170,180,195))
+                setPadding(0, dp(10), 0, dp(4))
+            })
+            box.addView(it)
+        } else null
+        val cacheMode = if (!openAi) spinner("Кэш промпта Claude (1h / 5m / off)", arrayOf("1h", "5m", "off"), "openrouter_cache_mode", "1h") else null
+        val pdfEngine = if (!openAi) spinner("Движок PDF OpenRouter", arrayOf("native", "auto", "cloudflare-ai", "mistral-ocr"), "openrouter_pdf_engine", "native") else null
+        val imageMode = if (!openAi) Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                arrayOf("Исходное изображение", "Совместимая копия JPEG"))
+            setSelection(if (prefs.getString("openrouter_image_mode", "original") == "compatible") 1 else 0)
+        }.also {
+            box.addView(TextView(this).apply {
+                text = "Передача фото OpenRouter"
+                textSize = 12f
+                setTextColor(Color.rgb(170,180,195))
+                setPadding(0, dp(10), 0, dp(4))
+            })
+            box.addView(it)
+        } else null
+
+        val parallelTools = chk("Parallel tool calls", "parallel_tools", true)
+        box.addView(parallelTools)
+
+        sectionHeader("Инструкции модели")
+        val systemPromptInput = EditText(this).apply {
+            hint = "Системный промпт"
+            setTextColor(Color.WHITE)
+            setText(prefs.getString("system_prompt", "").orEmpty())
+            minLines = 2
+        }
+        box.addView(systemPromptInput)
+        val developerInstructionsInput = EditText(this).apply {
+            hint = "Developer instructions"
+            setTextColor(Color.WHITE)
+            setText(prefs.getString("instructions", "").orEmpty())
+            minLines = 2
+        }
+        box.addView(developerInstructionsInput)
+
         AlertDialog.Builder(this)
-            .setTitle("Мышление и ответ")
+            .setTitle("Настройки модели и ответа")
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Отмена", null)
             .setPositiveButton("Сохранить") { _, _ ->
@@ -1410,14 +1572,35 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     .putString("max_output", max.text.toString().trim())
                     .putBoolean("response_presentation_instructions", presentation.isChecked)
                     .putBoolean("response_scientific_preview", scientificPreview.isChecked)
+                    .putBoolean("parallel_tools", parallelTools.isChecked)
+                    .putString("system_prompt", systemPromptInput.text.toString())
+                    .putString("instructions", developerInstructionsInput.text.toString())
                 if (mode != null) editor.putString("reasoning_mode", modes[mode.selectedItemPosition])
                 if (summary != null) editor.putString("reasoning_summary", summaries[summary.selectedItemPosition])
                 if (containerMemorySpinner != null) editor.putString("openai_container_memory", containerLimits[containerMemorySpinner.selectedItemPosition])
+                if (web != null) editor.putBoolean("web", web.isChecked)
+                if (fileSearch != null) editor.putBoolean("file_search", fileSearch.isChecked)
+                if (vectorInput != null) editor.putString("vector_store", vectorInput.text.toString().trim())
+                if (codeInterpreter != null) editor.putBoolean("code_interpreter", codeInterpreter.isChecked)
+                if (fileAnalysis != null) editor.putBoolean("file_analysis_tools", fileAnalysis.isChecked)
+                if (imageGen != null) editor.putBoolean("image_generation", imageGen.isChecked)
+                if (autoCompaction != null) {
+                    editor.putBoolean("openai_auto_compaction", autoCompaction.isChecked)
+                    editor.putBoolean("openai_auto_compaction_user_explicit", true)
+                }
+                if (cacheKeyInput != null) editor.putString("cache_key", cacheKeyInput.text.toString().trim())
+                if (openRouterWebSearch != null) editor.putBoolean("openrouter_web_search", openRouterWebSearch.isChecked)
+                if (openRouterWebFetch != null) editor.putBoolean("openrouter_web_fetch", openRouterWebFetch.isChecked)
+                if (githubTools != null) editor.putBoolean("github_tools", githubTools.isChecked)
+                if (claudeRoute != null) editor.putString("openrouter_claude_route", if (claudeRoute.selectedItemPosition == 1) "anthropic" else "auto")
+                if (cacheMode != null) editor.putString("openrouter_cache_mode", cacheMode.selectedItem.toString())
+                if (pdfEngine != null) editor.putString("openrouter_pdf_engine", pdfEngine.selectedItem.toString())
+                if (imageMode != null) editor.putString("openrouter_image_mode", if (imageMode.selectedItemPosition == 1) "compatible" else "original")
                 editor.putString(formatKey, formats[format.selectedItemPosition])
                 editor.putString(schemaKey, schema.text.toString())
                 editor.apply()
                 updateEffortBadge()
-                status.text = "Настройки ответа сохранены для следующего запроса"
+                status.text = "Настройки модели сохранены для следующего запроса"
             }
             .show()
     }
@@ -1510,20 +1693,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val divider = Color.rgb(52,54,60)
 
         val box = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(14),dp(6),dp(14),dp(10)) }
-        val advancedBox = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; visibility=View.GONE }
-        var target: LinearLayout = box
 
-        fun section(title:String){
-            target.addView(TextView(this).apply{
-                this.text=title
+        fun section(titleText:String){
+            box.addView(TextView(this).apply{
+                this.text=titleText
                 textSize=12.5f
                 setTypeface(null,Typeface.BOLD)
                 setTextColor(accent)
-                setPadding(dp(2),dp(20),0,dp(8))
+                setPadding(dp(2),dp(18),0,dp(8))
             })
-            target.addView(View(this).apply{ setBackgroundColor(divider) }, LinearLayout.LayoutParams(-1,dp(1)))
+            box.addView(View(this).apply{ setBackgroundColor(divider) }, LinearLayout.LayoutParams(-1,dp(1)))
         }
-        fun spaced(v:View){ target.addView(v, LinearLayout.LayoutParams(-1,-2).apply{ topMargin=dp(10) }) }
+        fun spaced(v:View){ box.addView(v, LinearLayout.LayoutParams(-1,-2).apply{ topMargin=dp(10) }) }
 
         fun field(hint:String,value:String,secret:Boolean=false) = EditText(this).apply {
             this.hint=hint; setText(value); setTextColor(Color.WHITE); setHintTextColor(subtext)
@@ -1532,138 +1713,55 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if (secret) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         fun labeled(caption:String,view:View){
-            target.addView(TextView(this).apply{this.text=caption;textSize=12f;setTextColor(subtext);setPadding(dp(2),dp(10),0,dp(4))})
-            target.addView(view)
-        }
-        fun spinner(values:Array<String>,pref:String,def:String):Spinner{
-            val s=Spinner(this)
-            s.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,values)
-            s.setSelection(values.indexOf(prefs.getString(pref,def) ?: def).coerceAtLeast(0))
-            s.setPadding(dp(10),dp(8),dp(10),dp(8))
-            s.background=rounded(cardBg)
-            return s
+            box.addView(TextView(this).apply{this.text=caption;textSize=12f;setTextColor(subtext);setPadding(dp(2),dp(10),0,dp(4))})
+            box.addView(view)
         }
 
-        section("Подключение")
-        val currentProvider = normalizedProviderId()
+        section("Подключение (API ключи)")
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
-        spaced(button("🧪 Диагностика") { showDiagnostics() }.apply {
-            setTextColor(accent); background = rounded(Color.rgb(40,48,66))
-        })
+
+        section("Оформление и уведомления")
+        val themeIds = AppThemePalette.themes
+        val themeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, AppThemePalette.labels)
+            val currentThemeId = prefs.getString("app_theme", "dark") ?: "dark"
+            setSelection(themeIds.indexOf(currentThemeId).coerceAtLeast(0))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(cardBg)
+        }
+        labeled("Тема оформления Integral LLM", themeSpinner)
+        val notifications = CheckBox(this).apply {
+            text = "Уведомлять о готовом ответе"
+            setTextColor(Color.LTGRAY)
+            isChecked = prefs.getBoolean("response_notifications", true)
+            setPadding(dp(4), dp(8), 0, dp(6))
+        }
+        box.addView(notifications)
 
         section("GitHub")
-        fun chk(label:String,pref:String) = CheckBox(this).apply {
-            text=label; setTextColor(Color.LTGRAY); isChecked=prefs.getBoolean(pref,false)
-            setPadding(dp(4),dp(6),0,dp(6))
-        }
-
-        val githubTools = chk("Разрешить GitHub-инструменты (Claude / OpenRouter)", "github_tools")
-        box.addView(githubTools)
         val githubToken = field("GitHub fine-grained PAT", secure.getGitHubToken(), true); spaced(githubToken)
         val githubRepo = field("GitHub repository allow-list", prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat") ?: "luoecrt-pixel/OpenAIApiChat"); spaced(githubRepo)
         val githubBranches = field("Allowed branches (через запятую)", prefs.getString("github_branches", "main") ?: "main"); spaced(githubBranches)
-        val githubNote = TextView(this).apply {
+        box.addView(TextView(this).apply {
             text = "PAT хранится в Android Keystore/AES-GCM и модели не передаётся. Любая запись в GitHub требует подтверждения."
-            setTextColor(subtext); textSize = 11.5f; setPadding(dp(2), dp(4), 0, dp(10))
-        }
-        box.addView(githubNote)
-
-        section("Инструменты")
-        val web=chk("Web Search","web")
-        val file=chk("File Search","file_search")
-        val code=chk("Code Interpreter","code_interpreter")
-        val img=chk("Image Generation","image_generation")
-        val parallel=chk("Parallel tool calls","parallel_tools")
-        val openRouterWebSearch = chk("OpenRouter: Web Search","openrouter_web_search").apply {
-            isEnabled = currentProvider == "openrouter"
-        }
-        val openRouterWebFetch = chk("OpenRouter: Web Fetch","openrouter_web_fetch").apply {
-            isEnabled = currentProvider == "openrouter"
-        }
-        val backgroundResponses=chk("Продолжать ответ, если Astra закрыта","background_responses").apply {
-            isChecked = prefs.getBoolean("background_responses", true)
-        }
-        val notifications = chk("Уведомлять о готовом ответе", "response_notifications").apply { isChecked = prefs.getBoolean("response_notifications", true) }
-        val fileAnalysis = chk("Анализ файлов с Python (Code Interpreter; платный контейнер OpenAI)", "file_analysis_tools").apply { isChecked = prefs.getBoolean("file_analysis_tools", false) }
-        val autoCompaction = chk("OpenAI: автосжатие контекста (порог по окну модели, до 800 тыс.)", "openai_auto_compaction").apply { isChecked = prefs.getBoolean("openai_auto_compaction", true) }
-        val toolsCard=LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(10),dp(4),dp(10),dp(4))
-            background=rounded(cardBg)
-        }
-        listOf(web,file,code,img,parallel,openRouterWebSearch,openRouterWebFetch,backgroundResponses,notifications,fileAnalysis,autoCompaction).forEach { toolsCard.addView(it) }
-        spaced(toolsCard)
-
-        spaced(button("Настройки уведомлений Android / Xiaomi") {
-            startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
-        })
-        spaced(button("Фоновая работа: настройки приложения") {
-            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            setTextColor(subtext); textSize = 11.5f; setPadding(dp(2), dp(4), 0, dp(8))
         })
 
-        section("Файлы")
+        section("Файлы и диагностика")
+        spaced(button("📁 Локальные файлы") { showLocalFiles() }.apply {
+            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+        })
         spaced(button("Сбросить ссылки повторных загрузок OpenAI") {
             OpenAiFileUploadCache(getSharedPreferences("openai_file_upload_cache", Context.MODE_PRIVATE)).clear()
-            Toast.makeText(this, "Локальные ссылки сброшены. При следующем анализе файлы могут загрузиться повторно; исходники сохранены.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Локальные ссылки сброшены. Исходники сохранены.", Toast.LENGTH_LONG).show()
         })
-        val cacheMode = spinner(arrayOf("1h", "5m", "off"), "openrouter_cache_mode", "1h")
-        labeled("Кэш Claude: 1h — запись ×2; 5m — ×1,25; off — без указания кэша. Выигрыш появляется при повторном использовании. По документации OpenRouter автокэш поддерживают Anthropic, Bedrock и Vertex; доступность конкретной модели/TTL проверяет сервер.", cacheMode)
-        val claudeRoute = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                arrayOf("Автоматический: с резервными провайдерами", "Прямой Anthropic: без резервного провайдера"))
-            setSelection(if (OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null)) == OpenRouterClaudeRoute.ANTHROPIC) 1 else 0)
-        }
-        labeled("Маршрут Claude: авто — до 5 МБ Base64 на фото и 20 МБ на запрос; прямой Anthropic — до 10 и 32 МБ. При сбое Anthropic прямой маршрут не переключается; доступность и цена могут отличаться. Оригиналы сохраняются.", claudeRoute)
-        val pdfEngine = spinner(arrayOf("native", "auto", "cloudflare-ai", "mistral-ocr"), "openrouter_pdf_engine", "native")
-        labeled("PDF OpenRouter: native сохраняет прямой ввод. auto/OCR может отдельно тарифицироваться; OCR передаёт не более 8 извлечённых изображений, текстовый движок теряет изображения.", pdfEngine)
-        val imageMode = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, arrayOf("Исходное изображение", "Совместимая копия JPEG: меньше размер и детализация"))
-            setSelection(if (prefs.getString("openrouter_image_mode", "original") == "compatible") 1 else 0)
-        }
-        labeled("OpenRouter: передача фото. Исходник и изображение в чате сохраняются.", imageMode)
         spaced(button("Поддерживаемые файлы и способ обработки") {
             AlertDialog.Builder(this).setTitle("Форматы файлов").setMessage(
                 "OpenRouter, текстовые/научные файлы через инструменты приложения:\n" + TextFileFormatPolicy.extensions.sorted().joinToString(", ") +
-                "\n\nOffice, извлечение текста: docx, pptx, odt, odp, ods. XLSX: все сохранённые строки и ячейки; формулы не пересчитываются, даты/стили не интерпретируются. Встроенные графики и изображения из Office не извлекаются.\n\nИзображения: JPEG, PNG, WebP, GIF (возможности зависят от модели; GIF обычно первый кадр). PDF: native для моделей с прямым файловым вводом; auto/OCR может подготовить текст для других моделей с ограничениями изображений. ZIP: распаковка поддерживаемых файлов, остальные явно перечисляются.\n\nOpenAI: изображения/PDF — файловый ввод; текст и таблицы — полные файлы в Code Interpreter, когда включён анализ файлов. Модель выбирает поиск, частичное чтение или обработку всех строк. Без этого стандартный ввод таблиц OpenAI содержит лишь предварительное представление.\n\nАудио/видео, бинарные научные форматы и старые DOC/XLS через OpenRouter пока не поддерживаются. Выбор в Android не означает поддержку конкретной модели.")
+                "\n\nOffice, извлечение текста: docx, pptx, odt, odp, ods. XLSX: все сохранённые строки и ячейки; формулы не пересчитываются. Встроенные графики и изображения из Office не извлекаются.\n\nИзображения: JPEG, PNG, WebP, GIF. PDF: native для моделей с прямым файловым вводом; auto/OCR может подготовить текст. ZIP: распаковка поддерживаемых файлов.")
                 .setPositiveButton("Закрыть", null).show()
         })
-        val vector = field("Vector Store ID", prefs.getString("vector_store","") ?: ""); spaced(vector)
-        spaced(button("📁 Управление файлами Vector Store"){ showVectorStoreManager() }.apply{
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
-        spaced(button("📁 Локальные файлы Astra") { showLocalFiles() }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
-        })
-
-        lateinit var advancedToggle: TextView
-        advancedToggle = TextView(this).apply{
-            text="▸ Дополнительные настройки"
-            setTextColor(accent); textSize=13f
-            setPadding(dp(2),dp(20),0,dp(6))
-            setOnClickListener{
-                val show = advancedBox.visibility!=View.VISIBLE
-                advancedBox.visibility = if(show) View.VISIBLE else View.GONE
-                advancedToggle.text = if(show) "▾ Дополнительные настройки" else "▸ Дополнительные настройки"
-            }
-        }
-        box.addView(advancedToggle)
-        box.addView(advancedBox)
-        target = advancedBox
-
-        section("Дополнительные параметры")
-        val systemPrompt = field(
-            "Системный промпт (общий для всех чатов)",
-            prefs.getString("system_prompt", "") ?: ""
-        ).apply {
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 3
-            maxLines = 8
-            gravity = android.view.Gravity.TOP
-        }
-        labeled("Системный промпт", systemPrompt)
-        val instructions = field("Developer instructions", prefs.getString("instructions","") ?: ""); spaced(instructions)
-        val cache = field("Prompt cache key (optional)", prefs.getString("cache_key","") ?: ""); spaced(cache)
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
@@ -1677,15 +1775,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }.apply {
             setTextColor(accent); background=rounded(Color.rgb(40,48,66))
         })
-
-        val note=TextView(this).apply {
-            text="Astra: 1.05M context. Max output: пусто = ограничение API/модели; можно задать вручную. reasoning: auto/low/medium/high/xhigh/max."
-            setTextColor(subtext); textSize=11.5f; setPadding(dp(2),dp(14),0,0)
-        }
-        box.addView(note)
+        spaced(button("🧪 Диагностика") { showDiagnostics() }.apply {
+            setTextColor(accent); background = rounded(Color.rgb(40,48,66))
+        })
 
         AlertDialog.Builder(this)
-            .setTitle("Настройки подключения и инструментов")
+            .setTitle("Настройки приложения")
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить") { _,_ ->
@@ -1693,30 +1788,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val openRouterKeySaved = secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
                 val githubTokenSaved = secure.setGitHubToken(githubToken.text.toString().trim())
                 val allSecretsSaved = openAiKeySaved && openRouterKeySaved && githubTokenSaved
+                val selectedTheme = themeIds.getOrElse(themeSpinner.selectedItemPosition) { "dark" }
                 prefs.edit()
+                    .putString("app_theme", selectedTheme)
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
-                    .putString("system_prompt", systemPrompt.text.toString())
-                    .putString("instructions",instructions.text.toString())
-                    .putString("vector_store",vector.text.toString().trim())
-                    .putString("cache_key",cache.text.toString().trim())
-                    .putBoolean("web",web.isChecked)
-                    .putBoolean("file_search",file.isChecked)
-                    .putBoolean("code_interpreter",code.isChecked)
-                    .putBoolean("image_generation",img.isChecked)
-                    .putBoolean("parallel_tools",parallel.isChecked)
-                    .putBoolean("openrouter_web_search",openRouterWebSearch.isChecked)
-                    .putBoolean("openrouter_web_fetch",openRouterWebFetch.isChecked)
-                    .putBoolean("background_responses",backgroundResponses.isChecked)
                     .putBoolean("response_notifications", notifications.isChecked)
-                    .putBoolean("file_analysis_tools", fileAnalysis.isChecked)
-                    .putBoolean("openai_auto_compaction", autoCompaction.isChecked)
-                    .putString("openrouter_pdf_engine", pdfEngine.selectedItem.toString())
-                    .putString("openrouter_cache_mode", cacheMode.selectedItem.toString())
-                    .putString("openrouter_claude_route", if (claudeRoute.selectedItemPosition == 1) "anthropic" else "auto")
-                    .putString("openrouter_image_mode", if (imageMode.selectedItemPosition == 1) "compatible" else "original")
-                    .putBoolean("github_tools",githubTools.isChecked)
                     .apply()
+                applyTheme()
                 updateModelBadge()
                 updateEffortBadge()
                 if (notifications.isChecked) requestAnswerNotificationPermission()
@@ -2706,8 +2785,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             provider = provider, requestedModel = model,
                             credentialSource = "openrouter_api_key"
                         )
-                        status.text = if (preflightWarning.isNullOrBlank()) "Astra думает…"
-                            else "⚠ $preflightWarning\nAstra думает…"
+                        status.text = if (preflightWarning.isNullOrBlank()) "Модель отвечает…"
+                            else "⚠ $preflightWarning\nМодель отвечает…"
                         toolStates.clear()
                         renderToolActivity()
                         diagnostics.log("request_start", mapOf(
@@ -2810,7 +2889,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             credentialSource = if (provider == "openrouter") "openrouter_api_key" else "openai_api_key"
         )
         setBusy(true)
-        status.text=if(preflightWarning.isNullOrBlank()) "Astra думает…" else "⚠ $preflightWarning\nAstra думает…"
+        status.text=if(preflightWarning.isNullOrBlank()) "Модель отвечает…" else "⚠ $preflightWarning\nМодель отвечает…"
         toolStates.clear()
         renderToolActivity()
         diagnostics.log("request_start", mapOf(
@@ -2882,7 +2961,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (!chainOnWire) openAiInstructions.applyToOpenAiRequest(body)
         prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
-        if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", true)) {
+        if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", false)) {
             ModelCatalog.compactionThreshold(model)?.let { threshold ->
                 body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",threshold)))
             }
@@ -3339,7 +3418,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         activeAssistantItemId=null
                         currentCall=null
                         activeRequestRegenerate=false
-                        if(status.text=="Astra думает…") status.text="Готово"
+                        if(status.text=="Модель отвечает…") status.text="Готово"
                     }
                 }
             } catch(e:Exception) {
@@ -3431,7 +3510,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         runOnUiThread{
                             if(isRequestCurrent(requestChatId,requestGeneration)){
                                 currentCall=null
-                                status.text="Соединение прервалось — Astra продолжает работу…"
+                                status.text="Соединение прервалось — генерация продолжается…"
                                 activeAssistantItemId?.let { id ->
                                     val partial=responseState.text
                                     if(partial.isNotBlank()) messageAdapter.updateText(id, partial)
@@ -3852,7 +3931,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     if(JsonProtocol.string(a, "text").isNotBlank()) messageAdapter.updateText(id, JsonProtocol.string(a, "text"))
                 }
                 runOnUiThread{
-                    status.text="Astra продолжает ответ…"
+                    status.text="Продолжается генерация…"
                     toolStates.clear()
                     renderToolActivity()
                 }
@@ -4390,7 +4469,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
              setPadding(0,dp(8),0,dp(2))
          }
          val toggle=TextView(this).apply{
-             text=if(summary.isBlank())"🧠 Astra думает…" else if(initiallyExpanded)"🧠 Скрыть ход рассуждений ▲" else "🧠 Показать ход рассуждений ▼"
+             text=if(summary.isBlank())"🧠 Модель размышляет…" else if(initiallyExpanded)"🧠 Скрыть ход рассуждений ▲" else "🧠 Показать ход рассуждений ▼"
              textSize=12.5f
              setTextColor(Color.rgb(165,195,240))
              setPadding(0,dp(2),0,dp(4))
@@ -4672,7 +4751,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             })
         }else if(mime.equals("application/pdf",true)){
             box.addView(TextView(this).apply{
-                text="📕 PDF — можно открыть первый лист внутри Astra"
+                text="📕 PDF — можно открыть первый лист в приложении"
                 textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
             })
         }
@@ -4985,7 +5064,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             runOnUiThread{
                 val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(14),dp(8),dp(14),dp(10))}
                 if(files.isEmpty()){
-                    box.addView(TextView(this).apply{ text="Пока нет локально сохранённых файлов Astra.";textSize=14f;setTextColor(Color.LTGRAY);setPadding(0,dp(10),0,dp(10))})
+                    box.addView(TextView(this).apply{ text="Пока нет локально сохранённых файлов.";textSize=14f;setTextColor(Color.LTGRAY);setPadding(0,dp(10),0,dp(10))})
                 }else{
                     files.forEach{f->
                         val row=LinearLayout(this).apply{
@@ -5033,7 +5112,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 }
                 AlertDialog.Builder(this)
-                    .setTitle("Локальные файлы Astra")
+                    .setTitle("Локальные файлы")
                     .setView(ScrollView(this).apply{addView(box)})
                     .setNegativeButton("Закрыть",null)
                     .show()
@@ -6636,7 +6715,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 pendingModel?.let { JSONObject().put("provider", it.optString("provider"))
                     .put("requested_model", it.optString("requested_model")) } ?: JSONObject()
             ),partial,false)
-            status.text=if(active.optString("status")=="queued")"Astra в очереди…" else "Astra продолжает ответ…"
+            status.text=if(active.optString("status")=="queued")"Модель в очереди…" else "Продолжается генерация…"
             setBusy(true)
         }else{
             val restoredStatus = chat.lastOrNull { it.optString("role") == "assistant" }?.optString("status")
@@ -7912,9 +7991,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
     private fun createChatBubbleCard(): LinearLayout = LinearLayout(this).apply{
+        val theme = currentTheme()
         orientation=LinearLayout.VERTICAL
         setPadding(dp(13),dp(10),dp(13),dp(10))
-        background=rounded(Color.rgb(28,29,34),14)
+        background=rounded(theme.assistantBubbleBg,14)
         layoutParams=RecyclerView.LayoutParams(-1,-2).apply{bottomMargin=dp(8)}
     }
 
@@ -7928,23 +8008,24 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
+        val theme = currentTheme()
         card.removeAllViews()
         card.orientation=LinearLayout.VERTICAL
         card.setPadding(dp(13),dp(10),dp(13),dp(10))
-        card.background=rounded(if(item.user)Color.rgb(31,40,54) else Color.rgb(28,29,34),14)
+        card.background=rounded(if(item.user) theme.userBubbleBg else theme.assistantBubbleBg,14)
 
         val who=TextView(this).apply{
             text=if (item.user) item.label else item.message?.let(AssistantModelLabel::text) ?: item.label
             textSize=12f
-            setTextColor(if(item.user)Color.rgb(160,195,245) else Color.rgb(190,195,205))
+            setTextColor(if(item.user) theme.accent else theme.textSecondary)
             setTypeface(null,Typeface.BOLD)
         }
         card.addView(who)
 
         val body=TextView(this).apply{
             textSize=16f
-            setTextColor(Color.WHITE)
-            setLinkTextColor(Color.rgb(138,180,248))
+            setTextColor(theme.textPrimary)
+            setLinkTextColor(theme.accent)
             movementMethod=LinkMovementMethod.getInstance()
             highlightColor=Color.TRANSPARENT
             setPadding(0,dp(5),0,dp(0))

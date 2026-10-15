@@ -34,7 +34,7 @@ class OpenAiEffectiveResponseIntegrationTest {
     private val prefs get() = context.getSharedPreferences("app", 0)
     private val changedSettings = listOf("current_chat", "provider", "model", "reasoning", "text_format",
         "system_prompt", "instructions", "background_responses", "response_notifications", "file_analysis_tools",
-        "web", "file_search", "code_interpreter", "image_generation")
+        "background_responses_migrated_v25", "web", "file_search", "code_interpreter", "image_generation")
     private lateinit var previous: Map<String, Any?>
     private var previousKey = ""
     private val ownedChats = mutableMapOf<String, String>()
@@ -48,7 +48,7 @@ class OpenAiEffectiveResponseIntegrationTest {
         assertTrue(prefs.edit().putString("provider", "openai").putString("model", "gpt-6-astra")
             .putString("reasoning", "high").putString("text_format", "text")
             .putString("system_prompt", "").putString("instructions", "")
-            .putBoolean("background_responses", false).putBoolean("response_notifications", false)
+            .putBoolean("background_responses", false).putBoolean("background_responses_migrated_v25", true).putBoolean("response_notifications", false)
             .putBoolean("file_analysis_tools", false).putBoolean("web", false).putBoolean("file_search", false)
             .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit())
         SecureStore(context).setApiKey("sk-effective-output-local-fixture")

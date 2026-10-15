@@ -29,7 +29,7 @@ class OpenAiCredentialChainLifecycleTest {
     private val prefs get() = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val keys = listOf("provider", "model", "reasoning", "text_format", "system_prompt",
         "instructions", "file_analysis_tools", "background_responses", "response_notifications",
-        "openai_auto_compaction", "web", "file_search", "code_interpreter", "image_generation", "current_chat")
+        "background_responses_migrated_v25", "openai_auto_compaction", "web", "file_search", "code_interpreter", "image_generation", "current_chat")
     private lateinit var saved: Map<String, Any?>
     private var savedKey = ""
     private val originalKey = "sk-chain-original-synthetic"
@@ -42,7 +42,7 @@ class OpenAiCredentialChainLifecycleTest {
         prefs.edit().putString("provider", "openai").putString("model", originalModel)
             .putString("reasoning", "high").putString("text_format", "text")
             .putString("system_prompt", "Chain system fixture").putString("instructions", "Chain developer fixture")
-            .putBoolean("file_analysis_tools", false).putBoolean("background_responses", false)
+            .putBoolean("file_analysis_tools", false).putBoolean("background_responses", false).putBoolean("background_responses_migrated_v25", true)
             .putBoolean("response_notifications", false).putBoolean("openai_auto_compaction", false)
             .putBoolean("web", false).putBoolean("file_search", false)
             .putBoolean("code_interpreter", false).putBoolean("image_generation", false).commit()

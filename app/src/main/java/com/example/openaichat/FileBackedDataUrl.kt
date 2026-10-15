@@ -37,7 +37,7 @@ internal class FileBackedDataUrl(private val file: File, val mime: String) {
         return sha.digest()
     }
     fun writeJson(out: Writer) {
-        if (!file.isFile || file.length() != sourceBytes || !hash().contentEquals(digest)) {
+        if (!file.isFile || file.length() != sourceBytes) {
             throw IOException("Attachment changed after preparation; original request was not sent")
         }
         out.write("\"data:$mime;base64,")
@@ -51,6 +51,7 @@ internal class FileBackedDataUrl(private val file: File, val mime: String) {
         }
         val started = System.nanoTime()
         readPasses.incrementAndGet()
+        var totalRead = 0L
         try { Base64.getEncoder().wrap(ascii).use { encoded ->
             file.inputStream().use { input ->
                 val buffer = ByteArray(64 * 1024)
@@ -58,12 +59,15 @@ internal class FileBackedDataUrl(private val file: File, val mime: String) {
                     if (Thread.currentThread().isInterrupted) throw IOException("Attachment serialization cancelled")
                     val count = input.read(buffer)
                     if (count < 0) break
+                    totalRead += count
                     readBytes.addAndGet(count.toLong())
                     sha.update(buffer, 0, count); encoded.write(buffer, 0, count)
                 }
             }
         } } finally { workNanos.addAndGet(System.nanoTime() - started) }
-        if (!sha.digest().contentEquals(digest)) throw IOException("Attachment changed during serialization")
+        if (totalRead != sourceBytes || !sha.digest().contentEquals(digest)) {
+            throw IOException("Attachment changed after preparation; original request was not sent")
+        }
         out.write('"'.code)
     }
     fun ioStats() = FileBackedIoTelemetry.Snapshot(1, readPasses.get(), readBytes.get(), workNanos.get())
