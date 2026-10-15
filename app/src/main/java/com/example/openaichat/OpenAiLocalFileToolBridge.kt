@@ -196,6 +196,12 @@ object OpenAiLocalFileToolBridge {
         }
     }
 
+    fun attachReceivedPrefix(db: ChatDatabase, chatId: String, requestId: String, response: JSONObject): JSONObject = response.apply {
+        val received = receivedOutput(db, chatId, requestId, JsonProtocol.nonBlank(this, "id"), optJSONArray("output") ?: JSONArray())
+        // Absence means no provider-authored typed output arrived. Do not fabricate even an empty array.
+        if (received.length() > 0 || has("output")) put("output", received)
+    }
+
     /** Preserve paid prior rounds even if the current child fails before emitting any text. */
     fun receivedOutput(db: ChatDatabase, chatId: String, requestId: String, responseId: String?, current: JSONArray): JSONArray {
         val saved = db.getOpenAiToolCheckpoint(chatId, requestId) ?: return current

@@ -3476,10 +3476,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val failureStatus = if (toolCheckpoint != null && toolCheckpoint.optString("phase") != "finished") "failed"
                         else responseState.terminalState?.wireStatus
                             ?: if (completionState == "disconnected" || cancelled) "disconnected" else "failed"
-                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState).apply {
-                        put("output", OpenAiLocalFileToolBridge.receivedOutput(chatDb, requestChatId, localRequestId,
-                            optString("id"), optJSONArray("output") ?: JSONArray()))
-                    }
+                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
+                    OpenAiLocalFileToolBridge.attachReceivedPrefix(chatDb, requestChatId, localRequestId, effectiveResponse)
                     val parsedPartial = AstraResponseModel.fromResponse(
                         effectiveResponse, responseState.text.ifBlank {
                             OpenAiSseStreamReader.terminalOutputText(effectiveResponse)

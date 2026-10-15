@@ -150,6 +150,15 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals("posting", db.getOpenAiToolCheckpoint("chat", "request")!!.getString("phase"))
     }
 
+    @Test fun receivedPrefixNeverFabricatesTypedOutputForAPreIdFailure() {
+        val failed = OpenAiEffectiveResponse.assemble(null, ResponseEventState())
+        assertFalse(failed.has("output"))
+        val preserved = OpenAiLocalFileToolBridge.attachReceivedPrefix(db, "chat", "request", failed)
+        assertFalse(preserved.has("output"))
+        val explicit = JSONObject().put("output", JSONArray())
+        assertEquals(0, OpenAiLocalFileToolBridge.attachReceivedPrefix(db, "chat", "request", explicit).getJSONArray("output").length())
+    }
+
     @Test fun failedChildRetainsPriorSignedToolProtocolInChatHistory() {
         val checkpoint = db.getOpenAiToolCheckpoint("chat", "request")!!
         val prior = call("resp_first").getJSONArray("output").put(JSONObject()
