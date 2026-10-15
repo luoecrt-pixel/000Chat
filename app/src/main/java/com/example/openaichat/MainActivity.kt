@@ -2964,10 +2964,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .put("parallel_tool_calls",prefs.getBoolean("parallel_tools",true))
 
         maxOut?.let { body.put("max_output_tokens",it) }
-        // Actual wire mode, not merely chain eligibility, owns the instructions:
-        // a typed-input replay must always start with the current system/developer
-        // roles, because it does not inherit the server-side chain.
-        val chainOnWire = usableOpenAiChain && typedInput == null
+        // A reusable chain receives only the new user turn (possibly typed descriptors).
+        // A full replay always starts with the current system/developer roles.
+        val chainOnWire = usableOpenAiChain
         if (!chainOnWire) openAiInstructions.applyToOpenAiRequest(body)
         prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
@@ -3676,10 +3675,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             else uploadLocalUserFile(file, filename, mime, credential = key, active = ownerActive).id
                         }) else emptyMap()
                     val prepared = if (typedHistoryNeeded) OpenAiLocalContextEncoder.encode(
-                        historySnapshot, containerFiles, allowLegacyVisibleTextOnly, this@MainActivity, localFileTools = localToolsEnabled
+                        if (usableOpenAiChain) historySnapshot.takeLast(1) else historySnapshot,
+                        containerFiles, allowLegacyVisibleTextOnly, this@MainActivity, localFileTools = localToolsEnabled
                     ) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     } else null
+                    if (usableOpenAiChain && localToolsEnabled && prepared != null) {
+                        val parts = prepared.optJSONObject(prepared.length() - 1)?.optJSONArray("content")
+                        val currentIds = OpenAiLocalFileToolBridge.attachments(historySnapshot.takeLast(1)).map { it.id }.toSet()
+                        OpenAiLocalFileToolBridge.attachments(historySnapshot).filter { it.id !in currentIds }.forEach { file ->
+                            parts?.put(JSONObject().put("type", "input_text").put("text", LocalFileTools.descriptor(file)
+                                .put("reading", "Use search_attached_file, read_attached_file or read_attached_table with this file_id.").toString()))
+                        }
+                    }
                     handedToUi = true
                     runOnUiThread {
                         try {
