@@ -553,6 +553,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             val draftText = JsonProtocol.string(json, "text").trim()
             val hasAttachments =
                 (json.optJSONArray("openrouter_attachments")?.length() ?: 0) > 0 ||
+                (json.optJSONArray("pending_attachments")?.length() ?: 0) > 0 ||
                 (json.optJSONArray("file_ids")?.length() ?: 0) > 0 ||
                 (json.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
                 (json.optJSONArray("pending_uploads")?.length() ?: 0) > 0 ||
@@ -2125,6 +2126,10 @@ data class ExistingMessageRow(
             created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, request_id),
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS openai_tool_checkpoints (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, request_checkpoint TEXT NOT NULL,
+            PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS openrouter_checkpoints (
             chat_id TEXT NOT NULL, request_id TEXT NOT NULL, protocol TEXT NOT NULL,
             PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
@@ -2134,6 +2139,55 @@ data class ExistingMessageRow(
             created_at INTEGER NOT NULL, metadata TEXT NOT NULL,
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
+    }
+
+    fun getOpenAiToolCheckpoint(chatId: String, requestId: String): JSONObject? =
+        SqliteLargeTextQuery.query(readableDatabase, "openai_tool_checkpoints", arrayOf("request_checkpoint"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+            keyColumns = arrayOf("chat_id", "request_id")).use { c ->
+            if (c.moveToFirst()) JSONObject(c.getString(0)) else null
+        }
+
+    fun saveOpenAiToolCheckpoint(chatId: String, requestId: String, checkpoint: JSONObject): Boolean {
+        var saved = false
+        writableDatabase.transaction { db ->
+            if (!isActiveRequest(chatId, requestId)) return@transaction
+            db.insertWithOnConflict("openai_tool_checkpoints", null, ContentValues().apply {
+                put("chat_id", chatId); put("request_id", requestId)
+                put("request_checkpoint", checkpoint.toString())
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+            saved = true
+        }
+        return saved
+    }
+
+    fun compareOpenAiToolCheckpoint(chatId: String, requestId: String, before: String, after: JSONObject): Boolean {
+        var changed = false
+        writableDatabase.transaction { db ->
+            if (!isActiveRequest(chatId, requestId)) return@transaction
+            changed = db.update("openai_tool_checkpoints", ContentValues().apply {
+                put("request_checkpoint", after.toString())
+            }, "chat_id=? AND request_id=? AND request_checkpoint=?", arrayOf(chatId, requestId, before)) == 1
+        }
+        return changed
+    }
+
+    /** A tool round has its own response identity and SSE cursor; only its current owner may advance it. */
+    fun advanceOpenAiToolResponse(chatId: String, requestId: String, previousId: String,
+        nextId: String, checkpoint: JSONObject): Boolean {
+        var advanced = false
+        writableDatabase.transaction { db ->
+            val count = db.update(CHAT_TABLE, ContentValues().apply {
+                put("active_response_id", nextId); put("active_status", "in_progress")
+                put("active_text", ""); put("active_last_sequence_number", -1)
+                putNull("active_indexed_checkpoint")
+            }, "id=? AND active_request_id=? AND active_response_id=? AND active_status IN ('completed','in_progress','starting','queued')",
+                arrayOf(chatId, requestId, previousId))
+            if (count != 1) return@transaction
+            check(saveOpenAiToolCheckpoint(chatId, requestId, checkpoint))
+            advanced = true
+        }
+        return advanced
     }
 
     fun saveOpenRouterCheckpoint(chatId: String, requestId: String, protocol: JSONObject) {

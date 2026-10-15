@@ -156,7 +156,10 @@ class OpenAiCredentialChainLifecycleTest {
                     assertEquals("Historical user question", parts.getJSONObject(0).getString("text"))
                     assertTrue((0 until parts.length()).any { parts.getJSONObject(it).optString("type") == "input_image" &&
                         parts.getJSONObject(it).optString("image_url").startsWith("data:image/png;base64,") })
-                    assertTrue(parts.toString().contains("EXACT-HISTORICAL-ATTACHMENT-BYTES"))
+                    assertFalse("Selective local tools must not inline the entire document", parts.toString().contains("EXACT-HISTORICAL-ATTACHMENT-BYTES"))
+                    assertTrue(parts.toString().contains(note.name))
+                    assertTrue(wire.getJSONArray("tools").toString().contains("read_attached_file"))
+                    assertEquals("EXACT-HISTORICAL-ATTACHMENT-BYTES", note.readText())
                     assertEquals("SIGNED-EXACT-REASONING", input.getJSONObject(3).getString("encrypted_content"))
                     assertEquals("tool_exact", input.getJSONObject(4).getString("id"))
                     assertEquals("msg_exact", input.getJSONObject(5).getString("id"))
@@ -167,6 +170,9 @@ class OpenAiCredentialChainLifecycleTest {
                     assertEquals("resp_chain_previous", wire.getString("previous_response_id"))
                     assertEquals(1, input.length())
                     assertEquals("user", input.getJSONObject(0).getString("role"))
+                    assertTrue(input.toString().contains(note.name))
+                    assertFalse(input.toString().contains("EXACT-HISTORICAL-ATTACHMENT-BYTES"))
+                    assertTrue(wire.getJSONArray("tools").toString().contains("read_attached_file"))
                 }
                 val deadline = SystemClock.elapsedRealtime() + 20_000L
                 var finalized = false

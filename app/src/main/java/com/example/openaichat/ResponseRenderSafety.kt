@@ -26,9 +26,11 @@ object ResponseRenderSafety {
     }
 
     /** Host document has no model markup outside an opaque, script-free sandbox. */
-    fun previewDocument(source: String): String {
+    fun previewDocument(source: String, theme: ThemeColors? = null): String {
+        val background = theme?.let { "#%06x".format(it.assistantBubbleBg and 0xFFFFFF) } ?: "white"
+        val foreground = theme?.let { "#%06x".format(it.textPrimary and 0xFFFFFF) } ?: "black"
         val csp = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'"
-        val inner = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"$csp\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body>$source</body></html>"
-        return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; frame-src about:; style-src 'unsafe-inline'; base-uri 'none'\"></head><body style=\"margin:0;background:#1c1d22\"><iframe title=\"Превью\" sandbox srcdoc=\"${html(inner)}\" style=\"border:0;width:100%;height:100vh;background:white\"></iframe></body></html>"
+        val inner = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"$csp\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"background:$background;color:$foreground\">$source</body></html>"
+        return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; frame-src about:; style-src 'unsafe-inline'; base-uri 'none'\"></head><body style=\"margin:0;background:$background\"><iframe title=\"Превью\" sandbox srcdoc=\"${html(inner)}\" style=\"border:0;width:100%;height:100vh;background:$background\"></iframe></body></html>"
     }
 }

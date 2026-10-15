@@ -14,6 +14,10 @@ internal object OpenAiCreateCallOwners {
         calls[Owner(chatId, requestId)] = call
     }
 
+    /** Keep a stopped/recreated Activity able to cancel the current tool-round HTTP call. */
+    @Synchronized fun replace(chatId: String, requestId: String, previous: Call, next: Call): Boolean =
+        calls.replace(Owner(chatId, requestId), previous, next)
+
     @Synchronized fun release(chatId: String, requestId: String, call: Call) {
         calls.remove(Owner(chatId, requestId), call)
     }

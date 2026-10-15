@@ -93,6 +93,35 @@ class RichResponsePanelTest {
         }
     }
 
+    @Test fun scientificBlocksPreviewAutomaticallyInEveryThemeAndCanShowCompleteSource() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val prefs = activity.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        try {
+            for (id in AppThemePalette.themes) {
+                prefs.edit().putString("app_theme", id).putBoolean("response_scientific_preview", true).commit()
+                val theme = AppThemePalette.byId(id)
+                val panel = RichResponsePanel(activity, {}, {})
+                panel.submit(ChatBubbleItem.create("auto-$id", "Claude",
+                    "```math\nx^2\n```\n\n```mermaid\nflowchart TD\n A-->B\n```\n\n```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"5\"/></svg>\n```", false))
+                activity.setContentView(panel)
+                val all = descendants(panel)
+                assertEquals(3, all.filterIsInstance<WebView>().size)
+                assertTrue(all.filterIsInstance<Button>().any { it.text == "Исходный код" })
+                val svg = all.filterIsInstance<WebView>().single { !it.settings.javaScriptEnabled }
+                assertFalse(svg.settings.allowFileAccess); assertTrue(svg.settings.blockNetworkLoads)
+                all.filterIsInstance<Button>().filter { it.text == "Исходный код" }.forEach { it.performClick() }
+                val native = descendants(panel).filterIsInstance<TextView>().single { it.text.toString() == "x^2\n" }
+                assertEquals(theme.textPrimary, native.currentTextColor)
+                assertEquals(View.VISIBLE, native.visibility)
+            }
+            prefs.edit().putBoolean("response_scientific_preview", false).commit()
+            val disabled = RichResponsePanel(activity, {}, {})
+            disabled.submit(ChatBubbleItem.create("disabled", "Claude", "```math\nx^2\n```\n\n```mermaid\nflowchart TD\nA-->B\n```", false))
+            assertTrue(descendants(disabled).none { it is WebView })
+        } finally { prefs.edit().remove("app_theme").remove("response_scientific_preview").commit(); controller.pause().stop().destroy() }
+    }
+
     @Test fun fileCardSavesOnlyAClosedSafeTextBlockAndNothingAutoExecutes() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         try {

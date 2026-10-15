@@ -14,6 +14,13 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
     private val pages = LocalTextPageIndex()
     companion object {
         val names = setOf("file_list", "file_info", "file_read_range", "file_search", "file_table_stats")
+        fun schemas(): JSONArray = JSONArray().apply {
+            val catalog = OpenRouterAppToolCatalog.tools()
+            for (i in 0 until catalog.length()) {
+                val schema = catalog.getJSONObject(i)
+                if (schema.getJSONObject("function").optString("name") in names) put(schema)
+            }
+        }
         fun descriptor(a: OpenRouterLocalAttachment): JSONObject = JSONObject()
             .put("file_id", a.id).put("filename", a.name).put("kind", a.kind).put("mime", a.mime).put("size_bytes", a.size)
             .put("source_encoding", a.textEncoding ?: JSONObject.NULL)

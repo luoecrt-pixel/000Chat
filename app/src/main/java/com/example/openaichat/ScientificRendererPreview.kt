@@ -31,7 +31,7 @@ object ScientificRendererPreview {
     } catch (_: Exception) { false }
 
     internal fun webView(context: Context, document: String, state: (WebView, String?) -> Unit, failed: (WebView) -> Unit): WebView = WebView(context).apply {
-        setBackgroundColor(Color.rgb(28, 29, 34))
+        setBackgroundColor(AppThemePalette.byId(context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")).assistantBubbleBg)
         settings.javaScriptEnabled = true
         settings.allowFileAccess = false; settings.allowContentAccess = false
         settings.domStorageEnabled = false; settings.blockNetworkLoads = true
@@ -48,7 +48,7 @@ object ScientificRendererPreview {
                 if (request.method == "GET" && request.isForMainFrame && request.url.toString() == ScientificRendererDocument.DOCUMENT_URL) {
                     return WebResourceResponse("text/html", "UTF-8", 200, "OK",
                         mapOf("Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff"),
-                        ByteArrayInputStream(document.toByteArray(Charsets.UTF_8)))
+                        ByteArrayInputStream(ScientificRendererDocument.themed(document, AppThemePalette.byId(context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark"))).toByteArray(Charsets.UTF_8)))
                 }
                 val path = if (request.method == "GET" && !request.isForMainFrame) ScientificRendererDocument.assetPath(request.url) else null
                 if (path != null) try {
@@ -69,11 +69,12 @@ object ScientificRendererPreview {
     fun create(context: Context, document: String, source: String, closed: (AlertDialog) -> Unit): AlertDialog {
         val density = context.resources.displayMetrics.density
         val handler = Handler(Looper.getMainLooper())
-        val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val notice = TextView(context).apply { text = "Готовлю офлайн-превью…"; setTextColor(Color.WHITE) }
+        val theme = AppThemePalette.byId(context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark"))
+        val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(theme.assistantBubbleBg) }
+        val notice = TextView(context).apply { text = "Готовлю офлайн-превью…"; setTextColor(theme.textPrimary) }
         val original = TextView(context).apply {
             text = source; typeface = Typeface.MONOSPACE; textSize = 14f
-            setTextColor(Color.WHITE); setTextIsSelectable(true); setHorizontallyScrolling(true)
+            setTextColor(theme.textPrimary); setTextIsSelectable(true); setHorizontallyScrolling(true)
         }
         val originalScroll = HorizontalScrollView(context).apply { addView(original); visibility = View.GONE }
         var destroyed = false

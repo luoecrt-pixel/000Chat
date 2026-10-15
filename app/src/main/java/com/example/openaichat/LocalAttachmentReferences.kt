@@ -30,6 +30,7 @@ object LocalAttachmentReferences {
         }
         JsonProtocol.string(json, "image_path").takeIf { it.isNotBlank() }?.let(result::add)
         result.addAll(openRouterPaths(json.optJSONArray("openrouter_attachments")))
+        result.addAll(openRouterPaths(json.optJSONArray("pending_attachments")))
         return result
     }
 
