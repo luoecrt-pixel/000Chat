@@ -134,6 +134,17 @@ class OpenRouterChatClient(
             onProtocolWarning("Изменён подписанный контекст Claude. История сообщений сохранена; прежние служебные блоки мышления нельзя повторно использовать с этим запросом.")
         }
         val inputHash = StreamingJsonRequestBody.sha256(history)
+        val allowedFunctionTools: Set<String> = buildSet {
+            if (tools != null) {
+                for (i in 0 until tools.length()) {
+                    val item = tools.optJSONObject(i) ?: continue
+                    if (item.optString("type").startsWith("openrouter:")) continue
+                    val fnName = item.optJSONObject("function")?.let { JsonProtocol.nonBlank(it, "name") }
+                        ?: JsonProtocol.nonBlank(item, "name")
+                    fnName?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
+                }
+            }
+        }
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
         val accumulatedUsage = JSONObject()
@@ -197,6 +208,15 @@ class OpenRouterChatClient(
             }
         }
 
+        fun emitProtocolCheckpoint() {
+            val checkpointTail = JSONArray()
+            for (i in inputCount until history.length()) checkpointTail.put(JsonProtocol.copy(history.get(i)))
+            onProtocolCheckpoint(
+                JSONObject().put("version", 1).put("input_sha256", sourceInputHash)
+                    .put("wire_input_sha256", inputHash).put("binding_sha256", binding).put("tail", checkpointTail)
+            )
+        }
+
         fun requestMessage(toolChoice: String): Pair<JSONObject, JSONObject> {
             ensureWithinBudget()
             val body = JSONObject()
@@ -211,11 +231,21 @@ class OpenRouterChatClient(
                 body.put("response_format", JsonProtocol.objectCopy(it))
             }
             claudeRoute.provider(model, responseFormat != null)?.let { body.put("provider", it) }
+            // Explicitly disable OpenRouter middle-out context compression on every
+            // request so conversation history and signed prefixes are never silently trimmed.
+            val plugins = JSONArray().put(
+                JSONObject().put("id", "context-compression").put("enabled", false)
+            )
             pdfEngine?.let { engine ->
                 require(engine in setOf("native", "auto", "cloudflare-ai", "mistral-ocr"))
-                if (engine != "auto") body.put("plugins", JSONArray().put(JSONObject()
-                    .put("id", "file-parser").put("pdf", JSONObject().put("engine", engine))))
+                if (engine != "auto") {
+                    plugins.put(
+                        JSONObject().put("id", "file-parser")
+                            .put("pdf", JSONObject().put("engine", engine))
+                    )
+                }
             }
+            body.put("plugins", plugins)
             tools?.takeIf { it.length() > 0 }?.let {
                 body.put("tools", it)
                 body.put("tool_choice", toolChoice)
@@ -516,6 +546,9 @@ class OpenRouterChatClient(
                     if (name.startsWith("openrouter:")) {
                         throw IOException("Unexpected OpenRouter server-side tool call: $name")
                     }
+                    if (allowedFunctionTools.isEmpty() || name !in allowedFunctionTools) {
+                        throw IOException("Unexpected tool call outside allowed catalog: $name")
+                    }
                     val arguments = try {
                         JSONObject(JsonProtocol.string(function, "arguments", "{}"))
                     } catch (e: Exception) {
@@ -532,11 +565,9 @@ class OpenRouterChatClient(
                             .put("tool_call_id", id)
                             .put("content", toolResult)
                     )
+                    // Persist durable checkpoint immediately after each completed tool side effect.
+                    emitProtocolCheckpoint()
                 }
-                val checkpointTail = JSONArray()
-                for (i in inputCount until history.length()) checkpointTail.put(JsonProtocol.copy(history.get(i)))
-                onProtocolCheckpoint(JSONObject().put("version", 1).put("input_sha256", sourceInputHash)
-                    .put("wire_input_sha256", inputHash).put("binding_sha256", binding).put("tail", checkpointTail))
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
