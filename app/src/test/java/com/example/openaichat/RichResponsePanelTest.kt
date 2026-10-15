@@ -161,4 +161,22 @@ class RichResponsePanelTest {
             assertTrue(descendants(panel).none { it is WebView })
         } finally { controller.pause().stop().destroy() }
     }
+
+    @Test fun detachingPanelDestroysAutomaticScientificWebViews() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val prefs = activity.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        try {
+            prefs.edit().putString("app_theme", "gray").putBoolean("response_scientific_preview", true).commit()
+            val panel = RichResponsePanel(activity, {}, {})
+            panel.submit(ChatBubbleItem.create("detach-test", "Claude", "```math\nx^2\n```\n\n```mermaid\nflowchart TD\nA-->B\n```", false))
+            activity.setContentView(panel)
+            assertEquals(2, descendants(panel).filterIsInstance<WebView>().size)
+            activity.setContentView(View(activity))
+            assertEquals(0, descendants(panel).filterIsInstance<WebView>().size)
+        } finally {
+            prefs.edit().remove("app_theme").remove("response_scientific_preview").commit()
+            controller.pause().stop().destroy()
+        }
+    }
 }

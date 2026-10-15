@@ -257,4 +257,17 @@ class OpenAiLocalFileToolBridgeTest {
         }
         assertEquals(0, server.requestCount)
     }
+
+    @Test fun statusCallbackReportsActiveToolNameAndRound() {
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val statuses = mutableListOf<String>()
+        OpenAiLocalFileToolBridge.finish(
+            context, db, "chat", "request", call("resp_first"), http,
+            onStatus = { statuses.add(it) },
+            credential = { "mock-only" }
+        )
+        assertEquals(1, statuses.size)
+        assertTrue(statuses.single().contains("1/6"))
+        assertTrue(statuses.single().contains("search_attached_file"))
+    }
 }

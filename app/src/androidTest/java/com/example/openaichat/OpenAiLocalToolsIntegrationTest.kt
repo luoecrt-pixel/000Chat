@@ -4,11 +4,19 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.os.SystemClock
+import android.graphics.drawable.GradientDrawable
+import android.view.View
+import android.view.ViewGroup
+import android.view.inspector.WindowInspector
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.TextView
 import android.widget.EditText
 import androidx.core.content.FileProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.filters.SdkSuppress
 import androidx.work.Data
 import androidx.work.ListenableWorker
 import androidx.work.testing.TestListenableWorkerBuilder
@@ -42,7 +50,7 @@ class OpenAiLocalToolsIntegrationTest {
     private val key = "sk-synthetic-package-h"
     private val settings = listOf("provider", "model", "current_chat", "background_responses", "response_notifications",
         "reasoning", "text_format", "system_prompt", "instructions", "file_analysis_tools", "code_interpreter",
-        "file_search", "web", "image_generation", "openai_auto_compaction", "openai_auto_compaction_opt_in_migrated_v25")
+        "file_search", "web", "image_generation", "openai_auto_compaction", "openai_auto_compaction_opt_in_migrated_v25", "app_theme")
 
     @Before fun before() {
         previous = settings.associateWith { prefs.all[it] }
@@ -192,6 +200,94 @@ class OpenAiLocalToolsIntegrationTest {
             assertEquals(2, imageBlocks.size)
             imageBlocks.forEach { assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
             awaitFinal(chatId, expectTools = false)
+        }
+    }
+
+    @Test fun pickAnyWithFileAnalysisEnabledSendsTwoImagesAsInputImageInNewChat() {
+        val bytes = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMfkAAAAASUVORK5CYII=")
+        val images = (1..2).map { n -> File(context.filesDir, "attachments/h-fa-${UUID.randomUUID()}-$n.png").apply {
+            parentFile!!.mkdirs(); writeBytes(bytes); files.add(this)
+        } }
+        prefs.edit().putBoolean("file_analysis_tools", true).putBoolean("code_interpreter", false).commit()
+        server.enqueue(sse(finalResponse()))
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            lateinit var chatId: String
+            scenario.onActivity { activity ->
+                activity.newChat(); chatId = activity.currentChatIdForTesting(); chats.add(chatId)
+                MainActivity::class.java.getDeclaredField("client").apply { isAccessible = true }.set(activity, http)
+                val uris = images.map { FileProvider.getUriForFile(context, context.packageName + ".fileprovider", it) }
+                val clip = ClipData.newUri(context.contentResolver, "photos", uris[0]).apply { addItem(ClipData.Item(uris[1])) }
+                activity.handleActivityResult(activity.pickAny, Activity.RESULT_OK, Intent().apply { clipData = clip })
+            }
+            val deadline = SystemClock.elapsedRealtime() + 20_000
+            var attached = false
+            while (!attached && SystemClock.elapsedRealtime() < deadline) {
+                scenario.onActivity { attached = (field(it, "attachedOpenRouterAttachments") as List<*>).size == 2 && it.pendingUploads.get() == 0 }
+                if (!attached) SystemClock.sleep(50)
+            }
+            assertTrue("Both images from pickAny must be prepared as image attachments", attached)
+            scenario.onActivity { activity -> send(activity) }
+            val recorded = server.takeRequest(20, TimeUnit.SECONDS)
+                ?: throw AssertionError("pickAny image Send did not reach the HTTPS server")
+            assertEquals("POST", recorded.method)
+            assertEquals("/v1/responses", recorded.path)
+            val inputs = JSONObject(recorded.body.readUtf8()).getJSONArray("input")
+            val content = (0 until inputs.length()).map { inputs.getJSONObject(it) }
+                .last { it.optString("role") == "user" }.getJSONArray("content")
+            val blocks = (0 until content.length()).map { content.getJSONObject(it) }
+            val imageBlocks = blocks.filter { it.optString("type") == "input_image" }
+            assertEquals("Both pickAny images must stay input_image when file_analysis_tools=true", 2, imageBlocks.size)
+            assertFalse("Images must not become input_file", blocks.any { it.optString("type") == "input_file" })
+            assertFalse("Images must not become container text descriptors", content.toString().contains("Complete file in the Code Interpreter container"))
+            imageBlocks.forEach { assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
+            awaitFinal(chatId, expectTools = false)
+        }
+    }
+
+    @SdkSuppress(minSdkVersion = 29)
+    @Test fun settingsAndResponseSettingsControlsUseReadableThemeColorsInLightAndGrayThemes() {
+        fun collectViews(root: View): List<View> {
+            val out = mutableListOf(root)
+            if (root is ViewGroup) {
+                for (i in 0 until root.childCount) out.addAll(collectViews(root.getChildAt(i)))
+            }
+            return out
+        }
+        fun assertDialogColors(title: String, theme: ThemeColors, minimumEdits: Int, minimumChecks: Int) {
+            // Public API: inspect the real shown dialog, never a detached test-only view tree.
+            val root = WindowInspector.getGlobalWindowViews().single { decor ->
+                collectViews(decor).filterIsInstance<TextView>().any { it.text.toString() == title }
+            }
+            try {
+                val all = collectViews(root)
+                val edits = all.filterIsInstance<EditText>()
+                val checks = all.filterIsInstance<CheckBox>()
+                assertTrue("$title must contain its real EditTexts", edits.size >= minimumEdits)
+                assertTrue("$title must contain its real CheckBoxes", checks.size >= minimumChecks)
+                edits.forEach { edit ->
+                    assertEquals("$title EditText text in ${theme.id}", theme.textPrimary, edit.currentTextColor)
+                    assertEquals("$title EditText hint in ${theme.id}", theme.hintText, edit.currentHintTextColor)
+                    assertEquals("$title EditText background in ${theme.id}", theme.inputBg,
+                        (edit.background as GradientDrawable).color!!.defaultColor)
+                }
+                checks.forEach { check ->
+                    assertEquals("$title CheckBox text in ${theme.id}", theme.textPrimary, check.currentTextColor)
+                }
+            } finally {
+                root.findViewById<Button>(android.R.id.button2).performClick()
+            }
+        }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            for (themeId in listOf("light", "gray")) {
+                val theme = AppThemePalette.byId(themeId)
+                scenario.onActivity { activity ->
+                    prefs.edit().putString("app_theme", themeId).commit()
+                    activity.showSettings()
+                }
+                scenario.onActivity { assertDialogColors("Настройки приложения", theme, 3, 2) }
+                scenario.onActivity { activity -> activity.showResponseSettings() }
+                scenario.onActivity { assertDialogColors("Настройки модели и ответа", theme, 4, 4) }
+            }
         }
     }
 }

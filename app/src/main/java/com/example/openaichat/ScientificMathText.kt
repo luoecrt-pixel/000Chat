@@ -31,6 +31,14 @@ open class ScientificMathText(context: Context, private val original: TextView, 
         val old = web ?: return
         web = null; removeView(old); old.stopLoading(); old.destroy()
     }
+
+    override fun onDetachedFromWindow() {
+        destroyRenderer()
+        original.visibility = View.VISIBLE
+        formatted = false
+        toggle.text = "Превью"
+        super.onDetachedFromWindow()
+    }
     private fun source(message: String = "") {
         formatted = false; destroyRenderer(); original.visibility = View.VISIBLE
         toggle.text = "Превью"; notice.text = message
@@ -65,8 +73,5 @@ open class ScientificMathText(context: Context, private val original: TextView, 
         addView(renderer, LayoutParams(-1, (48 * resources.displayMetrics.density).toInt()))
         handler.postDelayed(timeout, 12_000)
         renderer.loadUrl(ScientificRendererDocument.DOCUMENT_URL)
-    }
-    override fun onDetachedFromWindow() {
-        source(); super.onDetachedFromWindow()
     }
 }

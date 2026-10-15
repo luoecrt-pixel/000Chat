@@ -1393,14 +1393,44 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .show()
     }
 
+    private fun applyDialogControlTheme(root: ViewGroup, theme: ThemeColors) {
+        for (i in 0 until root.childCount) {
+            when (val child = root.getChildAt(i)) {
+                is EditText -> {
+                    child.setTextColor(theme.textPrimary)
+                    child.setHintTextColor(theme.hintText)
+                    child.background = rounded(theme.inputBg)
+                    child.setPadding(dp(12), dp(10), dp(12), dp(10))
+                }
+                is CheckBox -> {
+                    child.setTextColor(theme.textPrimary)
+                }
+                is Button -> {
+                    child.setTextColor(theme.accent)
+                    child.background = rounded(theme.buttonBg)
+                }
+                is TextView -> {
+                    if (child.currentTextColor == Color.WHITE || child.currentTextColor == Color.LTGRAY) {
+                        child.setTextColor(theme.textPrimary)
+                    } else if (child.currentTextColor == Color.rgb(170, 180, 195) || child.currentTextColor == Color.rgb(150, 155, 165)) {
+                        child.setTextColor(theme.textSecondary)
+                    }
+                }
+                is ViewGroup -> applyDialogControlTheme(child, theme)
+            }
+        }
+    }
+
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun showResponseSettings() {
         val provider = normalizedProviderId()
         val model = normalizedModelId()
         val openAi = provider == "openai"
         val supportsMode = ModelRequestPolicy.supportsReasoningMode(provider, model)
+        val theme = currentTheme()
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(theme.rootBg)
             setPadding(dp(18), dp(4), dp(18), dp(8))
         }
         fun sectionHeader(titleText: String) {
@@ -1408,7 +1438,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 text = titleText
                 textSize = 12.5f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.rgb(138, 180, 248))
+                setTextColor(theme.accent)
                 setPadding(0, dp(14), 0, dp(4))
             })
         }
@@ -1416,7 +1446,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             box.addView(TextView(this).apply {
                 text = label
                 textSize = 12f
-                setTextColor(Color.rgb(170,180,195))
+                setTextColor(theme.textSecondary)
                 setPadding(0, dp(10), 0, dp(4))
             })
             val input = Spinner(this)
@@ -1427,7 +1457,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         fun chk(label: String, pref: String, def: Boolean = false) = CheckBox(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             isChecked = prefs.getBoolean(pref, def)
         }
 
@@ -1437,7 +1467,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (provider == "openrouter") {
             box.addView(TextView(this).apply {
                 text = "auto: приложение выбирает усилие по запросу; xhigh/max не понижаются."
-                setTextColor(Color.rgb(170,180,195))
+                setTextColor(theme.textSecondary)
                 textSize = 11.5f
             })
         }
@@ -1453,18 +1483,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (!canSetVerbosity) box.addView(TextView(this).apply {
             text = "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие."
             textSize = 11.5f
-            setTextColor(Color.rgb(170,180,195))
+            setTextColor(theme.textSecondary)
             setPadding(0, dp(3), 0, dp(6))
         })
         box.addView(TextView(this).apply {
             text = "Max output tokens (пусто = выбирает API)"
-            setTextColor(Color.rgb(170,180,195))
+            setTextColor(theme.textSecondary)
             textSize = 12f
             setPadding(0, dp(10), 0, dp(4))
         })
         val max = EditText(this).apply {
             hint = "Max output tokens"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(prefs.getString("max_output", "").orEmpty().takeUnless { it == "128000" }.orEmpty())
@@ -1480,7 +1510,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val format = spinner("Формат ответа", formats, formatKey, "text")
         val schema = EditText(this).apply {
             hint = "JSON Schema (только для json_schema)"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setText(prefs.getString(schemaKey, "").orEmpty())
             minLines = 2
         }
@@ -1491,7 +1521,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val fileSearch = if (openAi) chk("File Search (Vector Store)", "file_search", false).also { box.addView(it) } else null
         val vectorInput = if (openAi) EditText(this).apply {
             hint = "Vector Store ID"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setSingleLine(true)
             setText(prefs.getString("vector_store", "").orEmpty())
         }.also {
@@ -1506,7 +1536,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val autoCompaction = if (openAi) chk("Автосжатие контекста на сервере OpenAI (opt-in; сокращает старый контекст)", "openai_auto_compaction", false).also { box.addView(it) } else null
         val cacheKeyInput = if (openAi) EditText(this).apply {
             hint = "Prompt cache key (необязательно)"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setSingleLine(true)
             setText(prefs.getString("cache_key", "").orEmpty())
         }.also { box.addView(it) } else null
@@ -1522,7 +1552,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             box.addView(TextView(this).apply {
                 text = "Маршрут Claude (по умолчанию Прямой Anthropic)"
                 textSize = 12f
-                setTextColor(Color.rgb(170,180,195))
+                setTextColor(theme.textSecondary)
                 setPadding(0, dp(10), 0, dp(4))
             })
             box.addView(it)
@@ -1537,7 +1567,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             box.addView(TextView(this).apply {
                 text = "Передача фото OpenRouter"
                 textSize = 12f
-                setTextColor(Color.rgb(170,180,195))
+                setTextColor(theme.textSecondary)
                 setPadding(0, dp(10), 0, dp(4))
             })
             box.addView(it)
@@ -1549,19 +1579,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         sectionHeader("Инструкции модели")
         val systemPromptInput = EditText(this).apply {
             hint = "Системный промпт"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setText(prefs.getString("system_prompt", "").orEmpty())
             minLines = 2
         }
         box.addView(systemPromptInput)
         val developerInstructionsInput = EditText(this).apply {
             hint = "Developer instructions"
-            setTextColor(Color.WHITE)
+            setTextColor(theme.textPrimary)
             setText(prefs.getString("instructions", "").orEmpty())
             minLines = 2
         }
         box.addView(developerInstructionsInput)
 
+        applyDialogControlTheme(box, theme)
         AlertDialog.Builder(this)
             .setTitle("Настройки модели и ответа")
             .setView(ScrollView(this).apply { addView(box) })
@@ -1687,13 +1718,21 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun showSettings() {
-        val cardBg = Color.rgb(36,38,44)
-        val accent = Color.rgb(138,180,248)
-        val subtext = Color.rgb(150,155,165)
-        val divider = Color.rgb(52,54,60)
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    fun showSettings() {
+        val theme = currentTheme()
+        val cardBg = theme.cardBg
+        val inputBg = theme.inputBg
+        val buttonBg = theme.buttonBg
+        val accent = theme.accent
+        val subtext = theme.textSecondary
+        val divider = theme.divider
 
-        val box = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(14),dp(6),dp(14),dp(10)) }
+        val box = LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL
+            setBackgroundColor(theme.rootBg)
+            setPadding(dp(14),dp(6),dp(14),dp(10))
+        }
 
         fun section(titleText:String){
             box.addView(TextView(this).apply{
@@ -1708,9 +1747,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         fun spaced(v:View){ box.addView(v, LinearLayout.LayoutParams(-1,-2).apply{ topMargin=dp(10) }) }
 
         fun field(hint:String,value:String,secret:Boolean=false) = EditText(this).apply {
-            this.hint=hint; setText(value); setTextColor(Color.WHITE); setHintTextColor(subtext)
+            this.hint=hint; setText(value); setTextColor(theme.textPrimary); setHintTextColor(theme.hintText)
             setPadding(dp(12),dp(11),dp(12),dp(11))
-            background=rounded(cardBg)
+            background=rounded(inputBg)
             if (secret) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         fun labeled(caption:String,view:View){
@@ -1735,14 +1774,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val backgroundResponses = CheckBox(this).apply {
             text = "Продолжать генерацию ответа в фоне"
             contentDescription = "Продолжать генерацию ответа в фоне"
-            setTextColor(Color.LTGRAY)
+            setTextColor(theme.textPrimary)
             isChecked = prefs.getBoolean("background_responses", true)
             setPadding(dp(4), dp(8), 0, dp(6))
         }
         box.addView(backgroundResponses)
         val notifications = CheckBox(this).apply {
             text = "Уведомлять о готовом ответе"
-            setTextColor(Color.LTGRAY)
+            setTextColor(theme.textPrimary)
             isChecked = prefs.getBoolean("response_notifications", true)
             setPadding(dp(4), dp(8), 0, dp(6))
         }
@@ -1759,7 +1798,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
         section("Файлы и диагностика")
         spaced(button("📁 Локальные файлы") { showLocalFiles() }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+            setTextColor(accent); background=rounded(buttonBg)
         })
         spaced(button("Сбросить ссылки повторных загрузок OpenAI") {
             OpenAiFileUploadCache(getSharedPreferences("openai_file_upload_cache", Context.MODE_PRIVATE)).clear()
@@ -1772,7 +1811,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 .setPositiveButton("Закрыть", null).show()
         })
         spaced(button("📊 Расход и токены") { showUsageStats() }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+            setTextColor(accent); background=rounded(buttonBg)
         })
         spaced(button("📈 Статистика auto-эффорта") {
             AlertDialog.Builder(this)
@@ -1782,12 +1821,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 .setNeutralButton("Очистить лог") { _, _ -> diagnostics.clear(); status.text = "Диагностический лог очищен" }
                 .show()
         }.apply {
-            setTextColor(accent); background=rounded(Color.rgb(40,48,66))
+            setTextColor(accent); background=rounded(buttonBg)
         })
         spaced(button("🧪 Диагностика") { showDiagnostics() }.apply {
-            setTextColor(accent); background = rounded(Color.rgb(40,48,66))
+            setTextColor(accent); background = rounded(buttonBg)
         })
 
+        applyDialogControlTheme(box, theme)
         AlertDialog.Builder(this)
             .setTitle("Настройки приложения")
             .setView(ScrollView(this).apply{addView(box)})
@@ -3302,6 +3342,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 if (!OpenAiCreateCallOwners.replace(requestChatId, localRequestId, ownedCreateCall, next)) next.cancel()
                                 else { ownedCreateCall = next; currentCall = next }
                                 if (!chatDb.isActiveRequest(requestChatId, localRequestId)) next.cancel()
+                            },
+                            onStatus = { progressText ->
+                                runOnUiThread {
+                                    if (isRequestCurrent(requestChatId, requestGeneration)) {
+                                        toolLabel.text = progressText
+                                        status.text = progressText
+                                    }
+                                }
                             })
                         newId = effectiveResponse.optString("id").takeIf { it.isNotBlank() } ?: newId
                         completionState = effectiveResponse.optString("status", completionState)
@@ -3647,7 +3695,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val typedHistoryNeeded = (!usableOpenAiChain && chat.isNotEmpty()) ||
             requestOpenRouterAttachments.isNotEmpty() || localToolsEnabled
-        val hasFilesForAnalysis = capturedFileHistory.any { m -> m.optString("role") == "user" && ((m.optJSONArray("file_ids")?.length() ?: 0) > 0 || (m.optJSONArray("attachments")?.length() ?: 0) > 0) }
+        val hasFilesForAnalysis = capturedFileHistory.any { m ->
+            if (m.optString("role") != "user") false
+            else {
+                val hasIds = (m.optJSONArray("file_ids")?.length() ?: 0) > 0
+                val atts = m.optJSONArray("attachments")
+                val hasNonImageAtts = atts != null && (0 until atts.length()).any { idx ->
+                    val kind = atts.optJSONObject(idx)?.optString("kind").orEmpty()
+                    kind.isNotBlank() && kind != "image"
+                }
+                hasIds || hasNonImageAtts
+            }
+        }
         if (typedHistoryNeeded || (fileAnalysisEnabled && hasFilesForAnalysis)) {
             val historySnapshot = chat.map { JSONObject(it.toString()) } +
                 JSONObject(sentUserMessage.toString())
@@ -3665,7 +3724,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     OpenAiLocalContextEncoder.materialize(historySnapshot, fileAnalysisEnabled, this@MainActivity) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     }
-                    val containerFiles = if (fileAnalysisEnabled) OpenAiFileAnalysis.prepare(historySnapshot,
+                    val containerFiles = if (fileAnalysisEnabled && hasFilesForAnalysis) OpenAiFileAnalysis.prepare(historySnapshot,
                         { isRequestCurrent(requestChatId, requestGeneration) && pendingOpenAiPreparation.get() == localRequestId },
                         { file, filename, mime ->
                             val ownerActive = { isRequestCurrent(requestChatId, requestGeneration) && pendingOpenAiPreparation.get() == localRequestId }
@@ -5685,6 +5744,70 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
+    private fun prepareOpenRouterAttachment(uri: Uri, pickerSourceChatId: String) {
+        val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
+        val uploadChatId = pickerSourceChatId
+        val uploadGeneration = activeResponseState.state.generation
+        beginUpload(uploadChatId, uploadGeneration)
+        executor.execute {
+            try {
+                val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource)
+                val prepared = if (local.kind == "zip") {
+                    OpenRouterAttachmentStore.extractZipFile(this, File(local.path), local.name) { message ->
+                        diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
+                    }
+                } else listOf(local)
+                val target = OpenRouterBackgroundOwnershipPolicy.decide(
+                    uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
+                )
+                when (target) {
+                    OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> runOnUiThread {
+                        val rechecked = OpenRouterBackgroundOwnershipPolicy.decide(
+                            uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
+                        )
+                        if (rechecked == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
+                            prepared.forEach { item ->
+                                if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
+                            }
+                            if (local.kind == "zip") File(local.path).delete()
+                            refreshAttachChips()
+                            persistComposerStateNow()
+                            status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
+                        } else if (rechecked == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
+                            saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
+                            if (local.kind == "zip") File(local.path).delete()
+                        } else {
+                            deleteOpenRouterAttachmentFiles(prepared)
+                            if (local.kind == "zip") File(local.path).delete()
+                        }
+                    }
+                    OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
+                        saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
+                        if (local.kind == "zip") File(local.path).delete()
+                    }
+                    OpenRouterAttachmentCompletionTarget.DISCARD -> {
+                        deleteOpenRouterAttachmentFiles(prepared)
+                        if (local.kind == "zip") File(local.path).delete()
+                    }
+                }
+            } catch (e: Exception) {
+                if (OpenRouterBackgroundOwnershipPolicy.decide(
+                        uploadChatId,
+                        currentChatId(),
+                        uploadGeneration,
+                        activeResponseState.state.generation,
+                        activityVisible,
+                        false
+                    ) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER
+                ) {
+                    runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось обработать файл") }
+                } else {
+                    diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
+                }
+            } finally { endUpload(uploadChatId, uploadGeneration) }
+        }
+    }
+
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun handleActivityResult(r:Int,c:Int,d:Intent?){
         if(c!=RESULT_OK || d==null) {
@@ -5776,74 +5899,31 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val provider = pendingPickerProvider ?: normalizedProviderId()
         val pickerSourceChatId = pendingPickerChatId ?: currentChatId()
 
+        var pickedImages: Set<Uri> = emptySet()
+        if (r == pickAny && provider == "openai" && prefs.getBoolean("file_analysis_tools", false)) {
+            val selectedUris = urisFromIntent(d)
+            pickedImages = selectedUris.filter { uri ->
+                val mime = contentResolver.getType(uri)?.lowercase(java.util.Locale.ROOT).orEmpty()
+                val name = queryName(uri).orEmpty().lowercase(java.util.Locale.ROOT)
+                mime.startsWith("image/") || name.substringAfterLast('.', "") in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "heif")
+            }.toSet()
+            if (pickedImages.isNotEmpty()) {
+                pickedImages.forEach { uri ->
+                    prepareOpenRouterAttachment(uri, pickerSourceChatId)
+                }
+                if (pickedImages.size == selectedUris.size) return
+            }
+        }
+
         if ((provider == "openrouter" || r == pickImage || (r == pickAny && !prefs.getBoolean("file_analysis_tools", false))) && r != pickVectorStoreFile && r != pickExportTxt && r != pickSaveGenerated && r != pickVoice) {
             val selectedUris = urisFromIntent(d)
             if (selectedUris.isNotEmpty()) {
                 selectedUris.forEach { uri ->
-                    val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
-                    val uploadChatId = pickerSourceChatId
-                    val uploadGeneration = activeResponseState.state.generation
-                    beginUpload(uploadChatId, uploadGeneration)
-                    executor.execute {
-                        try {
-                            val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource)
-                            val prepared = if (local.kind == "zip") {
-                                OpenRouterAttachmentStore.extractZipFile(this, File(local.path), local.name) { message ->
-                                    diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
-                                }
-                            } else listOf(local)
-                            val target = OpenRouterBackgroundOwnershipPolicy.decide(
-                                uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
-                            )
-                            when (target) {
-                                OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER -> runOnUiThread {
-                                    val rechecked = OpenRouterBackgroundOwnershipPolicy.decide(
-                                        uploadChatId, currentChatId(), uploadGeneration, activeResponseState.state.generation, activityVisible, false
-                                    )
-                                    if (rechecked == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER) {
-                                        prepared.forEach { item ->
-                                            if (attachedOpenRouterAttachments.none { it.sha256 == item.sha256 && it.name == item.name }) attachedOpenRouterAttachments.add(item)
-                                        }
-                                        if (local.kind == "zip") File(local.path).delete()
-                                        refreshAttachChips()
-                                        persistComposerStateNow()
-                                        status.text = if (local.kind == "zip") "ZIP подготовлен · файлов: " + prepared.size else "Вложение готово: " + local.name
-                                    } else if (rechecked == OpenRouterAttachmentCompletionTarget.SOURCE_CHAT) {
-                                        saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
-                                        if (local.kind == "zip") File(local.path).delete()
-                                    } else {
-                                        deleteOpenRouterAttachmentFiles(prepared)
-                                        if (local.kind == "zip") File(local.path).delete()
-                                    }
-                                }
-                                OpenRouterAttachmentCompletionTarget.SOURCE_CHAT -> {
-                                    saveOpenRouterAttachmentsToComposer(uploadChatId, prepared)
-                                    if (local.kind == "zip") File(local.path).delete()
-                                }
-                                OpenRouterAttachmentCompletionTarget.DISCARD -> {
-                                    deleteOpenRouterAttachmentFiles(prepared)
-                                    if (local.kind == "zip") File(local.path).delete()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            if (OpenRouterBackgroundOwnershipPolicy.decide(
-                                    uploadChatId,
-                                    currentChatId(),
-                                    uploadGeneration,
-                                    activeResponseState.state.generation,
-                                    activityVisible,
-                                    false
-                                ) == OpenRouterAttachmentCompletionTarget.CURRENT_COMPOSER
-                            ) {
-                                runOnUiThread { status.text = "Ошибка вложения: " + (e.message ?: "не удалось обработать файл") }
-                            } else {
-                                diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
-                            }
-                        } finally { endUpload(uploadChatId, uploadGeneration) }
-                    }
+                    prepareOpenRouterAttachment(uri, pickerSourceChatId)
                 }
                 return
             }
+            if (r == pickImage) return
         }
         if(r==pickImage){
             val imageUris = urisFromIntent(d)
@@ -5907,7 +5987,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val uris=mutableListOf<Uri>()
         d.data?.let{uris.add(it)}
         d.clipData?.let{clip->for(i in 0 until clip.itemCount)uris.add(clip.getItemAt(i).uri)}
-        uris.distinct().forEach{uri->
+        uris.distinct().filterNot { it in pickedImages }.forEach{uri->
             val name=queryName(uri) ?: "attachment"
             val ext=name.substringAfterLast('.',"").lowercase()
             val uploadChatId=pickerSourceChatId
