@@ -5,24 +5,40 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.io.Writer
 import java.security.DigestOutputStream
 import java.security.MessageDigest
 
-/** Emits UTF-8 JSON without one giant JSON string and a second giant byte array. */
+/** Freezes ordinary JSON bytes once, while keeping file-backed attachments streaming. */
 class StreamingJsonRequestBody(private val value: JSONObject) : RequestBody() {
-    private val jsonBytes by lazy { countBytes(value) }
+    private val materializedBytes: ByteArray? by lazy {
+        if (containsFileBackedValue(value)) null
+        else {
+            val output = ByteArrayOutputStream()
+            OutputStreamWriter(output, Charsets.UTF_8).use { writeJson(value, it) }
+            output.toByteArray()
+        }
+    }
+    private val jsonBytes by lazy { materializedBytes?.size?.toLong() ?: countBytes(value) }
     override fun contentType() = "application/json; charset=utf-8".toMediaType()
     override fun contentLength(): Long = jsonBytes
     override fun writeTo(sink: BufferedSink) {
+        materializedBytes?.let { sink.write(it); return }
         val writer = OutputStreamWriter(sink.outputStream(), Charsets.UTF_8)
         writeJson(value, writer)
         writer.flush() // The sink belongs to OkHttp.
     }
 
     companion object {
+        private fun containsFileBackedValue(value: Any?): Boolean = when (value) {
+            is FileBackedDataUrl, is FileBackedText -> true
+            is JSONObject -> value.keys().asSequence().any { containsFileBackedValue(value.opt(it)) }
+            is JSONArray -> (0 until value.length()).any { containsFileBackedValue(value.opt(it)) }
+            else -> false
+        }
         fun countBytes(value: Any?): Long {
             return when (value) {
                 null, JSONObject.NULL -> 4L

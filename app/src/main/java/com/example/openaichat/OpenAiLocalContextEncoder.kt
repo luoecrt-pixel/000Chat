@@ -12,6 +12,8 @@ import java.security.MessageDigest
  * Must run on a worker: history may contain multi-megabyte images and PDFs.
  */
 object OpenAiLocalContextEncoder {
+    private val closingFileTagPattern = Regex("(?i)</file")
+
     /**
      * For completed pre-v23 OpenAI history the signed reasoning/tool items
      * were never stored. Only explicit user consent can downgrade that turn
@@ -25,7 +27,7 @@ object OpenAiLocalContextEncoder {
                 !OpenAiInterruptedTurnReplay.isInterrupted(message)
         }
 
-    private fun escapeXmlAttribute(value: String): String = buildString(value.length) {
+    internal fun escapeXmlAttribute(value: String): String = buildString(value.length) {
         for (ch in value) {
             when (ch) {
                 '&' -> append("&amp;")
@@ -37,6 +39,49 @@ object OpenAiLocalContextEncoder {
                 '\n' -> append("&#10;")
                 else -> append(ch)
             }
+        }
+    }
+
+    internal fun escapeClosingFileTags(content: String): String =
+        if (!closingFileTagPattern.containsMatchIn(content)) content
+        else closingFileTagPattern.replace(content) { match -> "&lt;" + match.value.drop(1) }
+
+    private fun containsClosingFileTag(file: File): Boolean {
+        file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+            return lines.any { closingFileTagPattern.containsMatchIn(it) }
+        }
+    }
+
+    private fun sanitizeLargeTextFile(source: File): File {
+        val dir = source.parentFile ?: throw IOException("Нет каталога для безопасной сериализации файла")
+        val sanitized = PreparedAttachmentFiles.derivative(dir, ".utf8")
+        try {
+            source.inputStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                sanitized.outputStream().bufferedWriter(Charsets.UTF_8).use { writer ->
+                    val buffer = CharArray(8192)
+                    var carry = ""
+                    while (true) {
+                        if (Thread.currentThread().isInterrupted) throw IOException("Подготовка файла отменена")
+                        val n = reader.read(buffer)
+                        if (n < 0) break
+                        val combined = carry + String(buffer, 0, n)
+                        var safeCut = (combined.length - 6).coerceAtLeast(0)
+                        // Keep a closing-tag prefix whole when it crosses the emit/carry boundary.
+                        val crossingTag = closingFileTagPattern.find(combined, (safeCut - 5).coerceAtLeast(0))
+                        if (crossingTag != null && crossingTag.range.first < safeCut) safeCut = crossingTag.range.first
+                        val emit = combined.substring(0, safeCut)
+                        carry = combined.substring(safeCut)
+                        writer.write(escapeClosingFileTags(emit))
+                    }
+                    if (carry.isNotEmpty()) {
+                        writer.write(escapeClosingFileTags(carry))
+                    }
+                }
+            }
+            return sanitized
+        } catch (e: Exception) {
+            sanitized.delete()
+            throw e
         }
     }
 
@@ -173,8 +218,12 @@ object OpenAiLocalContextEncoder {
                         val prefix = "<file name=\"" + escapeXmlAttribute(item.name) + "\">\n"
                         val source = File(item.textPath ?: item.path)
                         if (!source.isFile) throw IOException("Текстовое вложение недоступно: " + item.name)
-                        val value: Any = if (source.length() > 64L * 1024L) FileBackedText(source, prefix, "\n</file>")
-                            else prefix + source.readText(Charsets.UTF_8) + "\n</file>"
+                        val value: Any = if (source.length() > 64L * 1024L) {
+                            val wireSource = if (containsClosingFileTag(source)) sanitizeLargeTextFile(source) else source
+                            FileBackedText(wireSource, prefix, "\n</file>")
+                        } else {
+                            prefix + escapeClosingFileTags(source.readText(Charsets.UTF_8)) + "\n</file>"
+                        }
                         parts.put(JSONObject().put("type", "input_text").put("text", value))
                     }
                     else -> throw IOException("Формат файла не поддерживается OpenAI: " +

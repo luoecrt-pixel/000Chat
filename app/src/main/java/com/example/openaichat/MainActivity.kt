@@ -2194,7 +2194,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun cancelRemoteResponse(chatId:String,responseId:String,key:String?){
-        if (key.isNullOrBlank()) return
+        if (key.isNullOrBlank() || !Regex("resp_[A-Za-z0-9_-]+").matches(responseId)) return
         executor.execute{
             try{
                 val req=Request.Builder()
@@ -2885,8 +2885,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         body.put("text",textObj)
 
+        val webEnabled = prefs.getBoolean("web", false)
         val tools=JSONArray()
-        if(prefs.getBoolean("web",true)) tools.put(JSONObject().put("type","web_search"))
+        if(webEnabled) tools.put(JSONObject().put("type","web_search"))
         if(prefs.getBoolean("file_search",false)){
             val vs=prefs.getString("vector_store","")?.trim().orEmpty()
             if(vs.isNotBlank()) tools.put(JSONObject().put("type","file_search").put("vector_store_ids",JSONArray().put(vs)).put("max_num_results",20))
@@ -2897,7 +2898,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val enableCodeInterpreter = prefs.getBoolean("code_interpreter", false) || (fileAnalysisEnabled && nonVisualContainerFiles.isNotEmpty())
         if(enableCodeInterpreter){
-            val c=JSONObject().put("type","auto").put("memory_limit","4g")
+            val containerMemory = if (knownFileBytes >= 15L * 1024L * 1024L) "4g" else "1g"
+            val c=JSONObject().put("type","auto").put("memory_limit",containerMemory)
             val wholeFileIds = (requestFileIds.mapIndexedNotNull { i, id ->
                 val path = requestFilePaths.getOrNull(i)
                 val mime = requestFileMimes.getOrNull(i).orEmpty()
@@ -2916,7 +2918,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // provider's opaque encrypted_content so a local typed replay can
         // preserve it without fabricating private reasoning.
         include.put("reasoning.encrypted_content")
-        if(prefs.getBoolean("web",true)) include.put("web_search_call.action.sources")
+        if(webEnabled) include.put("web_search_call.action.sources")
         if(prefs.getBoolean("file_search",false)) include.put("file_search_call.results")
         if(enableCodeInterpreter) include.put("code_interpreter_call.outputs")
         include.put("computer_call_output.output.image_url")
