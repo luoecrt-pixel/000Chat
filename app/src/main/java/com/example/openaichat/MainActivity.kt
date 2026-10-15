@@ -820,6 +820,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun showChats() {
+        persistComposerStateNow()
         refreshChatDrawer()
         drawerLayout.openDrawer(GravityCompat.START)
     }
