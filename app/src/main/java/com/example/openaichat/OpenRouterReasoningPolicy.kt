@@ -11,6 +11,7 @@ object OpenRouterReasoningPolicy {
     private val currentClaudeModels = setOf(
         "anthropic/claude-opus-5.5",
         "anthropic/claude-sonnet-5.5",
+        "anthropic/claude-haiku-5.5",
         "anthropic/claude-fable-5.1"
     )
 

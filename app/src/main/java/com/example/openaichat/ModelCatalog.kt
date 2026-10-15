@@ -12,7 +12,7 @@ data class ApiSourceOption(
 )
 
 object ModelCatalog {
-    // https://developers.openai.com/api/docs/models (verified 2026-10-10).
+    // [https://developers.openai.com/api/docs/models](https://developers.openai.com/api/docs/models) (verified 2026-10-10).
     // This is a context-window capability, never a client-side output-token cap.
     fun openAiContextWindow(model: String): Int? = when (model.removePrefix("~")) {
         "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna" -> 1_050_000
@@ -37,6 +37,7 @@ object ModelCatalog {
             models = listOf(
                 ModelOption("anthropic/claude-opus-5.5", "Claude Opus 5.5"),
                 ModelOption("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5"),
+                ModelOption("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
                 ModelOption("anthropic/claude-fable-5.1", "Claude Fable 5.1")
             )
         )

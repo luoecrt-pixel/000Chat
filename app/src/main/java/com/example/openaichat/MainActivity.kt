@@ -2034,33 +2034,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun githubConfirmationText(name: String, arguments: JSONObject): String {
-        return when (name) {
-            "merge_pull_request" ->
-                GitHubConfirmationPreview.text(name, arguments)
-            "create_or_update_file" -> {
-                val repo = arguments.optString("owner") + "/" + arguments.optString("repo")
-                val path = JsonProtocol.string(arguments, "path")
-                val branch = arguments.optString("branch")
-                val content = if (!arguments.isNull("content")) JsonProtocol.string(arguments, "content") else {
-                    try { String(Base64.decode(arguments.optString("content_base64"), Base64.DEFAULT), Charsets.UTF_8) } catch (_:Exception) { "" }
-                }
-                val preview = content.take(3000)
-                "Модель хочет записать файл в GitHub.\nРепозиторий: " + repo +
-                    "\nВетка: " + branch +
-                    "\nПуть: " + path +
-                    "\nРазмер: " + content.toByteArray(Charsets.UTF_8).size + " байт" +
-                    "\n\nPreview:\n" + preview + (if (content.length > 3000) "\n… preview truncated …" else "") +
-                    "\n\nРазрешить?"
-            }
-            "create_issue_comment", "submit_pull_request_review" ->
-                GitHubConfirmationPreview.text(name, arguments)
-            "trigger_workflow_dispatch" ->
-                "Модель хочет запустить GitHub Actions workflow " + arguments.optString("workflow_id") +
-                    " на ref " + arguments.optString("ref") + ".\n\nРазрешить?"
-            else -> "Модель хочет выполнить GitHub-действие " + name + ".\n\nРазрешить?"
-        }
-    }
+    private fun githubConfirmationText(name: String, arguments: JSONObject): String =
+        GitHubConfirmationPreview.text(name, arguments)
 
     private fun completePendingGitHubConfirmation(
         decision: CompletableFuture<Boolean>,

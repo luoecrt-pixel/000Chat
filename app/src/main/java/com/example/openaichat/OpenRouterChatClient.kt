@@ -37,7 +37,11 @@ class OpenRouterUpstreamException(
     val errorType: String?,
     val providerName: String?,
     val providerCode: String?,
-    val safeMetadata: String?
+    val safeMetadata: String?,
+    val retryEligible: Boolean = false,
+    val retryAfterSeconds: Long? = null,
+    val limitSource: String? = null,
+    val resetsAt: String? = null
 ) : IOException(message)
 
 private data class OpenRouterStreamToolCall(
@@ -62,37 +66,9 @@ class OpenRouterChatClient(
     }
 
     private fun upstreamError(
-        error: JSONObject, stage: String, roundIndex: Int, status: Int? = null
-    ): OpenRouterUpstreamException {
-        val metadata = error.optJSONObject("metadata")
-        fun scalar(o: JSONObject?, key: String): String? = when (val value = o?.opt(key)) {
-            is String -> value.takeIf { it.isNotBlank() }; is Number -> value.toString(); else -> null
-        }
-        val provider = scalar(metadata, "provider_name") ?: scalar(error, "provider_name")
-        val raw = metadata?.opt("raw")
-        val providerError = (if (raw is JSONObject) raw else if (raw is String && raw.length <= 32_000)
-            try { JSONObject(raw) } catch (_: Exception) { null } else null)?.optJSONObject("error")
-        val providerCode = scalar(metadata, "provider_code") ?: scalar(error, "provider_code") ?: scalar(providerError, "code")
-        val code = scalar(error, "code")
-        val errorType = scalar(error, "type") ?: code
-        val message = JsonProtocol.nonBlank(error, "message")?.take(480) ?: "Unknown upstream error"
-        val detail = JsonProtocol.nonBlank(providerError ?: JSONObject(), "message")?.take(300)
-        // Never record a whole provider payload. The diagnostic logger redacts secrets.
-        val safeMeta = metadata?.let {
-            JSONObject().apply {
-                listOf("provider_name", "provider_code").forEach { key ->
-                    scalar(it, key)?.let { value -> put(key, value.take(180)) }
-                }
-                scalar(providerError, "type")?.let { put("upstream_type", it.take(100)) }
-                scalar(providerError, "param")?.let { put("upstream_param", it.take(100)) }
-                detail?.let { put("upstream_message", it) }
-            }.toString().take(420)
-        }
-        return OpenRouterUpstreamException(
-            "OpenRouter " + stage + " error: " + message + (detail?.let { " · $it" } ?: ""),
-            stage, roundIndex, status ?: code?.toIntOrNull()?.takeIf { it in 400..599 }, errorType, provider, providerCode, safeMeta
-        )
-    }
+        error: JSONObject, stage: String, roundIndex: Int, status: Int? = null, retryAfterHeader: String? = null
+    ): OpenRouterUpstreamException =
+        OpenRouterErrorClassifier.classify(error, stage, roundIndex, status, retryAfterHeader)
 
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -275,6 +251,7 @@ class OpenRouterChatClient(
                 .addHeader("Accept", "text/event-stream")
                 .addHeader("HTTP-Referer", "com.example.openaichat")
                 .addHeader("X-Title", "OpenAIApiChat")
+                .addHeader("X-OpenRouter-Cache", "false")
                 .post(wireBody)
                 .build()
 
@@ -392,10 +369,12 @@ class OpenRouterChatClient(
                         onRoundObserved(roundIndex, headerGenId, null)
                     }
                     if (!httpResponse.isSuccessful) {
+                        val retryAfterHeader = httpResponse.header("Retry-After")
                         val raw = BoundedResponseDecoder.readErrorBody(httpResponse.body)
                         val error = runCatching { JSONObject(raw).optJSONObject("error") }.getOrNull()
-                        if (error != null) throw upstreamError(error, "HTTP", roundIndex, httpResponse.code)
-                        throw IOException("OpenRouter HTTP ${httpResponse.code}: ${raw.take(320)}")
+                        if (error != null) throw upstreamError(error, "HTTP", roundIndex, httpResponse.code, retryAfterHeader)
+                        val fallbackError = JSONObject().put("message", "HTTP ${httpResponse.code}: ${raw.take(320)}")
+                        throw upstreamError(fallbackError, "HTTP", roundIndex, httpResponse.code, retryAfterHeader)
                     }
                     val bodyResponse = httpResponse.body ?: throw IOException("OpenRouter response has no body")
                     BoundedResponseDecoder.openSse(bodyResponse.byteStream(), sseLimits).use { reader ->
