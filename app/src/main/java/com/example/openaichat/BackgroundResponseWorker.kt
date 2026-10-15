@@ -443,11 +443,11 @@ class BackgroundResponseWorker(
     private fun createForegroundInfo(title: String): ForegroundInfo {
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Astra — фоновые ответы", NotificationManager.IMPORTANCE_LOW))
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Фоновые ответы", NotificationManager.IMPORTANCE_LOW))
         }
         val notification: Notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_def_app_icon)
-            .setContentTitle("Astra продолжает ответ")
+            .setContentTitle("Продолжается генерация")
             .setContentText(title.take(80))
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)

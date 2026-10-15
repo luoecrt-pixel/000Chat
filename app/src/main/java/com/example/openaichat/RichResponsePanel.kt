@@ -91,14 +91,19 @@ class RichResponsePanel(
         }).build()
 
     init { orientation = VERTICAL; tag = "rich-response" }
+    private fun currentTheme(): ThemeColors = AppThemePalette.byId(
+        context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")
+    )
     private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
     private fun text(value: CharSequence = "") = TextView(context).apply {
-        text = value; textSize = 16f; setTextColor(Color.WHITE)
-        setLinkTextColor(Color.rgb(138, 180, 248)); setPadding(0, dp(5), 0, dp(5))
+        val theme = currentTheme()
+        text = value; textSize = 16f; setTextColor(theme.textPrimary)
+        setLinkTextColor(theme.accent); setPadding(0, dp(5), 0, dp(5))
         setTextIsSelectable(true); movementMethod = LinkMovementMethod.getInstance()
     }
     private fun button(label: String, action: () -> Unit) = Button(context).apply {
-        text = label; textSize = 12f; minWidth = 0; minimumWidth = 0; setTextColor(Color.rgb(138, 180, 248))
+        val theme = currentTheme()
+        text = label; textSize = 12f; minWidth = 0; minimumWidth = 0; setTextColor(theme.accent)
         setOnClickListener { action() }
     }
     private fun column() = LinearLayout(context).apply { orientation = VERTICAL }
@@ -405,16 +410,27 @@ class RichResponsePanel(
     }
 
     private fun table(block: ResponseBlockParser.Block.Table, state: TableState): View = column().apply {
+        val theme = currentTheme()
         var shown = 0
         val grid = column()
+        val columnWidthsPx = IntArray(block.header.size) { colIndex ->
+            var maxChars = block.header.getOrNull(colIndex).orEmpty().length
+            val sampleLimit = minOf(block.rows.size, 100)
+            for (r in 0 until sampleLimit) {
+                val cellLen = block.rows[r].getOrNull(colIndex).orEmpty().length
+                if (cellLen > maxChars) maxChars = cellLen
+            }
+            val estimatedDp = (maxChars * 9 + 26).coerceIn(88, 280)
+            dp(estimatedDp)
+        }
         fun append(values: List<String>, header: Boolean) {
             grid.addView(row().apply {
-                setBackgroundColor(if (header) Color.rgb(40, 44, 52) else Color.rgb(32, 35, 42))
+                setBackgroundColor(if (header) theme.tableHeaderBg else theme.tableRowBg)
                 for (index in block.header.indices) addView(markdown(values.getOrNull(index).orEmpty()).apply {
                     if (header) setTypeface(typeface, Typeface.BOLD)
                     gravity = when (block.align[index]) { 0 -> Gravity.CENTER; 1 -> Gravity.END; else -> Gravity.START }
-                    setPadding(dp(6), dp(5), dp(6), dp(5))
-                }, LayoutParams(dp(160), -2))
+                    setPadding(dp(8), dp(5), dp(8), dp(5))
+                }, LayoutParams(columnWidthsPx[index], -2))
             })
         }
         append(block.header, true)

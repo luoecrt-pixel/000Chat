@@ -31,7 +31,7 @@ object ResponseNotifications {
     fun running(context: Context, chatId: String, count: Int): Notification {
         channels(context)
         return NotificationCompat.Builder(context, RUNNING_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Astra выполняет ответ")
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Integral LLM выполняет ответ")
             .setContentText(if (count > 1) "Активных ответов: $count" else "Можно перейти в другое приложение")
             .setContentIntent(intent(context, chatId, 41063)).setOngoing(true).setOnlyAlertOnce(true).build()
     }

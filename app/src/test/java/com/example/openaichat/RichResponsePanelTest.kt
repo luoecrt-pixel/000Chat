@@ -61,6 +61,38 @@ class RichResponsePanelTest {
         } finally { controller.pause().stop().destroy() }
     }
 
+    @Test fun tableColumnsAdaptToContentAndUseTheSelectedThemeWithoutTruncatingCells() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val prefs = activity.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val oldTheme = prefs.getString("app_theme", null)
+        try {
+            val longText = "longword".repeat(20)
+            for (themeId in AppThemePalette.themes) {
+                prefs.edit().putString("app_theme", themeId).commit()
+                val theme = AppThemePalette.byId(themeId)
+                val panel = RichResponsePanel(activity, {}, {})
+                panel.submit(ChatBubbleItem.create("table-$themeId", "Claude",
+                    "| A | Long |\n| -- | -- |\n| 1 | $longText |\n", false))
+                val cells = descendants(panel).filterIsInstance<TextView>()
+                val first = cells.single { it.text.toString() == "A" }
+                val second = cells.single { it.text.toString() == "Long" }
+                val longCell = cells.single { it.text.toString() == longText }
+                val density = activity.resources.displayMetrics.density
+                assertEquals((88 * density).toInt(), first.layoutParams.width)
+                assertEquals((280 * density).toInt(), second.layoutParams.width)
+                assertEquals(second.layoutParams.width, longCell.layoutParams.width)
+                assertEquals(theme.textPrimary, longCell.currentTextColor)
+                assertEquals(theme.tableHeaderBg, ((first.parent as View).background as android.graphics.drawable.ColorDrawable).color)
+                assertEquals(theme.tableRowBg, ((longCell.parent as View).background as android.graphics.drawable.ColorDrawable).color)
+                assertTrue(descendants(panel).any { it is HorizontalScrollView })
+            }
+        } finally {
+            prefs.edit().apply { if (oldTheme == null) remove("app_theme") else putString("app_theme", oldTheme) }.commit()
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test fun fileCardSavesOnlyAClosedSafeTextBlockAndNothingAutoExecutes() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         try {

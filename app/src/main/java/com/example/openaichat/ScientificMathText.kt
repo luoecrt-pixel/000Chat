@@ -16,7 +16,10 @@ class ScientificMathText(context: Context, private val original: TextView, priva
     private val handler = Handler(Looper.getMainLooper())
     private var web: WebView? = null
     private var formatted = false
-    private val notice = TextView(context).apply { textSize = 12f; setTextColor(Color.LTGRAY) }
+    private val theme = AppThemePalette.byId(
+        context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")
+    )
+    private val notice = TextView(context).apply { textSize = 12f; setTextColor(theme.textSecondary) }
     private val toggle = Button(context).apply {
         text = "Формулы в тексте"; textSize = 12f
         setOnClickListener { if (formatted) source() else typeset() }

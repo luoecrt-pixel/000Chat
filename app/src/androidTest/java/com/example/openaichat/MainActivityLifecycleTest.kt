@@ -2483,5 +2483,106 @@ class MainActivityLifecycleTest {
         }
     }
 
-}
 
+    @Test
+    @androidx.test.filters.SdkSuppress(minSdkVersion = 29)
+    fun savedBackgroundResponsesFalseSurvivesUpgradeAndSendsBackgroundFalseOnWire() {
+        val (server, testHttpClient) = createHttpsMockServer()
+        val response = JSONObject().put("id", "resp_fg_only").put("status", "completed")
+            .put("output", JSONArray().put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(
+                    JSONObject().put("type", "output_text").put("text", "ok")))))
+        val sse = "data: " + JSONObject().put("type", "response.created")
+            .put("sequence_number", 0).put("response", JSONObject().put("id", "resp_fg_only")) +
+            "\n\ndata: " + JSONObject().put("type", "response.completed")
+                .put("sequence_number", 1).put("response", response) + "\n\n"
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(sse))
+
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val modified = listOf("background_responses", "background_responses_migrated_v25", "current_chat",
+            "provider", "model", "reasoning", "text_format", "system_prompt", "instructions",
+            "web", "file_search", "code_interpreter", "file_analysis_tools", "image_generation",
+            "openai_auto_compaction", "openai_auto_compaction_opt_in_migrated_v25")
+        val previous = modified.associateWith { prefs.all[it] }
+        val originalKey = SecureStore(context).getApiKey()
+        var fixtureChatId: String? = null
+
+        fun backgroundSwitch(view: android.view.View): android.widget.CheckBox? {
+            if (view is android.widget.CheckBox && view.text.toString() == "Продолжать генерацию ответа в фоне") return view
+            if (view is android.view.ViewGroup) {
+                for (i in 0 until view.childCount) backgroundSwitch(view.getChildAt(i))?.let { return it }
+            }
+            return null
+        }
+
+        try {
+            // A pre-upgrade explicit false must survive both startup and Activity recreation.
+            assertTrue(prefs.edit().putBoolean("background_responses", false)
+                .remove("background_responses_migrated_v25")
+                .putString("provider", "openai").putString("model", "gpt-6-astra")
+                .putString("reasoning", "high").putString("text_format", "text")
+                .putString("system_prompt", "").putString("instructions", "")
+                .putBoolean("web", false).putBoolean("file_search", false)
+                .putBoolean("code_interpreter", false).putBoolean("file_analysis_tools", false)
+                .putBoolean("image_generation", false).putBoolean("openai_auto_compaction", false).commit())
+
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    assertFalse("Explicit false must survive startup migration", activity.prefs.getBoolean("background_responses", true))
+                    activity.newChat()
+                    fixtureChatId = activity.currentChatIdForTesting()
+                }
+                scenario.recreate()
+                scenario.onActivity { activity ->
+                    assertFalse("Explicit false must survive restart", activity.prefs.getBoolean("background_responses", true))
+                    invoke(activity, "showSettings")
+                    val root = android.view.inspector.WindowInspector.getGlobalWindowViews()
+                        .single { backgroundSwitch(it) != null }
+                    assertFalse("Settings must show the saved switch disabled", backgroundSwitch(root)!!.isChecked)
+                    root.findViewById<Button>(android.R.id.button2).performClick()
+                    assertTrue(SecureStore(activity).setApiKey("sk-synthetic-bg-false-test"))
+                    val redirected = testHttpClient.newBuilder().addInterceptor { chain ->
+                        chain.proceed(chain.request().newBuilder().url(server.url("/v1/responses")).build())
+                    }.build()
+                    setPrivateField(activity, "client", redirected)
+                    (privateField(activity, "input") as android.widget.EditText).setText("Foreground only request")
+                    invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
+                }
+
+                val recorded = server.takeRequest(20, TimeUnit.SECONDS)
+                    ?: throw AssertionError("OpenAI Send did not reach local HTTPS MockWebServer")
+                assertEquals("POST", recorded.method)
+                assertEquals("/v1/responses", recorded.path)
+                assertFalse("Actual OpenAI wire JSON must respect the saved false",
+                    JSONObject(recorded.body.readUtf8()).getBoolean("background"))
+                // Finish this foreground request before closing Activity or restoring its credential.
+                var completed = false
+                val deadline = SystemClock.elapsedRealtime() + 20_000L
+                while (!completed && SystemClock.elapsedRealtime() < deadline) {
+                    scenario.onActivity { activity ->
+                        completed = (privateField(activity, "status") as android.widget.TextView)
+                            .text.toString().startsWith("Готово")
+                    }
+                    if (!completed) SystemClock.sleep(50L)
+                }
+                assertTrue("Foreground response must finish before fixture cleanup", completed)
+                assertEquals(1, server.requestCount)
+            }
+        } finally {
+            SecureStore(context).setApiKey(originalKey)
+            fixtureChatId?.let { id ->
+                ChatDatabase(context).use { it.deleteChat(id) }
+                prefs.edit().remove("composer_state_$id").commit()
+            }
+            prefs.edit().apply {
+                previous.forEach { (key, value) -> when (value) {
+                    is String -> putString(key, value)
+                    is Boolean -> putBoolean(key, value)
+                    else -> remove(key)
+                } }
+            }.commit()
+            server.shutdown()
+        }
+    }
+}

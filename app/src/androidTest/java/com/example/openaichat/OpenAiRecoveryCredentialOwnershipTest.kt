@@ -44,9 +44,9 @@ class OpenAiRecoveryCredentialOwnershipTest {
 
     @Before fun configureSyntheticOwner() {
         oldKey = SecureStore(context).getApiKey()
-        oldPrefs = listOf("response_notifications", "background_responses", "current_chat", "provider").associateWith { prefs.all[it] }
+        oldPrefs = listOf("background_responses_migrated_v25", "response_notifications", "background_responses", "current_chat", "provider").associateWith { prefs.all[it] }
         SecureStore(context).setApiKey(originalKey)
-        prefs.edit().putBoolean("response_notifications", false).putBoolean("background_responses", false)
+        prefs.edit().putBoolean("response_notifications", false).putBoolean("background_responses", false).putBoolean("background_responses_migrated_v25", true)
             .putString("provider", "openai").commit()
         chatId = "credential-recovery-" + UUID.randomUUID()
     }

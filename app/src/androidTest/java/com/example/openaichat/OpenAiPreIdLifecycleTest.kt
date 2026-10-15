@@ -37,13 +37,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 @RunWith(AndroidJUnit4::class)
 class OpenAiPreIdLifecycleTest {
     private var savedNotificationPreference: Boolean? = null
+    private var savedBackgroundMigrationPreference: Boolean? = null
 
     @Before fun suppressUnrelatedNotificationPermissionDialog() {
         val preferences = InstrumentationRegistry.getInstrumentation().targetContext
             .getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
         savedNotificationPreference = if (preferences.contains("response_notifications"))
             preferences.getBoolean("response_notifications", true) else null
-        preferences.edit().putBoolean("response_notifications", false).commit()
+        savedBackgroundMigrationPreference = preferences.all["background_responses_migrated_v25"] as? Boolean
+        preferences.edit().putBoolean("response_notifications", false)
+            .putBoolean("background_responses_migrated_v25", true).commit()
     }
 
     @After fun restoreNotificationPreference() {
@@ -51,6 +54,8 @@ class OpenAiPreIdLifecycleTest {
             .getSharedPreferences("app", android.content.Context.MODE_PRIVATE).edit()
         savedNotificationPreference?.let { edit.putBoolean("response_notifications", it) }
             ?: edit.remove("response_notifications")
+        savedBackgroundMigrationPreference?.let { edit.putBoolean("background_responses_migrated_v25", it) }
+            ?: edit.remove("background_responses_migrated_v25")
         edit.commit()
     }
 

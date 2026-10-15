@@ -42,6 +42,45 @@ class OpenRouterProtocolRegressionTest {
             maxTokens = null, reasoningEffort = "max", verbosity = "high", parallelToolCalls = true,
             executeTool = execute, onFileIoObserved = observeIo)
 
+    @Test fun unchangedBindingReusesFingerprintButChangedBindingRecomputesWireHash() {
+        val server = MockWebServer(); server.start()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        val file = java.io.File.createTempFile("protocol-hash", ".txt").apply { writeText("Full document 😀") }
+        try {
+            for (changedBinding in listOf(false, true)) {
+                val wire = FileBackedText(file)
+                val prefix = JSONArray().put(JSONObject().put("role", "user").put("content", wire))
+                val stored = JSONObject().put("openrouter_protocol", JSONObject().put("version", 1)
+                    .put("input_sha256", OpenRouterProtocolCodec.fingerprint(prefix))
+                    .put("binding_sha256", OpenRouterProtocolCodec.binding(
+                        "anthropic/claude-sonnet-5.5", null, if (changedBinding) "old-account" else "mock"))
+                    .put("tail", JSONArray().put(JSONObject().put("role", "assistant").put("content", "Prior")
+                        .put("reasoning", "signed thought"))))
+                val messages = JsonProtocol.arrayCopy(prefix)
+                assertTrue(OpenRouterProtocolCodec.append(messages, stored))
+                val readsBefore = wire.ioStats().readPasses
+                val expectedSource = OpenRouterProtocolCodec.fingerprint(messages)
+                val clean = JsonProtocol.arrayCopy(messages)
+                OpenRouterProtocolCodec.checkBinding(clean, OpenRouterProtocolCodec.binding("anthropic/claude-sonnet-5.5", null, "mock"))
+                val expectedWire = StreamingJsonRequestBody.sha256(clean)
+                val readsAtCall = wire.ioStats().readPasses
+                assertTrue(readsAtCall > readsBefore)
+                var warnings = 0
+                server.enqueue(stream("""{"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"""))
+                val result = client.complete("mock", "anthropic/claude-sonnet-5.5", messages, tools = null,
+                    maxTokens = null, reasoningEffort = "high", verbosity = null, parallelToolCalls = true,
+                    executeTool = { _, _ -> throw AssertionError("Unexpected tool") }, onProtocolWarning = { warnings++ })
+                val request = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+                assertEquals("Full document 😀", request.getJSONArray("messages").getJSONObject(0).getString("content"))
+                assertEquals(!changedBinding, request.getJSONArray("messages").getJSONObject(1).has("reasoning"))
+                assertEquals(if (changedBinding) 1 else 0, warnings)
+                assertEquals(expectedSource, result.protocol!!.getString("input_sha256"))
+                assertEquals(expectedWire, result.protocol.getString("wire_input_sha256"))
+                assertEquals(if (changedBinding) 3L else 2L, wire.ioStats().readPasses - readsAtCall)
+            }
+        } finally { file.delete(); client.close(); server.shutdown() }
+    }
+
     @Test fun failedIoObserverDoesNotTurnSuccessfulResponseIntoFailure() {
         val server = MockWebServer(); server.start()
         val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
