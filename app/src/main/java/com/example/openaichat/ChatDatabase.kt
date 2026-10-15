@@ -537,12 +537,21 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         return out
     }
 
-    /** Lightweight list for the chat picker; never loads full message histories. */
+    /**
+     * Lightweight list for the chat picker; never loads full message histories.
+     * Task 2: Empty provisional draft sessions remain hidden from the sidebar
+     * until their first accepted Send (message, active response, or request row)
+     * or an explicit rename.
+     */
     fun listChatSummaries(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
+        val publishedWhere = "title != 'Новый чат' OR active_status IS NOT NULL " +
+            "OR response_id IS NOT NULL " +
+            "OR EXISTS (SELECT 1 FROM $MESSAGE_TABLE m WHERE m.chat_id=$CHAT_TABLE.id) " +
+            "OR EXISTS (SELECT 1 FROM $REQUEST_ACCOUNTING_TABLE a WHERE a.chat_id=$CHAT_TABLE.id)"
         SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
             arrayOf("id", "title", "response_id", "baseline_effort", "updated_at"),
-            null, null, null, null, "updated_at DESC, id DESC"
+            publishedWhere, null, null, null, "updated_at DESC, id DESC"
         ).use { c ->
             while (c.moveToNext()) {
                 val obj = JSONObject()

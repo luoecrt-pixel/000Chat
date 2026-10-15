@@ -38,15 +38,19 @@ object ResponseNotifications {
     /** Only a winning SQLite finalizer calls this; never include answer text on the lock screen. */
     fun finished(context: Context, chatId: String, requestId: String, completed: Boolean) {
         val store = context.getSharedPreferences("answer_notification_outbox", Context.MODE_PRIVATE)
-        if (OpenRouterUiBridge.viewing(chatId) || !context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_notifications", true)) {
+        val permissionDenied = Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        val manager = NotificationManagerCompat.from(context)
+        if (OpenRouterUiBridge.viewing(chatId) ||
+            !context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_notifications", true) ||
+            permissionDenied || !manager.areNotificationsEnabled()) {
             try {
-                if (AnswerNotificationOutbox.discard(store, requestId)) ChatDatabase(context).use { it.acknowledgeAnswerNotification(chatId, requestId) }
+                if (AnswerNotificationOutbox.discard(store, requestId)) {
+                    ChatDatabase(context).use { it.acknowledgeAnswerNotification(chatId, requestId) }
+                }
             } catch (_: Exception) { /* Notification state must never turn a saved answer into an error. */ }
             return
         }
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val manager = NotificationManagerCompat.from(context)
-        if (!manager.areNotificationsEnabled()) return
         val record = JSONObject().put("chat_id", chatId).put("completed", completed)
         try {
             AnswerNotificationOutbox.deliver(store, requestId, record) { pending ->
