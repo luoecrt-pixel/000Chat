@@ -1,5 +1,6 @@
 package com.example.openaichat
 
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONArray
@@ -155,7 +156,8 @@ class OpenRouterProtocolRegressionTest {
 
     @Test fun stopBetweenToolAAndToolBMarksToolBCancelledWithoutRepeatingToolA() {
         val server = MockWebServer(); server.start()
-        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        val transport = OkHttpClient()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), transport, reconcileGenerations = false)
         val active = AtomicBoolean(true)
         val toolACount = AtomicInteger()
         val toolBCount = AtomicInteger()
@@ -179,6 +181,8 @@ class OpenRouterProtocolRegressionTest {
             assertEquals(1, toolACount.get()); assertEquals(0, toolBCount.get())
             assertEquals("Round and completed A must both be checkpointed", 2, checkpoints.size)
             assertEquals(1, server.requestCount)
+            assertEquals("Stopped round must finish before replay", 0, transport.dispatcher.runningCallsCount())
+            assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
 
             val failedAssistant = JSONObject().put("role", "assistant").put("text", "Inspect notes").put("status", "stopped")
             failedAssistant.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(checkpoints.last(), failedAssistant))
@@ -205,7 +209,6 @@ class OpenRouterProtocolRegressionTest {
             server.enqueue(stream("""{"choices":[{"delta":{"content":"Continued"},"finish_reason":"stop"}]}"""))
             assertEquals("Continued", complete(client, replayed) { _, _ -> throw AssertionError("Completed tools must not repeat") }.text)
             assertEquals(1, toolACount.get()); assertEquals(0, toolBCount.get())
-            server.takeRequest(2, TimeUnit.SECONDS)
             val wire = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("messages")
             assertEquals(originalResult, wire.getJSONObject(2).getString("content"))
             assertTrue(JSONObject(wire.getJSONObject(3).getString("content")).getBoolean("cancelled"))
