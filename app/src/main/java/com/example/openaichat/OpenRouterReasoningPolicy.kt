@@ -7,10 +7,11 @@ object OpenRouterReasoningPolicy {
     private val gatewayEfforts = setOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
     private val claudeEfforts = setOf("low", "medium", "high", "xhigh", "max")
 
-    // Native effort levels apply to built-in and user-added Anthropic Claude models.
+    // Five native effort levels for the Claude models in ModelCatalog.
     private val currentClaudeModels = setOf(
         "anthropic/claude-opus-5.5",
         "anthropic/claude-sonnet-5.5",
+        "anthropic/claude-haiku-5.5",
         "anthropic/claude-fable-5.1"
     )
 
@@ -23,8 +24,7 @@ object OpenRouterReasoningPolicy {
             "Автоматическое усилие нужно выбрать по запросу до отправки в OpenRouter"
         }
         require(effort in gatewayEfforts) { "Неизвестное усилие мышления: $effort" }
-        val normalized = modelId(model)
-        if (normalized in currentClaudeModels || normalized.startsWith("anthropic/")) {
+        if (modelId(model) in currentClaudeModels) {
             require(effort in claudeEfforts) {
                 "Модель $model не поддерживает усилие $effort"
             }

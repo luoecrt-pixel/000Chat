@@ -26,9 +26,14 @@ class OpenRouterReasoningPolicyTest {
     }
 
     @Test fun unresolvedAutoAndUnsupportedClaudeEffortsAreRejected() {
-        for (effort in listOf("auto", "none", "minimal", "ultra")) {
-            assertThrows(IllegalArgumentException::class.java) {
-                OpenRouterReasoningPolicy.requestEffort("anthropic/claude-opus-5.5", effort)
+        for (model in ModelCatalog.source("openrouter").models) {
+            for (effort in listOf("auto", "none", "minimal", "ultra")) {
+                assertThrows(IllegalArgumentException::class.java) {
+                    OpenRouterReasoningPolicy.requestEffort(model.id, effort)
+                }
+                assertThrows(IllegalArgumentException::class.java) {
+                    OpenRouterReasoningPolicy.requestEffort("~${model.id}", effort)
+                }
             }
         }
     }
@@ -40,8 +45,10 @@ class OpenRouterReasoningPolicyTest {
     }
 
     @Test fun responseVerbosityCannotOverrideClaudeEffort() {
-        assertFalse(OpenRouterReasoningPolicy.supportsResponseVerbosity("anthropic/claude-opus-5.5"))
-        assertFalse(OpenRouterReasoningPolicy.supportsResponseVerbosity("~anthropic/claude-fable-5.1"))
+        for (model in ModelCatalog.source("openrouter").models) {
+            assertFalse(OpenRouterReasoningPolicy.supportsResponseVerbosity(model.id))
+            assertFalse(OpenRouterReasoningPolicy.supportsResponseVerbosity("~${model.id}"))
+        }
         assertTrue(OpenRouterReasoningPolicy.supportsResponseVerbosity("openai/gpt-6-astra"))
     }
 }
