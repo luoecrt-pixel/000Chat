@@ -75,6 +75,7 @@ class MainActivitySettingsTest {
         val hints = widgets(dialog).filterIsInstance<EditText>().map { it.hint?.toString() }
         assertTrue(hints.containsAll(listOf("OpenAI API key", "OpenRouter API key", "GitHub fine-grained PAT")))
         assertTrue(labels(dialog).containsAll(listOf("Настройки приложения", "Тема оформления Integral LLM", "🧪 Диагностика")))
+        assertTrue(checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked)
         assertEquals(1, widgets(dialog).filterIsInstance<Spinner>().size)
         assertFalse(labels(dialog).any { it.contains("Усилие мышления") || it.contains("Автосжатие") || it.contains("Web Search") })
         assertFalse(hints.contains("Системный промпт"))
@@ -89,6 +90,7 @@ class MainActivitySettingsTest {
         val texts = labels(dialog)
         assertTrue(texts.containsAll(listOf("Настройки модели и ответа", "Инструменты и контекст OpenAI", "Усилие мышления")))
         assertFalse(texts.any { it.contains("API key") || it.contains("Тема оформления") || it.contains("GitHub fine-grained PAT") })
+        assertFalse(texts.contains("Продолжать генерацию ответа в фоне"))
         assertFalse(texts.contains("OpenRouter: Web Search"))
         val compaction = checkbox(dialog, "Автосжатие контекста")
         assertFalse(compaction.isChecked)
@@ -127,16 +129,59 @@ class MainActivitySettingsTest {
         assertEquals("anthropic", prefs.getString("openrouter_claude_route", null))
     }
 
-    @Test fun migrationDisablesImplicitLegacyCompactionAndEnablesBackgroundOnce() {
+    @Test fun migrationDisablesImplicitLegacyCompactionAndPreservesBackgroundChoice() {
         prefs.edit().putBoolean("openai_auto_compaction", true).putBoolean("background_responses", false).commit()
         val activity = launch()
         assertFalse(prefs.getBoolean("openai_auto_compaction", true))
-        assertTrue(prefs.getBoolean("background_responses", false))
+        assertFalse(prefs.getBoolean("background_responses", true))
         assertTrue(prefs.getBoolean("openai_auto_compaction_opt_in_migrated_v25", false))
         prefs.edit().putBoolean("openai_auto_compaction", true).putBoolean("background_responses", false).commit()
         MainActivity::class.java.getDeclaredMethod("migrateLegacySettingsPreferences").apply { isAccessible = true }.invoke(activity)
         assertTrue(prefs.getBoolean("openai_auto_compaction", false))
         assertFalse(prefs.getBoolean("background_responses", true))
+    }
+
+    @Test fun savedBackgroundResponsesFalseSurvivesMigrationRestartAndSettingsSave() {
+        prefs.edit().putBoolean("background_responses", false)
+            .remove("background_responses_migrated_v25").commit()
+        var activity = launch()
+        assertFalse(prefs.getBoolean("background_responses", true))
+        var dialog = openAppSettings(activity)
+        assertFalse(checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked)
+        save(dialog)
+        assertFalse(prefs.getBoolean("background_responses", true))
+
+        controller!!.destroy()
+        controller = null
+        activity = launch()
+        assertFalse(prefs.getBoolean("background_responses", true))
+        dialog = openAppSettings(activity)
+        assertFalse(checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked)
+        checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked = true
+        save(dialog)
+        assertTrue(prefs.getBoolean("background_responses", false))
+
+        dialog = openAppSettings(activity)
+        assertTrue(checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked)
+        checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked = false
+        save(dialog)
+        assertFalse(prefs.getBoolean("background_responses", true))
+
+        controller!!.destroy()
+        controller = null
+        activity = launch()
+        assertFalse(prefs.getBoolean("background_responses", true))
+        dialog = openAppSettings(activity)
+        assertFalse(checkbox(dialog, "Продолжать генерацию ответа в фоне").isChecked)
+    }
+
+    @Test fun missingBackgroundPreferenceDefaultsToTrueEvenWithLegacyMigrationMarker() {
+        prefs.edit().remove("background_responses")
+            .putBoolean("background_responses_migrated_v25", true).commit()
+        val activity = launch()
+        assertTrue(prefs.contains("background_responses"))
+        assertTrue(prefs.getBoolean("background_responses", false))
+        assertTrue(checkbox(openAppSettings(activity), "Продолжать генерацию ответа в фоне").isChecked)
     }
 
     @Test fun migrationPreservesAnExplicitCompactionOptIn() {

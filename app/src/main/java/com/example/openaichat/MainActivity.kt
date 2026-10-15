@@ -558,9 +558,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun migrateLegacySettingsPreferences() {
         val editor = prefs.edit()
         var changed = false
-        if (!prefs.getBoolean("background_responses_migrated_v25", false)) {
+        // Preserve any existing user choice (including false); only initialize when absent.
+        if (!prefs.contains("background_responses")) {
             editor.putBoolean("background_responses", true)
-            editor.putBoolean("background_responses_migrated_v25", true)
             changed = true
         }
         if (!prefs.getBoolean("openai_auto_compaction_opt_in_migrated_v25", false)) {
@@ -1731,6 +1731,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             background = rounded(cardBg)
         }
         labeled("Тема оформления Integral LLM", themeSpinner)
+        val backgroundResponses = CheckBox(this).apply {
+            text = "Продолжать генерацию ответа в фоне"
+            contentDescription = "Продолжать генерацию ответа в фоне"
+            setTextColor(Color.LTGRAY)
+            isChecked = prefs.getBoolean("background_responses", true)
+            setPadding(dp(4), dp(8), 0, dp(6))
+        }
+        box.addView(backgroundResponses)
         val notifications = CheckBox(this).apply {
             text = "Уведомлять о готовом ответе"
             setTextColor(Color.LTGRAY)
@@ -1793,6 +1801,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     .putString("app_theme", selectedTheme)
                     .putString("github_repo", githubRepo.text.toString().trim())
                     .putString("github_branches", githubBranches.text.toString().trim())
+                    .putBoolean("background_responses", backgroundResponses.isChecked)
                     .putBoolean("response_notifications", notifications.isChecked)
                     .apply()
                 applyTheme()
