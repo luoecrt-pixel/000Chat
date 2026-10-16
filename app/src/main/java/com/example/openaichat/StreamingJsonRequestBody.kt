@@ -12,8 +12,8 @@ import java.io.Writer
 import java.security.DigestOutputStream
 import java.security.MessageDigest
 
-/** Freezes ordinary JSON bytes once, while keeping file-backed attachments streaming. */
-class StreamingJsonRequestBody(private val value: JSONObject) : RequestBody() {
+/** Freezes JSON bytes while streaming attachments; paid POSTs must opt out of transport replay. */
+class StreamingJsonRequestBody(private val value: JSONObject, private val oneShot: Boolean = false) : RequestBody() {
     private val materializedBytes: ByteArray? by lazy {
         if (containsFileBackedValue(value)) null
         else {
@@ -25,6 +25,9 @@ class StreamingJsonRequestBody(private val value: JSONObject) : RequestBody() {
     private val jsonBytes by lazy { materializedBytes?.size?.toLong() ?: countBytes(value) }
     override fun contentType() = "application/json; charset=utf-8".toMediaType()
     override fun contentLength(): Long = jsonBytes
+    // OkHttp also retries 408/503 follow-ups inside execute(); an application
+    // checkpoint cannot observe or prevent that second paid POST.
+    override fun isOneShot(): Boolean = oneShot
     override fun writeTo(sink: BufferedSink) {
         materializedBytes?.let { sink.write(it); return }
         val writer = OutputStreamWriter(sink.outputStream(), Charsets.UTF_8)

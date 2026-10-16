@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
-/** Whole files in the Python container; input_file's spreadsheet preview is not the dataset. */
+/** Whole non-image files in Python; vision images keep their original input_image wire source. */
 object OpenAiFileAnalysis {
     fun prepare(history: List<JSONObject>, active: () -> Boolean,
                 upload: (File, String, String) -> String): Map<String, String> {
@@ -20,11 +20,18 @@ object OpenAiFileAnalysis {
             for (i in 0 until manifest.length()) {
                 if (!active()) throw IOException("Подготовка файлов отменена")
                 val a = OpenRouterLocalAttachment.fromJson(manifest.getJSONObject(i))
-                if (a.kind !in setOf("text", "document", "table", "image", "pdf", "container", "container_document")) continue
+                // Enabling file analysis for a document does not opt its companion photos
+                // into a second, unnecessary upload. Keep source verification here, then
+                // the context encoder sends input_image independently of the container.
+                if (a.kind == "image") {
+                    OpenRouterAttachmentPreflight.verifySources(listOf(a))
+                    continue
+                }
+                if (a.kind !in setOf("text", "document", "table", "pdf", "container", "container_document")) continue
                 OpenRouterAttachmentPreflight.verifySources(listOf(a))
                 if (files.containsKey(a.path)) continue
                 val nativeOffice = TextFileFormatPolicy.extension(a.name) in setOf("xlsx", "docx", "pptx")
-                val nativeVisual = a.kind in setOf("image", "pdf", "container", "container_document")
+                val nativeVisual = a.kind in setOf("pdf", "container", "container_document")
                 val source = File(if (nativeOffice || nativeVisual) a.path else a.textPath ?: a.path)
                 if (!source.isFile) throw IOException("Файл для полного анализа недоступен: ${a.name}")
                 files[a.path] = upload(source, if (nativeOffice || nativeVisual) a.name else a.name + ".txt",

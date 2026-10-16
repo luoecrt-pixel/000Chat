@@ -11,6 +11,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.*
@@ -69,6 +71,58 @@ class ScientificRendererDeviceTest {
             } finally {
                 prefs.edit().apply {
                     if (oldTheme == null) remove("app_theme") else putString("app_theme", oldTheme)
+                    if (oldPreview == null) remove("response_scientific_preview") else putBoolean("response_scientific_preview", oldPreview)
+                }.commit()
+            }
+        }
+    }
+
+    @Test fun richPanelManualInlineMathRendersWhenAutomaticPreviewIsDisabled() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val prefs = context.getSharedPreferences("app", 0)
+        val oldPreview = prefs.all["response_scientific_preview"] as? Boolean
+        fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
+            (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val ready = CountDownLatch(1)
+            val title = AtomicReference<String>()
+            val panelRef = AtomicReference<RichResponsePanel>()
+            val dialogRef = AtomicReference<AlertDialog>()
+            val webRef = AtomicReference<WebView>()
+            try {
+                scenario.onActivity { activity ->
+                    prefs.edit().putBoolean("response_scientific_preview", false).commit()
+                    val panel = RichResponsePanel(activity, {}, {})
+                    panel.submit(ChatBubbleItem.create("manual-inline-device", "Model", "**Science** ${'$'}x^2${'$'} and source.", false))
+                    panelRef.set(panel)
+                    dialogRef.set(AlertDialog.Builder(activity).setView(panel).setPositiveButton("Close", null).show())
+                    assertNull("Automatic preview must be disabled", findWeb(panel))
+                    descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Формулы в тексте" }.performClick()
+                    val web = findWeb(panel) ?: throw AssertionError("Manual action did not open the renderer")
+                    webRef.set(web)
+                    val delegate = web.webChromeClient
+                    web.webChromeClient = object : WebChromeClient() {
+                        override fun onReceivedTitle(view: WebView, value: String?) {
+                            delegate?.onReceivedTitle(view, value)
+                            if (value == "renderer:ready" || value == "renderer:failed") { title.set(value); ready.countDown() }
+                        }
+                    }
+                    if (web.title == "renderer:ready" || web.title == "renderer:failed") { title.set(web.title); ready.countDown() }
+                }
+                assertTrue("Manual inline engine did not finish", ready.await(15, TimeUnit.SECONDS))
+                assertEquals("renderer:ready", title.get())
+                assertEquals("1", evaluate(scenario, webRef.get(), "document.querySelectorAll('.katex').length"))
+                assertEquals("1", evaluate(scenario, webRef.get(), "document.querySelectorAll('#result b,#result strong').length"))
+                assertEquals("\"undefined\"", evaluate(scenario, webRef.get(), "typeof window.Android"))
+                scenario.onActivity {
+                    val panel = panelRef.get()
+                    descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Исходный код" }.performClick()
+                    assertNull("Source action disposes its renderer", findWeb(panel))
+                    assertTrue(descendants(panel).filterIsInstance<TextView>().any { it.visibility == View.VISIBLE && it.text.toString().contains("${'$'}x^2${'$'}") })
+                }
+            } finally {
+                scenario.onActivity { dialogRef.get()?.dismiss() }
+                prefs.edit().apply {
                     if (oldPreview == null) remove("response_scientific_preview") else putBoolean("response_scientific_preview", oldPreview)
                 }.commit()
             }

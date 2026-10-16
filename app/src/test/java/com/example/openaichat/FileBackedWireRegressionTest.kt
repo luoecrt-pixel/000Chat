@@ -15,7 +15,7 @@ import java.util.Base64
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class FileBackedWireRegressionTest {
-    @Test fun fullAnalysisUsesOriginalImageAfterCompatibleOpenRouterCopy() {
+    @Test fun fullAnalysisDoesNotUploadOrMutateVisionOriginalOrCompatibleCopy() {
         val context: Context = RuntimeEnvironment.getApplication()
         val original = File(context.cacheDir, "original.png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val copy = File(context.cacheDir, "compatible.jpg").apply { writeBytes(byteArrayOf(4)) }
@@ -23,11 +23,15 @@ class FileBackedWireRegressionTest {
             val image = OpenRouterLocalAttachment("a", original.name, "image", original.path, "image/png", original.length(), "",
                 wirePath = copy.path, wireMime = "image/jpeg")
             val message = JSONObject().put("role", "user").put("provider", "openrouter").put("attachments", org.json.JSONArray().put(image.toJson()))
-            val result = OpenAiFileAnalysis.prepare(listOf(message), { true }) { file, _, mime ->
-                assertEquals(original.path, file.path); assertEquals("image/png", mime)
-                assertArrayEquals(byteArrayOf(1, 2, 3), file.readBytes()); "file_original"
+            val result = OpenAiFileAnalysis.prepare(listOf(message), { true }) { _, _, _ ->
+                throw AssertionError("A compatible vision source does not require an implicit container upload")
             }
-            assertEquals("file_original", result[original.path])
+            assertTrue(result.isEmpty())
+            assertArrayEquals(byteArrayOf(1, 2, 3), original.readBytes())
+            assertArrayEquals(byteArrayOf(4), copy.readBytes())
+            val preserved = message.getJSONArray("attachments").getJSONObject(0)
+            assertEquals(original.path, preserved.getString("path"))
+            assertEquals(copy.path, preserved.getString("wire_path"))
         } finally { original.delete(); copy.delete() }
     }
     @Test fun diskWireMatchesCanonicalJsonAndCopiesWithoutMaterializingBase64() {

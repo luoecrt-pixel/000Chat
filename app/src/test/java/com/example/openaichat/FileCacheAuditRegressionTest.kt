@@ -12,6 +12,7 @@ import org.robolectric.annotation.Config
 import java.io.File
 import java.io.IOException
 import java.io.InputStreamReader
+import java.io.StringWriter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -86,12 +87,13 @@ class FileCacheAuditRegressionTest {
         } finally { dir.deleteRecursively() }
     }
 
-    @Test fun historicalDocumentAndImageIdsNeverBypassCurrentAccountCache() {
+    @Test fun historicalDocumentIdsUseCurrentAccountCacheWhileVisionImagesStayInline() {
         val dir = File(context.cacheDir, "audit-account").apply { deleteRecursively(); mkdirs() }
         val uploadCache = cache("audit-account-cache")
         try {
             val pdf = File(dir, "original.pdf").apply { writeText("original-pdf") }
-            val image = File(dir, "original.png").apply { writeText("original-image") }
+            val imageBytes = TestPngFixtures.png(3, 2, 0xffd52c36.toInt())
+            val image = File(dir, "original.png").apply { writeBytes(imageBytes) }
             val message = JSONObject().put("role", "user").put("provider", "openai")
                 .put("file_paths", JSONArray().put(pdf.path)).put("file_ids", JSONArray().put("file_old_document"))
                 .put("image_path", image.path).put("image_file_id", "file_old_image")
@@ -100,16 +102,25 @@ class FileCacheAuditRegressionTest {
                     .put(OpenRouterLocalAttachment("i", image.name, "image", image.path, "image/png", image.length(), "").toJson()))
             val calls = AtomicInteger()
             fun prepare(account: String) = OpenAiFileAnalysis.prepare(listOf(message), { true }) { file, name, mime ->
+                assertFalse("Vision photos must not use the server upload cache", mime.startsWith("image/"))
                 uploadCache.getOrUpload(file, name, mime, account, { true }) { "file_new_${calls.incrementAndGet()}" }
             }
             val first = prepare("account-a")
-            assertEquals(first, prepare("account-a")); assertEquals(2, calls.get())
+            assertEquals(setOf(pdf.path), first.keys)
+            assertEquals(first, prepare("account-a")); assertEquals(1, calls.get())
             val second = prepare("account-b")
-            assertEquals(4, calls.get()); assertTrue(first.values.none { it in second.values })
+            assertEquals(2, calls.get()); assertTrue(first.values.none { it in second.values })
             assertEquals("file_old_document", message.getJSONArray("file_ids").getString(0))
             assertEquals("file_old_image", message.getString("image_file_id"))
-            val encoded = OpenAiLocalContextEncoder.encode(listOf(message), second).toString()
+            val writer = StringWriter()
+            StreamingJsonRequestBody.writeJson(OpenAiLocalContextEncoder.encode(listOf(message), second), writer)
+            val encoded = writer.toString()
             assertTrue(second.values.all { encoded.contains(it) }); assertFalse(encoded.contains("file_old_"))
+            val parts = JSONArray(encoded).getJSONObject(0).getJSONArray("content")
+            val vision = (0 until parts.length()).map { parts.getJSONObject(it) }.single { it.optString("type") == "input_image" }
+            assertFalse(vision.has("file_id"))
+            assertArrayEquals(imageBytes, java.util.Base64.getDecoder().decode(vision.getString("image_url").substringAfter(',')))
+            assertArrayEquals(imageBytes, image.readBytes())
         } finally { dir.deleteRecursively() }
     }
 

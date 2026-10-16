@@ -15,7 +15,6 @@ object OpenAiLocalFileToolBridge {
         "list_attached_files" to "file_list", "search_attached_file" to "file_search",
         "read_attached_file" to "file_read_range", "read_attached_table" to "file_table_stats"
     )
-    const val MAX_ROUNDS = 6
 
     fun schemas(): JSONArray = JSONArray().apply {
         val source = LocalFileTools.schemas()
@@ -42,7 +41,8 @@ object OpenAiLocalFileToolBridge {
         val template = JsonProtocol.objectCopy(body).apply { remove("input"); remove("previous_response_id") }
         check(db.saveOpenAiToolCheckpoint(chatId, requestId, JSONObject().put("version", 1)
             .put("template", template).put("attachments", JSONArray().apply { files.forEach { put(it.toJson()) } })
-            .put("round", 0).put("phase", "idle").put("prior_output", JSONArray()).put("usage", JSONObject())))
+            .put("round", 0).put("phase", "idle").put("prior_output", JSONArray()).put("usage", JSONObject())
+            .put("telemetry", JSONObject().put("rounds_completed", 0).put("calls_executed", 0).put("executed_tools", JSONArray()))))
     }
 
     fun durableTerminal(db: ChatDatabase, chatId: String, requestId: String, fallback: JSONObject?): JSONObject? {
@@ -70,6 +70,9 @@ object OpenAiLocalFileToolBridge {
             return key
         }
         var persisted = checkpoint.toString()
+        // v1 checkpoints predate telemetry. Recover only durably saved results, never physical
+        // executions: a crash before this batch's commit can repeat its read-only work.
+        if (checkpoint.optJSONObject("telemetry") == null) checkpoint.put("telemetry", committedTelemetry(checkpoint))
         fun persist() {
             ensureActive()
             if (!db.compareOpenAiToolCheckpoint(chatId, requestId, persisted, checkpoint)) throw CancellationException("Раунд уже принадлежит другому читателю")
@@ -82,7 +85,7 @@ object OpenAiLocalFileToolBridge {
                 .addPathSegment("v1").addPathSegment("responses").apply { responseId?.let(::addPathSegment) }.build()
             val url = if (transport == null) original else original.newBuilder().host(transport.second.host).port(transport.second.port).build()
             val request = Request.Builder().url(url).header("Authorization", "Bearer $key")
-                .apply { if (body != null) post(StreamingJsonRequestBody(body)) }.build()
+                .apply { if (body != null) post(StreamingJsonRequestBody(body, oneShot = true)) }.build()
             val call = (transport?.first ?: client).newCall(request)
             db.getActiveResponse(chatId)?.optLong("started_at")?.let {
                 ResponseDeadlinePolicy.boundCall(call, it, System.currentTimeMillis())
@@ -112,6 +115,16 @@ object OpenAiLocalFileToolBridge {
                 throw cancelled
             }
             return received
+        }
+        if (checkpoint.optString("phase") in setOf("prepared", "waiting")) {
+            ensureActive()
+            val pending = checkpoint.optJSONArray("next_input") ?: JSONArray()
+            val pendingIds = (0 until pending.length()).mapNotNull { pending.optJSONObject(it)?.optString("call_id") }.toSet()
+            val prior = checkpoint.optJSONArray("prior_output") ?: JSONArray()
+            val tools = (0 until prior.length()).mapNotNull { prior.optJSONObject(it) }
+                .filter { it.optString("type") == "function_call" && it.optString("call_id") in pendingIds }
+                .map { it.optString("name") }.distinct()
+            onStatus("🔧 Локальные файлы (${checkpoint.optInt("round")}): ${tools.joinToString(", ")}")
         }
         var response = initial
         while (true) {
@@ -154,7 +167,6 @@ object OpenAiLocalFileToolBridge {
                 checkpoint.put("phase", "finished").put("final_response", response); persist()
                 return response
             }
-            if (checkpoint.getInt("round") >= MAX_ROUNDS) throw UnrecoverableResponsesStreamException("Достигнут предел 6 раундов локальных файловых инструментов")
             val ids = HashSet<String>()
             val validated = calls.map { call ->
                 val name = call.optString("name")
@@ -175,8 +187,12 @@ object OpenAiLocalFileToolBridge {
             }
             val nextRound = checkpoint.getInt("round") + 1
             val toolLabels = calls.mapNotNull { it.optString("name").takeIf(String::isNotBlank) }.distinct().joinToString(", ")
-            onStatus("🔧 Локальные файлы ($nextRound/$MAX_ROUNDS): $toolLabels")
-            val local = LocalFileTools(files) { active() && db.isActiveRequest(chatId, requestId) && !Thread.currentThread().isInterrupted }
+            onStatus("🔧 Локальные файлы ($nextRound): $toolLabels")
+            val startedAt = db.getActiveResponse(chatId)?.optLong("started_at", 0L) ?: 0L
+            val local = LocalFileTools(files) {
+                active() && db.isActiveRequest(chatId, requestId) && !Thread.currentThread().isInterrupted &&
+                    ResponseDeadlinePolicy.remainingMillis(startedAt, System.currentTimeMillis()) > 0L
+            }
             val results = JSONArray()
             for ((id, name, args) in validated) {
                 ensureActive()
@@ -193,11 +209,30 @@ object OpenAiLocalFileToolBridge {
             val prior = checkpoint.getJSONArray("prior_output")
             for (i in 0 until output.length()) prior.put(JsonProtocol.copy(output.get(i)))
             for (i in 0 until results.length()) prior.put(JsonProtocol.copy(results.get(i)))
+            val telemetry = checkpoint.getJSONObject("telemetry")
+            val executedTools = telemetry.getJSONArray("executed_tools")
+            calls.forEach { executedTools.put(it.getString("name")) }
+            telemetry.put("rounds_completed", nextRound)
+                .put("calls_executed", telemetry.getInt("calls_executed") + results.length())
             checkpoint.put("usage", addUsage(checkpoint.getJSONObject("usage"), response.optJSONObject("usage")))
-                .put("round", checkpoint.getInt("round") + 1).put("parent_id", response.getString("id"))
+                .put("round", nextRound).put("parent_id", response.getString("id"))
                 .put("next_input", results).put("phase", "prepared")
             persist()
         }
+    }
+
+    private fun committedTelemetry(checkpoint: JSONObject): JSONObject {
+        val prior = checkpoint.optJSONArray("prior_output") ?: JSONArray()
+        val outputIds = (0 until prior.length()).mapNotNull { prior.optJSONObject(it) }
+            .filter { it.optString("type") == "function_call_output" }.map { it.optString("call_id") }.toSet()
+        val tools = JSONArray()
+        for (i in 0 until prior.length()) {
+            val item = prior.optJSONObject(i) ?: continue
+            if (item.optString("type") == "function_call" && item.optString("call_id") in outputIds && item.optString("name") in names)
+                tools.put(item.getString("name"))
+        }
+        return JSONObject().put("rounds_completed", checkpoint.optInt("round"))
+            .put("calls_executed", tools.length()).put("executed_tools", tools)
     }
 
     fun attachReceivedPrefix(db: ChatDatabase, chatId: String, requestId: String, response: JSONObject): JSONObject = response.apply {

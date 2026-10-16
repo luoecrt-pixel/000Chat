@@ -64,7 +64,6 @@ class RichResponsePanel(
     private val rendered = mutableListOf<Pair<ResponseBlockParser.Block, View>>()
     private var footer: View? = null
     private val dialogs = mutableListOf<AlertDialog>()
-    private val inlineWebViews = mutableSetOf<WebView>()
     private var parseJob: Future<*>? = null
     private val parseVersion = AtomicLong()
     private var parserSession = ResponseBlockParser.Session()
@@ -77,8 +76,9 @@ class RichResponsePanel(
     private data class DetailsState(var expanded: Boolean, var body: RichResponsePanel? = null)
     private val detailStates = mutableMapOf<Int, DetailsState>()
     private val formulaRanges = mutableMapOf<Int, List<MathDelimiterScanner.Formula>>()
+    // Assets enable explicit actions even when automatic preview is disabled.
     private val scientificAssets = ScientificRendererPreview.available(context)
-    private var scientificEnabled = false
+    private var autoScientificPreview = false
     private val refresh = Runnable { scheduled = false; latest?.let(::render) }
     private val markwon = Markwon.builder(context)
         .usePlugin(StrikethroughPlugin.create())
@@ -141,8 +141,8 @@ class RichResponsePanel(
 
     private fun render(item: ChatBubbleItem) {
         if (parseJob != null) return // Finish one snapshot while incoming snapshots are conflated.
-        val science = scientificAssets && context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_scientific_preview", true)
-        if (science != scientificEnabled) { rendered.clear(); formulaRanges.clear(); removeAllViews(); footer = null; scientificEnabled = science }
+        val autoPreview = scientificAssets && context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_scientific_preview", true)
+        if (autoPreview != autoScientificPreview) { rendered.clear(); formulaRanges.clear(); removeAllViews(); footer = null; autoScientificPreview = autoPreview }
         val version = parseVersion.incrementAndGet()
         val session = parserSession
         val previous = rendered.map { it.first }
@@ -157,7 +157,7 @@ class RichResponsePanel(
                 prefix++
             }
             val formulas = mutableMapOf<Int, List<MathDelimiterScanner.Formula>>()
-            if (science) blocks.forEachIndexed { index, block ->
+            if (scientificAssets) blocks.forEachIndexed { index, block ->
                 if (cancelled()) throw CancellationException()
                 if (block is ResponseBlockParser.Block.Prose && block.raw.length <= 100_000) {
                     formulas[index] = if (index < prefix) previousFormulas[index].orEmpty() else MathDelimiterScanner.scan(block.raw, ::cancelled)
@@ -233,7 +233,7 @@ class RichResponsePanel(
         is ResponseBlockParser.Block.Prose -> if (block.raw.length > 100_000) pagedText(block.raw, index, false) else column().apply {
             val formulas = formulaRanges[index].orEmpty()
             val native = markdown(block.raw)
-            if (formulas.isNotEmpty()) addView(ScientificMathText(context, native, autoPreview = true) {
+            if (formulas.isNotEmpty()) addView(ScientificMathText(context, native, autoPreview = autoScientificPreview) {
                 val prepared = MathTextTokens.prepare(block.raw, formulas)
                 val node = markwon.parse(prepared.markdown); safeTree(node)
                 val rendered = bridgeMarkwonSpansForHtml(markwon.render(node))
@@ -338,7 +338,7 @@ class RichResponsePanel(
             addView(text(block.language.ifBlank { "text" } + if (block.closed) "" else " · пишется…").apply { textSize = 12f }, LayoutParams(0, -2, 1f))
             addView(button("Копировать") { copy(block.content) })
         })
-        if (block.closed && scientificEnabled && block.language.lowercase() in setOf("latex", "tex", "math", "mermaid", "svg")) {
+        if (block.closed && autoScientificPreview && block.language.lowercase() in setOf("latex", "tex", "math", "mermaid", "svg")) {
             val visual = when (block.language.lowercase()) {
                 "mermaid" -> if (ScientificRendererDocument.mermaidProblem(block.content) == null) MermaidDiagramView(context, block.content) else null
                 "svg" -> if (block.content.length <= 200_000) safeSvg(block.content) else null
@@ -346,7 +346,7 @@ class RichResponsePanel(
             }
             if (visual != null) { addView(visual); return@apply }
         }
-        if (block.closed && scientificEnabled) {
+        if (block.closed && scientificAssets) {
             if (block.language.equals("mermaid", true)) addView(button("Превью диаграммы") {
                 val problem = ScientificRendererDocument.mermaidProblem(block.content)
                 if (problem != null) previewNotice(problem) else scientificPreview(block.content) { ScientificRendererDocument.mermaid(block.content) }
@@ -355,6 +355,8 @@ class RichResponsePanel(
                 formulaPreview(listOf(MathDelimiterScanner.Formula(0, block.content.length, block.content, block.content, true)))
             })
         }
+        if (block.closed && block.language.lowercase() in setOf("html", "svg"))
+            addView(button(if (block.language.equals("svg", true)) "Превью SVG" else "Код / Превью") { preview(block) })
         if (block.content.length > 100_000) {
             addView(pagedText(block.content, index, true))
             return@apply
@@ -372,8 +374,6 @@ class RichResponsePanel(
             }
         }
         addView(HorizontalScrollView(context).apply { isFillViewport = false; addView(body, LayoutParams(-2, -2)) }, LayoutParams(-1, -2))
-        if (block.closed && block.language.lowercase() in setOf("html", "svg"))
-            addView(button("Код / Превью") { preview(block) })
     }
 
     private fun pagedText(source: String, index: Int, code: Boolean): View = column().apply {
@@ -395,7 +395,7 @@ class RichResponsePanel(
             addView(button("Сохранить всё") { saveFile(ResponseBlockParser.Block.File("", "response-${index + 1}.txt", source, true)) })
         })
         addView(position)
-        if (scientificEnabled && !code) addView(button("Формулы фрагмента") {
+        if (scientificAssets && !code) addView(button("Формулы фрагмента") {
             val page = ResponseTextPages.page(source, if (state.followTail) Int.MAX_VALUE else state.page)
             val formulas = MathDelimiterScanner.scan(page.text)
             if (formulas.isEmpty()) previewNotice("В этом фрагменте нет закрытых формул. Полный исходник можно сохранить в файл.")
@@ -465,29 +465,53 @@ class RichResponsePanel(
         addView(next)
     }
 
-    private fun safeSvg(source: String): View = column().apply {
-        val theme = currentTheme()
-        val original = text(source).apply { typeface = Typeface.MONOSPACE; visibility = GONE }
-        val web = WebView(context).apply {
-            setBackgroundColor(theme.assistantBubbleBg)
-            settings.javaScriptEnabled = false; settings.allowFileAccess = false; settings.allowContentAccess = false
-            settings.domStorageEnabled = false; settings.blockNetworkLoads = true
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) =
-                    WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
-                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-                    original.visibility = VISIBLE; (view.parent as? ViewGroup)?.removeView(view)
-                    inlineWebViews.remove(view); view.destroy(); return true
-                }
-            }
-            loadDataWithBaseURL("https://preview.invalid/", ResponseRenderSafety.previewDocument(source, theme), "text/html", "UTF-8", null)
+    private fun safeSvg(source: String): View = object : LinearLayout(context) {
+        private val theme = currentTheme()
+        private val original = text(source).apply { typeface = Typeface.MONOSPACE; visibility = GONE }
+        private val notice = text().apply { textSize = 12f; visibility = GONE }
+        private var web: WebView? = null
+
+        private fun destroyRenderer() {
+            val old = web ?: return
+            web = null; removeView(old); old.stopLoading(); old.destroy()
         }
-        inlineWebViews.add(web)
-        addView(button("Исходный код") { original.visibility = VISIBLE; web.visibility = GONE })
-        addView(button("Превью") { if (web in inlineWebViews) { original.visibility = GONE; web.visibility = VISIBLE } })
-        addView(original); addView(web, LayoutParams(-1, dp(240)))
+        private fun showPreview() {
+            if (web == null) {
+                val renderer = WebView(context).apply {
+                    setBackgroundColor(theme.assistantBubbleBg)
+                    settings.javaScriptEnabled = false; settings.allowFileAccess = false; settings.allowContentAccess = false
+                    settings.domStorageEnabled = false; settings.blockNetworkLoads = true
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = true
+                        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) =
+                            WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                            if (web === view) {
+                                destroyRenderer(); original.visibility = VISIBLE
+                                notice.text = "Превью недоступно; исходный код сохранён."; notice.visibility = VISIBLE
+                            }
+                            return true
+                        }
+                    }
+                }
+                web = renderer; addView(renderer, LayoutParams(-1, dp(240)))
+                renderer.loadDataWithBaseURL("https://preview.invalid/", ResponseRenderSafety.previewDocument(source, theme), "text/html", "UTF-8", null)
+            }
+            original.visibility = GONE; notice.visibility = GONE; web?.visibility = VISIBLE
+        }
+        init {
+            orientation = VERTICAL
+            addView(row().apply {
+                addView(button("Исходный код") { original.visibility = VISIBLE; web?.visibility = GONE })
+                addView(button("Превью") { showPreview() })
+            })
+            addView(notice); addView(original); showPreview()
+        }
+        override fun onDetachedFromWindow() {
+            destroyRenderer(); original.visibility = VISIBLE
+            super.onDetachedFromWindow()
+        }
     }
 
     private fun preview(block: ResponseBlockParser.Block.Code) {
@@ -567,7 +591,6 @@ class RichResponsePanel(
         latest = null
         handler.removeCallbacks(refresh); scheduled = false
         dialogs.toList().forEach { it.dismiss() }
-        inlineWebViews.toList().forEach { it.stopLoading(); it.destroy() }; inlineWebViews.clear()
         super.onDetachedFromWindow()
     }
 }
