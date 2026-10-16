@@ -4,6 +4,7 @@ import android.content.Context
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -15,6 +16,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 
@@ -103,6 +105,107 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals("Found needle", OpenAiSseStreamReader.terminalOutputText(result))
         val replay = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
         assertEquals(result.toString(), replay.toString()); assertEquals(2, server.requestCount)
+    }
+
+    @Test fun sevenToolRoundsHaveNoFixedCapAndPersistOnlyCommittedToolTelemetry() {
+        for (round in 2..7) server.enqueue(MockResponse().setBody(call("resp_$round", callId = "call_$round").toString()))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val statuses = mutableListOf<String>()
+        val result = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http,
+            onStatus = { statuses.add(it) }, credential = { "mock-only" })
+        assertEquals("resp_final", result.getString("id"))
+        assertEquals(17, result.getJSONObject("usage").getInt("input_tokens"))
+        assertEquals(22, result.getJSONArray("output").length())
+        assertEquals(7, server.requestCount)
+        repeat(7) { assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method) }
+        assertEquals(7, statuses.size)
+        assertTrue(statuses.last().contains("(7)"))
+        assertTrue(statuses.none { it.contains("/6") })
+        val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
+        assertEquals(7, telemetry.getInt("rounds_completed"))
+        assertEquals(7, telemetry.getInt("calls_executed"))
+        assertEquals(List(7) { "search_attached_file" }, (0 until 7).map { telemetry.getJSONArray("executed_tools").getString(it) })
+        db.close(); db = ChatDatabase(context)
+        assertEquals(result.toString(), OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http,
+            credential = { "mock-only" }).toString())
+        assertEquals(telemetry.toString(), db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry").toString())
+        assertEquals(7, server.requestCount)
+    }
+
+    @Test fun aBatchWithTwoToolsCommitsTwoCallsAndOneRoundWithoutTheirArguments() {
+        val response = call("resp_first")
+        response.getJSONArray("output").put(call("resp_first", "read_attached_file", "call_2").getJSONArray("output").getJSONObject(1))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", response, http, credential = { "mock-only" })
+        val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
+        assertEquals(1, telemetry.getInt("rounds_completed"))
+        assertEquals(2, telemetry.getInt("calls_executed"))
+        assertEquals("[\"search_attached_file\",\"read_attached_file\"]", telemetry.getJSONArray("executed_tools").toString())
+        assertEquals(setOf("rounds_completed", "calls_executed", "executed_tools"), telemetry.keys().asSequence().toSet())
+        assertFalse(telemetry.toString().contains(attachment.id))
+        assertFalse(telemetry.toString().contains("needle"))
+    }
+
+    @Test fun preparedTelemetrySurvivesDatabaseReopenAndIsNotCountedAgain() {
+        var lookups = 0
+        assertThrows(IOException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http,
+                credential = { if (++lookups == 2) throw IOException("simulated crash after batch commit") else "mock-only" })
+        }
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("prepared", saved.getString("phase"))
+        assertEquals(1, saved.getJSONObject("telemetry").getInt("calls_executed"))
+        assertEquals(0, server.requestCount)
+        db.close(); db = ChatDatabase(context); file.delete()
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val statuses = mutableListOf<String>()
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http,
+            onStatus = { statuses.add(it) }, credential = { "mock-only" })
+        assertEquals(saved.getJSONObject("telemetry").toString(), db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry").toString())
+        assertEquals(1, server.requestCount)
+        val expected = saved.getJSONArray("next_input")
+        val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("input")
+        assertEquals(expected.length(), sent.length())
+        for (index in 0 until expected.length()) {
+            val original = expected.getJSONObject(index)
+            val actual = sent.getJSONObject(index)
+            assertEquals(original.keys().asSequence().toSet(), actual.keys().asSequence().toSet())
+            // The JSON writer canonicalizes object key order, while the saved
+            // tool output string and call pairing must stay byte-for-byte equal.
+            for (field in listOf("type", "call_id", "output"))
+                assertEquals(original.getString(field), actual.getString(field))
+        }
+        assertTrue(statuses.single().contains("(1): search_attached_file"))
+    }
+
+    @Test fun legacyCheckpointReconstructsTelemetryFromCommittedProtocolOnResume() {
+        val output = JSONObject().put("type", "function_call_output").put("call_id", "call_1").put("output", "original result")
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+            .put("phase", "prepared").put("round", 1).put("parent_id", "resp_first")
+            .put("prior_output", call("resp_first").getJSONArray("output").put(output))
+            .put("next_input", JSONArray().put(output)).apply { remove("telemetry") }
+        assertTrue(db.saveOpenAiToolCheckpoint("chat", "request", saved))
+        db.close(); db = ChatDatabase(context); file.delete()
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
+        assertEquals(1, telemetry.getInt("rounds_completed"))
+        assertEquals(1, telemetry.getInt("calls_executed"))
+        assertEquals("[\"search_attached_file\"]", telemetry.getJSONArray("executed_tools").toString())
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun stoppedRoundDoesNotPublishUncommittedTelemetry() {
+        assertThrows(CancellationException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http,
+                onStatus = { db.clearActiveResponse("chat", expectedRequestId = "request") }, credential = { "mock-only" })
+        }
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("idle", saved.getString("phase"))
+        assertEquals(0, saved.getJSONObject("telemetry").getInt("rounds_completed"))
+        assertEquals(0, saved.getJSONObject("telemetry").getInt("calls_executed"))
+        assertEquals(0, saved.getJSONObject("telemetry").getJSONArray("executed_tools").length())
+        assertEquals(0, server.requestCount)
     }
     @Test fun preparedRoundSurvivesDatabaseReopenWithoutRepeatingTheRead() {
         val snapshot = db.getOpenAiToolCheckpoint("chat", "request")!!
@@ -196,6 +299,9 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals("resp_final", result.getString("id"))
         assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method)
         repeat(2) { assertEquals("GET", server.takeRequest(2, TimeUnit.SECONDS)!!.method) }
+        val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
+        assertEquals(1, telemetry.getInt("rounds_completed"))
+        assertEquals(1, telemetry.getInt("calls_executed"))
     }
 
     @Test fun waitingChildIsPolledAfterReopenAndFinishedCheckpointNeedsNoNetwork() {
@@ -246,16 +352,52 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals(0, server.requestCount)
         assertFalse(db.advanceOpenAiToolResponse("chat", "request", "resp_first", "foreign", snapshot))
     }
-    @Test fun unknownToolsAndRoundLimitHaveNoHttpSideEffects() {
+    @Test fun unknownToolsHaveNoHttpSideEffects() {
         assertThrows(UnrecoverableResponsesStreamException::class.java) {
             OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "arbitrary_read"), http, credential = { "mock-only" })
         }
-        val snapshot = db.getOpenAiToolCheckpoint("chat", "request")!!.put("round", 6)
-        db.saveOpenAiToolCheckpoint("chat", "request", snapshot)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test fun expiredDeadlineStillStopsToolRoundsBeforeAnyHttp() {
+        db.setActiveResponse("chat", "resp_first", "request", "", "in_progress",
+            System.currentTimeMillis() - ResponseDeadlinePolicy.MAX_REQUEST_MS - 1, "high", "high", false, 6, 1, true)
         assertThrows(UnrecoverableResponsesStreamException::class.java) {
             OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
         }
         assertEquals(0, server.requestCount)
+        assertEquals(0, db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry").getInt("calls_executed"))
+    }
+
+    private fun assertContinuationPostIsNotRepeated(response: MockResponse) {
+        server.enqueue(response)
+        // A replayable body would consume this success in the same execute(), hiding the first failure.
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        assertThrows(IOException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        }
+        assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method)
+        assertEquals(1, server.requestCount)
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("posting", saved.getString("phase"))
+        assertEquals("resp_first", db.getActiveResponse("chat")!!.getString("response_id"))
+        db.close(); db = ChatDatabase(context)
+        assertThrows(UnrecoverableResponsesStreamException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        }
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun continuationPostIsNotRepeatedByOkHttpAfter408() {
+        assertContinuationPostIsNotRepeated(MockResponse().setResponseCode(408).setBody("request timeout"))
+    }
+
+    @Test fun continuationPostIsNotRepeatedByOkHttpAfter503RetryAfterZero() {
+        assertContinuationPostIsNotRepeated(MockResponse().setResponseCode(503).setHeader("Retry-After", "0").setBody("busy"))
+    }
+
+    @Test fun ambiguousContinuationDisconnectLeavesPostingAndNeverRepeatsPaidPost() {
+        assertContinuationPostIsNotRepeated(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
     }
 
     @Test fun statusCallbackReportsActiveToolNameAndRound() {
@@ -267,7 +409,8 @@ class OpenAiLocalFileToolBridgeTest {
             credential = { "mock-only" }
         )
         assertEquals(1, statuses.size)
-        assertTrue(statuses.single().contains("1/6"))
+        assertTrue(statuses.single().contains("(1)"))
+        assertFalse(statuses.single().contains("/6"))
         assertTrue(statuses.single().contains("search_attached_file"))
     }
 }

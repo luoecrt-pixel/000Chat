@@ -121,6 +121,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
+    // Preparation finishes in picker order, rather than whichever image decodes first.
+    // Reuse the Activity executor so response work stays independent and teardown
+    // still owns every attachment task; a failed item does not block later items.
+    private var attachmentPreparationTail = CompletableFuture.completedFuture(Unit)
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
     @Volatile private var openRouterClientFactory: () -> OpenRouterChatClient = { OpenRouterChatClient() }
     private val openRouterClient by lazy { openRouterClientFactory() }
@@ -220,7 +224,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private var requestTelemetryExpanded = false
     private val localArtifactToolExecutor by lazy { LocalArtifactToolExecutor(this) }
 
-    private var currentCall: Call? = null
+    @Volatile private var currentCall: Call? = null
     private val activeResponseState = ActiveResponseStateStore()
     private val requestGeneration: Long
         get() = activeResponseState.state.generation
@@ -3088,7 +3092,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .url("https://api.openai.com/v1/responses")
             .addHeader("Authorization","Bearer $key")
             .addHeader("Content-Type","application/json")
-            .post(StreamingJsonRequestBody(body))
+            .post(StreamingJsonRequestBody(body, oneShot = true))
             .build()
 
         currentCall=client.newCall(req)
@@ -3335,22 +3339,52 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     // even when the terminal envelope omits output_item.done items.
                     var effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
                     if (chatDb.getOpenAiToolCheckpoint(requestChatId, localRequestId) != null) {
-                        effectiveResponse = OpenAiLocalFileToolBridge.finish(applicationContext, chatDb,
-                            requestChatId, localRequestId, effectiveResponse, client,
-                            active = { chatDb.isActiveRequest(requestChatId, localRequestId) && (!call.isCanceled() || backgroundEnabled) },
-                            onCall = { next ->
-                                if (!OpenAiCreateCallOwners.replace(requestChatId, localRequestId, ownedCreateCall, next)) next.cancel()
-                                else { ownedCreateCall = next; currentCall = next }
-                                if (!chatDb.isActiveRequest(requestChatId, localRequestId)) next.cancel()
-                            },
-                            onStatus = { progressText ->
-                                runOnUiThread {
-                                    if (isRequestCurrent(requestChatId, requestGeneration)) {
-                                        toolLabel.text = progressText
-                                        status.text = progressText
-                                    }
-                                }
-                            })
+                        // A child ID is durable before its first GET. Retrying only that
+                        // reader never reissues the paid continuation POST, including in
+                        // foreground-only mode. The original Create is no longer its Call.
+                        fun ownsToolReader(): Boolean = activityVisible && !executor.isShutdown &&
+                            !ownedCreateCall.isCanceled() &&
+                            OpenAiCreateCallOwners.call(requestChatId, localRequestId) === ownedCreateCall &&
+                            chatDb.isActiveRequest(requestChatId, localRequestId)
+                        var toolRetryDelayMs = 1_500L
+                        while (true) {
+                            try {
+                                effectiveResponse = OpenAiLocalFileToolBridge.finish(applicationContext, chatDb,
+                                    requestChatId, localRequestId, effectiveResponse, client,
+                                    active = ::ownsToolReader,
+                                    onCall = { next ->
+                                        if (!ownsToolReader() || !OpenAiCreateCallOwners.replace(requestChatId, localRequestId, ownedCreateCall, next)) next.cancel()
+                                        else { ownedCreateCall = next; currentCall = next }
+                                        if (!activityVisible || !chatDb.isActiveRequest(requestChatId, localRequestId)) next.cancel()
+                                    },
+                                    onStatus = { progressText ->
+                                        runOnUiThread {
+                                            if (isRequestCurrent(requestChatId, requestGeneration) &&
+                                                chatDb.isActiveRequest(requestChatId, localRequestId)) {
+                                                toolLabel.text = progressText
+                                                status.text = progressText
+                                            }
+                                        }
+                                    })
+                                break
+                            } catch (error: ApiHttpException) {
+                                val pending = chatDb.getOpenAiToolCheckpoint(requestChatId, localRequestId)
+                                val childId = pending?.let { JsonProtocol.nonBlank(it, "response_id") }
+                                val currentChild = chatDb.getActiveResponse(requestChatId)
+                                val retryGet = pending?.optString("phase") == "waiting" && childId != null &&
+                                    currentChild != null && currentChild.optString("request_id") == localRequestId &&
+                                    currentChild.optString("response_id") == childId &&
+                                    ownedCreateCall.request().method == "GET" &&
+                                    ownedCreateCall.request().url.pathSegments.lastOrNull() == childId &&
+                                    BackgroundRecoveryPolicy.actionForHttpStatus(error.statusCode) == BackgroundRecoveryAction.RETRY
+                                if (!retryGet) throw error
+                                waitForOpenAiToolRetry(requestChatId, localRequestId,
+                                    BackgroundRecoveryPolicy.retryDelayMs(
+                                        BackgroundRecoveryPolicy.jitteredDelayMs(toolRetryDelayMs), error.retryAfterMs),
+                                    ::ownsToolReader)
+                                toolRetryDelayMs = BackgroundRecoveryPolicy.nextDelayMs(toolRetryDelayMs)
+                            }
+                        }
                         newId = effectiveResponse.optString("id").takeIf { it.isNotBlank() } ?: newId
                         completionState = effectiveResponse.optString("status", completionState)
                         usage = effectiveResponse.optJSONObject("usage")
@@ -3506,7 +3540,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         completionState = "in_progress"
                     }
                 }
-                val cancelled=call.isCanceled()
+                val cancelled=ownedCreateCall.isCanceled()
                 // stopCurrentResponse() invalidates this request generation and already restores
                 // the composer/chat UI. The worker must not replay those mutations after the stop.
                 val userStopped = activeResponseState.state.wasUserStopped(requestGeneration)
@@ -4409,6 +4443,29 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             "Не удалось безопасно восстановить ответ; полученный текст сохранён")
     }
 
+    /** Retry waiting is still owned by this Activity, its current child Call and the DB request. */
+    private fun waitForOpenAiToolRetry(
+        chatId: String, requestId: String, delayMs: Long, stillOwned: () -> Boolean
+    ) {
+        val waitUntil = SystemClock.elapsedRealtime() + delayMs.coerceAtLeast(0L)
+        while (true) {
+            if (!activityVisible || executor.isShutdown || Thread.currentThread().isInterrupted || !stillOwned())
+                throw CancellationException("Чтение ответа инструментов остановлено")
+            val active = chatDb.getActiveResponse(chatId)
+            if (active?.optString("request_id") != requestId) throw CancellationException("Владелец ответа изменён")
+            val remaining = ResponseDeadlinePolicy.remainingMillis(active.optLong("started_at"), System.currentTimeMillis())
+            if (remaining <= 0L) throw UnrecoverableResponsesStreamException("Истёк сквозной лимит ответа (5 часов)")
+            val delayRemaining = waitUntil - SystemClock.elapsedRealtime()
+            if (delayRemaining <= 0L) return
+            // Small slices stop backoff promptly on Stop/Delete/onStop, even if Retry-After is long.
+            try { Thread.sleep(minOf(100L, delayRemaining, remaining)) }
+            catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw CancellationException("Ожидание чтения ответа прервано")
+            }
+        }
+    }
+
     private fun sleepBackgroundRetry(delayMs:Long):Boolean {
         val actual = delayMs.coerceIn(1_000L, 300_000L)
         return try {
@@ -4467,8 +4524,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val initialResponse = OpenAiEffectiveResponse.assemble(response, recovered)
         val requestOwner = active.optString("request_id")
         val effectiveResponse = OpenAiLocalFileToolBridge.finish(applicationContext, chatDb, chatId, requestOwner,
-            initialResponse, client, active = { chatDb.isActiveRequest(chatId, requestOwner) },
-            onCall = { next -> activeResumeCalls[chatId] = next })
+            initialResponse, client, active = { activityVisible && !executor.isShutdown &&
+                activeResumeCalls[chatId]?.isCanceled() != true && chatDb.isActiveRequest(chatId, requestOwner) },
+            onCall = { next ->
+                activeResumeCalls[chatId] = next
+                if (!activityVisible || executor.isShutdown || !chatDb.isActiveRequest(chatId, requestOwner)) next.cancel()
+            },
+            onStatus = { progressText ->
+                runOnUiThread {
+                    if (uiSnapshot != null && activeResponseState.state.isCurrent(
+                            uiSnapshot, currentChatId(), activeAssistantItemId, activityVisible, isFinishing) &&
+                        chatDb.isActiveRequest(chatId, requestOwner)) {
+                        toolLabel.text = progressText
+                        status.text = progressText
+                    }
+                }
+            })
         responseId = effectiveResponse.optString("id").ifBlank { responseId }
         val state=effectiveResponse.optString("status").ifBlank{active.optString("status")}
         val fallbackText=JsonProtocol.string(active, "text")
@@ -5749,7 +5820,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val uploadChatId = pickerSourceChatId
         val uploadGeneration = activeResponseState.state.generation
         beginUpload(uploadChatId, uploadGeneration)
-        executor.execute {
+        attachmentPreparationTail = attachmentPreparationTail.handleAsync({ _, _ ->
             try {
                 val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource)
                 val prepared = if (local.kind == "zip") {
@@ -5805,7 +5876,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     diagnostics.log("openrouter_attachment_prepare_stale_failure", mapOf("chat_id" to uploadChatId, "error" to (e.message ?: e.toString()).take(300)))
                 }
             } finally { endUpload(uploadChatId, uploadGeneration) }
-        }
+            Unit
+        }, executor)
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)

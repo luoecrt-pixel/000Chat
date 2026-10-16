@@ -12,16 +12,25 @@ class OpenAiLocalContextEncoderTest {
     @Test fun twoImagesAndLegacySingleImageRemainReadableInOneTypedMessage() {
         val dir = kotlin.io.path.createTempDirectory("openai-images").toFile()
         try {
-            val first = File(dir, "first.jpg").apply { writeBytes(realJpeg()) }
-            val second = File(dir, "second.jpg").apply { writeBytes(realJpeg()) }
-            val a = OpenRouterAttachmentStore.classifyLocalFile(first, first.name, "image/jpeg")
-            val b = OpenRouterAttachmentStore.classifyLocalFile(second, second.name, "image/jpeg")
+            val firstBytes = encodedPng(3, 2, 0xffd52c36.toInt())
+            val secondBytes = encodedPng(4, 3, 0xff225fc7.toInt())
+            assertFalse("The second image must be distinguishable on the wire", firstBytes.contentEquals(secondBytes))
+            val first = File(dir, "first.png").apply { writeBytes(firstBytes) }
+            val second = File(dir, "second.png").apply { writeBytes(secondBytes) }
+            val a = OpenRouterAttachmentStore.classifyLocalFile(first, first.name, "image/png")
+            val b = OpenRouterAttachmentStore.classifyLocalFile(second, second.name, "image/png")
             val message = JSONObject().put("role", "user").put("text", "Compare")
                 .put("attachments", JSONArray().put(a.toJson()).put(b.toJson())).put("image_path", first.path)
             val content = serialized(OpenAiLocalContextEncoder.encode(listOf(message))).getJSONObject(0).getJSONArray("content")
             val images = (0 until content.length()).map { content.getJSONObject(it) }.filter { it.optString("type") == "input_image" }
             assertEquals(2, images.size)
-            images.forEach { assertArrayEquals(realJpeg(), Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
+            images.forEachIndexed { index, block ->
+                assertTrue(block.getString("image_url").startsWith("data:image/png;base64,"))
+                assertArrayEquals("Image order/bytes at index $index", listOf(firstBytes, secondBytes)[index],
+                    Base64.getDecoder().decode(block.getString("image_url").substringAfter(",")))
+            }
+            assertArrayEquals(firstBytes, first.readBytes())
+            assertArrayEquals(secondBytes, second.readBytes())
         } finally { dir.deleteRecursively() }
     }
 
@@ -45,6 +54,10 @@ class OpenAiLocalContextEncoderTest {
         StreamingJsonRequestBody.writeJson(value, writer)
         return JSONArray(writer.toString())
     }
+
+    private fun encodedPng(width: Int, height: Int, color: Int): ByteArray =
+        TestPngFixtures.png(width, height, color)
+
     private fun realJpeg(): ByteArray = Base64.getDecoder().decode(
         "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAACAAIDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDnK/Bz9oP/2Q=="
     )
@@ -111,9 +124,7 @@ class OpenAiLocalContextEncoderTest {
     fun mixedLocalContextEncodesAllWithoutForeignIds() {
         val folder = createTempDir()
         val photo = File(folder, "preview.png").apply {
-            writeBytes(Base64.getDecoder().decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8yyfNwMDAxMDAwMDAAAAO1AEqT6J0VgAAAABJRU5ErkJggg=="
-            ))
+            writeBytes(encodedPng(3, 2, 0xffd52c36.toInt()))
         }
         val doc = File(folder, "note.txt").apply { writeText("note") }
         val img = OpenRouterAttachmentStore.classifyLocalFile(photo, "preview.png", "image/png")

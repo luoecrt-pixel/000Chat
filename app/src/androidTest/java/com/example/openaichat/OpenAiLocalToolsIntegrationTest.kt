@@ -3,6 +3,8 @@ package com.example.openaichat
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.SystemClock
 import android.graphics.drawable.GradientDrawable
 import android.view.View
@@ -24,6 +26,8 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import org.json.JSONArray
@@ -34,8 +38,14 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
 
 @RunWith(AndroidJUnit4::class)
 class OpenAiLocalToolsIntegrationTest {
@@ -166,82 +176,205 @@ class OpenAiLocalToolsIntegrationTest {
         assertEquals(1, server.requestCount)
     }
 
-    @Test fun actualPhotoPickerPersistsTwoImagesAcrossRecreateAndSendsBothOnWire() {
-        val bytes = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMfkAAAAASUVORK5CYII=")
-        val images = (1..2).map { n -> File(context.filesDir, "attachments/h-${UUID.randomUUID()}-$n.png").apply {
-            parentFile!!.mkdirs(); writeBytes(bytes); files.add(this)
-        } }
-        server.enqueue(sse(finalResponse()))
+    @Test fun actualPhotoPickerPersistsTwoImagesAcrossRecreateAndSendsBothOnWire() =
+        assertPickerImagesOnWire(pickAny = false, fileAnalysis = false, recreate = true, holdFirstCopy = true)
+
+    @Test fun photoPickerWithFileAnalysisEnabledSendsImagesWithoutContainerOrUploads() =
+        assertPickerImagesOnWire(pickAny = false, fileAnalysis = true)
+
+    @Test fun pickAnyWithFileAnalysisEnabledSendsTwoImagesAsInputImageInNewChat() =
+        assertPickerImagesOnWire(pickAny = true, fileAnalysis = true)
+
+    @Test fun pickAnyWithoutFileAnalysisSendsTwoImagesInExactOrder() =
+        assertPickerImagesOnWire(pickAny = true, fileAnalysis = false)
+
+    @Test fun pickAnyMixedImagesAndTextUsesLocalToolsWithoutUploadingOrReplacingImages() =
+        assertPickerImagesOnWire(pickAny = true, fileAnalysis = false, includeText = true)
+
+    @Test fun pickAnyMixedImagesAndTextWithAnalysisUploadsOnlyTextAndKeepsBothVisionImages() =
+        assertPickerImagesOnWire(pickAny = true, fileAnalysis = true, includeText = true)
+
+    /** Real picker result -> persisted composer -> Send -> HTTPS request, including optional recreate. */
+    private fun assertPickerImagesOnWire(pickAny: Boolean, fileAnalysis: Boolean,
+                                        recreate: Boolean = false, includeText: Boolean = false,
+                                        holdFirstCopy: Boolean = false) {
+        val firstBytes = encodedPng(3, 2, 0xffd52c36.toInt())
+        val secondBytes = encodedPng(4, 3, 0xff225fc7.toInt())
+        assertFalse("Multi-photo fixtures must have different bytes", firstBytes.contentEquals(secondBytes))
+        val payloads = listOf(firstBytes, secondBytes)
+        val images = payloads.mapIndexed { index, bytes ->
+            File(context.filesDir, "attachments/h-photo-${UUID.randomUUID()}-$index.png").apply {
+                parentFile!!.mkdirs(); writeBytes(bytes); files.add(this)
+            }
+        }
+        val textFile = if (includeText) File(context.filesDir, "attachments/h-mixed-${UUID.randomUUID()}.txt").apply {
+            writeText("PRIVATE_MIXED_SOURCE_ONLY_READ_ON_REQUEST"); files.add(this)
+        } else null
+        val selected = images + listOfNotNull(textFile)
+        prefs.edit().putBoolean("file_analysis_tools", fileAnalysis).putBoolean("code_interpreter", false).commit()
+        val uploadIds = AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.method == "POST" && request.path == "/v1/responses" -> sse(finalResponse())
+                includeText && fileAnalysis && request.method == "POST" && request.path == "/v1/files" ->
+                    MockResponse().setBody(JSONObject().put("id", "file_mixed_text_${uploadIds.incrementAndGet()}").toString())
+                else -> MockResponse().setResponseCode(400).setBody("Unexpected request: photo originals must stay inline")
+            }
+        }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             lateinit var chatId: String
+            val firstCopyStarted = CountDownLatch(1)
+            val releaseFirstCopy = CountDownLatch(1)
+            val secondCopyStarted = CountDownLatch(1)
             scenario.onActivity { activity ->
                 activity.newChat(); chatId = activity.currentChatIdForTesting(); chats.add(chatId)
-                val uris = images.map { FileProvider.getUriForFile(context, context.packageName + ".fileprovider", it) }
-                val clip = ClipData.newUri(context.contentResolver, "photos", uris[0]).apply { addItem(ClipData.Item(uris[1])) }
-                activity.handleActivityResult(5101, Activity.RESULT_OK, Intent().apply { clipData = clip })
+                MainActivity::class.java.getDeclaredField("client").apply { isAccessible = true }.set(activity, http)
+                val uris = selected.map { FileProvider.getUriForFile(context, context.packageName + ".fileprovider", it) }
+                val clip = ClipData.newUri(context.contentResolver, "photos", uris[0]).apply {
+                    uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+                }
+                if (holdFirstCopy) activity.openRouterAttachmentInputStreamSource = AttachmentInputStreamSource { ctx, uri ->
+                    if (uri == uris[0]) {
+                        firstCopyStarted.countDown()
+                        check(releaseFirstCopy.await(10, TimeUnit.SECONDS)) { "First image copy was not released" }
+                    } else if (uri == uris[1]) secondCopyStarted.countDown()
+                    DefaultAttachmentInputStreamSource.openInputStream(ctx, uri)
+                }
+                val picker = if (pickAny) activity.pickAny else field(activity, "pickImage") as Int
+                activity.handleActivityResult(picker, Activity.RESULT_OK, Intent().apply { clipData = clip })
+            }
+            if (holdFirstCopy) {
+                try {
+                    assertTrue("First selected image must start preparing", firstCopyStarted.await(10, TimeUnit.SECONDS))
+                    assertFalse("The second image must not overtake a blocked first image",
+                        secondCopyStarted.await(500, TimeUnit.MILLISECONDS))
+                } finally { releaseFirstCopy.countDown() }
             }
             val deadline = SystemClock.elapsedRealtime() + 20_000
             var attached = false
+            val expectedLocalAttachments = if (includeText && fileAnalysis) 2 else selected.size
             while (!attached && SystemClock.elapsedRealtime() < deadline) {
-                scenario.onActivity { attached = (field(it, "attachedOpenRouterAttachments") as List<*>).size == 2 && it.pendingUploads.get() == 0 }
+                scenario.onActivity {
+                    val localReady = (field(it, "attachedOpenRouterAttachments") as List<*>).size == expectedLocalAttachments
+                    val textReady = !includeText || !fileAnalysis || (field(it, "attachedFilePaths") as List<*>).size == 1
+                    attached = localReady && textReady && it.pendingUploads.get() == 0
+                }
                 if (!attached) SystemClock.sleep(50)
             }
-            assertTrue("Both image sources must be prepared", attached)
-            scenario.recreate()
+            assertTrue("All picker sources must be prepared", attached)
+            if (recreate) scenario.recreate()
             scenario.onActivity { activity ->
-                assertEquals(2, (field(activity, "attachedOpenRouterAttachments") as List<*>).size)
+                @Suppress("UNCHECKED_CAST")
+                val attachments = field(activity, "attachedOpenRouterAttachments") as List<OpenRouterLocalAttachment>
+                assertEquals(expectedLocalAttachments, attachments.size)
+                assertEquals(2, attachments.count { it.kind == "image" })
+                attachments.forEach { attachment ->
+                    files.add(File(attachment.path))
+                    attachment.textPath?.let { files.add(File(it)) }
+                }
+                (field(activity, "attachedFilePaths") as List<*>).filterIsInstance<String>().forEach { files.add(File(it)) }
                 MainActivity::class.java.getDeclaredField("client").apply { isAccessible = true }.set(activity, http)
                 send(activity)
             }
-            val body = JSONObject(server.takeRequest(20, TimeUnit.SECONDS)!!.body.readUtf8())
-            val inputs = body.getJSONArray("input")
-            val content = (0 until inputs.length()).map { inputs.getJSONObject(it) }.last { it.optString("role") == "user" }.getJSONArray("content")
-            val imageBlocks = (0 until content.length()).map { content.getJSONObject(it) }.filter { it.optString("type") == "input_image" }
-            assertEquals(2, imageBlocks.size)
-            imageBlocks.forEach { assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
-            awaitFinal(chatId, expectTools = false)
-        }
-    }
-
-    @Test fun pickAnyWithFileAnalysisEnabledSendsTwoImagesAsInputImageInNewChat() {
-        val bytes = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMfkAAAAASUVORK5CYII=")
-        val images = (1..2).map { n -> File(context.filesDir, "attachments/h-fa-${UUID.randomUUID()}-$n.png").apply {
-            parentFile!!.mkdirs(); writeBytes(bytes); files.add(this)
-        } }
-        prefs.edit().putBoolean("file_analysis_tools", true).putBoolean("code_interpreter", false).commit()
-        server.enqueue(sse(finalResponse()))
-        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            lateinit var chatId: String
-            scenario.onActivity { activity ->
-                activity.newChat(); chatId = activity.currentChatIdForTesting(); chats.add(chatId)
-                MainActivity::class.java.getDeclaredField("client").apply { isAccessible = true }.set(activity, http)
-                val uris = images.map { FileProvider.getUriForFile(context, context.packageName + ".fileprovider", it) }
-                val clip = ClipData.newUri(context.contentResolver, "photos", uris[0]).apply { addItem(ClipData.Item(uris[1])) }
-                activity.handleActivityResult(activity.pickAny, Activity.RESULT_OK, Intent().apply { clipData = clip })
+            val textUploads = mutableListOf<RecordedRequest>()
+            var recorded = server.takeRequest(20, TimeUnit.SECONDS)
+                ?: throw AssertionError("Picker image Send did not reach the HTTPS server")
+            while (recorded.path == "/v1/files") {
+                textUploads.add(recorded)
+                recorded = server.takeRequest(20, TimeUnit.SECONDS)
+                    ?: throw AssertionError("Prepared mixed picker sources did not reach Responses")
             }
-            val deadline = SystemClock.elapsedRealtime() + 20_000
-            var attached = false
-            while (!attached && SystemClock.elapsedRealtime() < deadline) {
-                scenario.onActivity { attached = (field(it, "attachedOpenRouterAttachments") as List<*>).size == 2 && it.pendingUploads.get() == 0 }
-                if (!attached) SystemClock.sleep(50)
-            }
-            assertTrue("Both images from pickAny must be prepared as image attachments", attached)
-            scenario.onActivity { activity -> send(activity) }
-            val recorded = server.takeRequest(20, TimeUnit.SECONDS)
-                ?: throw AssertionError("pickAny image Send did not reach the HTTPS server")
             assertEquals("POST", recorded.method)
             assertEquals("/v1/responses", recorded.path)
-            val inputs = JSONObject(recorded.body.readUtf8()).getJSONArray("input")
+            val body = JSONObject(recorded.body.readUtf8())
+            val inputs = body.getJSONArray("input")
             val content = (0 until inputs.length()).map { inputs.getJSONObject(it) }
                 .last { it.optString("role") == "user" }.getJSONArray("content")
             val blocks = (0 until content.length()).map { content.getJSONObject(it) }
             val imageBlocks = blocks.filter { it.optString("type") == "input_image" }
-            assertEquals("Both pickAny images must stay input_image when file_analysis_tools=true", 2, imageBlocks.size)
+            assertEquals("Both images must stay input_image (pickAny=$pickAny, analysis=$fileAnalysis)", 2, imageBlocks.size)
             assertFalse("Images must not become input_file", blocks.any { it.optString("type") == "input_file" })
-            assertFalse("Images must not become container text descriptors", content.toString().contains("Complete file in the Code Interpreter container"))
-            imageBlocks.forEach { assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(it.getString("image_url").substringAfter(","))) }
+            if (!includeText || !fileAnalysis) assertFalse("Images must not become container text descriptors",
+                content.toString().contains("Complete file in the Code Interpreter container"))
+            imageBlocks.forEachIndexed { index, block ->
+                assertTrue(block.getString("image_url").startsWith("data:image/png;base64,"))
+                assertFalse("Inline originals do not need uploaded file IDs", block.has("file_id"))
+                assertArrayEquals("Original image bytes/order at index $index", payloads[index],
+                    java.util.Base64.getDecoder().decode(block.getString("image_url").substringAfter(",")))
+                assertArrayEquals(payloads[index], images[index].readBytes())
+            }
+            if (!includeText || !fileAnalysis) assertFalse("Photos alone must not enable a paid container",
+                body.optJSONArray("tools")?.toString().orEmpty().contains("code_interpreter"))
+            if (includeText) {
+                if (fileAnalysis) {
+                    val tools = body.getJSONArray("tools")
+                    val interpreter = (0 until tools.length()).map { tools.getJSONObject(it) }
+                        .single { it.optString("type") == "code_interpreter" }
+                    val containerFiles = interpreter.getJSONObject("container").getJSONArray("file_ids")
+                    assertEquals("The container gets the document, never the two vision photos", 1, containerFiles.length())
+                    assertTrue(containerFiles.getString(0).startsWith("file_mixed_text_"))
+                    // #21 separately tracks the existing duplicate text upload under two filenames.
+                    // Accept either one necessary upload or that known extra; never an image upload.
+                    assertTrue("Only the text upload (and existing #21 duplicate) is allowed", textUploads.size in 1..2)
+                    textUploads.forEach { upload ->
+                        assertEquals("POST", upload.method)
+                        val raw = String(upload.body.clone().readByteArray(), Charsets.ISO_8859_1)
+                        val boundary = upload.getHeader("Content-Type")!!.substringAfter("boundary=").trim('"')
+                        assertTrue("The uploaded file must contain the complete text document",
+                            raw.contains("\r\n\r\n${textFile!!.readText()}\r\n--$boundary"))
+                        assertTrue(raw.contains("Content-Type: text/plain"))
+                        assertFalse("Vision MIME must not be uploaded", raw.contains("Content-Type: image/"))
+                        payloads.forEach { bytes ->
+                            assertFalse("Original PNG bytes must not be uploaded", raw.contains(String(bytes, Charsets.ISO_8859_1)))
+                        }
+                    }
+                } else assertTrue(body.getJSONArray("tools").toString().contains("search_attached_file"))
+                assertFalse("Selective tools must not inject full file contents", content.toString().contains("PRIVATE_MIXED_SOURCE"))
+                assertTrue(textFile!!.isFile)
+            }
             awaitFinal(chatId, expectTools = false)
+            assertEquals("Exactly one Responses POST plus the counted text uploads", 1 + textUploads.size, server.requestCount)
+            if (!includeText || !fileAnalysis) assertTrue("No image upload is needed", textUploads.isEmpty())
         }
+    }
+
+    /** Android's standard encoder, independently checked for decode/dimensions and all PNG CRCs. */
+    private fun encodedPng(width: Int, height: Int, color: Int): ByteArray {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bytes = try {
+            bitmap.eraseColor(color)
+            ByteArrayOutputStream().use { output ->
+                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                output.toByteArray()
+            }
+        } finally { bitmap.recycle() }
+        DataInputStream(ByteArrayInputStream(bytes)).use { input ->
+            assertArrayEquals(byteArrayOf(0x89.toByte(), 80, 78, 71, 13, 10, 26, 10), ByteArray(8).also(input::readFully))
+            val chunks = mutableListOf<String>()
+            while (input.available() > 0) {
+                val size = input.readInt()
+                assertTrue("Complete PNG chunk", size >= 0 && size <= input.available() - 8)
+                val type = ByteArray(4).also(input::readFully)
+                val data = ByteArray(size).also(input::readFully)
+                assertEquals("PNG CRC for ${String(type, Charsets.US_ASCII)}",
+                    CRC32().apply { update(type); update(data) }.value, input.readInt().toLong() and 0xffffffffL)
+                chunks.add(String(type, Charsets.US_ASCII))
+                if (chunks.last() == "IEND") {
+                    assertEquals(0, size)
+                    assertEquals("No trailing PNG bytes", 0, input.available())
+                }
+            }
+            assertEquals("IHDR", chunks.first())
+            assertTrue(chunks.contains("IDAT"))
+            assertEquals("IEND", chunks.last())
+        }
+        val decoded = requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
+        try {
+            assertEquals(width, decoded.width)
+            assertEquals(height, decoded.height)
+            assertEquals(color, decoded.getPixel(width - 1, height - 1))
+        } finally { decoded.recycle() }
+        return bytes
     }
 
     @SdkSuppress(minSdkVersion = 29)
