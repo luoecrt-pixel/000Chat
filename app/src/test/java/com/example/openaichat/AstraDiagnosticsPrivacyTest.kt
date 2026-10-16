@@ -12,6 +12,22 @@ import org.robolectric.RuntimeEnvironment
 @Config(sdk = [35])
 class AstraDiagnosticsPrivacyTest {
     @Test
+    fun displayCopyAndExportRedactionPreservesLineBreaksAndSafeIds() {
+        val diagnostics = AstraDiagnostics(RuntimeEnvironment.getApplication())
+        val raw = "header\nreq_safe_123 sk-proj-SyntheticDisplaySecret1234567\n\n" +
+            "Bearer display-bearer https://example.org/?token=display-query\n" +
+            "data:image/png;base64,SECRETBASE64\nfooter\n"
+        val text = diagnostics.redactDisplayText(raw)
+        assertTrue(text.startsWith("header\nreq_safe_123 [REDACTED]\n\n"))
+        assertTrue(text.endsWith("\nfooter\n"))
+        assertTrue(text.count { it == '\n' } == raw.count { it == '\n' })
+        assertFalse(text.contains("SyntheticDisplaySecret"))
+        assertFalse(text.contains("display-bearer"))
+        assertFalse(text.contains("display-query"))
+        assertFalse(text.contains("SECRETBASE64"))
+    }
+
+    @Test
     fun secretsAndBase64AreRedactedWithoutDiscardingDiagnosticFields() {
         val log = AstraDiagnostics(RuntimeEnvironment.getApplication())
         log.clear()

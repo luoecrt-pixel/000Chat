@@ -180,4 +180,63 @@ class OpenAiWorkerToolRecoveryTest {
             assertEquals(13, assistant.getJSONObject("usage").getInt("input_tokens"))
         }
     }
+
+    @Test fun finishedCheckpointCommitsAfterReopenWithoutNetworkAndRetainsSignedOutputTextImagesAndLedger() {
+        val (chatId, requestId) = seedWaitingChild()
+        fun png(color: Int): ByteArray {
+            val bitmap = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            return try {
+                bitmap.eraseColor(color)
+                java.io.ByteArrayOutputStream().use { output ->
+                    assertTrue(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output))
+                    output.toByteArray()
+                }
+            } finally { bitmap.recycle() }
+        }
+        val imageBytes = listOf(png(android.graphics.Color.RED), png(android.graphics.Color.BLUE))
+        ChatDatabase(context).use { db ->
+            val terminal = finalResponse()
+            val output = terminal.getJSONArray("output")
+            output.put(JSONObject().put("type", "reasoning").put("id", "rs_paid_child")
+                .put("encrypted_content", "opaque-paid-child-final"))
+            imageBytes.forEachIndexed { index, bytes ->
+                output.put(JSONObject().put("type", "image_generation_call").put("id", "ig_paid_$index")
+                    .put("result", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)))
+            }
+            val finished = OpenAiLocalFileToolBridge.finish(context, db, chatId, requestId, terminal, http)
+            assertEquals("finished", db.getOpenAiToolCheckpoint(chatId, requestId)!!.getString("phase"))
+            assertEquals(32, finished.getJSONObject("usage").getInt("input_tokens"))
+        }
+        assertEquals(2, server.requestCount)
+        assertEquals(ListenableWorker.Result.success(), runBlocking { withTimeout(10_000L) { worker(chatId, requestId).doWork() } })
+        assertNull(server.takeRequest(1_000L, TimeUnit.MILLISECONDS))
+        ChatDatabase(context).use { db ->
+            assertNull(db.getActiveResponse(chatId)); assertNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+            val messages = db.getChat(chatId)!!.getJSONArray("messages")
+            assertEquals(2, messages.length())
+            val assistant = messages.getJSONObject(1)
+            assertEquals("Worker recovered child", assistant.getString("text"))
+            val output = assistant.getJSONArray("openai_protocol_output")
+            assertEquals("opaque-j-worker-signed", output.getJSONObject(0).getString("encrypted_content"))
+            assertTrue((0 until output.length()).mapNotNull { output.optJSONObject(it) }
+                .any { it.optString("encrypted_content") == "opaque-paid-child-final" })
+            val generated = assistant.getJSONArray("generated_images")
+            assertEquals(imageBytes.size, generated.length())
+            for (i in imageBytes.indices) {
+                val image = generated.getJSONObject(i)
+                assertEquals("READY", image.getString("state"))
+                val saved = File(image.getString("local_path")).also(files::add)
+                assertArrayEquals(imageBytes[i], saved.readBytes())
+            }
+            assertEquals(32, assistant.getJSONObject("usage").getInt("input_tokens"))
+            assertEquals(40, assistant.getJSONObject("usage").getInt("output_tokens"))
+            assertEquals(32, OpenAiUsageLedger.total(assistant.getJSONObject(OpenAiUsageLedger.FIELD))!!.getInt("input_tokens"))
+            val accounting = db.listRequestAccounting(chatId).single()
+            assertEquals(32, accounting.getInt("input_tokens")); assertEquals(40, accounting.getInt("output_tokens"))
+            assertTelemetry(accounting.getJSONObject("telemetry_summary"))
+            assertEquals(32, db.listRequestEvents(chatId).single().getInt("input_tokens"))
+        }
+        assertEquals(ListenableWorker.Result.success(), runBlocking { worker(chatId, requestId).doWork() })
+        assertEquals(2, server.requestCount)
+    }
 }

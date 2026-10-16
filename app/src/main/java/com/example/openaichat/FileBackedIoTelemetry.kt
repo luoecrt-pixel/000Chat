@@ -80,6 +80,19 @@ internal object FileBackedIoTelemetry {
                     merged.put(key, OpenAiUsageLedger.merge(merged.optJSONObject(key), value))
                 key == "cost_details" && value is JSONObject ->
                     merged.put(key, mergeObjects(merged.optJSONObject(key), value))
+                key in setOf("rounds_completed", "calls_executed", "files", "source_read_passes", "source_read_bytes", "file_work_ms") ->
+                    value.toString().toLongOrNull()?.takeIf { it >= 0L }?.let {
+                        merged.put(key, maxOf(merged.optLong(key, 0L), it))
+                    }
+                key == "executed_tools" && value is JSONArray -> {
+                    val previous = merged.optJSONArray(key) ?: JSONArray()
+                    val names = listOf(previous, value).flatMap { names ->
+                        (0 until names.length()).mapNotNull { index ->
+                            JsonProtocol.text(names, index)?.trim()?.takeIf { it.isNotEmpty() }
+                        }
+                    }.distinct()
+                    if (names.isNotEmpty()) merged.put(key, JSONArray(names))
+                }
                 else -> merged.put(key, JsonProtocol.copy(value))
             }
         }

@@ -1,39 +1,36 @@
-# WIP: #21 + #29/K + #18.1–2 — продолжение
+# WIP: #21 + K/#29 + #18.1–2 — продолжение
 
-База: main e096b8be2961c113a75694de9f37bd166de9c019 (J/#174 merged).
-Ветка: feat/package-k-atomic-accounting-and-uploads.
-Владелец попросил реализовать в репозитории; архив/монолит присылать уже не нужно.
-Ожидание Debug/Release CI оставить владельцу. Merge НЕ выполнять автором.
-Работа прервана по сообщению владельца «минута или менее до лимита».
-Это НЕ готовый патч: сборка и тесты ещё не запускались.
+База main e096b8be2961c113a75694de9f37bd166de9c019 (J/#174 merged).
+Ветка feat/package-k-atomic-accounting-and-uploads, workspace /workspace/000Chat-k.
+Владелец: реализовать в репозитории, архив не нужен, ожидание Debug/Release CI оставить ему. Автор не merge.
 
-## Сделано, но не проверено
-- Main: immutable OpenAiRequestOptionsSnapshot всех отложенных prefs и previous_response_id; openAiPreparationHook; picker локальный для обоих провайдеров, provider захватывается до async.
-- OpenAiUsageLedger: raw usage по response ID отдельно от aggregate, legacy unattributed base, terminal snapshot protection. FIELD=openai_usage_ledger.
-- Bridge: durable raw received_response/usage ledger; aggregate marker; idempotent attachReceivedPrefix; durableResponse и extractTelemetrySummary.
-- DB: schema25, атомарный terminal cleanup, telemetry/ledger, stopped recovery archive вместо возврата удалённых bubbles, late perresponse reconcile, costkind/usageTotals.
-- OpenRouter: cost breakdown SSE accumulation, nullable unknown, IO helpers/deltas, runtime telemetry, убрать finally clear, event formatter/policy.
-- FileAnalysis: SHA-safe original/derivative, no redundant .txt, exact cache, image preflight.
-- Worker/failure paths начали интеграцию ledger/summary и сохранности output.
+## Текущая проверка
+Первый полный прогон:604 tests,6fail. Исправлены все6 (legacy отсутствующие таблицы, пустой usageledger, тестfixturepartial).
+Повторный testDebugUnitTest:608 tests,0fail/errors/skipped по XML. Основной код и Androidtests компилировались; lint/assemble могли ещё выполняться: /tmp/package-k-final-checks.log, exec session33985.
+ВАЖНО: ПОСЛЕ компиляции этого прогона внесены последние изменения ниже — они ещё не собраны/не протестированы. Не объявлять финальный HEAD зелёным.
+Четыре Python/static/mutation verifier проходили до последних изменений; повторить после них. git diff --check PASS.
 
-## Сначала завершить
-1. Сверить все сохранённые edits/агентские отчёты; выполнить compileDebugKotlin, исправить несовместимости API. Только git diff --check выполнялся.
-2. Main пока НЕ завершён: propagate OpenAiUsageLedger.FIELD из effectiveResponse в normal/partial/resumed assistant ДО DB finalize, attach compact tool+FileIO telemetry, persist IO через chatDb.recordRequestTelemetry перед handoff, передавать aggregate usage/summary в later accounting/event (не responseState.usage raw!). Helper API от FileBackedIoTelemetry уже есть.
-3. Main: убрать clearOpenRouterCheckpoint в recoverInterruptedOpenRouterRequests; showDiagnostics structured per-request summary с captured chat/UI ownership и redaction Copy/Export; formatUsageStats distinct confirmed/estimated/unknown. Старые eager picker fallback ветви теперь недостижимы для pickAny/image — проверить/убрать безопасно.
-4. DB regression tests пока отсутствуют. Проверить Stop legacy100 + child20 twice=120; repeated aggregate marker120 не становится220; finished150 vs child50; >2MB Unicode cp; rollback/fault/staleowner/reopen; terminal/noassistant paid output; corrupt data failclosed. DB агент отметил: recordRequestAccounting late unmarked raw usage может затереть aggregate; event insert после раннего reconcile может не взять ledger цену — проверить.
-5. Новые actual Activity snapshot/picker tests в работе: openAiPreparationHook reflection; flip paid prefs; zero picker uploads; one note/xlsx upload, no image; repeatcache/credential/Stop/missing source. Existing mixed J test tightening saved. Проверить наличия нового test файла (агент мог не успеть).
-6. Worker regression/instrumentation assertions cp deleted + summary durable; убедиться BackgroundFailure preserves full final_response before checkpoint cleanup.
-7. OpenRouter добавить real SSE multi-round cost_details/unknown+zero/IO/typederrors tests; all 7 owned prod files saved, новых тестов ещё нет. Current typed error metadata contract должен сохраниться.
-8. FileAnalysis formats/cache tests сохранены, не запускались. UploadCache exact key не менять на content-only.
-9. Прочитать AGENTS/NEXT_AGENT_HANDOFF/AGENT_TASKS; актуализировать план без заявления о CI/приёмке до доказательств. PROJECT_HISTORY не журнал.
+## Реализовано
+Main immutable Send tools/options snapshot+hook, локальный ordered picker без eageruploads, provider capture, exact uploadcache, корректные filenames/SHA/originals.
+Ledger raw perresponse отдельно от aggregate marker; legacybase; durable terminal/prefix recovery; ancestorID rejection; marker propagated Main/Worker/failure/DB.
+DB v25 owner-aware atomiccompaction, Stop paid archive, >2MB chunked TEXT, rollback/stale/corrupt tests, snapshotmigration24/25.
+Unknown/zero/estimate costs separated; SSE breakdown, late reconciliation banners/events/metrics; IO counters and bounded redacted diagnostics Summary/Copy/Export.
+Main finished catch prefers durable terminal over stale parent envelope. No unconditional OpenRouter finally/recovery checkpoint clear.
 
-## Проверки/окружение
+## Последние дополнения, обязательно проверить
+1. Новый internal OpenRouterUsageAccumulator в OpenRouterCompletionTelemetry.kt: mergeSnapshot + aggregate. Клиент переведён на общий helper. DB хранит usage_snapshot TEXT в openrouter_request_rounds и агрегирует полные cache/cachewrite/reasoning/costdetails перед Stop/terminal. Добавлено accounting.cache_write_tokens. Проверить SQL creation/upgrade/onOpen, selectorsindices, sparse/repeated/reconcile snapshots.
+2. DB seals OR rounds ВНУТРИ Stop/complete tx. Новые тесты уже есть для seal/rollback. Последнему usage_snapshot добавить тест Stop/reopen с cache/reasoning/breakdown и повторным rawsnapshot без дублей.
+3. recoveryArchivePaths включён в listAllLocalFilePaths/per-chat paths: проверить сохранность и delete cascade/owners архивных generated_images/annotations. Дописать тест для последнего owner helper.
+4. FileBackedIoTelemetry merges delayed counters via max + toolsunion; новый merge regressiontest сохранён, нужен прогон.
+5. Прочитать diff и снова провести cross-file review только новой delta; текущие helpercalls собраны ещё не были после последних edits.
+
+## Далее
 . /workspace/toolchains/env.sh
-Gradle8.9/JDK17/SDK35 доступны, wrapper в репозитории НЕТ.
+В проекте нет ./gradlew; использовать Gradle8.9/JDK17/SDK35.
 gradle --no-daemon --max-workers=2 :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:lintDebug :app:assembleDebug
 python3 tools/verify_handoff.py
 python3 tools/verify_v4_17_0.py
 python3 tools/verify_implementation.py
 python3 tools/test_verify_v4_17_0_mutations.py
-Эмулятора/KVM нет: instrumentation compile не execution. Не утверждать обратное.
-После исправлений и проверок — отдельный commit [ci], push и Draft PR. Не ждать CI, ссылки владельцу.
+Эмулятора/KVM нет: instrumentation только compile локально. Не заявлять live/device/billing proof.
+После PASS удалить этот временный note, обновить PRbody с точной матрицей/tests/SHA, commit [ci], push. Оставить Draft до acceptance; ожидание pushDebug/Release владельцу, не ждать самому.

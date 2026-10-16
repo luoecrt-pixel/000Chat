@@ -40,7 +40,20 @@ object OpenAiUsageLedger {
         val base = fromCheckpoint(checkpoint)
         if (response == null) return base
         response.optJSONObject(FIELD)?.let { return merge(base, it) }
-        return observe(base, JsonProtocol.nonBlank(response, "id") ?: JsonProtocol.nonBlank(response, "response_id"),
+        val responseId = JsonProtocol.nonBlank(response, "id") ?: JsonProtocol.nonBlank(response, "response_id")
+        // The caller can still hold the first response while a later child GET fails. A v1
+        // aggregate covers every previous parent, not only the last parent_id known by name.
+        // Only the durable waiting child can contribute a new raw snapshot in that state.
+        if (checkpoint != null) {
+            val expected = when (checkpoint.optString("phase")) {
+                "finished" -> return base
+                "prepared", "posting" -> JsonProtocol.nonBlank(checkpoint, "parent_id")
+                "waiting" -> JsonProtocol.nonBlank(checkpoint, "response_id")
+                else -> null
+            }
+            if (expected != null && responseId != expected) return base
+        }
+        return observe(base, responseId,
             response.optJSONObject("usage"), JsonProtocol.nonBlank(response, "status"))
     }
 

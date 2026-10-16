@@ -183,15 +183,17 @@ class OpenAiLocalFileToolBridgeTest {
         val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
             .put("phase", "prepared").put("round", 1).put("parent_id", "resp_first")
             .put("prior_output", call("resp_first").getJSONArray("output").put(output))
-            .put("next_input", JSONArray().put(output)).apply { remove("telemetry") }
+            .put("usage", call("resp_first").getJSONObject("usage"))
+            .put("next_input", JSONArray().put(output)).apply { remove("telemetry"); remove(OpenAiUsageLedger.FIELD) }
         assertTrue(db.saveOpenAiToolCheckpoint("chat", "request", saved))
         db.close(); db = ChatDatabase(context); file.delete()
         server.enqueue(MockResponse().setBody(finalResponse().toString()))
-        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        val result = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
         val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
         assertEquals(1, telemetry.getInt("rounds_completed"))
         assertEquals(1, telemetry.getInt("calls_executed"))
         assertEquals("[\"search_attached_file\"]", telemetry.getJSONArray("executed_tools").toString())
+        assertEquals(5L, result.getJSONObject("usage").getLong("input_tokens"))
         assertEquals(1, server.requestCount)
     }
 
@@ -302,6 +304,135 @@ class OpenAiLocalFileToolBridgeTest {
         val telemetry = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry")
         assertEquals(1, telemetry.getInt("rounds_completed"))
         assertEquals(1, telemetry.getInt("calls_executed"))
+    }
+
+    @Test fun rawUsageAndPaidOutputStayIdempotentAcrossFailedGetRepeatedPrefixAndReopen() {
+        val first = call("resp_first").put("usage", JSONObject().put("input_tokens", 100).put("output_tokens", 10))
+        val second = call("resp_second", callId = "call_2")
+            .put("usage", JSONObject().put("input_tokens", 30).put("output_tokens", 3))
+        val queued = JSONObject().put("id", "resp_final").put("status", "queued")
+        server.enqueue(MockResponse().setBody(second.toString()))
+        server.enqueue(MockResponse().setBody(queued.toString()))
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{\"error\":{\"message\":\"busy\"}}"))
+        assertThrows(ApiHttpException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", first, http, credential = { "mock-only" })
+        }
+        val waiting = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("waiting", waiting.getString("phase"))
+        assertEquals("resp_final", waiting.getJSONObject("received_response").getString("id"))
+        assertEquals(130L, waiting.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals(6, waiting.getJSONArray("prior_output").length())
+
+        // The Activity still holds the original raw parent when the child GET fails.
+        // Repeated failure preservation cannot append that parent's paid output or usage again.
+        val retained = JsonProtocol.objectCopy(first)
+        repeat(3) {
+            OpenAiLocalFileToolBridge.attachReceivedPrefix(db, "chat", "request", retained)
+            assertEquals(130L, retained.getJSONObject("usage").getLong("input_tokens"))
+            assertEquals(6, retained.getJSONArray("output").length())
+            assertEquals(130L, OpenAiUsageLedger.total(OpenAiUsageLedger.resolve(waiting, retained))!!.getLong("input_tokens"))
+        }
+        db.close(); db = ChatDatabase(context)
+        val terminal = finalResponse().put("usage", JSONObject().put("input_tokens", 20).put("output_tokens", 2))
+        server.enqueue(MockResponse().setBody(terminal.toString()))
+        val result = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", first, http, credential = { "mock-only" })
+        assertEquals(150L, result.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals(15L, result.getJSONObject("usage").getLong("output_tokens"))
+        assertEquals(7, result.getJSONArray("output").length())
+        val entries = result.getJSONObject(OpenAiUsageLedger.FIELD).getJSONObject("responses")
+        assertEquals(20L, entries.getJSONObject("resp_final").getJSONObject("usage").getLong("input_tokens"))
+        assertEquals("Found needle", OpenAiSseStreamReader.terminalOutputText(result))
+        repeat(2) { OpenAiLocalFileToolBridge.attachReceivedPrefix(db, "chat", "request", result) }
+        assertEquals(150L, result.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals(7, result.getJSONArray("output").length())
+        db.close(); db = ChatDatabase(context)
+        val replay = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", first, http, credential = { "mock-only" })
+        assertEquals(150L, replay.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals(7, replay.getJSONArray("output").length())
+        assertEquals(listOf("POST", "POST", "GET", "GET"), List(4) { server.takeRequest(2, TimeUnit.SECONDS)!!.method })
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test fun reopeningPreparedLaterRoundDoesNotReplaceItsPaidSnapshotWithTheFirstParent() {
+        val first = call("resp_first").put("usage", JSONObject().put("input_tokens", 100))
+        val second = call("resp_second", callId = "call_2").put("usage", JSONObject().put("input_tokens", 30))
+        val failed = JSONObject().put("type", "function_call_output").put("call_id", "call_2").put("output", "saved second result")
+        val prior = JsonProtocol.arrayCopy(first.getJSONArray("output"))
+            .put(JSONObject().put("type", "function_call_output").put("call_id", "call_1").put("output", "saved first result"))
+        for (i in 0 until second.getJSONArray("output").length()) prior.put(second.getJSONArray("output").get(i))
+        prior.put(failed)
+        val ledger = OpenAiUsageLedger.observe(OpenAiUsageLedger.observe(null, "resp_first", first.getJSONObject("usage"), "completed"),
+            "resp_second", second.getJSONObject("usage"), "completed")
+        val prepared = db.getOpenAiToolCheckpoint("chat", "request")!!
+            .put("phase", "prepared").put("round", 2).put("parent_id", "resp_second")
+            .put("usage", OpenAiUsageLedger.total(ledger)).put(OpenAiUsageLedger.FIELD, ledger)
+            .put("prior_output", prior).put("next_input", JSONArray().put(failed)).put("received_response", second)
+        assertTrue(db.advanceOpenAiToolResponse("chat", "request", "resp_first", "resp_second", prepared))
+        assertEquals("resp_second", db.getActiveResponse("chat")!!.getString("response_id"))
+        db.close(); db = ChatDatabase(context)
+        server.enqueue(MockResponse().setResponseCode(503).setBody("busy"))
+        assertThrows(UnrecoverableResponsesStreamException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", first, http, credential = { "mock-only" })
+        }
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("posting", saved.getString("phase"))
+        assertEquals("resp_second", saved.getJSONObject("received_response").getString("id"))
+        assertEquals(130L, saved.getJSONObject("usage").getLong("input_tokens"))
+        val durable = OpenAiLocalFileToolBridge.durableResponse(saved)!!
+        assertEquals(6, durable.getJSONArray("output").length())
+        assertEquals(130L, durable.getJSONObject("usage").getLong("input_tokens"))
+        val wire = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+        assertEquals("resp_second", wire.getString("previous_response_id"))
+        assertEquals("saved second result", wire.getJSONArray("input").getJSONObject(0).getString("output"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun terminalChildSnapshotSurvivesReopenBeforeFinalCommitAndNeedsNoGet() {
+        val first = call("resp_first").put("usage", JSONObject().put("input_tokens", 100))
+        val child = finalResponse().put("usage", JSONObject().put("input_tokens", 20))
+        val ledger = OpenAiUsageLedger.observe(OpenAiUsageLedger.observe(null, "resp_first", first.getJSONObject("usage"), "completed"),
+            "resp_final", child.getJSONObject("usage"), "completed")
+        val output = JsonProtocol.arrayCopy(first.getJSONArray("output")).put(JSONObject()
+            .put("type", "function_call_output").put("call_id", "call_1").put("output", "exact durable result"))
+        val checkpoint = db.getOpenAiToolCheckpoint("chat", "request")!!
+            .put("phase", "waiting").put("round", 1).put("parent_id", "resp_first")
+            .put("response_id", "resp_final").put("prior_output", output)
+            .put("received_response", child).put(OpenAiUsageLedger.FIELD, ledger)
+            .put("usage", OpenAiUsageLedger.total(ledger))
+        assertTrue(db.advanceOpenAiToolResponse("chat", "request", "resp_first", "resp_final", checkpoint))
+        db.close(); db = ChatDatabase(context)
+        // A stale indexed snapshot can still look active even after the bridge saved terminal JSON.
+        val stale = JsonProtocol.objectCopy(child).put("status", "in_progress")
+            .put("usage", JSONObject().put("input_tokens", 999)).put("output", JSONArray())
+        val preserved = OpenAiLocalFileToolBridge.attachReceivedPrefix(db, "chat", "request", stale)
+        assertEquals(120L, preserved.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals("Found needle", OpenAiSseStreamReader.terminalOutputText(preserved))
+        val result = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", stale, http, credential = { "" })
+        assertEquals("completed", result.getString("status"))
+        assertEquals("Found needle", OpenAiSseStreamReader.terminalOutputText(result))
+        assertEquals(120L, result.getJSONObject("usage").getLong("input_tokens"))
+        assertEquals(4, result.getJSONArray("output").length())
+        assertEquals("exact durable result", result.getJSONArray("output").getJSONObject(2).getString("output"))
+        assertEquals("finished", db.getOpenAiToolCheckpoint("chat", "request")!!.getString("phase"))
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test fun paidContinuationCannotReuseAnOlderAncestorIdAndReplaceItsUsage() {
+        server.enqueue(MockResponse().setBody(call("resp_second", callId = "call_2").toString()))
+        server.enqueue(MockResponse().setBody(finalResponse().put("id", "resp_first").toString()))
+        assertThrows(UnrecoverableResponsesStreamException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        }
+        val saved = db.getOpenAiToolCheckpoint("chat", "request")!!
+        assertEquals("posting", saved.getString("phase"))
+        assertEquals("resp_second", saved.getJSONObject("received_response").getString("id"))
+        assertEquals(4L, saved.getJSONObject("usage").getLong("input_tokens"))
+        db.close(); db = ChatDatabase(context)
+        assertThrows(UnrecoverableResponsesStreamException::class.java) {
+            OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first"), http, credential = { "mock-only" })
+        }
+        assertEquals(2, server.requestCount)
+        repeat(2) { assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method) }
     }
 
     @Test fun waitingChildIsPolledAfterReopenAndFinishedCheckpointNeedsNoNetwork() {

@@ -12,6 +12,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -26,7 +27,7 @@ class BackgroundRequestFailureRecorderTest {
         SQLiteDatabase.deleteDatabase(context.getDatabasePath("astra_chats.db"))
     }
 
-    private fun prepared(db: ChatDatabase, chatId: String = "chat"): String {
+    private fun prepared(db: ChatDatabase, chatId: String = "chat", activeText: String = "partial text"): String {
         val requestId = "local_worker_request"
         db.ensureChat(chatId)
         db.upsertCurrentChat(chatId, "Worker chat", null, "high", listOf(
@@ -36,7 +37,7 @@ class BackgroundRequestFailureRecorderTest {
         ))
         db.setActiveResponse(
             chatId = chatId, responseId = "resp_x", requestId = requestId,
-            text = "partial text", status = "in_progress",
+            text = activeText, status = "in_progress",
             startedAt = System.currentTimeMillis(), effortPref = "high",
             effectiveEffort = "high", autoSelected = false,
             promptChars = 15, attachments = 0, backgroundEnabled = true
@@ -167,8 +168,9 @@ class BackgroundRequestFailureRecorderTest {
                 .put("usage", usage(20, 4)).put("output", JSONArray().put(childSigned))
             val state = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_x"),
                 JSONObject().put("type", "response.failed").put("response", terminal)).state
-            assertTrue(db.updateActiveResponse("chat", "resp_x", state.text, "failed", 2, request,
-                ResponseIndexedCheckpoint.serialize(state)))
+            db.updateActiveResponse("chat", "resp_x", state.text, "failed", 2, request,
+                ResponseIndexedCheckpoint.serialize(state))
+            assertEquals("failed", db.getActiveResponse("chat")!!.getString("status"))
             assertTrue(db.saveOpenAiToolCheckpoint("chat", request,
                 checkpoint(ledger, "waiting").put("prior_output", JSONArray().put(parentSigned))))
             request
@@ -194,8 +196,9 @@ class BackgroundRequestFailureRecorderTest {
 
     @Test fun usageOnlyFailureCreatesDurableAssistantAndLedgerWithoutFabricatingTypedOutput() {
         ChatDatabase(context).use { db ->
-            val requestId = prepared(db)
-            assertTrue(db.updateActiveResponse("chat", "resp_x", "", "in_progress", -1L, requestId))
+            val requestId = prepared(db, activeText = "")
+            assertEquals(requestId, db.getActiveResponse("chat")!!.getString("request_id"))
+            assertEquals("", db.getActiveResponse("chat")!!.getString("text"))
             val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
             assertTrue(db.saveOpenAiToolCheckpoint("chat", requestId, checkpoint(ledger, "posting")))
             assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
@@ -207,5 +210,44 @@ class BackgroundRequestFailureRecorderTest {
             assertEquals(100L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
             assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
         }
+    }
+
+    @Test fun receivedChildTerminalWinsOlderIndexedEnvelopeAndRetainsPaidImageArtifact() {
+        val imagesDir = kotlin.io.path.createTempDirectory("worker-failed-images").toFile()
+        try {
+            ChatDatabase(context).use { db ->
+                val requestId = prepared(db)
+                val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
+                val oldTerminal = JSONObject().put("id", "resp_x").put("status", "failed")
+                    .put("usage", usage(5, 1)).put("output", JSONArray().put(JSONObject()
+                        .put("type", "message").put("id", "msg_same_child").put("role", "assistant")
+                        .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", "old partial")))))
+                val oldState = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_x"),
+                    JSONObject().put("type", "response.failed").put("response", oldTerminal)).state
+                db.updateActiveResponse("chat", "resp_x", oldState.text, "failed", 2, requestId,
+                    ResponseIndexedCheckpoint.serialize(oldState))
+                assertEquals("failed", db.getActiveResponse("chat")!!.getString("status"))
+                val imageBytes = TestPngFixtures.png(3, 2, 0x225fc7)
+                val paid = JSONObject().put("id", "resp_x").put("status", "completed")
+                    .put("usage", usage(20, 4)).put("output", JSONArray()
+                        .put(JSONObject().put("type", "message").put("id", "msg_same_child").put("role", "assistant")
+                            .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", "Paid new text"))))
+                        .put(JSONObject().put("type", "image_generation_call").put("id", "ig_paid")
+                            .put("result", java.util.Base64.getEncoder().encodeToString(imageBytes))))
+                assertTrue(db.saveOpenAiToolCheckpoint("chat", requestId,
+                    checkpoint(ledger, "waiting").put("received_response", paid)))
+                assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
+                    "resp_x", "failed", "tool_validation_failed", imagesDir))
+                val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+                assertEquals("Paid new text", assistant.getString("text"))
+                assertEquals(120L, assistant.getJSONObject("usage").getLong("input_tokens"))
+                val generated = assistant.getJSONArray("generated_images").getJSONObject(0)
+                assertEquals("READY", generated.getString("state"))
+                assertArrayEquals(imageBytes, File(generated.getString("local_path")).readBytes())
+                assertEquals(2, assistant.getJSONArray("openai_protocol_output").length())
+                assertEquals(120L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
+                assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
+            }
+        } finally { imagesDir.deleteRecursively() }
     }
 }

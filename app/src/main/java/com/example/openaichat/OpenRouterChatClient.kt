@@ -126,9 +126,7 @@ class OpenRouterChatClient(
         }
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
-        val accumulatedUsage = JSONObject()
-        // Cost is complete only if every generation reported its cost.
-        var everyRoundCostKnown = true
+        val roundUsages = mutableListOf<JSONObject?>()
         var responseModel: String? = null
         var accumulatedTotalTokens = 0L
         var nextRoundIndex = 0
@@ -136,71 +134,11 @@ class OpenRouterChatClient(
         var previousFileIoSnapshot: FileBackedIoTelemetry.Snapshot? = null
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
-        fun addUsageLong(target: JSONObject, key: String, value: Long) {
-            if (value <= 0L) return
-            target.put(key, target.optLong(key, 0L) + value)
-        }
-
-        fun accumulateUsage(source: JSONObject?) {
-            if (source == null) return
-            addUsageLong(accumulatedUsage, "prompt_tokens", source.optLong("prompt_tokens", 0L))
-            addUsageLong(accumulatedUsage, "completion_tokens", source.optLong("completion_tokens", 0L))
-            addUsageLong(accumulatedUsage, "total_tokens", source.optLong("total_tokens", 0L))
-            source.optJSONObject("prompt_tokens_details")?.let { details ->
-                val target = accumulatedUsage.optJSONObject("prompt_tokens_details") ?: JSONObject().also {
-                    accumulatedUsage.put("prompt_tokens_details", it)
-                }
-                addUsageLong(target, "cached_tokens", details.optLong("cached_tokens", 0L))
-                addUsageLong(target, "cache_write_tokens", details.optLong("cache_write_tokens", 0L))
-            }
-            source.optJSONObject("completion_tokens_details")?.let { details ->
-                val target = accumulatedUsage.optJSONObject("completion_tokens_details") ?: JSONObject().also {
-                    accumulatedUsage.put("completion_tokens_details", it)
-                }
-                addUsageLong(target, "reasoning_tokens", details.optLong("reasoning_tokens", 0L))
-            }
-            // These are a breakdown of the reported total, never additional charges.
-            val breakdown = OpenRouterUsageSnapshot.extractCostDetails(source) ?: return
-            fun addAmounts(target: JSONObject, incoming: JSONObject) {
-                incoming.keys().forEach { key ->
-                    val amount = incoming.opt(key)?.toString()?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
-                    if (amount != null) target.put(key, target.optDouble(key, 0.0) + amount)
-                }
-            }
-            breakdown.optJSONObject("cost_details")?.let { details ->
-                val target = accumulatedUsage.optJSONObject("cost_details") ?: JSONObject().also { accumulatedUsage.put("cost_details", it) }
-                addAmounts(target, details)
-            }
-            for (key in listOf("upstream_inference_cost", "server_tool_cost")) {
-                if (breakdown.has(key)) accumulatedUsage.put(key, accumulatedUsage.optDouble(key, 0.0) + breakdown.getDouble(key))
-            }
-            JsonProtocol.nonBlank(breakdown, "service_tier")?.let { accumulatedUsage.put("service_tier", it) }
-            breakdown.optJSONObject("server_tool_use")?.let { incoming ->
-                val target = accumulatedUsage.optJSONObject("server_tool_use") ?: JSONObject().also { accumulatedUsage.put("server_tool_use", it) }
-                incoming.keys().forEach { key -> addUsageLong(target, key, incoming.optLong(key)) }
-            }
-            breakdown.optJSONArray("iterations")?.let { incoming ->
-                val target = accumulatedUsage.optJSONArray("iterations") ?: JSONArray().also { accumulatedUsage.put("iterations", it) }
-                for (i in 0 until incoming.length()) target.put(JsonProtocol.copy(incoming.get(i)))
-            }
-        }
-
-        fun snapshotAccumulatedUsage(): JSONObject? =
-            JSONObject(accumulatedUsage.toString()).apply {
-                if (!everyRoundCostKnown) remove("cost")
-            }.takeIf { it.length() > 0 }
+        fun snapshotAccumulatedUsage(): JSONObject? = OpenRouterUsageAccumulator.aggregate(roundUsages)
 
         fun currentFileIoJson(): JSONObject? = try {
             (previousFileIoSnapshot ?: FileBackedIoTelemetry.snapshot(history)).takeIf { it.hasSourceWork }?.toJson()
         } catch (_: Exception) { null }
-
-        fun mergeUsageSnapshot(previous: JSONObject?, incoming: JSONObject): JSONObject =
-            (previous?.let(JsonProtocol::objectCopy) ?: JSONObject()).apply {
-                incoming.keys().forEach { key ->
-                    val value = incoming.opt(key)
-                    put(key, if (value is JSONObject) mergeUsageSnapshot(optJSONObject(key), value) else JsonProtocol.copy(value))
-                }
-            }
 
         fun budgetException(message: String): OpenRouterCompletionException =
             OpenRouterCompletionException(
@@ -321,10 +259,9 @@ class OpenRouterChatClient(
             fun commitRoundUsage() {
                 if (roundUsageCommitted) return
                 roundUsageCommitted = true
-                accumulateUsage(roundUsage)
-                val completedRoundCost = roundReportedCost
-                if (completedRoundCost == null) everyRoundCostKnown = false
-                else accumulatedUsage.put("cost", accumulatedUsage.optDouble("cost", 0.0) + completedRoundCost)
+                val observed = roundUsage?.let(JsonProtocol::objectCopy)
+                roundReportedCost?.let { observed?.put("cost", it) }
+                roundUsages += observed
                 roundUsage?.let { u ->
                     accumulatedTotalTokens += u.optLong("total_tokens", 0L).takeIf { it > 0L }
                         ?: (u.optLong("prompt_tokens", 0L).coerceAtLeast(0L) + u.optLong("completion_tokens", 0L).coerceAtLeast(0L))
@@ -366,12 +303,12 @@ class OpenRouterChatClient(
                 JsonProtocol.nonBlank(json, "model")?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
                     // Repeated final usage frames are snapshots, not billable deltas.
-                    roundUsage = mergeUsageSnapshot(roundUsage, usage)
+                    roundUsage = OpenRouterUsageAccumulator.mergeSnapshot(roundUsage, usage)
                     // Cost may arrive after finish_reason, just before [DONE].
                     // Explicit zero is known; missing/invalid values are not.
-                    if (usage.has("cost")) {
-                        roundReportedCost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
-                    }
+                    // A later missing/null/invalid field is not evidence that a confirmed
+                    // charge disappeared. Match observeOpenRouterRound's durable contract.
+                    OpenRouterUsageSnapshot.from(usage).reportedCostUsd?.let { roundReportedCost = it }
                     onRoundObserved(roundIndex, generationId, roundUsage)
                 }
                 val choices = json.optJSONArray("choices")

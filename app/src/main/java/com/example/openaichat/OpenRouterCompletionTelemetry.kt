@@ -94,3 +94,85 @@ object OpenRouterCompletionTelemetry {
         recordEvent(snapshot)
     }
 }
+
+/** One sanitized sparse snapshot per HTTP round; aggregate each round exactly once. */
+internal object OpenRouterUsageAccumulator {
+    private val tokenKeys = listOf("prompt_tokens", "completion_tokens", "total_tokens")
+    private val detailTokenKeys = mapOf("prompt_tokens_details" to listOf("cached_tokens", "cache_write_tokens"),
+        "completion_tokens_details" to listOf("reasoning_tokens"))
+    private val nestedCostKeys = listOf("upstream_inference_cost", "upstream_inference_prompt_cost",
+        "upstream_inference_completions_cost", "server_tool_cost")
+    private val topCostKeys = listOf("upstream_inference_cost", "server_tool_cost")
+
+    private fun nonnegative(source: JSONObject?, key: String): Long? =
+        source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+
+    private fun sanitized(source: JSONObject?): JSONObject = JSONObject().apply {
+        if (source == null) return@apply
+        tokenKeys.forEach { key -> nonnegative(source, key)?.let { put(key, it) } }
+        detailTokenKeys.forEach { (key, fields) ->
+            val details = JSONObject()
+            fields.forEach { field -> nonnegative(source.optJSONObject(key), field)?.let { details.put(field, it) } }
+            if (details.length() > 0) put(key, details)
+        }
+        val snapshot = OpenRouterUsageSnapshot.from(source)
+        snapshot.reportedCostUsd?.let { put("cost", it) }
+        snapshot.costDetails?.let { metadata -> metadata.keys().forEach { key -> put(key, JsonProtocol.copy(metadata.opt(key))) } }
+    }
+
+    /** Missing, null and invalid values cannot erase an earlier provider observation. */
+    fun mergeSnapshot(previous: JSONObject?, incoming: JSONObject?): JSONObject? {
+        fun merge(target: JSONObject, source: JSONObject) {
+            source.keys().forEach { key ->
+                val value = source.opt(key)
+                if (value is JSONObject) {
+                    val child = target.optJSONObject(key) ?: JSONObject().also { target.put(key, it) }
+                    merge(child, value)
+                } else target.put(key, JsonProtocol.copy(value))
+            }
+        }
+        return sanitized(previous).apply { merge(this, sanitized(incoming)) }.takeIf { it.length() > 0 }
+    }
+
+    /** Null entries represent attempted rounds without usage; their price remains unknown. */
+    fun aggregate(snapshots: List<JSONObject?>): JSONObject? {
+        if (snapshots.isEmpty()) return null
+        val rounds = snapshots.map(::sanitized)
+        val out = JSONObject()
+        fun sumLong(values: List<Long>): Long = values.fold(0L) { sum, next ->
+            if (Long.MAX_VALUE - sum < next) Long.MAX_VALUE else sum + next
+        }
+        fun putTokenSum(target: JSONObject, key: String, sources: List<JSONObject?>) {
+            val values = sources.mapNotNull { nonnegative(it, key) }
+            if (values.isNotEmpty()) target.put(key, sumLong(values))
+        }
+        tokenKeys.forEach { putTokenSum(out, it, rounds) }
+        detailTokenKeys.forEach { (key, fields) ->
+            val details = JSONObject()
+            fields.forEach { putTokenSum(details, it, rounds.map { round -> round.optJSONObject(key) }) }
+            if (details.length() > 0) out.put(key, details)
+        }
+        fun sumAmounts(target: JSONObject, key: String, sources: List<JSONObject?>) {
+            val values = sources.mapNotNull { it?.opt(key)?.toString()?.toDoubleOrNull()?.takeIf { n -> n.isFinite() && n >= 0.0 } }
+            if (values.isNotEmpty()) values.sum().takeIf { it.isFinite() }?.let { target.put(key, it) }
+        }
+        val costs = rounds.mapNotNull { OpenRouterUsageSnapshot.from(it).reportedCostUsd }
+        if (costs.size == rounds.size) costs.sum().takeIf { it.isFinite() }?.let { out.put("cost", it) }
+        val nestedCosts = JSONObject()
+        nestedCostKeys.forEach { key -> sumAmounts(nestedCosts, key, rounds.map { it.optJSONObject("cost_details") }) }
+        if (nestedCosts.length() > 0) out.put("cost_details", nestedCosts)
+        topCostKeys.forEach { sumAmounts(out, it, rounds) }
+        rounds.mapNotNull { JsonProtocol.nonBlank(it, "service_tier") }.lastOrNull()?.let { out.put("service_tier", it) }
+        val toolUse = JSONObject()
+        val tools = rounds.mapNotNull { it.optJSONObject("server_tool_use") }
+        val keys = tools.flatMap { it.keys().asSequence().toList() }.distinct()
+        keys.forEach { putTokenSum(toolUse, it, tools) }
+        if (toolUse.length() > 0) out.put("server_tool_use", toolUse)
+        val iterations = JSONArray()
+        rounds.forEach { round -> round.optJSONArray("iterations")?.let { values ->
+            for (i in 0 until values.length()) iterations.put(JsonProtocol.copy(values.opt(i)))
+        } }
+        if (iterations.length() > 0) out.put("iterations", iterations)
+        return out.takeIf { it.length() > 0 }
+    }
+}

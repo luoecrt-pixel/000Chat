@@ -35,7 +35,8 @@ assert 'file_citation' in main
 assert 'url_citation' in main
 assert 'put("type","web_search")' in main
 assert 'configuration_update' in main
-assert 'configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", false)' in main
+assert 'autoCompaction = prefs.getBoolean("openai_auto_compaction", false)' in main
+assert 'configUpdateEffort == null && openAiOptions.autoCompaction' in main
 assert 'background' in main
 assert 'streamBackgroundResponse' in main
 assert 'response.reasoning_summary_text.delta' in main

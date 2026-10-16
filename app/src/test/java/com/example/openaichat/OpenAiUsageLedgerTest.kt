@@ -59,4 +59,23 @@ class OpenAiUsageLedgerTest {
         val correction = OpenAiUsageLedger.observe(terminal, "resp", usage(95), "completed")
         assertEquals(95L, tokens(correction))
     }
+
+    @Test fun legacyAggregateIgnoresAnEarlierParentWhoseIdWasNotRetained() {
+        val checkpoint = JSONObject().put("phase", "waiting").put("parent_id", "resp_second")
+            .put("response_id", "resp_third").put("usage", usage(130))
+        assertEquals(130L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_first", 100))))
+        assertEquals(150L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_third", 20))))
+        checkpoint.put("phase", "prepared")
+        assertEquals(130L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_first", 100))))
+        checkpoint.put("phase", "posting")
+        assertEquals(130L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_first", 100))))
+    }
+
+    @Test fun legacyFinishedAggregateIgnoresEveryRawSnapshotIncludingAnUnknownOldParent() {
+        val checkpoint = JSONObject().put("phase", "finished").put("parent_id", "resp_second")
+            .put("usage", usage(130)).put("final_response", raw("resp_final", 150))
+        assertEquals(150L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_first", 100))))
+        assertEquals(150L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_second", 30))))
+        assertEquals(150L, tokens(OpenAiUsageLedger.resolve(checkpoint, raw("resp_final", 20))))
+    }
 }

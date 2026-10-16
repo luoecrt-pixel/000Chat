@@ -51,7 +51,9 @@ object BackgroundRequestFailureRecorder {
         // Never merge a parent's output indices into an active child's indices.
         val receivedResponse = checkpoint?.optJSONObject("received_response")
             ?.takeIf { JsonProtocol.nonBlank(it, "id") == ownedResponseId }
-        val sourceResponse = durableTerminal ?: recovered?.terminalResponse ?: receivedResponse
+        // The bridge's snapshot may be newer than the indexed SSE envelope
+        // (for example, the child finished before tool validation failed).
+        val sourceResponse = durableTerminal ?: receivedResponse ?: recovered?.terminalResponse
         val response = if (durableTerminal != null) JsonProtocol.objectCopy(durableTerminal)
             else OpenAiEffectiveResponse.assemble(sourceResponse,
                 recovered ?: ResponseEventState(responseId = ownedResponseId))
@@ -100,6 +102,11 @@ object BackgroundRequestFailureRecorder {
                     }
                     if (summary.isNotBlank()) put("reasoning_summary", summary)
                     if (typed.length() > 0) put("openai_protocol_output", typed)
+                    receivedFilesDir?.let { filesDir ->
+                        if (model.generatedImageResults.isNotEmpty()) {
+                            put("generated_images", GeneratedImageStore.save(filesDir, model.generatedImageResults) { _, _ -> })
+                        }
+                    }
                     usage?.let { put("usage", JsonProtocol.objectCopy(it)) }
                     response.optJSONObject(OpenAiUsageLedger.FIELD)?.let {
                         put(OpenAiUsageLedger.FIELD, JsonProtocol.objectCopy(it))

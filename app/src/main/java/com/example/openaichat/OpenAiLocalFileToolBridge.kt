@@ -12,6 +12,7 @@ import java.util.concurrent.CancellationException
 /** Durable, request-scoped, read-only Responses tool continuation, shared by Activity and Worker. */
 object OpenAiLocalFileToolBridge {
     private const val OUTPUT_PREFIX_FIELD = "openai_tool_output_prefix_attached"
+    private val terminalStatuses = setOf("completed", "cancelled", "failed", "incomplete")
     private val names = linkedMapOf(
         "list_attached_files" to "file_list", "search_attached_file" to "file_search",
         "read_attached_file" to "file_read_range", "read_attached_table" to "file_table_stats"
@@ -81,10 +82,20 @@ object OpenAiLocalFileToolBridge {
             persisted = checkpoint.toString()
         }
         fun observeResponse(received: JSONObject) {
-            val ledger = OpenAiUsageLedger.resolve(checkpoint, received)
+            // This helper accepts only the checked current initial/GET/POST response. A new
+            // POST child is observed while the durable phase is still "posting", before the
+            // active response ID and waiting checkpoint advance atomically together.
+            val base = OpenAiUsageLedger.fromCheckpoint(checkpoint)
+            val ledger = received.optJSONObject(OpenAiUsageLedger.FIELD)?.let { OpenAiUsageLedger.merge(base, it) }
+                ?: OpenAiUsageLedger.observe(base, JsonProtocol.nonBlank(received, "id"), received.optJSONObject("usage"),
+                    JsonProtocol.nonBlank(received, "status"))
+            val previous = checkpoint.optJSONObject("received_response")
+            val snapshot = if (previous != null && previous.optString("id") == received.optString("id") &&
+                previous.optString("status") in terminalStatuses && received.optString("status") !in terminalStatuses)
+                previous else received
             checkpoint.put(OpenAiUsageLedger.FIELD, ledger)
                 .put("usage", OpenAiUsageLedger.total(ledger) ?: JSONObject())
-                .put("received_response", JsonProtocol.objectCopy(received))
+                .put("received_response", JsonProtocol.objectCopy(snapshot))
         }
         fun http(body: JSONObject?, responseId: String? = null): JSONObject {
             ensureActive(); val key = ensureCredential()
@@ -134,12 +145,17 @@ object OpenAiLocalFileToolBridge {
                 .map { it.optString("name") }.distinct()
             onStatus("🔧 Локальные файлы (${checkpoint.optInt("round")}): ${tools.joinToString(", ")}")
         }
-        var response = initial
-        if (checkpoint.optString("phase") != "finished" &&
-            (checkpoint.optString("phase") != "waiting" || initial.optString("id") == checkpoint.optString("response_id"))) {
+        val received = checkpoint.optJSONObject("received_response")
+        // A process can die after committing the child's paid terminal JSON but before
+        // committing its local tool batch/final response. Consume it offline on resume.
+        var response = if (received != null && checkpoint.optString("phase") == "waiting" &&
+            received.optString("id") == checkpoint.optString("response_id") &&
+            received.optString("status") in terminalStatuses) JsonProtocol.objectCopy(received) else initial
+        if (checkpoint.optString("phase") == "idle" ||
+            (checkpoint.optString("phase") == "waiting" && response.optString("id") == checkpoint.optString("response_id"))) {
             // Save paid snapshots before validating/executing their tools. Failure/Stop can then
             // preserve the raw provider output as well as all previous committed rounds.
-            observeResponse(initial)
+            observeResponse(response)
             if (checkpoint.toString() != persisted) persist()
         }
         while (true) {
@@ -155,7 +171,11 @@ object OpenAiLocalFileToolBridge {
                     checkpoint.put("phase", "posting"); persist()
                     response = http(next)
                     val id = JsonProtocol.nonBlank(response, "id") ?: throw IOException("Нет ID продолжения OpenAI")
-                    if (id == checkpoint.getString("parent_id")) throw UnrecoverableResponsesStreamException("OpenAI повторил ID вместо нового раунда")
+                    val ledger = OpenAiUsageLedger.fromCheckpoint(checkpoint)
+                    val covered = ledger.optJSONArray("legacy_covered_ids") ?: JSONArray()
+                    if (id == checkpoint.getString("parent_id") || ledger.optJSONObject("responses")?.has(id) == true ||
+                        (0 until covered.length()).any { JsonProtocol.text(covered, it) == id })
+                        throw UnrecoverableResponsesStreamException("OpenAI повторил ID вместо нового раунда")
                     observeResponse(response)
                     checkpoint.put("phase", "waiting").put("response_id", id)
                     if (!db.advanceOpenAiToolResponse(chatId, requestId, checkpoint.getString("parent_id"), id, checkpoint))
@@ -305,11 +325,21 @@ object OpenAiLocalFileToolBridge {
         if (saved.optString("phase") == "finished") return saved.optJSONObject("final_response")?.optJSONArray("output") ?: current
         val prior = saved.optJSONArray("prior_output") ?: return current
         val paid = saved.optJSONObject("received_response")
-        val effectiveCurrent = if (current.length() == 0 && (responseId == null || responseId == paid?.optString("id")))
-            paid?.optJSONArray("output") ?: current else current
+        // A prepared/posting batch already includes its parent's output. Legacy checkpoints
+        // cannot name every earlier parent, so a stale first response must not be appended.
+        if (prior.length() > 0 && saved.optString("phase") in setOf("prepared", "posting")) return JsonProtocol.arrayCopy(prior)
+        val paidId = paid?.let { JsonProtocol.nonBlank(it, "id") }
+        val waitingId = JsonProtocol.nonBlank(saved, "response_id")
+        val belongsToWaitingChild = saved.optString("phase") == "waiting" && responseId == waitingId
+        if (prior.length() > 0 && saved.optString("phase") == "waiting" && !belongsToWaitingChild && paid == null)
+            return JsonProtocol.arrayCopy(prior)
+        val paidIsTerminal = paid?.optString("status") in terminalStatuses
+        val usePaid = paid != null && (current.length() == 0 || paidIsTerminal && (paidId == responseId || paidId == waitingId) ||
+            responseId != paidId && !belongsToWaitingChild)
+        val effectiveCurrent = if (usePaid) paid?.optJSONArray("output") ?: JSONArray() else current
         if (prior.length() == 0) return effectiveCurrent
         val result = JsonProtocol.arrayCopy(prior)
-        val effectiveId = responseId ?: if (current.length() == 0) paid?.let { JsonProtocol.nonBlank(it, "id") } else null
+        val effectiveId = if (usePaid) paidId else responseId
         if (effectiveId != saved.optString("parent_id")) for (i in 0 until effectiveCurrent.length()) result.put(JsonProtocol.copy(effectiveCurrent.get(i)))
         return result
     }
