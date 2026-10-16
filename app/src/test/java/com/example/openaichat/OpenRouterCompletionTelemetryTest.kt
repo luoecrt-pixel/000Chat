@@ -19,7 +19,7 @@ class OpenRouterCompletionTelemetryTest {
         assertEquals(1, recordedEvents.size)
         assertEquals(0L, recordedEvents.single().inputTokens)
         assertEquals(0L, recordedEvents.single().outputTokens)
-        assertEquals(0.0, recordedEvents.single().costUsd, 0.0)
+        assertNull(recordedEvents.single().costUsd)
         assertNull(recordedEvents.single().reportedCostUsd)
     }
 
@@ -42,7 +42,7 @@ class OpenRouterCompletionTelemetryTest {
         assertEquals(12L, events.single().cacheWriteTokens)
         assertEquals(55L, events.single().outputTokens)
         assertEquals(21L, events.single().reasoningTokens)
-        assertEquals(0.014, events.single().costUsd, 0.00000001)
+        assertEquals(0.014, events.single().costUsd!!, 0.00000001)
         assertEquals(0.014, events.single().reportedCostUsd!!, 0.00000001)
     }
 
@@ -53,12 +53,12 @@ class OpenRouterCompletionTelemetryTest {
             usage = JSONObject().put("cost", "NaN").put("prompt_tokens", -99),
             recordMetric = {
                 calls += "metric"
-                assertEquals(0.0, it.costUsd, 0.0)
+                assertNull(it.costUsd)
                 assertEquals(0L, it.inputTokens)
             },
             recordEvent = {
                 calls += "event"
-                assertEquals(0.0, it.costUsd, 0.0)
+                assertNull(it.costUsd)
                 assertNull(it.reportedCostUsd)
             }
         )

@@ -153,7 +153,6 @@ class BackgroundResponseWorker(
                     ))
                     BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
                         "failed", "recovery_timeout", applicationContext.filesDir)
-                    db.clearActiveResponse(chatId, expectedRequestId = requestId)
                     return Result.success()
                 }
                 var lastSequence = cursor
@@ -270,7 +269,6 @@ class BackgroundResponseWorker(
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
                                 "failed", "recovery_auth_${e.statusCode}", applicationContext.filesDir)
-                            db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
                         BackgroundRecoveryAction.RESPONSE_GONE -> {
@@ -281,7 +279,6 @@ class BackgroundResponseWorker(
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
                                 "unknown", "response_gone_${e.statusCode}", applicationContext.filesDir)
-                            db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.success()
                         }
                         BackgroundRecoveryAction.RETRY -> {
@@ -304,7 +301,6 @@ class BackgroundResponseWorker(
                             ))
                             BackgroundRequestFailureRecorder.persist(db, chatId, requestId, responseId,
                                 "failed", "recovery_http_${e.statusCode}", applicationContext.filesDir)
-                            db.clearActiveResponse(chatId, expectedRequestId = requestId)
                             return Result.failure()
                         }
                     }
@@ -378,6 +374,19 @@ class BackgroundResponseWorker(
         )
         val model = parsedModel.copy(reasoningSummary = parsedModel.reasoningSummary?.takeIf { it.isNotBlank() }
             ?: recovered.reasoningSummary.takeIf { it.isNotBlank() })
+        // The checkpoint is a crash-gap buffer and is removed by the winning
+        // chat transaction. Capture its compact data before that transaction.
+        // Keep the response ledger marker: model.usage is an aggregate and must
+        // never be attributed to this response's single ID again.
+        val toolTelemetry = OpenAiLocalFileToolBridge.extractTelemetrySummary(db, chatId, requestId)
+            ?: JSONObject()
+        effectiveResponse.optJSONObject(OpenAiUsageLedger.FIELD)?.let {
+            toolTelemetry.put(OpenAiUsageLedger.FIELD, JsonProtocol.objectCopy(it))
+        }
+        val compactTelemetry = FileBackedIoTelemetry.mergeCompactTelemetry(
+            toolTelemetry = toolTelemetry,
+            costDetails = OpenRouterUsageSnapshot.extractCostDetails(model.usage)
+        )
         val savedImages = saveGeneratedImages(model.generatedImageResults, diagnostics)
         val requestMeta = db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
             (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
@@ -394,6 +403,10 @@ class BackgroundResponseWorker(
             requestedModel?.let { put("requested_model", it) }
             model.model?.let { put("response_model", it) }
             model.usage?.let { put("usage", JSONObject(it.toString())) }
+            effectiveResponse.optJSONObject(OpenAiUsageLedger.FIELD)?.let {
+                put(OpenAiUsageLedger.FIELD, JsonProtocol.objectCopy(it))
+            }
+            compactTelemetry?.let { put("telemetry_summary", it) }
             if (savedImages.length() > 0) put("generated_images", savedImages)
             if (state != "completed" || (0 until savedImages.length()).any {
                     savedImages.optJSONObject(it)?.optString("state") != "READY"
@@ -435,7 +448,7 @@ class BackgroundResponseWorker(
         ResponseNotifications.finished(applicationContext, chatId, requestId, state == "completed")
         db.recordRequestAccounting(
             chatId = chatId, localRequestId = requestId, status = state,
-            responseId = responseId, usage = usage
+            responseId = responseId, usage = usage, telemetrySummary = compactTelemetry
         )
         db.recordRequestEvent(
             chatId = chatId,
@@ -450,7 +463,8 @@ class BackgroundResponseWorker(
             cacheWriteTokens = cacheWriteTok, outputTokens = outTok,
             reasoningTokens = reasoningTok,
             estimatedCostUsd = cost, latencyMs = latency,
-            toolSummary = model.tools.distinct().joinToString(",")
+            toolSummary = model.tools.distinct().joinToString(","),
+            telemetrySummary = compactTelemetry
         )
         db.recordEffortMetric(
             requestId, chatId, "resumed", effortPref, effectiveEffort, active.optBoolean("auto_selected", false),
@@ -458,7 +472,6 @@ class BackgroundResponseWorker(
             inTok, cachedTok, cacheWriteTok, outTok, reasoningTok, state == "completed",
             if (state == "completed") null else state.ifBlank { "background_failed" }, cost
         )
-        db.clearActiveResponse(chatId, expectedRequestId = requestId)
         diagnostics.log("worker_response_finalized", mapOf("chat_id" to chatId, "response_id" to responseId, "request_id" to requestId, "status" to state, "latency_ms" to latency, "estimated_cost_usd" to "%.6f".format(cost)))
     }
 

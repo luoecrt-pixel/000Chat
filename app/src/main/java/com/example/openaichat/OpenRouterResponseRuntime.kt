@@ -87,15 +87,24 @@ object OpenRouterResponseRuntime {
         var lastCheckpoint = 0L
         var fatalFailure = false
         var github: GitHubToolExecutor? = null
+        var latestFileIoJson: JSONObject? = null
         fun active() = !item.cancelled.get() && db.isActiveRequest(r.chatId, r.requestId)
-        fun terminal(message: JSONObject, status: String, usage: JSONObject?, responseModel: String?, error: String? = null): Boolean {
+        fun terminal(message: JSONObject, status: String, usage: JSONObject?, responseModel: String?, error: String? = null,
+            fileIo: JSONObject? = null, roundsCompleted: Int = 0): Boolean {
             if (artifacts.isNotEmpty()) message.put("annotations", annotations(artifacts))
             if (trace.length() > 0) message.put("tool_trace", trace)
+            val totals = OpenRouterUsageSnapshot.from(usage)
+            val executedTools = (0 until trace.length()).mapNotNull { trace.optJSONObject(it)?.let { entry -> JsonProtocol.nonBlank(entry, "name") } }.distinct()
+            val toolTelemetry = if (roundsCompleted > 0 || trace.length() > 0) JSONObject()
+                .put("rounds_completed", roundsCompleted).put("calls_executed", trace.length())
+                .put("executed_tools", JSONArray(executedTools)) else null
+            val compactTelemetry = FileBackedIoTelemetry.mergeCompactTelemetry(toolTelemetry = toolTelemetry,
+                fileIoJson = fileIo ?: latestFileIoJson, costDetails = totals.costDetails)
+            compactTelemetry?.let { message.put("telemetry_summary", it) }
             val committed = db.finalizeCurrentChatIfActiveRequest(r.chatId, "", null, null, listOf(message), r.requestId)
             if (!committed) return false
-            val totals = OpenRouterUsageSnapshot.from(usage)
             db.recordRequestAccounting(chatId = r.chatId, localRequestId = r.requestId, status = status, usage = usage, error = error,
-                reportedCostUsd = totals.reportedCostUsd)
+                reportedCostUsd = totals.reportedCostUsd, telemetrySummary = compactTelemetry)
             db.recordRequestEvent(chatId = r.chatId, eventType = "request_$status", requestId = r.requestId,
                 provider = "openrouter", requestedModel = r.model, responseModel = responseModel,
                 modelMatch = ModelCatalog.match(r.model, responseModel), status = status,
@@ -103,7 +112,7 @@ object OpenRouterResponseRuntime {
                 outputTokens = totals.outputTokens, reasoningTokens = totals.reasoningTokens,
                 estimatedCostUsd = totals.costUsd, reportedCostUsd = totals.reportedCostUsd,
                 latencyMs = SystemClock.elapsedRealtime() - r.startedAt,
-                toolSummary = (0 until trace.length()).mapNotNull { trace.optJSONObject(it)?.optString("name") }.distinct().joinToString(","), error = error)
+                toolSummary = executedTools.joinToString(","), error = error, telemetrySummary = compactTelemetry)
             ResponseNotifications.finished(item.context, r.chatId, r.requestId, status == "completed")
             OpenRouterUiBridge.changed(r.chatId, r.requestId)
             return true
@@ -181,10 +190,14 @@ object OpenRouterResponseRuntime {
                     }
                 },
                 onPayloadObserved = { round, size -> diagnostics.log("openrouter_http_payload", mapOf("chat_id" to r.chatId, "request_id" to r.requestId, "round" to round, "model" to r.model, "json_bytes" to size)) },
-                onFileIoObserved = { round, stats -> diagnostics.log("openrouter_file_io", mapOf("chat_id" to r.chatId,
-                    "request_id" to r.requestId, "round" to round, "files" to stats.optInt("files"),
-                    "source_read_passes" to stats.optLong("source_read_passes"), "source_read_bytes" to stats.optLong("source_read_bytes"),
-                    "file_work_ms" to stats.optLong("file_work_ms"))) },
+                onFileIoObserved = { round, stats ->
+                    latestFileIoJson = JsonProtocol.objectCopy(stats)
+                    diagnostics.log("openrouter_file_io", mapOf("chat_id" to r.chatId,
+                        "request_id" to r.requestId, "round" to round, "files" to stats.optInt("files"),
+                        "source_read_passes" to stats.optLong("source_read_passes"), "source_read_bytes" to stats.optLong("source_read_bytes"),
+                        "file_work_ms" to stats.optLong("file_work_ms"), "round_read_passes" to stats.optLong("round_read_passes"),
+                        "round_read_bytes" to stats.optLong("round_read_bytes"), "round_work_ms" to stats.optLong("round_work_ms")))
+                },
                 onProtocolCheckpoint = { checkpoint -> db.saveOpenRouterCheckpoint(r.chatId, r.requestId, checkpoint) },
                 onProtocolWarning = { warning ->
                     protocolNotice = warning
@@ -200,12 +213,14 @@ object OpenRouterResponseRuntime {
             if (explanation.isNotBlank()) message.put("error", explanation) // UI metadata, never model content.
             result.protocol?.let { protocol -> protocolNotice?.let { protocol.put("context_notice", it) }; message.put("openrouter_protocol", protocol) }
             result.usage?.let { message.put("usage", it) }
-            if (terminal(message, status, result.usage, result.responseModel, explanation.takeIf { it.isNotBlank() })) {
+            if (terminal(message, status, result.usage, result.responseModel, explanation.takeIf { it.isNotBlank() },
+                    result.fileIoTelemetry, result.roundsCompleted)) {
                 OpenRouterCompletionTelemetry.record(result.usage, { totals ->
                     db.recordEffortMetric(r.requestId, r.chatId, r.taskClass, r.effortPref, r.effort, r.autoSelected,
                         r.promptChars, r.attachments.size, SystemClock.elapsedRealtime() - r.startedAt,
                         totals.inputTokens, totals.cachedTokens, totals.cacheWriteTokens, totals.outputTokens,
-                        totals.reasoningTokens, completed, result.finishReason.takeUnless { completed }, totals.costUsd)
+                        totals.reasoningTokens, completed, result.finishReason.takeUnless { completed }, totals.reportedCostUsd,
+                        costKind = totals.costKind)
                 }, { })
             }
         } catch (e: Exception) {
@@ -224,7 +239,8 @@ object OpenRouterResponseRuntime {
                 .put("status", status).put("error", error)
             failedUsage?.let { failed.put("usage", JSONObject(it.toString())) }
             db.getOpenRouterCheckpoint(r.chatId, r.requestId)?.let { failed.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(it, failed)) }
-            terminal(failed, status, failedUsage, null, error)
+            terminal(failed, status, failedUsage, null, error, completionError?.fileIoTelemetry,
+                completionError?.roundsCompleted ?: 0)
         } catch (fatal: Error) {
             fatalFailure = true
             item.call?.cancel()
@@ -243,7 +259,6 @@ object OpenRouterResponseRuntime {
             try { github?.close() } catch (_: Exception) {}
             try {
                 db.sealOpenRouterRounds(r.chatId, r.requestId)
-                db.clearOpenRouterCheckpoint(r.chatId, r.requestId)
                 if (!fatalFailure && item.client.reconcileGenerations) {
                     var anyReconciled = false
                     OpenRouterGenerationReconciler(r.metadataClient, item.client.metadataBaseUrl)

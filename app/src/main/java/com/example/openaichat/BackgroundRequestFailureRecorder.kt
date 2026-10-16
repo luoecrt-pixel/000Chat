@@ -1,5 +1,6 @@
 package com.example.openaichat
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -42,29 +43,49 @@ object BackgroundRequestFailureRecorder {
         } catch (_: UnrecoverableResponsesCheckpointException) {
             null
         }
-        val received = OpenAiLocalFileToolBridge.receivedOutput(db, chatId, localRequestId,
-            JsonProtocol.nonBlank(active, "response_id"), org.json.JSONArray().apply {
-                recovered?.typedOutputItems?.toSortedMap()?.values?.forEach { put(it) }
-            })
-        val typed = (0 until received.length()).mapNotNull { received.optJSONObject(it) }
-        val partial = JsonProtocol.string(active, "text").ifBlank {
-            OpenAiSseStreamReader.terminalOutputText(JSONObject().put("output", received))
+        val checkpoint = db.getOpenAiToolCheckpoint(chatId, localRequestId)
+        val durableTerminal = checkpoint?.takeIf { it.optString("phase") == "finished" }
+            ?.optJSONObject("final_response")
+        // A received response can be newer than active_indexed_checkpoint: the
+        // local tool bridge writes it before validation/execution of its tools.
+        // Never merge a parent's output indices into an active child's indices.
+        val receivedResponse = checkpoint?.optJSONObject("received_response")
+            ?.takeIf { JsonProtocol.nonBlank(it, "id") == ownedResponseId }
+        val sourceResponse = durableTerminal ?: recovered?.terminalResponse ?: receivedResponse
+        val response = if (durableTerminal != null) JsonProtocol.objectCopy(durableTerminal)
+            else OpenAiEffectiveResponse.assemble(sourceResponse,
+                recovered ?: ResponseEventState(responseId = ownedResponseId))
+        if (JsonProtocol.nonBlank(response, "id") == null) response.put("id", ownedResponseId)
+        OpenAiLocalFileToolBridge.attachReceivedPrefix(db, chatId, localRequestId, response)
+        val received = response.optJSONArray("output") ?: JSONArray()
+        val typed = OpenAiLocalFileToolBridge.completePendingOutputs(received)
+        val partial = OpenAiSseStreamReader.terminalOutputText(response)
+            .ifBlank { JsonProtocol.string(active, "text") }
+        val model = AstraResponseModel.fromResponse(response, partial, localRequestId, status, error.take(1200))
+        val summary = model.reasoningSummary?.takeIf(String::isNotBlank)
+            ?: recovered?.reasoningSummary.orEmpty()
+        val usage = response.optJSONObject("usage")
+        val toolTelemetry = OpenAiLocalFileToolBridge.extractTelemetrySummary(db, chatId, localRequestId)
+            ?: JSONObject()
+        response.optJSONObject(OpenAiUsageLedger.FIELD)?.let {
+            toolTelemetry.put(OpenAiUsageLedger.FIELD, JsonProtocol.objectCopy(it))
         }
-        val summary = recovered?.reasoningSummary.orEmpty()
+        val compactTelemetry = FileBackedIoTelemetry.mergeCompactTelemetry(
+            toolTelemetry = toolTelemetry,
+            costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage)
+        )
         val sourceMessage = JSONObject()
         receivedFilesDir?.let {
             OpenAiRawSseArchive.attachToMessage(sourceMessage, it, chatId, localRequestId)
         }
-        if ((partial.isNotBlank() || typed.isNotEmpty() || summary.isNotBlank() ||
-                sourceMessage.has("annotations")) && items.none {
+        if ((partial.isNotBlank() || typed.length() > 0 || summary.isNotBlank() ||
+                sourceMessage.has("annotations") || usage != null || compactTelemetry != null) && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {
-            items += JSONObject()
-                .put("role", "assistant")
-                .put("text", partial)
+            items += model.toChatJson()
                 .put("provider", "openai")
                 .put("request_id", localRequestId)
-                .put("response_id", ownedResponseId)
+                .put("response_id", JsonProtocol.nonBlank(response, "id") ?: ownedResponseId)
                 .put("status", status)
                 .put("incomplete", true)
                 .put("error", error.take(1200))
@@ -73,12 +94,17 @@ object BackgroundRequestFailureRecorder {
                     userMessage?.optString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD)
                         ?.takeIf { it.isNotBlank() }
                         ?.let { put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, it) }
-                    sourceMessage.optJSONArray("annotations")?.let { put("annotations", it) }
+                    sourceMessage.optJSONArray("annotations")?.let { extra ->
+                        val annotations = optJSONArray("annotations") ?: JSONArray().also { put("annotations", it) }
+                        for (i in 0 until extra.length()) annotations.put(JsonProtocol.copy(extra.get(i)))
+                    }
                     if (summary.isNotBlank()) put("reasoning_summary", summary)
-                    if (typed.isNotEmpty()) put("openai_protocol_output",
-                        org.json.JSONArray().apply {
-                            typed.forEach { item -> put(JSONObject(item.toString())) }
-                        })
+                    if (typed.length() > 0) put("openai_protocol_output", typed)
+                    usage?.let { put("usage", JsonProtocol.objectCopy(it)) }
+                    response.optJSONObject(OpenAiUsageLedger.FIELD)?.let {
+                        put(OpenAiUsageLedger.FIELD, JsonProtocol.objectCopy(it))
+                    }
+                    compactTelemetry?.let { put("telemetry_summary", it) }
                 }
         }
         val previousResponseId = chat.optString("response_id")
@@ -92,7 +118,8 @@ object BackgroundRequestFailureRecorder {
 
         db.recordRequestAccounting(
             chatId = chatId, localRequestId = localRequestId,
-            status = status, responseId = ownedResponseId, error = error
+            status = status, responseId = ownedResponseId, error = error,
+            usage = usage, telemetrySummary = compactTelemetry
         )
         db.recordRequestEvent(
             chatId = chatId,
@@ -100,11 +127,17 @@ object BackgroundRequestFailureRecorder {
             requestId = localRequestId,
             provider = "openai",
             requestedModel = requestedModel,
-            responseModel = null,
-            modelMatch = ModelCatalog.Match.UNKNOWN,
+            responseModel = model.model,
+            modelMatch = ModelCatalog.match(requestedModel, model.model),
             status = status,
+            inputTokens = usage?.optLong("input_tokens", 0L) ?: 0L,
+            cachedTokens = usage?.optJSONObject("input_tokens_details")?.optLong("cached_tokens", 0L) ?: 0L,
+            cacheWriteTokens = usage?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens", 0L) ?: 0L,
+            outputTokens = usage?.optLong("output_tokens", 0L) ?: 0L,
+            reasoningTokens = usage?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens", 0L) ?: 0L,
             latencyMs = latencyMs,
-            error = error
+            error = error,
+            telemetrySummary = compactTelemetry
         )
         return true
     }

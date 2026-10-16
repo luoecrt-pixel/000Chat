@@ -10,6 +10,11 @@ object RequestEventFormatter {
         else -> ModelCatalog.Match.UNKNOWN
     }
 
+    fun parseTelemetry(event: JSONObject): JSONObject? =
+        event.optJSONObject("telemetry_summary") ?: JsonProtocol.nonBlank(event, "telemetry_summary")?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
+
     fun summary(event: JSONObject): String {
         val provider = JsonProtocol.nonBlank(event, "provider") ?: "unknown"
         val requested = JsonProtocol.nonBlank(event, "requested_model")
@@ -22,15 +27,24 @@ object RequestEventFormatter {
                 "requested=${ModelCatalog.displayName(provider, requested)} · response=unknown"
         }
         val cost = RequestCostFormatter.text(event)
+        val telemetry = parseTelemetry(event)
+        val telemetrySuffix = buildString {
+            val rounds = telemetry?.optLong("rounds_completed") ?: 0L
+            val calls = telemetry?.optLong("calls_executed") ?: 0L
+            if (rounds > 0L || calls > 0L) append(" · tools ${calls}/${rounds}r")
+            val files = telemetry?.optInt("files") ?: 0
+            val passes = telemetry?.optLong("source_read_passes") ?: 0L
+            if (files > 0 || passes > 0L) append(" · file-io ${files}f/${passes}p")
+        }
         if (JsonProtocol.string(event, "status") == "stopped") {
-            return "● Остановлено · " + ModelCatalog.displayName(provider, requested) + " · " + cost
+            return "● Остановлено · " + ModelCatalog.displayName(provider, requested) + " · " + cost + telemetrySuffix
         }
         val latency = event.optLong("latency_ms", 0L)
         return "● $modelText · ${tokens(event.optLong("input_tokens"))} in · " +
             "${tokens(event.optLong("output_tokens"))} out · " +
             "${tokens(event.optLong("reasoning_tokens"))} reasoning · " +
             "cache ${tokens(event.optLong("cached_tokens"))} · " +
-            "$cost · %.1fs".format(Locale.US, latency / 1000.0)
+            "$cost$telemetrySuffix · %.1fs".format(Locale.US, latency / 1000.0)
     }
 
     fun details(event: JSONObject): String = buildString {
@@ -50,6 +64,18 @@ object RequestEventFormatter {
         append("cost_kind=").append(JsonProtocol.nonBlank(event, "cost_kind") ?: "unknown").append('\n')
         append("latency_ms=").append(event.optLong("latency_ms")).append('\n')
         append("tools=").append(JsonProtocol.nonBlank(event, "tool_summary").orEmpty()).append('\n')
+        parseTelemetry(event)?.let { telemetry ->
+            for ((source, label) in listOf("rounds_completed" to "tool_rounds_completed", "calls_executed" to "tool_calls_executed",
+                "files" to "file_io_files", "source_read_passes" to "file_io_read_passes",
+                "source_read_bytes" to "file_io_read_bytes", "file_work_ms" to "file_io_work_ms")) {
+                if (telemetry.has(source)) append(label).append('=').append(telemetry.optLong(source)).append('\n')
+            }
+            telemetry.optJSONArray("executed_tools")?.let { tools ->
+                val names = (0 until tools.length()).mapNotNull { i -> JsonProtocol.string(tools, i).trim().takeIf { it.isNotEmpty() } }
+                if (names.isNotEmpty()) append("executed_tools=").append(names.joinToString(",")).append('\n')
+            }
+            telemetry.optJSONObject("cost_details")?.let { append("cost_details=").append(it).append('\n') }
+        }
         append("request_id=").append(JsonProtocol.nonBlank(event, "request_id").orEmpty()).append('\n')
         val error = JsonProtocol.nonBlank(event, "error").orEmpty()
         if (error.isNotBlank()) append("error=").append(error).append('\n')

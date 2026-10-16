@@ -21,7 +21,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         // during connection initialization. Concurrent helper opens can race
         // for its exclusive journal-mode transition and raise SQLITE_BUSY.
         private val CONNECTION_OPEN_LOCK = Any()
-        private const val DB_VERSION = 24
+        private const val DB_VERSION = 25
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val METRICS_TABLE = "effort_metrics"
@@ -162,6 +162,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         ensureRequestAccountingTable(db)
         ensureOpenRouterRoundsTable(db)
         ensureLocalArtifactsTable(db)
+        ensureTelemetryAndCostColumns(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -288,6 +289,25 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         ensureRequestAccountingTable(db)
         ensureOpenRouterRoundsTable(db)
         ensureLocalArtifactsTable(db)
+        ensureTelemetryAndCostColumns(db)
+    }
+
+    /** Additive, idempotent for existing v25 installs as well as migration from v24. */
+    private fun ensureTelemetryAndCostColumns(db: SQLiteDatabase) {
+        fun column(table: String, name: String, definition: String = "TEXT") {
+            val present = db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+                val index = cursor.getColumnIndexOrThrow("name")
+                var found = false
+                while (cursor.moveToNext()) if (cursor.getString(index) == name) found = true
+                found
+            }
+            if (!present) db.execSQL("ALTER TABLE $table ADD COLUMN $name $definition")
+        }
+        column(MESSAGE_TABLE, "telemetry_summary")
+        column(MESSAGE_TABLE, "openai_usage_ledger")
+        column(REQUEST_EVENT_TABLE, "telemetry_summary")
+        column(REQUEST_ACCOUNTING_TABLE, "telemetry_summary")
+        column(METRICS_TABLE, "cost_kind", "TEXT NOT NULL DEFAULT 'unknown'")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -381,7 +401,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (oldVersion < 17) {
             MessageMetadataCodec.allKeys.filter {
                 it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state",
-                    "openai_instructions_sha256", "openai_protocol_output")
+                    "openai_instructions_sha256", "openai_protocol_output", "telemetry_summary", "openai_usage_ledger")
             }.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
             }
@@ -452,6 +472,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if ("active_indexed_checkpoint" !in columns)
                 db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_indexed_checkpoint TEXT")
         }
+        if (oldVersion < 25) ensureTelemetryAndCostColumns(db)
     }
 
     /** One-time migration from v4.13's SharedPreferences chat_store JSON. */
@@ -768,43 +789,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (messages.size == 1 && JsonProtocol.string(messages[0], "role") == "assistant" &&
             JsonProtocol.string(messages[0], "request_id") != expectedRequestId) return false
         return completeActiveRequestOnce(id, expectedRequestId) { db ->
-        // This callback may hold an older full-chat snapshot. Commit only the assistant
-        // belonging to the winning request, preserving newer messages/feedback/files.
-        val assistant = messages.lastOrNull { item ->
-            item.optString("role") == "assistant" && item.optString("request_id") == expectedRequestId
-        }
+        val provided = messages.lastOrNull { it.optString("role") == "assistant" && it.optString("request_id") == expectedRequestId }
+        val assistant = recoverAssistantInDb(db, id, expectedRequestId, provided, provided?.optString("status") ?: "failed")
         if (assistant != null) {
-            val existingId = db.query(MESSAGE_TABLE, arrayOf("id"),
-                "chat_id=? AND request_id=? AND role='assistant'",
-                arrayOf(id, expectedRequestId), null, null, "position DESC", "1"
-            ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
-            if (existingId == null) {
-                val nextPosition = db.rawQuery(
-                    "SELECT COALESCE(MAX(position), -1) + 1 FROM $MESSAGE_TABLE WHERE chat_id=?",
-                    arrayOf(id)
-                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-                val copy = JSONObject(assistant.toString())
-                db.insertOrThrow(
-                    MESSAGE_TABLE, null,
-                    messageContentValues(id, nextPosition, copy, ChatMessageFingerprint.of(copy))
-                )
-            } else {
-                val position = db.query(MESSAGE_TABLE, arrayOf("position"), "id=?", arrayOf(existingId.toString()),
-                    null,null,null,"1"
-                ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-                db.update(MESSAGE_TABLE,
-                    messageContentValues(id, position, assistant, ChatMessageFingerprint.of(assistant)),
-                    "id=?", arrayOf(existingId.toString())
-                )
-            }
+            persistTerminalAssistantInDb(db, id, expectedRequestId, assistant)
             queueAnswerNotification(db, id, expectedRequestId, assistant.optString("status") == "completed")
-            // Consuming the active owner must publish its terminal ledger status
-            // in the same transaction. Later accounting only enriches usage/cost.
-            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
-                put("local_status", assistant.optString("status").ifBlank { "unknown" })
-                put("updated_at", System.currentTimeMillis())
-            }, "chat_id=? AND local_request_id=? AND local_status='running'",
-                arrayOf(id, expectedRequestId))
         }
         val clearOpenAiChain = assistant?.optString("provider") == "openai" &&
             assistant.optString("status") != "completed"
@@ -821,7 +810,150 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     /** Fatal recovery with no new messages still consumes its one-shot claim. */
     fun claimActiveRequestFailure(chatId: String, expectedRequestId: String): Boolean =
-        completeActiveRequestOnce(chatId, expectedRequestId) { db -> queueAnswerNotification(db, chatId, expectedRequestId, false) }
+        completeActiveRequestOnce(chatId, expectedRequestId) { db ->
+            recoverAssistantInDb(db, chatId, expectedRequestId, null, "failed")?.let {
+                persistTerminalAssistantInDb(db, chatId, expectedRequestId, it)
+            }
+            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+                put("local_status", "failed"); put("updated_at", System.currentTimeMillis())
+            }, "chat_id=? AND local_request_id=? AND local_status='running'", arrayOf(chatId, expectedRequestId))
+            queueAnswerNotification(db, chatId, expectedRequestId, false)
+        }
+
+    private fun readCheckpointInDb(db: SQLiteDatabase, table: String, field: String,
+        chatId: String, requestId: String): JSONObject? =
+        SqliteLargeTextQuery.query(db, table, arrayOf(field), "chat_id=? AND request_id=?",
+            arrayOf(chatId, requestId), null, null, null, "1", arrayOf("chat_id", "request_id")).use { c ->
+            // A malformed paid checkpoint must roll back terminal compaction, not be silently deleted.
+            if (c.moveToFirst()) JSONObject(c.getString(0)) else null
+        }
+
+    private fun readAccountingTelemetryInDb(db: SQLiteDatabase, chatId: String, requestId: String): String? =
+        SqliteLargeTextQuery.query(db, REQUEST_ACCOUNTING_TABLE, arrayOf("telemetry_summary"),
+            "chat_id=? AND local_request_id=?", arrayOf(chatId, requestId), null, null, null,
+            "1", arrayOf("chat_id", "local_request_id")).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    /** Restores paid terminal output as well as the current indexed SSE partial before deleting any cursor. */
+    private fun recoverAssistantInDb(db: SQLiteDatabase, chatId: String, requestId: String,
+        provided: JSONObject?, terminalStatus: String): JSONObject? {
+        val oa = readCheckpointInDb(db, "openai_tool_checkpoints", "request_checkpoint", chatId, requestId)
+        val or = readCheckpointInDb(db, "openrouter_checkpoints", "protocol", chatId, requestId)
+        val active = SqliteLargeTextQuery.query(db, CHAT_TABLE,
+            arrayOf("active_response_id", "active_text", "active_indexed_checkpoint"), "id=? AND active_request_id=?",
+            arrayOf(chatId, requestId), null, null, null, "1").use { c ->
+            if (!c.moveToFirst()) JSONObject() else JSONObject().apply {
+                c.getString(0)?.let { put("response_id", it) }
+                put("text", c.getString(1) ?: "")
+                c.getString(2)?.let { put("indexed_checkpoint", it) }
+            }
+        }
+        var durable = OpenAiLocalFileToolBridge.durableResponse(oa)
+        if (or == null && JsonProtocol.nonBlank(active, "indexed_checkpoint") != null) {
+            val state = ResponseIndexedCheckpoint.restore(active)
+            val current = OpenAiEffectiveResponse.assemble(state.terminalResponse, state)
+            if (oa?.optString("phase") != "finished") {
+                val prior = oa?.optJSONArray("prior_output") ?: JSONArray()
+                val output = JsonProtocol.arrayCopy(prior)
+                if (JsonProtocol.nonBlank(current, "id") != oa?.let { JsonProtocol.nonBlank(it, "parent_id") }) {
+                    current.optJSONArray("output")?.let { items ->
+                        for (i in 0 until items.length()) output.put(JsonProtocol.copy(items.get(i)))
+                    }
+                }
+                if (output.length() > 0) current.put("output", output)
+                val ledger = OpenAiUsageLedger.resolve(oa, current)
+                OpenAiUsageLedger.attach(current, ledger)
+                durable = current
+            }
+        }
+        val message = provided?.let(JsonProtocol::objectCopy) ?: JSONObject()
+            .put("role", "assistant").put("request_id", requestId).put("status", terminalStatus)
+            .put("provider", if (or != null) "openrouter" else "openai")
+            .put("text", JsonProtocol.string(active, "text"))
+        val output = durable?.optJSONArray("output")
+        if (output != null && (oa?.optString("phase") == "finished" || !message.has("openai_protocol_output"))) {
+            message.put("openai_protocol_output", OpenAiLocalFileToolBridge.completePendingOutputs(output))
+        }
+        if (durable != null) {
+            val fallbackText = OpenAiSseStreamReader.terminalOutputText(durable)
+            val model = AstraResponseModel.fromResponse(durable, fallbackText, requestId, terminalStatus)
+            val restored = model.toChatJson()
+            for (key in listOf("response_id", "response_model", "reasoning_summary", "annotations", "tools")) {
+                if (!message.has(key) || message.isNull(key)) restored.opt(key)?.let { message.put(key, JsonProtocol.copy(it)) }
+            }
+            if (JsonProtocol.string(message, "text").isBlank() && fallbackText.isNotBlank()) message.put("text", fallbackText)
+            if (!message.has("generated_images") && model.generatedImageResults.isNotEmpty()) {
+                message.put("generated_images", GeneratedImageStore.save(appContext.filesDir, model.generatedImageResults) { _, failure -> throw failure })
+            }
+        }
+        if (or != null && !message.has("openrouter_protocol"))
+            message.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(or, message))
+        if (or == null) {
+            // Marked aggregates merge as ledgers; they are never reinserted under a single response ID.
+            val ledger = OpenAiUsageLedger.resolve(oa, message)
+            val combined = OpenAiUsageLedger.merge(ledger, durable?.optJSONObject(OpenAiUsageLedger.FIELD))
+            OpenAiUsageLedger.total(combined)?.let { message.put("usage", it) }
+            if (combined.length() > 0) message.put(OpenAiUsageLedger.FIELD, combined)
+            val tools = OpenAiLocalFileToolBridge.extractTelemetrySummary(oa)
+            val incoming = message.optJSONObject("telemetry_summary") ?: JSONObject()
+            if (combined.length() > 0) incoming.put(OpenAiUsageLedger.FIELD, combined)
+            FileBackedIoTelemetry.mergeTelemetryJson(tools?.toString(), incoming)?.let {
+                message.put("telemetry_summary", JSONObject(it))
+            }
+        }
+        val evidence = provided != null || oa != null || or != null ||
+            JsonProtocol.string(message, "text").isNotBlank() || message.has("openai_protocol_output")
+        return message.takeIf { evidence }
+    }
+
+    private fun persistTerminalAssistantInDb(db: SQLiteDatabase, chatId: String, requestId: String,
+        assistant: JSONObject, archive: Boolean = false) {
+        if (archive) {
+            db.insertWithOnConflict("request_recovery_archive", null, ContentValues().apply {
+                put("chat_id", chatId); put("request_id", requestId)
+                put("recovery_message", assistant.toString()); put("created_at", System.currentTimeMillis())
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+        } else {
+            val existing = db.query(MESSAGE_TABLE, arrayOf("id", "position"),
+                "chat_id=? AND request_id=? AND role='assistant'", arrayOf(chatId, requestId),
+                null, null, "position DESC", "1").use { c -> if (c.moveToFirst()) Pair(c.getLong(0), c.getInt(1)) else null }
+            val position = existing?.second ?: db.rawQuery(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM $MESSAGE_TABLE WHERE chat_id=?", arrayOf(chatId)
+            ).use { c -> c.moveToFirst(); c.getInt(0) }
+            val values = messageContentValues(chatId, position, assistant, ChatMessageFingerprint.of(assistant))
+            if (existing == null) db.insertOrThrow(MESSAGE_TABLE, null, values)
+            else check(db.update(MESSAGE_TABLE, values, "id=?", arrayOf(existing.first.toString())) == 1)
+        }
+        val telemetry = FileBackedIoTelemetry.mergeTelemetryJson(readAccountingTelemetryInDb(db, chatId, requestId),
+            assistant.optJSONObject("telemetry_summary"))
+        val usage = assistant.optJSONObject("usage")
+        val router = assistant.optString("provider") == "openrouter"
+        db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+            put("local_status", assistant.optString("status").ifBlank { "unknown" })
+            put("updated_at", System.currentTimeMillis())
+            JsonProtocol.nonBlank(assistant, "response_id")?.let { put("response_id", it) }
+            JsonProtocol.nonBlank(assistant, "error")?.let { put("error", it.take(1200)) }
+            telemetry?.let { put("telemetry_summary", it) }
+            putUsageValues(this, usage, router)
+            if (router) OpenRouterUsageSnapshot.from(usage).reportedCostUsd?.let {
+                put("cost_kind", "provider_reported"); put("cost_usd", it.toString())
+            }
+        }, "chat_id=? AND local_request_id=? AND local_status='running'", arrayOf(chatId, requestId))
+    }
+
+    private fun putUsageValues(values: ContentValues, usage: JSONObject?, router: Boolean = false) {
+        fun nonnegative(source: JSONObject?, key: String): Long? =
+            source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+        nonnegative(usage, if (router) "prompt_tokens" else "input_tokens")?.let { values.put("input_tokens", it) }
+        nonnegative(usage, if (router) "completion_tokens" else "output_tokens")?.let { values.put("output_tokens", it) }
+        nonnegative(usage?.optJSONObject(if (router) "prompt_tokens_details" else "input_tokens_details"), "cached_tokens")?.let { values.put("cached_tokens", it) }
+        nonnegative(usage?.optJSONObject(if (router) "completion_tokens_details" else "output_tokens_details"), "reasoning_tokens")?.let { values.put("reasoning_tokens", it) }
+    }
+
+    /** Explicit recovery archive, independent of visible bubbles; deleted with its owning chat. */
+    fun getRequestRecoveryArchive(chatId: String, requestId: String): JSONObject? =
+        SqliteLargeTextQuery.query(readableDatabase, "request_recovery_archive", arrayOf("recovery_message"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+            "1", arrayOf("chat_id", "request_id")).use { c -> if (c.moveToFirst()) JSONObject(c.getString(0)) else null }
 
     /**
      * Stop and active-cursor release are a single SQLite transaction. A Worker
@@ -847,6 +979,10 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 put("created_at", System.currentTimeMillis()); put("updated_at", System.currentTimeMillis())
                 put("local_status", "running")
             }, SQLiteDatabase.CONFLICT_IGNORE)
+            recoverAssistantInDb(db, chatId, expectedRequestId, null, "stopped")?.let {
+                // Stop intentionally removes its visible bubble. Keep the paid data in an explicit archive.
+                persistTerminalAssistantInDb(db, chatId, expectedRequestId, it, archive = true)
+            }
             db.update(
                 REQUEST_ACCOUNTING_TABLE,
                 ContentValues().apply {
@@ -854,7 +990,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     put("updated_at", System.currentTimeMillis())
                     active?.second?.takeIf { it.isNotBlank() }?.let { put("response_id", it) }
                 },
-                "chat_id=? AND local_request_id=? AND local_status='running'",
+                "chat_id=? AND local_request_id=? AND local_status IN ('running','stopped')",
                 arrayOf(chatId, expectedRequestId)
             )
             val cleared = ContentValues().apply {
@@ -878,6 +1014,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 arrayOf(chatId, expectedRequestId)
             ) == 1
             if (stopped) {
+                db.delete("openai_tool_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
+                db.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
                 if (removeUserMessage) db.delete(MESSAGE_TABLE,
                     "chat_id=? AND request_id=? AND role='user'", arrayOf(chatId, expectedRequestId))
                 // One event for this exact stopped local request, within the CAS transaction.
@@ -896,7 +1034,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         CASE WHEN cost_kind='provider_reported' AND cost_usd IS NOT NULL
                             THEN 'provider_reported' ELSE 'unknown' END,
                         CASE WHEN cost_kind='provider_reported' THEN cost_usd ELSE NULL END,
-                        MAX(0, ? - created_at)
+                        MAX(0, ? - created_at), telemetry_summary
                     FROM $REQUEST_ACCOUNTING_TABLE
                     WHERE chat_id=? AND local_request_id=?
                 """.trimIndent(), arrayOf(now, now, chatId, expectedRequestId))
@@ -944,6 +1082,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 CHAT_TABLE, cleared, "id=? AND active_request_id=?",
                 arrayOf(chatId, expectedRequestId)
             ) == 1
+            check(committed) { "Active owner changed inside terminal transaction" }
+            db.delete("openai_tool_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
+            db.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
         }
         return committed
     }
@@ -1106,7 +1247,8 @@ data class ExistingMessageRow(
         reasoningTokens: Long,
         success: Boolean,
         errorType: String?,
-        estimatedCostUsd: Double = 0.0
+        estimatedCostUsd: Double? = null,
+        costKind: String = if (estimatedCostUsd != null) "estimated" else "unknown"
     ) {
         if (chatId.isBlank()) return
         writableDatabase.transaction { db ->
@@ -1135,7 +1277,9 @@ data class ExistingMessageRow(
                 put("reasoning_tokens", reasoningTokens.coerceAtLeast(0))
                 put("success", if (success) 1 else 0)
                 putStringOrNull("error_type", errorType)
-                put("estimated_cost_usd", estimatedCostUsd.coerceAtLeast(0.0))
+                val validCost = estimatedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
+                put("estimated_cost_usd", validCost ?: 0.0)
+                put("cost_kind", if (validCost == null) "unknown" else costKind.takeIf { it in setOf("estimated", "provider_reported") } ?: "unknown")
             }
             db.insert(METRICS_TABLE, null, v)
         }
@@ -1205,7 +1349,8 @@ data class ExistingMessageRow(
         httpRequestId: String? = null,
         usage: JSONObject? = null,
         reportedCostUsd: Double? = null,
-        error: String? = null
+        error: String? = null,
+        telemetrySummary: JSONObject? = null
     ): Boolean {
         if (chatId.isBlank() || localRequestId.isBlank()) return false
         var written = false
@@ -1220,8 +1365,11 @@ data class ExistingMessageRow(
             val knownCost = existing[1]
             val capturedProvider = existing[2]
             val existingProviderStatus = existing[3]
+            val mergedTelemetry = if (telemetrySummary != null) FileBackedIoTelemetry.mergeTelemetryJson(
+                readAccountingTelemetryInDb(db, chatId, localRequestId), telemetrySummary) else null
             val values = ContentValues().apply {
                 put("updated_at", System.currentTimeMillis())
+                mergedTelemetry?.let { put("telemetry_summary", it) }
                 if (localStatus == "running") put("local_status", status.ifBlank { "unknown" })
                 if (existingProviderStatus.isNullOrBlank() || existingProviderStatus == "in_progress") {
                     put("provider_status", status.ifBlank { "unknown" })
@@ -1265,6 +1413,20 @@ data class ExistingMessageRow(
         return written
     }
 
+    /** Merge diagnostics without touching lifecycle, provider status, or ownership. */
+    fun recordRequestTelemetry(chatId: String, localRequestId: String, telemetrySummary: JSONObject): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank()) return false
+        var updated = false
+        writableDatabase.transaction { db ->
+            val merged = FileBackedIoTelemetry.mergeTelemetryJson(
+                readAccountingTelemetryInDb(db, chatId, localRequestId), telemetrySummary) ?: return@transaction
+            updated = db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
+                put("telemetry_summary", merged); put("updated_at", System.currentTimeMillis())
+            }, "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId)) == 1
+        }
+        return updated
+    }
+
     /**
      * Bind an ID delivered by the original Create after local Stop. Only its
      * existing, stopped OpenAI accounting row with no captured ID can change;
@@ -1297,36 +1459,42 @@ data class ExistingMessageRow(
         responseId: String,
         response: JSONObject
     ): Boolean {
-        if (chatId.isBlank() || localRequestId.isBlank() || responseId.isBlank()) return false
-        if (response.optString("id") != responseId) return false
+        if (chatId.isBlank() || localRequestId.isBlank() || responseId.isBlank() || response.optString("id") != responseId) return false
         val status = response.optString("status")
         if (status !in setOf("completed", "cancelled", "failed", "incomplete", "in_progress", "queued")) return false
+        val terminal = status in setOf("completed", "cancelled", "failed", "incomplete")
         val usage = response.optJSONObject("usage")
-        val values = ContentValues().apply {
-            put("updated_at", System.currentTimeMillis())
-            // "in_progress" / "queued" are observations, not terminal outcomes.
-            if (status in setOf("completed", "cancelled", "failed", "incomplete")) {
-                put("provider_status", status)
+        if (!terminal && usage == null) return false
+        var updated = false
+        writableDatabase.transaction { db ->
+            val captured = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("response_id"),
+                "chat_id=? AND local_request_id=? AND response_id=? AND provider='openai' AND local_status='stopped'",
+                arrayOf(chatId, localRequestId, responseId), null, null, null, "1").use { it.moveToFirst() }
+            if (!captured) return@transaction
+            val raw = readAccountingTelemetryInDb(db, chatId, localRequestId)
+            val telemetry = raw?.let(::JSONObject) ?: JSONObject()
+            val ledger = OpenAiUsageLedger.observe(telemetry.optJSONObject(OpenAiUsageLedger.FIELD), responseId, usage, status)
+            val total = OpenAiUsageLedger.total(ledger)
+            if (ledger.length() > 0) telemetry.put(OpenAiUsageLedger.FIELD, ledger)
+            val values = ContentValues().apply {
+                put("updated_at", System.currentTimeMillis())
+                if (terminal) put("provider_status", status)
+                if (telemetry.length() > 0) put("telemetry_summary", telemetry.toString())
+                putUsageValues(this, total)
             }
-            fun nonnegative(source: JSONObject?, key: String): Long? =
-                source?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
-            nonnegative(usage, "input_tokens")?.let { put("input_tokens", it) }
-            nonnegative(usage, "output_tokens")?.let { put("output_tokens", it) }
-            usage?.optJSONObject("input_tokens_details")?.let {
-                nonnegative(it, "cached_tokens")?.let { n -> put("cached_tokens", n) }
+            updated = db.update(REQUEST_ACCOUNTING_TABLE, values,
+                "chat_id=? AND local_request_id=? AND response_id=? AND provider='openai' AND local_status='stopped'",
+                arrayOf(chatId, localRequestId, responseId)) == 1
+            if (updated) {
+                val eventValues = ContentValues().apply {
+                    if (telemetry.length() > 0) put("telemetry_summary", telemetry.toString())
+                    putUsageValues(this, total)
+                }
+                if (eventValues.size() > 0) db.update(REQUEST_EVENT_TABLE, eventValues,
+                    "chat_id=? AND request_id=? AND event_type='request_stopped'", arrayOf(chatId, localRequestId))
             }
-            usage?.optJSONObject("output_tokens_details")?.let {
-                nonnegative(it, "reasoning_tokens")?.let { n -> put("reasoning_tokens", n) }
-            }
-            // Responses usage reports tokens; it does not establish a USD charge.
-            // cost_kind / cost_usd / local_status / response_id are immutable here.
         }
-        if (values.size() <= 1) return false // no terminal status or usage evidence
-        return writableDatabase.update(
-            REQUEST_ACCOUNTING_TABLE, values,
-            "chat_id=? AND local_request_id=? AND response_id=? AND provider='openai' AND local_status='stopped'",
-            arrayOf(chatId, localRequestId, responseId)
-        ) == 1
+        return updated
     }
 
     /**
@@ -1409,12 +1577,10 @@ data class ExistingMessageRow(
     }
 
     private fun recomputeOpenRouterTotalsInDb(db: SQLiteDatabase, chatId: String, localRequestId: String) {
-        val account = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("rounds_sealed"), 
-            "chat_id=? AND local_request_id=? AND provider='openrouter'",
-            arrayOf(chatId, localRequestId), null, null, null, "1").use { c ->
-            c.moveToFirst() && c.getInt(0) == 1
-        }
-        if (!account) return
+        val sealed = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("rounds_sealed"),
+            "chat_id=? AND local_request_id=? AND provider='openrouter'", arrayOf(chatId, localRequestId),
+            null, null, null, "1").use { it.moveToFirst() && it.getInt(0) == 1 }
+        if (!sealed) return
         db.rawQuery("""
             SELECT COUNT(*), COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN CAST(cost_usd AS REAL) ELSE 0 END),0),
@@ -1422,21 +1588,28 @@ data class ExistingMessageRow(
             FROM $OPENROUTER_ROUND_TABLE WHERE chat_id=? AND local_request_id=?
         """.trimIndent(), arrayOf(chatId, localRequestId)).use { c ->
             if (!c.moveToFirst()) return
-            val count = c.getLong(0)
-            val complete = count > 0 && count == c.getLong(1)
-            db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
-                put("updated_at", System.currentTimeMillis())
-                if (complete) {
-                    put("cost_kind", "provider_reported")
-                    put("cost_usd", c.getDouble(2).toString())
-                } else {
-                    put("cost_kind", "unknown")
-                    putNull("cost_usd")
-                }
+            val complete = c.getLong(0) > 0 && c.getLong(0) == c.getLong(1)
+            val cost = if (complete) c.getDouble(2) else null
+            val usageValues = ContentValues().apply {
                 if (!c.isNull(3)) put("input_tokens", c.getLong(3))
                 if (!c.isNull(4)) put("output_tokens", c.getLong(4))
-            }, "chat_id=? AND local_request_id=? AND provider='openrouter'",
-                arrayOf(chatId, localRequestId))
+            }
+            val accounting = ContentValues(usageValues).apply {
+                put("updated_at", System.currentTimeMillis())
+                put("cost_kind", if (complete) "provider_reported" else "unknown")
+                if (cost == null) putNull("cost_usd") else put("cost_usd", cost.toString())
+            }
+            db.update(REQUEST_ACCOUNTING_TABLE, accounting, "chat_id=? AND local_request_id=? AND provider='openrouter'", arrayOf(chatId, localRequestId))
+            val event = ContentValues(usageValues).apply {
+                put("cost_kind", if (complete) "provider_reported" else "unknown")
+                if (cost == null) putNull("cost_usd") else put("cost_usd", cost.toString())
+            }
+            db.update(REQUEST_EVENT_TABLE, event, "chat_id=? AND request_id=?", arrayOf(chatId, localRequestId))
+            val metric = ContentValues(usageValues).apply {
+                put("cost_kind", if (complete) "provider_reported" else "unknown")
+                put("estimated_cost_usd", cost ?: 0.0)
+            }
+            db.update(METRICS_TABLE, metric, "chat_id=? AND request_id=?", arrayOf(chatId, localRequestId))
         }
     }
 
@@ -1488,8 +1661,8 @@ data class ExistingMessageRow(
     fun listRequestAccounting(chatId: String): List<JSONObject> {
         if (chatId.isBlank()) return emptyList()
         val rows = mutableListOf<JSONObject>()
-        readableDatabase.query(REQUEST_ACCOUNTING_TABLE, null, "chat_id=?", arrayOf(chatId),
-            null, null, "created_at ASC, local_request_id ASC").use { c ->
+        SqliteLargeTextQuery.query(readableDatabase, REQUEST_ACCOUNTING_TABLE, null, "chat_id=?", arrayOf(chatId),
+            null, null, "created_at ASC, local_request_id ASC", keyColumns = arrayOf("chat_id", "local_request_id")).use { c ->
             while (c.moveToNext()) {
                 val value = JSONObject()
                 for (i in 0 until c.columnCount) {
@@ -1540,11 +1713,12 @@ data class ExistingMessageRow(
         cacheWriteTokens: Long = 0L,
         outputTokens: Long = 0L,
         reasoningTokens: Long = 0L,
-        estimatedCostUsd: Double = 0.0,
+        estimatedCostUsd: Double? = null,
         reportedCostUsd: Double? = null,
         latencyMs: Long = 0L,
         toolSummary: String? = null,
-        error: String? = null
+        error: String? = null,
+        telemetrySummary: JSONObject? = null
     ) {
         if (chatId.isBlank()) return
         writableDatabase.transaction { db ->
@@ -1578,13 +1752,14 @@ data class ExistingMessageRow(
                 put("output_tokens", outputTokens.coerceAtLeast(0L))
                 put("reasoning_tokens", reasoningTokens.coerceAtLeast(0L))
                 // The legacy numeric estimate is not proof of a provider charge.
-                put("estimated_cost_usd", estimatedCostUsd.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0)
+                put("estimated_cost_usd", estimatedCostUsd?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0)
                 val verifiedCost = reportedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
                 put("cost_kind", if (verifiedCost == null) "unknown" else "provider_reported")
                 if (verifiedCost == null) putNull("cost_usd") else put("cost_usd", verifiedCost.toString())
                 put("latency_ms", latencyMs.coerceAtLeast(0L))
                 putStringOrNull("tool_summary", toolSummary)
                 putStringOrNull("error", error?.take(1200))
+                telemetrySummary?.let { put("telemetry_summary", it.toString()) }
             }
             db.insert(REQUEST_EVENT_TABLE, null, values)
         }
@@ -1627,6 +1802,9 @@ data class ExistingMessageRow(
                 c.getString(c.getColumnIndexOrThrow("response_model"))?.let { event.put("response_model", it) }
                 c.getString(c.getColumnIndexOrThrow("tool_summary"))?.let { event.put("tool_summary", it) }
                 c.getString(c.getColumnIndexOrThrow("error"))?.let { event.put("error", it) }
+                c.getString(c.getColumnIndexOrThrow("telemetry_summary"))?.let { raw ->
+                    event.put("telemetry_summary", runCatching { JSONObject(raw) }.getOrElse { raw })
+                }
                 out += event
             }
         }
@@ -2097,26 +2275,24 @@ data class ExistingMessageRow(
     }
 
     fun usageTotals(since: Long = 0L): JSONObject {
-        readableDatabase.query(
-            METRICS_TABLE,
-            arrayOf(
-                "COUNT(*)", "SUM(success)", "SUM(input_tokens)", "SUM(cached_tokens)",
-                "SUM(cache_write_tokens)", "SUM(output_tokens)", "SUM(reasoning_tokens)",
-                "SUM(estimated_cost_usd)"
-            ),
-            "created_at>=?", arrayOf(since.coerceAtLeast(0L).toString()),
-            null, null, null
-        ).use { c ->
+        readableDatabase.rawQuery("""
+            SELECT COUNT(*), COALESCE(SUM(success),0), COALESCE(SUM(input_tokens),0),
+                COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+                COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0),
+                COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN estimated_cost_usd ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN cost_kind='estimated' THEN estimated_cost_usd ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN cost_kind='estimated' THEN 1 ELSE 0 END),0)
+            FROM $METRICS_TABLE WHERE created_at>=?
+        """.trimIndent(), arrayOf(since.coerceAtLeast(0L).toString())).use { c ->
             if (!c.moveToFirst()) return JSONObject()
-            return JSONObject()
-                .put("requests", c.getLong(0))
-                .put("success", c.getLong(1))
-                .put("input_tokens", c.getLong(2))
-                .put("cached_tokens", c.getLong(3))
-                .put("cache_write_tokens", c.getLong(4))
-                .put("output_tokens", c.getLong(5))
-                .put("reasoning_tokens", c.getLong(6))
-                .put("estimated_cost_usd", c.getDouble(7))
+            val total = c.getLong(0); val known = c.getLong(8); val estimates = c.getLong(10)
+            return JSONObject().put("requests",total).put("success",c.getLong(1))
+                .put("input_tokens",c.getLong(2)).put("cached_tokens",c.getLong(3))
+                .put("cache_write_tokens",c.getLong(4)).put("output_tokens",c.getLong(5)).put("reasoning_tokens",c.getLong(6))
+                .put("provider_reported_cost_usd",c.getDouble(7)).put("known_cost_requests",known)
+                .put("estimated_cost_usd",c.getDouble(9)).put("estimated_cost_requests",estimates)
+                .put("unknown_cost_requests",total-known-estimates)
         }
     }
 
@@ -2133,6 +2309,11 @@ data class ExistingMessageRow(
         db.execSQL("""CREATE TABLE IF NOT EXISTS openrouter_checkpoints (
             chat_id TEXT NOT NULL, request_id TEXT NOT NULL, protocol TEXT NOT NULL,
             PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS request_recovery_archive (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, recovery_message TEXT NOT NULL,
+            created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, request_id),
+            FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifacts (
             path TEXT PRIMARY KEY NOT NULL, chat_id TEXT NOT NULL, request_id TEXT NOT NULL,

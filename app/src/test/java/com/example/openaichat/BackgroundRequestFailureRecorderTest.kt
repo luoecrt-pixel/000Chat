@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
@@ -96,6 +97,115 @@ class BackgroundRequestFailureRecorderTest {
             assertFalse(BackgroundRequestFailureRecorder.persist(
                 db, "deleted", deleted, "resp_x", "failed", "late_callback"))
             assertTrue(db.listRequestAccounting("deleted").isEmpty())
+        }
+    }
+
+    private fun usage(input: Long, output: Long = 0L) = JSONObject()
+        .put("input_tokens", input).put("output_tokens", output)
+        .put("input_tokens_details", JSONObject().put("cached_tokens", input / 10))
+        .put("output_tokens_details", JSONObject().put("reasoning_tokens", output / 2))
+
+    private fun checkpoint(ledger: JSONObject, phase: String) = JSONObject()
+        .put("version", 1).put("phase", phase).put("round", 1)
+        .put("parent_id", "resp_parent").put("response_id", "resp_x")
+        .put("usage", OpenAiUsageLedger.total(ledger))
+        .put(OpenAiUsageLedger.FIELD, ledger)
+        .put("prior_output", JSONArray())
+        .put("telemetry", JSONObject().put("rounds_completed", 1).put("calls_executed", 1)
+            .put("executed_tools", JSONArray().put("read_attached_file")))
+
+    @Test fun finishedDurableResponseSurvivesFailureAndCompactionWithoutCountingAggregateAsChildUsage() {
+        var requestId = ""
+        ChatDatabase(context).use { db ->
+            requestId = prepared(db)
+            val ledger = OpenAiUsageLedger.observe(
+                OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed"),
+                "resp_x", usage(20, 4), "completed")
+            val signed = JSONObject().put("type", "reasoning").put("id", "rs_paid_final")
+                .put("encrypted_content", "exact-paid-final-signed")
+            val output = JSONArray().put(signed).put(JSONObject().put("type", "message")
+                .put("role", "assistant").put("content", JSONArray().put(JSONObject()
+                    .put("type", "output_text").put("text", "Paid final answer"))))
+            val terminal = OpenAiUsageLedger.attach(JSONObject().put("id", "resp_x")
+                .put("status", "completed").put("model", "test-actual-model").put("output", output), ledger)
+            assertTrue(db.saveOpenAiToolCheckpoint("chat", requestId,
+                checkpoint(ledger, "finished").put("final_response", terminal)))
+        }
+        ChatDatabase(context).use { db ->
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
+                "resp_x", "failed", "local_finalization_failure"))
+            assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
+            assertNull(db.getActiveResponse("chat"))
+        }
+        ChatDatabase(context).use { db ->
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals("Paid final answer", assistant.getString("text"))
+            assertEquals("exact-paid-final-signed", assistant.getJSONArray("openai_protocol_output")
+                .getJSONObject(0).getString("encrypted_content"))
+            assertEquals(120L, assistant.getJSONObject("usage").getLong("input_tokens"))
+            assertEquals(120L, OpenAiUsageLedger.total(assistant.getJSONObject(OpenAiUsageLedger.FIELD))!!
+                .getLong("input_tokens"))
+            assertEquals(120L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
+            val event = db.listRequestEvents("chat").single()
+            assertEquals(120L, event.getLong("input_tokens"))
+            assertEquals(1, event.getJSONObject("telemetry_summary").getInt("calls_executed"))
+            assertFalse(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
+                "resp_x", "failed", "duplicate_callback"))
+            assertEquals(2, db.getChat("chat")!!.getJSONArray("messages").length())
+        }
+    }
+
+    @Test fun rawCurrentChildUsageAndIndexedPaidOutputArePreservedOnceWhenLaterRecoveryFails() {
+        val requestId = ChatDatabase(context).use { db ->
+            val request = prepared(db)
+            val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
+            val parentSigned = JSONObject().put("type", "reasoning").put("id", "rs_parent")
+                .put("encrypted_content", "signed-parent")
+            val childSigned = JSONObject().put("type", "reasoning").put("id", "rs_child")
+                .put("encrypted_content", "signed-current-child")
+            val terminal = JSONObject().put("id", "resp_x").put("status", "failed")
+                .put("usage", usage(20, 4)).put("output", JSONArray().put(childSigned))
+            val state = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_x"),
+                JSONObject().put("type", "response.failed").put("response", terminal)).state
+            assertTrue(db.updateActiveResponse("chat", "resp_x", state.text, "failed", 2, request,
+                ResponseIndexedCheckpoint.serialize(state)))
+            assertTrue(db.saveOpenAiToolCheckpoint("chat", request,
+                checkpoint(ledger, "waiting").put("prior_output", JSONArray().put(parentSigned))))
+            request
+        }
+        ChatDatabase(context).use { db ->
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
+                "resp_x", "failed", "fatal_read_failure"))
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals("", assistant.getString("text"))
+            val output = assistant.getJSONArray("openai_protocol_output")
+            assertEquals(2, output.length())
+            assertEquals("signed-parent", output.getJSONObject(0).getString("encrypted_content"))
+            assertEquals("signed-current-child", output.getJSONObject(1).getString("encrypted_content"))
+            assertEquals(120L, assistant.getJSONObject("usage").getLong("input_tokens"))
+            val row = db.listRequestAccounting("chat").single()
+            assertEquals(120L, row.getLong("input_tokens"))
+            assertEquals(14L, row.getLong("output_tokens"))
+            assertEquals(12L, row.getLong("cached_tokens"))
+            assertEquals(7L, row.getLong("reasoning_tokens"))
+            assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
+        }
+    }
+
+    @Test fun usageOnlyFailureCreatesDurableAssistantAndLedgerWithoutFabricatingTypedOutput() {
+        ChatDatabase(context).use { db ->
+            val requestId = prepared(db)
+            assertTrue(db.updateActiveResponse("chat", "resp_x", "", "in_progress", -1L, requestId))
+            val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
+            assertTrue(db.saveOpenAiToolCheckpoint("chat", requestId, checkpoint(ledger, "posting")))
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId,
+                "resp_x", "failed", "ambiguous_continuation_post"))
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals("", assistant.getString("text"))
+            assertFalse(assistant.has("openai_protocol_output"))
+            assertEquals(100L, assistant.getJSONObject("usage").getLong("input_tokens"))
+            assertEquals(100L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
+            assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
         }
     }
 }

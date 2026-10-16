@@ -153,9 +153,10 @@ class OpenAiWorkerToolRecoveryTest {
             assertTrue(JSONObject(output.getJSONObject(2).getString("output")).getJSONArray("matches").length() > 0)
             assertEquals(32, assistant.getJSONObject("usage").getInt("input_tokens"))
             assertEquals(40, assistant.getJSONObject("usage").getInt("output_tokens"))
-            val saved = db.getOpenAiToolCheckpoint(chatId, requestId)!!
-            assertEquals("finished", saved.getString("phase")); assertEquals(prior, saved.getJSONArray("prior_output").toString())
-            assertTelemetry(saved.getJSONObject("telemetry"))
+            assertNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+            assertTelemetry(assistant.getJSONObject("telemetry_summary"))
+            assertEquals(32, OpenAiUsageLedger.total(assistant.getJSONObject(OpenAiUsageLedger.FIELD))!!.getInt("input_tokens"))
+            assertEquals(32, db.listRequestAccounting(chatId).single().getInt("input_tokens"))
         }
         // A duplicate WorkManager execution must neither create nor GET anything or append another assistant.
         assertEquals(ListenableWorker.Result.success(), runBlocking { worker(chatId, requestId).doWork() })
@@ -174,7 +175,9 @@ class OpenAiWorkerToolRecoveryTest {
             assertEquals("failed", assistant.getString("status"))
             assertEquals("opaque-j-worker-signed", assistant.getJSONArray("openai_protocol_output")
                 .getJSONObject(0).getString("encrypted_content"))
-            assertTelemetry(db.getOpenAiToolCheckpoint(chatId, requestId)!!.getJSONObject("telemetry"))
+            assertNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+            assertTelemetry(assistant.getJSONObject("telemetry_summary"))
+            assertEquals(13, assistant.getJSONObject("usage").getInt("input_tokens"))
         }
     }
 }

@@ -252,16 +252,16 @@ class OpenAiLocalToolsIntegrationTest {
             }
             val deadline = SystemClock.elapsedRealtime() + 20_000
             var attached = false
-            val expectedLocalAttachments = if (includeText && fileAnalysis) 2 else selected.size
+            val expectedLocalAttachments = selected.size
             while (!attached && SystemClock.elapsedRealtime() < deadline) {
                 scenario.onActivity {
                     val localReady = (field(it, "attachedOpenRouterAttachments") as List<*>).size == expectedLocalAttachments
-                    val textReady = !includeText || !fileAnalysis || (field(it, "attachedFilePaths") as List<*>).size == 1
-                    attached = localReady && textReady && it.pendingUploads.get() == 0
+                    attached = localReady && it.pendingUploads.get() == 0
                 }
                 if (!attached) SystemClock.sleep(50)
             }
             assertTrue("All picker sources must be prepared", attached)
+            assertEquals("Selecting attachments must not upload any file before Send", 0, server.requestCount)
             if (recreate) scenario.recreate()
             scenario.onActivity { activity ->
                 @Suppress("UNCHECKED_CAST")
@@ -313,12 +313,12 @@ class OpenAiLocalToolsIntegrationTest {
                     val containerFiles = interpreter.getJSONObject("container").getJSONArray("file_ids")
                     assertEquals("The container gets the document, never the two vision photos", 1, containerFiles.length())
                     assertTrue(containerFiles.getString(0).startsWith("file_mixed_text_"))
-                    // #21 separately tracks the existing duplicate text upload under two filenames.
-                    // Accept either one necessary upload or that known extra; never an image upload.
-                    assertTrue("Only the text upload (and existing #21 duplicate) is allowed", textUploads.size in 1..2)
+                    assertEquals("The complete text source must be uploaded exactly once", 1, textUploads.size)
                     textUploads.forEach { upload ->
                         assertEquals("POST", upload.method)
                         val raw = String(upload.body.clone().readByteArray(), Charsets.ISO_8859_1)
+                        assertTrue("Preserve the original text filename", raw.contains("filename=\"${textFile!!.name}\""))
+                        assertFalse("Do not append a second text extension", raw.contains("${textFile.name}.txt"))
                         val boundary = upload.getHeader("Content-Type")!!.substringAfter("boundary=").trim('"')
                         assertTrue("The uploaded file must contain the complete text document",
                             raw.contains("\r\n\r\n${textFile!!.readText()}\r\n--$boundary"))
