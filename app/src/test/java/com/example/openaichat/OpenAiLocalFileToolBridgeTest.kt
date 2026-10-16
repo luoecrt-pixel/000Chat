@@ -163,7 +163,18 @@ class OpenAiLocalFileToolBridgeTest {
             onStatus = { statuses.add(it) }, credential = { "mock-only" })
         assertEquals(saved.getJSONObject("telemetry").toString(), db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONObject("telemetry").toString())
         assertEquals(1, server.requestCount)
-        assertEquals(saved.getJSONArray("next_input").toString(), JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("input").toString())
+        val expected = saved.getJSONArray("next_input")
+        val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8()).getJSONArray("input")
+        assertEquals(expected.length(), sent.length())
+        for (index in 0 until expected.length()) {
+            val original = expected.getJSONObject(index)
+            val actual = sent.getJSONObject(index)
+            assertEquals(original.keys().asSequence().toSet(), actual.keys().asSequence().toSet())
+            // The JSON writer canonicalizes object key order, while the saved
+            // tool output string and call pairing must stay byte-for-byte equal.
+            for (field in listOf("type", "call_id", "output"))
+                assertEquals(original.getString(field), actual.getString(field))
+        }
         assertTrue(statuses.single().contains("(1): search_attached_file"))
     }
 
