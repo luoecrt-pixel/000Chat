@@ -148,7 +148,7 @@ for index, expected in enumerate((large, other)):
 main_activity = (ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt").read_text()
 parsed = re.search(r'val parsedModel = AstraResponseModel\.fromResponse\(\s*effectiveResponse,\s*finalText,\s*(\w+)\s*,', main_activity)
 assert parsed and parsed.group(1) == "localRequestId", "Foreground assistant must use its local active request ID"
-assert 'val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)' in main_activity, "Foreground model must include all received typed output before extraction"
+assert re.search(r'val effectiveResponse = durableToolTerminal\s*\?: OpenAiEffectiveResponse\.assemble\(completedResponse, responseState\)', main_activity), "Foreground failure must prefer durable terminal output and otherwise retain all received typed output"
 assert 'JsonProtocol.string(messages[0], "request_id") != expectedRequestId) return false' in db, "Mismatched terminal assistant must not consume active ownership"
 assert '"Готово. Ответ не содержит текста."' not in main_activity, "UI status must not enter canonical response"
 assert '"Ответ завершился без полученного текста: "' not in main_activity, "Exception text must stay in metadata"

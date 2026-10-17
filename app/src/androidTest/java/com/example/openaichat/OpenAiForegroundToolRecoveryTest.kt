@@ -88,10 +88,16 @@ class OpenAiForegroundToolRecoveryTest {
         parentFile!!.mkdirs(); writeText("needle in original source"); files.add(this)
     }.let { OpenRouterAttachmentStore.classifyLocalFile(context, it, it.name, "text/plain") }
     private fun toolResponse(fileId: String) = JSONObject().put("id", "resp_j_parent").put("status", "completed")
+        .put("usage", JSONObject().put("input_tokens", 100).put("output_tokens", 5)
+            .put("input_tokens_details", JSONObject().put("cached_tokens", 30))
+            .put("output_tokens_details", JSONObject().put("reasoning_tokens", 2)))
         .put("output", JSONArray().put(JSONObject().put("type", "function_call").put("id", "fc_j")
             .put("call_id", "call_j").put("name", "search_attached_file")
             .put("arguments", JSONObject().put("file_id", fileId).put("query", "needle").toString())))
     private fun finalResponse() = JSONObject().put("id", "resp_j_child").put("status", "completed").put("model", "gpt-6-astra")
+        .put("usage", JSONObject().put("input_tokens", 20).put("output_tokens", 3)
+            .put("input_tokens_details", JSONObject().put("cached_tokens", 4))
+            .put("output_tokens_details", JSONObject().put("reasoning_tokens", 1)))
         .put("output", JSONArray().put(JSONObject().put("type", "message").put("id", "msg_j").put("role", "assistant")
             .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", "Recovered child")))))
     private fun sse(response: JSONObject) = MockResponse().setHeader("Content-Type", "text/event-stream")
@@ -169,7 +175,24 @@ class OpenAiForegroundToolRecoveryTest {
             awaitCondition("Final child was not committed") { assistant(chatId)?.optString("response_id") == "resp_j_child" }
             assertEquals("Recovered child", assistant(chatId)!!.getString("text"))
             assertNull(active(chatId)); assertEquals(5, server.requestCount)
-            assertTrue(assistant(chatId)!!.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
+            val terminal = assistant(chatId)!!
+            assertTrue(terminal.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
+            assertEquals("GET retries must not repeat the parent round's usage", 120L,
+                terminal.getJSONObject("usage").getLong("input_tokens"))
+            ChatDatabase(context).use { reopened ->
+                val requestId = terminal.getString("request_id")
+                assertNull(reopened.getOpenAiToolCheckpoint(chatId, requestId))
+                val accounting = reopened.listRequestAccounting(chatId).single {
+                    it.optString("local_request_id") == requestId
+                }
+                assertEquals(120L, accounting.getLong("input_tokens"))
+                assertEquals(34L, accounting.getLong("cached_tokens"))
+                assertEquals(8L, accounting.getLong("output_tokens"))
+                assertEquals(3L, accounting.getLong("reasoning_tokens"))
+                val telemetry = terminal.getJSONObject("telemetry_summary")
+                assertEquals(1, telemetry.getInt("rounds_completed"))
+                assertEquals(1, telemetry.getInt("calls_executed"))
+            }
         }
     }
 
@@ -181,6 +204,18 @@ class OpenAiForegroundToolRecoveryTest {
             scenario.onActivity { call(it, "stopCurrentResponse") }
             awaitCondition("Stopped child reader retained ownership", 5_000L) { !OpenAiCreateCallOwners.isRegistered(chatId, requestId) }
             assertTrue(child.isCanceled()); assertNull(active(chatId))
+            ChatDatabase(context).use { reopened ->
+                assertNull("Stop removes the checkpoint only after its paid usage is durable",
+                    reopened.getOpenAiToolCheckpoint(chatId, requestId))
+                val accounting = reopened.listRequestAccounting(chatId).single {
+                    it.optString("local_request_id") == requestId
+                }
+                assertEquals("stopped", accounting.getString("local_status"))
+                assertEquals(100L, accounting.getLong("input_tokens"))
+                assertEquals(30L, accounting.getLong("cached_tokens"))
+                assertEquals(5L, accounting.getLong("output_tokens"))
+                assertEquals(2L, accounting.getLong("reasoning_tokens"))
+            }
             assertNull(server.takeRequest(1_200, TimeUnit.MILLISECONDS))
         }
     }

@@ -4,8 +4,6 @@ import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -19,14 +17,18 @@ data class OpenRouterCompletionResult(
     val assistantMessage: JSONObject,
     val toolNames: List<String>,
     val finishReason: String? = null,
-    val protocol: JSONObject? = null
+    val protocol: JSONObject? = null,
+    val fileIoTelemetry: JSONObject? = null,
+    val roundsCompleted: Int = 0
 )
 
 class OpenRouterCompletionException(
     message: String,
     val partialText: String,
     cause: Throwable? = null,
-    val accumulatedUsage: JSONObject? = null
+    val accumulatedUsage: JSONObject? = null,
+    val fileIoTelemetry: JSONObject? = null,
+    val roundsCompleted: Int = 0
 ) : IOException(message, cause)
 
 class OpenRouterUpstreamException(
@@ -124,49 +126,26 @@ class OpenRouterChatClient(
         }
         val toolNames = mutableListOf<String>()
         val accumulatedText = mutableListOf<String>()
-        val accumulatedUsage = JSONObject()
-        // Cost is complete only if every generation reported its cost.
-        var everyRoundCostKnown = true
+        val roundUsages = mutableListOf<JSONObject?>()
         var responseModel: String? = null
         var accumulatedTotalTokens = 0L
         var nextRoundIndex = 0
+        var roundsCompleted = 0
+        var previousFileIoSnapshot: FileBackedIoTelemetry.Snapshot? = null
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMPLETE_TIME_LIMIT_MS)
 
-        fun addUsageLong(target: JSONObject, key: String, value: Long) {
-            if (value <= 0L) return
-            target.put(key, target.optLong(key, 0L) + value)
-        }
+        fun snapshotAccumulatedUsage(): JSONObject? = OpenRouterUsageAccumulator.aggregate(roundUsages)
 
-        fun accumulateUsage(source: JSONObject?) {
-            if (source == null) return
-            addUsageLong(accumulatedUsage, "prompt_tokens", source.optLong("prompt_tokens", 0L))
-            addUsageLong(accumulatedUsage, "completion_tokens", source.optLong("completion_tokens", 0L))
-            addUsageLong(accumulatedUsage, "total_tokens", source.optLong("total_tokens", 0L))
-            source.optJSONObject("prompt_tokens_details")?.let { details ->
-                val target = accumulatedUsage.optJSONObject("prompt_tokens_details") ?: JSONObject().also {
-                    accumulatedUsage.put("prompt_tokens_details", it)
-                }
-                addUsageLong(target, "cached_tokens", details.optLong("cached_tokens", 0L))
-                addUsageLong(target, "cache_write_tokens", details.optLong("cache_write_tokens", 0L))
-            }
-            source.optJSONObject("completion_tokens_details")?.let { details ->
-                val target = accumulatedUsage.optJSONObject("completion_tokens_details") ?: JSONObject().also {
-                    accumulatedUsage.put("completion_tokens_details", it)
-                }
-                addUsageLong(target, "reasoning_tokens", details.optLong("reasoning_tokens", 0L))
-            }
-        }
-
-        fun snapshotAccumulatedUsage(): JSONObject? =
-            JSONObject(accumulatedUsage.toString()).apply {
-                if (!everyRoundCostKnown) remove("cost")
-            }.takeIf { it.length() > 0 }
+        fun currentFileIoJson(): JSONObject? = try {
+            (previousFileIoSnapshot ?: FileBackedIoTelemetry.snapshot(history)).takeIf { it.hasSourceWork }?.toJson()
+        } catch (_: Exception) { null }
 
         fun budgetException(message: String): OpenRouterCompletionException =
             OpenRouterCompletionException(
                 message = message,
                 partialText = accumulatedText.joinToString("\n\n").trim(),
-                accumulatedUsage = snapshotAccumulatedUsage()
+                accumulatedUsage = snapshotAccumulatedUsage(),
+                fileIoTelemetry = currentFileIoJson(), roundsCompleted = roundsCompleted
             )
 
         fun ensureActive() {
@@ -276,6 +255,18 @@ class OpenRouterChatClient(
             var roundResponseModel: String? = null
             var roundReportedCost: Double? = null
             var roundUsage: JSONObject? = null
+            var roundUsageCommitted = false
+            fun commitRoundUsage() {
+                if (roundUsageCommitted) return
+                roundUsageCommitted = true
+                val observed = roundUsage?.let(JsonProtocol::objectCopy)
+                roundReportedCost?.let { observed?.put("cost", it) }
+                roundUsages += observed
+                roundUsage?.let { u ->
+                    accumulatedTotalTokens += u.optLong("total_tokens", 0L).takeIf { it > 0L }
+                        ?: (u.optLong("prompt_tokens", 0L).coerceAtLeast(0L) + u.optLong("completion_tokens", 0L).coerceAtLeast(0L))
+                }
+            }
             var generationId: String? = null
             val contentParts = StringBuilder()
             var lastTextSnapshot = 0L
@@ -312,12 +303,12 @@ class OpenRouterChatClient(
                 JsonProtocol.nonBlank(json, "model")?.let { roundResponseModel = it }
                 json.optJSONObject("usage")?.let { usage ->
                     // Repeated final usage frames are snapshots, not billable deltas.
-                    roundUsage = JSONObject(usage.toString())
+                    roundUsage = OpenRouterUsageAccumulator.mergeSnapshot(roundUsage, usage)
                     // Cost may arrive after finish_reason, just before [DONE].
                     // Explicit zero is known; missing/invalid values are not.
-                    if (usage.has("cost")) {
-                        roundReportedCost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
-                    }
+                    // A later missing/null/invalid field is not evidence that a confirmed
+                    // charge disappeared. Match observeOpenRouterRound's durable contract.
+                    OpenRouterUsageSnapshot.from(usage).reportedCostUsd?.let { roundReportedCost = it }
                     onRoundObserved(roundIndex, generationId, roundUsage)
                 }
                 val choices = json.optJSONArray("choices")
@@ -388,6 +379,7 @@ class OpenRouterChatClient(
                 }
             } catch (e: Exception) {
                 emitTextSnapshot(force = true)
+                commitRoundUsage()
                 if (e is CancellationException) throw e
                 if (e is OpenRouterCompletionException) {
                     val partial = buildList {
@@ -398,7 +390,9 @@ class OpenRouterChatClient(
                         message = e.message ?: e.javaClass.simpleName,
                         partialText = partial,
                         cause = e.cause ?: e,
-                        accumulatedUsage = e.accumulatedUsage ?: snapshotAccumulatedUsage()
+                        accumulatedUsage = snapshotAccumulatedUsage() ?: e.accumulatedUsage,
+                        fileIoTelemetry = e.fileIoTelemetry ?: currentFileIoJson(),
+                        roundsCompleted = roundsCompleted
                     )
                 }
                 if (contentParts.isNotEmpty()) {
@@ -409,9 +403,11 @@ class OpenRouterChatClient(
                 // Optional diagnostics must not replace the result, cancellation or upstream error.
                 try {
                     val stats = FileBackedIoTelemetry.snapshot(body)
-                    onFileIoObserved(roundIndex, JSONObject().put("files", stats.files)
-                        .put("source_read_passes", stats.readPasses).put("source_read_bytes", stats.readBytes)
-                        .put("file_work_ms", stats.workNanos / 1_000_000L))
+                    val delta = stats.deltaFrom(previousFileIoSnapshot)
+                    previousFileIoSnapshot = stats
+                    onFileIoObserved(roundIndex, stats.toJson()
+                        .put("round_read_passes", delta.readPasses).put("round_read_bytes", delta.readBytes)
+                        .put("round_work_ms", delta.workMs))
                 } catch (_: Exception) {
                     // Diagnostics are best-effort. Never swallow VM/heap Errors.
                 }
@@ -419,18 +415,8 @@ class OpenRouterChatClient(
 
             emitTextSnapshot(force = true)
             ensureActive()
-            accumulateUsage(roundUsage)
-            roundUsage?.let { u ->
-                val total = u.optLong("total_tokens", 0L).takeIf { it > 0L }
-                    ?: (u.optLong("prompt_tokens", 0L).coerceAtLeast(0L) + u.optLong("completion_tokens", 0L).coerceAtLeast(0L))
-                accumulatedTotalTokens += total
-            }
-            val completedRoundCost = roundReportedCost
-            if (completedRoundCost == null) {
-                everyRoundCostKnown = false
-            } else {
-                accumulatedUsage.put("cost", accumulatedUsage.optDouble("cost", 0.0) + completedRoundCost)
-            }
+            commitRoundUsage()
+            roundsCompleted++
             val message = JSONObject()
                 .put("role", role)
                 .put("content", contentParts.toString())
@@ -511,7 +497,8 @@ class OpenRouterChatClient(
                             .put("wire_input_sha256", inputHash)
                             .put("binding_sha256", binding).put("tail", tail).apply {
                                 if (finishReason != "stop") put("interrupted_assistant", JsonProtocol.objectCopy(message))
-                            }
+                            },
+                        fileIoTelemetry = currentFileIoJson(), roundsCompleted = roundsCompleted
                     )
                 }
                 val validatedCalls = mutableListOf<Triple<String, String, JSONObject>>()
@@ -557,22 +544,24 @@ class OpenRouterChatClient(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             val partialUsage = snapshotAccumulatedUsage()
+            val ioJson = currentFileIoJson()
             if (e is OpenRouterCompletionException) {
-                if (e.accumulatedUsage != null || partialUsage == null) throw e
                 throw OpenRouterCompletionException(
                     message = e.message ?: e.javaClass.simpleName,
-                    partialText = e.partialText,
-                    cause = e.cause ?: e,
-                    accumulatedUsage = partialUsage
+                    partialText = e.partialText, cause = e.cause ?: e,
+                    accumulatedUsage = partialUsage ?: e.accumulatedUsage,
+                    fileIoTelemetry = ioJson ?: e.fileIoTelemetry,
+                    roundsCompleted = maxOf(roundsCompleted, e.roundsCompleted)
                 )
             }
             val partialText = accumulatedText.joinToString("\n\n").trim()
+            // File I/O alone must not change the typed upstream-error contract.
             if (partialText.isNotBlank() || partialUsage != null) {
                 throw OpenRouterCompletionException(
                     message = e.message ?: e.javaClass.simpleName,
-                    partialText = partialText,
-                    cause = e,
-                    accumulatedUsage = partialUsage
+                    partialText = partialText, cause = e,
+                    accumulatedUsage = partialUsage, fileIoTelemetry = ioJson,
+                    roundsCompleted = roundsCompleted
                 )
             }
             throw e

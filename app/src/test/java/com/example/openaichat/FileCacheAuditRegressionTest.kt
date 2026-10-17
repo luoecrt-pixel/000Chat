@@ -178,6 +178,27 @@ class FileCacheAuditRegressionTest {
         } finally { file.delete() }
     }
 
+    @Test fun identicalBytesKeepDistinctNamesMimeCredentialsAndPurposes() {
+        val dir = File(context.cacheDir, "audit-exact-metadata-${System.nanoTime()}").apply { mkdirs() }
+        val uploadCache = cache("audit-exact-metadata-cache")
+        try {
+            val first = File(dir, "a.txt").apply { writeText("identical bytes") }
+            val second = File(dir, "b.txt").apply { writeBytes(first.readBytes()) }
+            var calls = 0
+            fun prepare(file: File, name: String, mime: String = "text/plain", credential: String = "a", purpose: String = "user_data") =
+                uploadCache.getOrUpload(file, name, mime, credential, { true }, purpose) { "file_exact_${++calls}" }
+            val a = prepare(first, "a.txt")
+            assertEquals(a, prepare(second, "a.txt"))
+            val b = prepare(second, "b.txt")
+            assertNotEquals(a, b)
+            assertEquals(b, prepare(first, "b.txt"))
+            assertNotEquals(a, prepare(first, "a.txt", mime = "text/markdown"))
+            assertNotEquals(a, prepare(first, "a.txt", credential = "b"))
+            assertNotEquals(a, prepare(first, "a.txt", purpose = "vision"))
+            assertEquals(5, calls)
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun invalidatingOneIdKeepsAnotherConcurrentUploadReusable() {
         val dir = File(context.cacheDir, "audit-scoped-reset").apply { deleteRecursively(); mkdirs() }
         val uploadCache = cache("audit-scoped-reset-cache")

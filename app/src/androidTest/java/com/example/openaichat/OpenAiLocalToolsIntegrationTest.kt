@@ -96,10 +96,16 @@ class OpenAiLocalToolsIntegrationTest {
         parentFile!!.mkdirs(); writeText("Find needle in the complete local source 😀"); files.add(this)
     }.let { OpenRouterAttachmentStore.classifyLocalFile(context, it, it.name, "text/plain") }
     private fun toolResponse(fileId: String) = JSONObject().put("id", "resp_h_tools").put("status", "completed")
+        .put("usage", JSONObject().put("input_tokens", 100).put("output_tokens", 5)
+            .put("input_tokens_details", JSONObject().put("cached_tokens", 30))
+            .put("output_tokens_details", JSONObject().put("reasoning_tokens", 2)))
         .put("output", JSONArray().put(JSONObject().put("type", "reasoning").put("id", "rs_h").put("encrypted_content", "opaque-signed"))
             .put(JSONObject().put("type", "function_call").put("id", "fc_h").put("call_id", "call_h")
                 .put("name", "search_attached_file").put("arguments", JSONObject().put("file_id", fileId).put("query", "needle").toString())))
     private fun finalResponse() = JSONObject().put("id", "resp_h_final").put("status", "completed").put("model", "gpt-6-astra")
+        .put("usage", JSONObject().put("input_tokens", 20).put("output_tokens", 3)
+            .put("input_tokens_details", JSONObject().put("cached_tokens", 4))
+            .put("output_tokens_details", JSONObject().put("reasoning_tokens", 1)))
         .put("output", JSONArray().put(JSONObject().put("type", "message").put("id", "msg_h").put("role", "assistant")
             .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", "Found needle")))))
     private fun sse(response: JSONObject) = MockResponse().setHeader("Content-Type", "text/event-stream")
@@ -127,7 +133,29 @@ class OpenAiLocalToolsIntegrationTest {
             } }
             if (message?.optString("response_id") == "resp_h_final") {
                 assertEquals("Found needle", message.getString("text"))
-                if (expectTools) assertTrue(message.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
+                val requestId = message.getString("request_id")
+                ChatDatabase(context).use { reopened ->
+                    assertNull("Terminal request must release its heavyweight tool checkpoint",
+                        reopened.getOpenAiToolCheckpoint(chatId, requestId))
+                    val accounting = reopened.listRequestAccounting(chatId).single {
+                        it.optString("local_request_id") == requestId
+                    }
+                    assertEquals("completed", accounting.getString("local_status"))
+                    assertEquals(if (expectTools) 120L else 20L, accounting.getLong("input_tokens"))
+                    assertEquals(if (expectTools) 8L else 3L, accounting.getLong("output_tokens"))
+                    if (expectTools) {
+                        assertTrue(message.getJSONArray("openai_protocol_output").toString().contains("function_call_output"))
+                        assertTrue(message.getJSONArray("openai_protocol_output").toString().contains("opaque-signed"))
+                        assertEquals(120L, message.getJSONObject("usage").getLong("input_tokens"))
+                        val telemetry = message.getJSONObject("telemetry_summary")
+                        assertEquals(1, telemetry.getInt("rounds_completed"))
+                        assertEquals(1, telemetry.getInt("calls_executed"))
+                        assertTrue(telemetry.getJSONArray("executed_tools").toString().contains("search_attached_file"))
+                        val durableTelemetry = accounting.optJSONObject("telemetry_summary")
+                            ?: JSONObject(accounting.getString("telemetry_summary"))
+                        assertEquals(1, durableTelemetry.getInt("calls_executed"))
+                    }
+                }
                 return
             }
             SystemClock.sleep(50)
@@ -163,6 +191,7 @@ class OpenAiLocalToolsIntegrationTest {
                 .put("provider", "openai").put("request_id", requestId).put("model", "gpt-6-astra")
                 .put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, fingerprint).put("attachments", JSONArray().put(attachment.toJson()))))
             db.setActiveResponse(chatId, "resp_h_tools", requestId, "", "in_progress", System.currentTimeMillis(), "high", "high", false, 11, 1, true)
+            db.startRequestAccounting(chatId, requestId, "openai", "gpt-6-astra", "openai_api_key")
             OpenAiLocalFileToolBridge.configure(db, chatId, requestId, JSONObject().put("model", "gpt-6-astra").put("store", true).put("background", true), listOf(attachment))
             val state = ResponseEventReducer.reduce(ResponseEventState(), JSONObject().put("type", "response.completed").put("response", toolResponse(attachment.id))).state
             db.updateActiveResponse(chatId, "resp_h_tools", state.text, "completed", 1, requestId, ResponseIndexedCheckpoint.serialize(state))
@@ -252,16 +281,16 @@ class OpenAiLocalToolsIntegrationTest {
             }
             val deadline = SystemClock.elapsedRealtime() + 20_000
             var attached = false
-            val expectedLocalAttachments = if (includeText && fileAnalysis) 2 else selected.size
+            val expectedLocalAttachments = selected.size
             while (!attached && SystemClock.elapsedRealtime() < deadline) {
                 scenario.onActivity {
                     val localReady = (field(it, "attachedOpenRouterAttachments") as List<*>).size == expectedLocalAttachments
-                    val textReady = !includeText || !fileAnalysis || (field(it, "attachedFilePaths") as List<*>).size == 1
-                    attached = localReady && textReady && it.pendingUploads.get() == 0
+                    attached = localReady && it.pendingUploads.get() == 0
                 }
                 if (!attached) SystemClock.sleep(50)
             }
             assertTrue("All picker sources must be prepared", attached)
+            assertEquals("Selecting attachments must not upload any file before Send", 0, server.requestCount)
             if (recreate) scenario.recreate()
             scenario.onActivity { activity ->
                 @Suppress("UNCHECKED_CAST")
@@ -313,12 +342,12 @@ class OpenAiLocalToolsIntegrationTest {
                     val containerFiles = interpreter.getJSONObject("container").getJSONArray("file_ids")
                     assertEquals("The container gets the document, never the two vision photos", 1, containerFiles.length())
                     assertTrue(containerFiles.getString(0).startsWith("file_mixed_text_"))
-                    // #21 separately tracks the existing duplicate text upload under two filenames.
-                    // Accept either one necessary upload or that known extra; never an image upload.
-                    assertTrue("Only the text upload (and existing #21 duplicate) is allowed", textUploads.size in 1..2)
+                    assertEquals("The complete text source must be uploaded exactly once", 1, textUploads.size)
                     textUploads.forEach { upload ->
                         assertEquals("POST", upload.method)
                         val raw = String(upload.body.clone().readByteArray(), Charsets.ISO_8859_1)
+                        assertTrue("Preserve the original text filename", raw.contains("filename=\"${textFile!!.name}\""))
+                        assertFalse("Do not append a second text extension", raw.contains("${textFile.name}.txt"))
                         val boundary = upload.getHeader("Content-Type")!!.substringAfter("boundary=").trim('"')
                         assertTrue("The uploaded file must contain the complete text document",
                             raw.contains("\r\n\r\n${textFile!!.readText()}\r\n--$boundary"))

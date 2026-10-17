@@ -20,27 +20,28 @@ class OpenAiV23ToV24ActiveCheckpointMigrationTest {
         val file = File(folder, "astra_chats.db")
         val chatId = "old-active-" + UUID.randomUUID()
         val requestId = "owned-v23"
+        val signedOutput = """[{"type":"reasoning","encrypted_content":"preserved-v23-signature"}]"""
+        val instructionFingerprint = "existing-v23-instruction-binding"
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
-            db.execSQL("""CREATE TABLE chats (
-                id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL,
-                response_id TEXT, baseline_effort TEXT,
-                updated_at INTEGER NOT NULL,
-                active_response_id TEXT, active_request_id TEXT,
-                active_text TEXT, active_status TEXT,
-                active_started_at INTEGER, active_effort_pref TEXT,
-                active_effective_effort TEXT,
-                active_auto_selected INTEGER NOT NULL DEFAULT 0,
-                active_prompt_chars INTEGER NOT NULL DEFAULT 0,
-                active_attachments INTEGER NOT NULL DEFAULT 0,
-                active_background_enabled INTEGER NOT NULL DEFAULT 1,
-                active_last_sequence_number INTEGER NOT NULL DEFAULT -1)""")
+            LegacyOpenAiMigrationSchema.create(db, version = 23)
             db.execSQL("""INSERT INTO chats(
                 id,title,updated_at,active_response_id,active_request_id,
                 active_text,active_status,active_started_at,active_last_sequence_number)
                 VALUES (?,?,?, ?,?,?,?,?,?)""",
                 arrayOf(chatId, "Unfinished", 1L, "resp_v23", requestId,
                     "Hello", "in_progress", 1L, 10))
-            db.version = 23
+            db.execSQL("""INSERT INTO messages (
+                chat_id,position,role,text,response_id,request_id,provider,status,
+                openai_instructions_sha256,openai_protocol_output
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                arrayOf(chatId, 0, "assistant", "Existing signed answer", "resp_earlier", "local_earlier",
+                    "openai", "completed", instructionFingerprint, signedOutput))
+            db.execSQL("""INSERT INTO request_accounting (
+                chat_id,local_request_id,provider,credential_source,created_at,updated_at,
+                local_status,response_id,input_tokens,output_tokens
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                arrayOf(chatId, requestId, "openai", "openai_api_key", 1L, 1L,
+                    "running", "resp_v23", 100, 25))
         }
         val isolated = object : ContextWrapper(base) {
             override fun getDatabasePath(name: String): File = file
@@ -56,17 +57,34 @@ class OpenAiV23ToV24ActiveCheckpointMigrationTest {
         }
         try {
             ChatDatabase(isolated).use { db ->
-                assertEquals(24, db.readableDatabase.version)
+                assertEquals(25, db.readableDatabase.version)
+                LegacyOpenAiMigrationSchema.assertCurrentAdditions(db.readableDatabase)
                 val active = db.getActiveResponse(chatId)!!
                 assertEquals("Hello", active.getString("text"))
                 assertEquals(10L, active.getLong("last_sequence_number"))
                 assertEquals(requestId, active.getString("request_id"))
                 assertFalse(active.has("indexed_checkpoint"))
                 assertTrue(ResponseIndexedCheckpoint.restore(active).legacyFlatCheckpoint)
+                val historical = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+                assertEquals("Existing signed answer", historical.getString("text"))
+                assertEquals(instructionFingerprint, historical.getString(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD))
+                assertEquals(signedOutput, historical.getJSONArray("openai_protocol_output").toString())
+                val accounting = db.listRequestAccounting(chatId).single()
+                assertEquals("running", accounting.getString("local_status"))
+                assertEquals(100L, accounting.getLong("input_tokens"))
+                assertEquals(25L, accounting.getLong("output_tokens"))
             }
             ChatDatabase(isolated).use { db ->
-                assertEquals("Hello", db.getActiveResponse(chatId)!!.getString("text"))
-                assertEquals(24, db.readableDatabase.version)
+                LegacyOpenAiMigrationSchema.assertCurrentAdditions(db.readableDatabase)
+                val active = db.getActiveResponse(chatId)!!
+                assertEquals("Hello", active.getString("text"))
+                assertEquals(10L, active.getLong("last_sequence_number"))
+                assertEquals(requestId, active.getString("request_id"))
+                assertFalse(active.has("indexed_checkpoint"))
+                assertTrue(ResponseIndexedCheckpoint.restore(active).legacyFlatCheckpoint)
+                assertEquals(signedOutput, db.getChat(chatId)!!.getJSONArray("messages")
+                    .getJSONObject(0).getJSONArray("openai_protocol_output").toString())
+                assertEquals(25, db.readableDatabase.version)
             }
         } finally {
             file.delete()

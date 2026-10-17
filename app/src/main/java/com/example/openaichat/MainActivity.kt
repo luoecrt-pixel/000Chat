@@ -140,6 +140,24 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pendingOpenRouterPreparation = AtomicReference<String?>(null)
     private val pendingOpenAiPreparation = AtomicReference<String?>(null)
     @Volatile private var openRouterPreparationHook: (() -> Unit)? = null
+    @Volatile private var openAiPreparationHook: (() -> Unit)? = null
+
+    /** Captured on Send before asynchronous preparation can observe later settings edits. */
+    private data class OpenAiRequestOptionsSnapshot(
+        val fileAnalysis: Boolean,
+        val parallelTools: Boolean,
+        val cacheKey: String,
+        val autoCompaction: Boolean,
+        val textFormat: String,
+        val jsonSchema: String,
+        val web: Boolean,
+        val fileSearch: Boolean,
+        val vectorStore: String,
+        val codeInterpreter: Boolean,
+        val containerMemory: String,
+        val imageGeneration: Boolean,
+        val previousResponseId: String?
+    )
     @Volatile private var openAiReceivedEventHook: ((JSONObject) -> Unit)? = null
     // Deterministic lower budget for instrumentation; reducer always caps this
     // by the production heap budget, so a test cannot raise the safety limit.
@@ -1642,6 +1660,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun showDiagnostics() {
+        val diagnosticsChatId = currentChatId()
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(8), dp(14), dp(8))
@@ -1683,18 +1702,33 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         container.addView(actions)
-        AlertDialog.Builder(this)
+        applyDialogControlTheme(container, currentTheme())
+        val diagnosticsDialog = AlertDialog.Builder(this)
             .setTitle("Диагностика запросов")
             .setView(container)
             .setNegativeButton("Закрыть", null)
-            .show().window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.75).toInt())
+            .create()
+        diagnosticsDialog.show()
+        diagnosticsDialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.75).toInt())
         executor.execute {
             val read = diagnostics.tail(300)
+            val recent = try { chatDb.listRequestEvents(diagnosticsChatId, 10) } catch (_: Exception) { emptyList() }
+            val accounts = try {
+                val requestIds = recent.mapNotNull { JsonProtocol.nonBlank(it, "request_id") }.toSet()
+                chatDb.listRequestAccounting(diagnosticsChatId, requestIds)
+                    .associateBy { JsonProtocol.string(it, "local_request_id") }
+            } catch (_: Exception) { emptyMap() }
+            val enriched = recent.map { event ->
+                RequestStopEventPolicy.enrich(event, accounts[JsonProtocol.string(event, "request_id")])
+            }
+            val summary = RequestDiagnosticsSummary.format(enriched)
             runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                rawEvents = read
-                events.text = formatDiagnostics(read)
-                eventScroll.post { eventScroll.fullScroll(View.FOCUS_DOWN) }
+                if (isFinishing || isDestroyed || !diagnosticsDialog.isShowing ||
+                    currentChatId() != diagnosticsChatId) return@runOnUiThread
+                // Display, Copy and Export share the same redaction boundary.
+                rawEvents = diagnostics.redactDisplayText(summary + read)
+                events.text = diagnostics.redactDisplayText(summary + formatDiagnostics(read))
+                eventScroll.post { eventScroll.fullScroll(View.FOCUS_UP) }
             }
         }
     }
@@ -2160,7 +2194,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 if (chatDb.finalizeCurrentChatIfActiveRequest(chatId, "", null, null, listOf(m), id)) {
                     chatDb.recordRequestAccounting(chatId = chatId, localRequestId = id, status = "disconnected", error = error)
                     chatDb.sealOpenRouterRounds(chatId, id)
-                    chatDb.clearOpenRouterCheckpoint(chatId, id)
                     ResponseNotifications.finished(applicationContext, chatId, id, false)
                 }
             }
@@ -2903,7 +2936,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val filePathsBeforePreparation = attachedFilePaths.toList()
         val imagePathBeforePreparation = pendingImagePath
         val pendingUrisBeforePreparation = pendingUploadUris.toList()
-        val fileAnalysisEnabled = prefs.getBoolean("file_analysis_tools", false)
+        // Model, credential, instructions, effort, verbosity, maxOut and backgroundEnabled
+        // were already captured above on this UI turn. Capture every deferred option too.
+        val openAiOptions = OpenAiRequestOptionsSnapshot(
+            fileAnalysis = prefs.getBoolean("file_analysis_tools", false),
+            parallelTools = prefs.getBoolean("parallel_tools", true),
+            cacheKey = prefs.getString("cache_key", "")?.trim().orEmpty(),
+            autoCompaction = prefs.getBoolean("openai_auto_compaction", false),
+            textFormat = prefs.getString("text_format", "text") ?: "text",
+            jsonSchema = prefs.getString("json_schema", "")?.trim().orEmpty(),
+            web = prefs.getBoolean("web", false),
+            fileSearch = prefs.getBoolean("file_search", false),
+            vectorStore = prefs.getString("vector_store", "")?.trim().orEmpty(),
+            codeInterpreter = prefs.getBoolean("code_interpreter", false),
+            containerMemory = prefs.getString("openai_container_memory", "1g")
+                ?.takeIf { it in setOf("1g", "4g", "16g", "64g") } ?: "1g",
+            imageGeneration = prefs.getBoolean("image_generation", false),
+            previousResponseId = currentResponseId
+        )
+        val fileAnalysisEnabled = openAiOptions.fileAnalysis
         val capturedFileHistory = chat.map { JSONObject(it.toString()) } + JSONObject(sentUserMessage.toString())
         fun commitPreparedOpenAi(typedInput: JSONArray?, containerFiles: Map<String, String> = emptyMap(), toolFiles: List<OpenRouterLocalAttachment> = emptyList()) {
         // Repeat creates a new user request under current settings without touching a newer draft.
@@ -3005,28 +3056,28 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .put("store",true)
             .put("background",backgroundEnabled)
             .put("reasoning",reasoningObj)
-            .put("parallel_tool_calls",prefs.getBoolean("parallel_tools",true))
+            .put("parallel_tool_calls",openAiOptions.parallelTools)
 
         maxOut?.let { body.put("max_output_tokens",it) }
         // A reusable chain receives only the new user turn (possibly typed descriptors).
         // A full replay always starts with the current system/developer roles.
         val chainOnWire = usableOpenAiChain
         if (!chainOnWire) openAiInstructions.applyToOpenAiRequest(body)
-        prefs.getString("cache_key","")?.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
+        openAiOptions.cacheKey.takeIf{it.isNotBlank()}?.let { body.put("prompt_cache_key",it) }
         // OpenAI currently disallows combining configuration_update with automatic compaction.
-        if (configUpdateEffort == null && prefs.getBoolean("openai_auto_compaction", false)) {
+        if (configUpdateEffort == null && openAiOptions.autoCompaction) {
             ModelCatalog.compactionThreshold(model)?.let { threshold ->
                 body.put("context_management", JSONArray().put(JSONObject().put("type","compaction").put("compact_threshold",threshold)))
             }
         }
         if (chainOnWire) {
-            currentResponseId?.let { body.put("previous_response_id", it) }
+            openAiOptions.previousResponseId?.let { body.put("previous_response_id", it) }
         }
 
-        when(prefs.getString("text_format","text")){
+        when(openAiOptions.textFormat){
             "json_object" -> textObj.put("format",JSONObject().put("type","json_object"))
             "json_schema" -> {
-                val schemaText=prefs.getString("json_schema","")?.trim().orEmpty()
+                val schemaText=openAiOptions.jsonSchema
                 if(schemaText.isNotBlank()){
                     try {
                         val schema=JSONObject(schemaText)
@@ -3041,21 +3092,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         body.put("text",textObj)
 
-        val webEnabled = prefs.getBoolean("web", false)
+        val webEnabled = openAiOptions.web
         val tools=JSONArray()
         if(webEnabled) tools.put(JSONObject().put("type","web_search"))
-        if(prefs.getBoolean("file_search",false)){
-            val vs=prefs.getString("vector_store","")?.trim().orEmpty()
+        if(openAiOptions.fileSearch){
+            val vs=openAiOptions.vectorStore
             if(vs.isNotBlank()) tools.put(JSONObject().put("type","file_search").put("vector_store_ids",JSONArray().put(vs)).put("max_num_results",20))
         }
         val nonVisualContainerFiles = containerFiles.filterKeys { path ->
             val ext = TextFileFormatPolicy.extension(path)
             ext !in setOf("jpg", "jpeg", "png", "webp", "gif", "pdf")
         }
-        val enableCodeInterpreter = prefs.getBoolean("code_interpreter", false) || (fileAnalysisEnabled && nonVisualContainerFiles.isNotEmpty())
+        val enableCodeInterpreter = openAiOptions.codeInterpreter || (fileAnalysisEnabled && nonVisualContainerFiles.isNotEmpty())
         if(enableCodeInterpreter){
-            val containerMemory = prefs.getString("openai_container_memory", "1g")
-                ?.takeIf { it in setOf("1g", "4g", "16g", "64g") } ?: "1g"
+            val containerMemory = openAiOptions.containerMemory
             val c=JSONObject().put("type","auto").put("memory_limit",containerMemory)
             val wholeFileIds = (requestFileIds.mapIndexedNotNull { i, id ->
                 val path = requestFilePaths.getOrNull(i)
@@ -3067,7 +3117,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
             tools.put(JSONObject().put("type","code_interpreter").put("container",c))
         }
-        if(prefs.getBoolean("image_generation",false)) tools.put(JSONObject().put("type","image_generation"))
+        if(openAiOptions.imageGeneration) tools.put(JSONObject().put("type","image_generation"))
         if(tools.length()>0) body.put("tools",tools)
 
         val include=JSONArray()
@@ -3076,7 +3126,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // preserve it without fabricating private reasoning.
         include.put("reasoning.encrypted_content")
         if(webEnabled) include.put("web_search_call.action.sources")
-        if(prefs.getBoolean("file_search",false)) include.put("file_search_call.results")
+        if(openAiOptions.fileSearch) include.put("file_search_call.results")
         if(enableCodeInterpreter) include.put("code_interpreter_call.outputs")
         include.put("computer_call_output.output.image_url")
         body.put("include",include)
@@ -3114,9 +3164,30 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             var lastActiveCheckpoint=0L
             val destroyedCallbackCleanup = DestroyedActivityCallbackCleanup { executor.isShutdown }
             var ownedCreateCall = call
+            var initialFileIo: FileBackedIoTelemetry.Snapshot? = null
+            var fileIoRecorded = false
+            fun captureInitialFileIo() {
+                // Optional counters must not replace the network outcome. Persist them before
+                // Activity hands its response to WorkManager, which cannot reconstruct wrappers.
+                try {
+                    val snapshot = FileBackedIoTelemetry.snapshot(body)
+                    if (!snapshot.hasSourceWork) return
+                    initialFileIo = snapshot
+                    if (!fileIoRecorded) {
+                        val compact = FileBackedIoTelemetry.mergeCompactTelemetry(fileIo = snapshot)
+                        if (compact != null) chatDb.recordRequestTelemetry(requestChatId, localRequestId, compact)
+                        diagnostics.log("openai_file_io", mapOf("chat_id" to requestChatId,
+                            "request_id" to localRequestId, "files" to snapshot.files,
+                            "source_read_passes" to snapshot.readPasses,
+                            "source_read_bytes" to snapshot.readBytes, "file_work_ms" to snapshot.workMs))
+                        fileIoRecorded = true
+                    }
+                } catch (_: Exception) { /* Diagnostics are best effort; usage is durable separately. */ }
+            }
             try {
                 ResponseDeadlinePolicy.boundCall(call, requestWallStartedAt, System.currentTimeMillis())
                 call.execute().use { response ->
+                    captureInitialFileIo()
                     requestId=response.header("x-request-id")
                     activeResponsePersistence.updateActiveResponse(requestChatId, text = "", status = "in_progress", expectedRequestId = localRequestId)
                     diagnostics.log("http_response", mapOf("request_id" to requestId, "status" to response.code, "chat_id" to requestChatId, "generation" to requestGeneration))
@@ -3445,6 +3516,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val cacheWriteTok=usageObj?.optJSONObject("input_tokens_details")?.optLong("cache_write_tokens",0L) ?: 0L
                     val reasoningTok=usageObj?.optJSONObject("output_tokens_details")?.optLong("reasoning_tokens",0L) ?: 0L
                     val estimatedCost=estimateCost(inTok,cachedTok,cacheWriteTok,outTok)
+                    val compactTelemetry = attachOpenAiCompletionMetadata(assistantMessage, effectiveResponse,
+                        requestChatId, localRequestId, initialFileIo)
                     val finalized = chatDb.finalizeCurrentChatIfActiveRequest(
                         requestChatId, "", newId.takeIf { completionState == "completed" },
                         actualEffort, listOf(assistantMessage), localRequestId
@@ -3469,7 +3542,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         status = completionState,
                         responseId = newId,
                         httpRequestId = requestId,
-                        usage = usage
+                        usage = assistantMessage.optJSONObject("usage"),
+                        telemetrySummary = compactTelemetry
                     )
                     chatDb.recordRequestEvent(
                         chatId = requestChatId,
@@ -3487,7 +3561,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         reasoningTokens = reasoningTok,
                         estimatedCostUsd = estimatedCost,
                         latencyMs = latency,
-                        toolSummary = responseModel.tools.distinct().joinToString(",")
+                        toolSummary = responseModel.tools.distinct().joinToString(","),
+                        telemetrySummary = compactTelemetry
                     )
 
                     runOnUiThread{
@@ -3533,6 +3608,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 }
             } catch(e:Exception) {
+                captureInitialFileIo()
                 destroyedCallbackCleanup.enter()
                 chatDb.getOpenAiToolCheckpoint(requestChatId, localRequestId)?.let { checkpoint ->
                     if (checkpoint.optString("phase") in setOf("idle", "prepared", "waiting", "finished")) {
@@ -3558,12 +3634,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val failureStatus = if (toolCheckpoint != null && toolCheckpoint.optString("phase") != "finished") "failed"
                         else responseState.terminalState?.wireStatus
                             ?: if (completionState == "disconnected" || cancelled) "disconnected" else "failed"
-                    val effectiveResponse = OpenAiEffectiveResponse.assemble(completedResponse, responseState)
+                    val durableToolTerminal = toolCheckpoint?.takeIf { it.optString("phase") == "finished" }
+                        ?.let(OpenAiLocalFileToolBridge::durableResponse)
+                    val effectiveResponse = durableToolTerminal
+                        ?: OpenAiEffectiveResponse.assemble(completedResponse, responseState)
                     OpenAiLocalFileToolBridge.attachReceivedPrefix(chatDb, requestChatId, localRequestId, effectiveResponse)
                     val parsedPartial = AstraResponseModel.fromResponse(
-                        effectiveResponse, responseState.text.ifBlank {
-                            OpenAiSseStreamReader.terminalOutputText(effectiveResponse)
-                        }, localRequestId, failureStatus, (e.message ?: failureStatus).take(1200)
+                        effectiveResponse,
+                        if (durableToolTerminal != null) OpenAiSseStreamReader.terminalOutputText(effectiveResponse)
+                        else responseState.text.ifBlank { OpenAiSseStreamReader.terminalOutputText(effectiveResponse) },
+                        localRequestId, failureStatus, (e.message ?: failureStatus).take(1200)
                     )
                     val partialModel = parsedPartial.copy(
                         id = newId ?: parsedPartial.id,
@@ -3583,6 +3663,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val savedPartialImages = saveGeneratedImages(partialModel.generatedImageResults)
                     if (savedPartialImages.length() > 0) assistant.put("generated_images", savedPartialImages)
                     OpenAiRawSseArchive.attachToMessage(assistant, filesDir, requestChatId, localRequestId)
+                    val compactTelemetry = attachOpenAiCompletionMetadata(assistant, effectiveResponse,
+                        requestChatId, localRequestId, initialFileIo)
                     val claimed = chatDb.finalizeCurrentChatIfActiveRequest(
                         requestChatId, "", null, null, listOf(assistant), localRequestId
                     )
@@ -3592,8 +3674,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         chatDb.recordRequestAccounting(
                             chatId = requestChatId, localRequestId = localRequestId,
                             status = failureStatus, responseId = newId,
-                            httpRequestId = requestId, usage = responseState.usage,
-                            error = (e.message ?: e.toString()).take(1200)
+                            httpRequestId = requestId, usage = assistant.optJSONObject("usage"),
+                            error = (e.message ?: e.toString()).take(1200),
+                            telemetrySummary = compactTelemetry
                         )
                         chatDb.recordRequestEvent(
                             chatId = requestChatId, eventType = "request_failed",
@@ -3601,7 +3684,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             requestedModel = model, responseModel = null,
                             modelMatch = ModelCatalog.Match.UNKNOWN,
                             status = failureStatus, latencyMs = latency,
-                            error = (e.message ?: e.toString()).take(1200)
+                            error = (e.message ?: e.toString()).take(1200),
+                            telemetrySummary = compactTelemetry
                         )
                     }
                 }
@@ -3752,6 +3836,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val scope = preparedFiles.capture()
                 var handedToUi = false
                 try {
+                    openAiPreparationHook?.invoke()
                     historySnapshot.filter { JsonProtocol.string(it, "role") == "user" }.forEach { message ->
                         chatDb.cachedAttachmentManifest(requestChatId, message)?.let { message.put("attachments", it) }
                     }
@@ -4515,6 +4600,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun extractResponseText(response:JSONObject?):String =
         OpenAiSseStreamReader.terminalOutputText(response)
 
+    /** Carry the aggregate marker alongside usage so finalization never treats a total as one round. */
+    private fun attachOpenAiCompletionMetadata(
+        assistant: JSONObject, response: JSONObject, chatId: String, requestId: String,
+        fileIo: FileBackedIoTelemetry.Snapshot? = null
+    ): JSONObject? {
+        val checkpoint = chatDb.getOpenAiToolCheckpoint(chatId, requestId)
+        val ledger = OpenAiUsageLedger.resolve(checkpoint, response)
+        OpenAiUsageLedger.attach(assistant, ledger)
+        val compact = FileBackedIoTelemetry.mergeCompactTelemetry(
+            toolTelemetry = OpenAiLocalFileToolBridge.extractTelemetrySummary(checkpoint),
+            fileIo = fileIo,
+            costDetails = OpenRouterUsageSnapshot.extractCostDetails(assistant.optJSONObject("usage")))
+            ?: JSONObject()
+        compact.put(OpenAiUsageLedger.FIELD, ledger)
+        val merged = FileBackedIoTelemetry.mergeTelemetryJson(
+            assistant.optJSONObject("telemetry_summary")?.toString(), compact)
+        return merged?.let { JSONObject(it).also { summary -> assistant.put("telemetry_summary", summary) } }
+    }
+
     private fun finalizeBackgroundResponse(
         active: JSONObject, response: JSONObject, uiSnapshot: BackgroundResponseUiSnapshot?
     ) {
@@ -4563,6 +4667,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 OpenAiRawSseArchive.attachToMessage(this, filesDir, chatId, requestId)
             }
         }
+        val compactTelemetry = attachOpenAiCompletionMetadata(assistant, effectiveResponse, chatId, requestId)
         val chatObj=chatDb.getChat(chatId) ?: return
         val arr=chatObj.optJSONArray("messages") ?: JSONArray()
         var already=false
@@ -4618,7 +4723,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         ) }
         chatDb.recordRequestAccounting(
             chatId = chatId, localRequestId = requestId,
-            status = state, responseId = responseId, usage = usage
+            status = state, responseId = responseId, usage = assistant.optJSONObject("usage"),
+            telemetrySummary = compactTelemetry
         )
         chatDb.recordRequestEvent(
             chatId = chatId,
@@ -4636,7 +4742,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             reasoningTokens = reasoningTok,
             estimatedCostUsd = cost,
             latencyMs = latency,
-            toolSummary = model.tools.distinct().joinToString(",")
+            toolSummary = model.tools.distinct().joinToString(","),
+            telemetrySummary = compactTelemetry
         )
         diagnostics.log("background_response_finalized",mapOf(
             "chat_id" to chatId,
@@ -5247,14 +5354,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val writes=o.optLong("cache_write_tokens")
             val output=o.optLong("output_tokens")
             val reasoning=o.optLong("reasoning_tokens")
-            // Historical aggregate estimates are not verified provider charges.
+            val known = o.optLong("known_cost_requests", 0L)
+            val estimates = o.optLong("estimated_cost_requests", 0L)
+            val unknown = o.optLong("unknown_cost_requests", (requests - known - estimates).coerceAtLeast(0L))
+            val confirmed = o.optDouble("provider_reported_cost_usd", 0.0)
+            val estimate = o.optDouble("estimated_cost_usd", 0.0)
             return buildString{
                 append("$title\n")
                 append("Запросов: $requests (успешных $success)\n")
                 append("Input: ${fmtTokens(input)} · cache: ${fmtTokens(cached)}\n")
                 append("Cache write: ${fmtTokens(writes)}\n")
                 append("Output: ${fmtTokens(output)} · reasoning: ${fmtTokens(reasoning)}\n")
-                append("Расход: неизвестен (исторические оценки не подтверждены)\n")
+                append("Подтверждено по метрикам: ").append(known).append(" · $")
+                    .append("%.6f".format(java.util.Locale.US, confirmed)).append('\n')
+                if (estimates > 0) append("Предварительные оценки: ").append(estimates).append(" · $")
+                    .append("%.6f".format(java.util.Locale.US, estimate)).append(" (не подтверждены)\n")
+                append("Расход неизвестен: ").append(unknown).append(" запросов\n")
             }
         }
         return block("Сегодня",today)+"\n"+block("Последние 7 дней",seven)+"\n"+block("За всё время",all)+
@@ -5815,14 +5930,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun prepareOpenRouterAttachment(uri: Uri, pickerSourceChatId: String) {
+    private fun prepareOpenRouterAttachment(uri: Uri, pickerSourceChatId: String,
+        pickerProvider: String = pendingPickerProvider ?: normalizedProviderId()) {
         val name = OpenRouterAttachmentStore.queryName(this, uri) ?: uri.lastPathSegment ?: "attachment"
         val uploadChatId = pickerSourceChatId
         val uploadGeneration = activeResponseState.state.generation
         beginUpload(uploadChatId, uploadGeneration)
         attachmentPreparationTail = attachmentPreparationTail.handleAsync({ _, _ ->
             try {
-                val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource)
+                val local = OpenRouterAttachmentStore.copyAndClassify(this, uri, name, openRouterAttachmentInputStreamSource,
+                    allowOpenAiContainer = pickerProvider == "openai")
                 val prepared = if (local.kind == "zip") {
                     OpenRouterAttachmentStore.extractZipFile(this, File(local.path), local.name) { message ->
                         diagnostics.log("openrouter_zip", mapOf("filename" to local.name, "message" to message.take(300)))
@@ -5971,155 +6088,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val provider = pendingPickerProvider ?: normalizedProviderId()
         val pickerSourceChatId = pendingPickerChatId ?: currentChatId()
 
-        var pickedImages: Set<Uri> = emptySet()
-        if (r == pickAny && provider == "openai" && prefs.getBoolean("file_analysis_tools", false)) {
+        // Selection is local for both providers. Upload once on Send, after its immutable
+        // options/credential snapshot chooses native input versus Python analysis.
+        if (r == pickImage || r == pickAny) {
             val selectedUris = urisFromIntent(d)
-            pickedImages = selectedUris.filter { uri ->
-                val mime = contentResolver.getType(uri)?.lowercase(java.util.Locale.ROOT).orEmpty()
-                val name = queryName(uri).orEmpty().lowercase(java.util.Locale.ROOT)
-                mime.startsWith("image/") || name.substringAfterLast('.', "") in setOf("png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "heif")
-            }.toSet()
-            if (pickedImages.isNotEmpty()) {
-                pickedImages.forEach { uri ->
-                    prepareOpenRouterAttachment(uri, pickerSourceChatId)
-                }
-                if (pickedImages.size == selectedUris.size) return
-            }
-        }
-
-        if ((provider == "openrouter" || r == pickImage || (r == pickAny && !prefs.getBoolean("file_analysis_tools", false))) && r != pickVectorStoreFile && r != pickExportTxt && r != pickSaveGenerated && r != pickVoice) {
-            val selectedUris = urisFromIntent(d)
-            if (selectedUris.isNotEmpty()) {
-                selectedUris.forEach { uri ->
-                    prepareOpenRouterAttachment(uri, pickerSourceChatId)
-                }
+            if (selectedUris.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) {
+                status.text = "Слишком много вложений: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS
                 return
             }
-            if (r == pickImage) return
-        }
-        if(r==pickImage){
-            val imageUris = urisFromIntent(d)
-            if (imageUris.isEmpty()) return
-            if (imageUris.size > OpenRouterAttachmentStore.MAX_ATTACHMENTS) {
-                status.text = "Слишком много изображений: максимум " + OpenRouterAttachmentStore.MAX_ATTACHMENTS
-                return
-            }
-            if (provider == "openrouter") return
-            val uri = imageUris.first()
-            val uploadChatId=pickerSourceChatId
-            val uploadGeneration=activeResponseState.state.generation
-            val imageMime=contentResolver.getType(uri).orEmpty().ifBlank{mimeForFilename(queryName(uri) ?: "image")}
-            val key=attachmentKey(uri,"image")
-            if (!activePendingUploadKeys.add(key)) return
-            rememberUploadUri(uri,"image")
-            refreshAttachChips()
-            startPendingPreview(uri,"image")
-            beginUpload(uploadChatId, uploadGeneration)
-            executor.execute{
-                try{
-                    reportUploadProgress(key,"Подготовка изображения",0L,100L)
-                    val path=copyImageToLocal(uri){done,total->reportUploadProgress(key,"Подготовка",(done*45L/total.coerceAtLeast(1L)),100L)} ?: throw IOException("Не удалось сохранить изображение")
-                    pendingLocalUploadPaths[key]=path
-                    val name=queryName(uri) ?: "image.${File(path).extension}"
-                    reportUploadProgress(key,"Загрузка",50L,100L)
-                    val fileId=uploadImageFile(path,name,key){done,total->reportUploadProgress(key,"Загрузка",50L + (done*50L/total.coerceAtLeast(1L)),100L)}
-                    runOnUiThread{
-                        when (
-                            AttachmentUploadCompletionPolicy.decide(
-                                sourceChatId = uploadChatId,
-                                currentChatId = currentChatId(),
-                                cancelled = cancelledUploads.contains(key)
-                            )
-                        ) {
-                            AttachmentUploadCompletionTarget.DISCARD -> return@runOnUiThread
-                            AttachmentUploadCompletionTarget.CURRENT_COMPOSER -> {
-                                pendingImagePath=path
-                                pendingImageFileId=fileId
-                                pendingImageName=name
-                                pendingImageMime=imageMime
-                                pendingImageSize=File(path).length()
-                                forgetUploadUri(uri,"image")
-                                refreshAttachChips()
-                                persistComposerStateNow()
-                                status.text="Изображение готово к отправке"
-                            }
-                            AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
-                                saveUploadedImageToComposer(uploadChatId,path,fileId,uri.toString(),name,imageMime,File(path).length())
-                                status.text="Изображение загружено — оно сохранено в исходном чате"
-                            }
-                        }
-                    }
-                }catch(e:Exception){
-                    if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка изображения: ${e.message}"}
-                }finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingPreviewBitmaps.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key) }
+            selectedUris.forEach { uri ->
+                prepareOpenRouterAttachment(uri, pickerSourceChatId, provider)
             }
             return
-        }
-
-        val uris=mutableListOf<Uri>()
-        d.data?.let{uris.add(it)}
-        d.clipData?.let{clip->for(i in 0 until clip.itemCount)uris.add(clip.getItemAt(i).uri)}
-        uris.distinct().filterNot { it in pickedImages }.forEach{uri->
-            val name=queryName(uri) ?: "attachment"
-            val ext=name.substringAfterLast('.',"").lowercase()
-            val uploadChatId=pickerSourceChatId
-            val uploadGeneration=activeResponseState.state.generation
-            val kind=if(ext=="zip")"zip" else "file"
-            if(ext=="zip"){
-                rememberUploadUri(uri,"zip")
-                refreshAttachChips()
-                status.text="ZIP добавлен. Он будет распакован при отправке."
-                return@forEach
-            }
-            if(ext !in supportedFileExtensions && !TextFileFormatPolicy.knownText(name)){
-                runOnUiThread{status.text="Формат .$ext не поддерживается для чтения файла: $name"}
-                return@forEach
-            }
-            val key=attachmentKey(uri,kind)
-            if (!activePendingUploadKeys.add(key)) return@forEach
-            rememberUploadUri(uri,"file")
-            refreshAttachChips()
-            if(contentResolver.getType(uri).orEmpty().startsWith("image/")) startPendingPreview(uri,"file")
-            beginUpload(uploadChatId, uploadGeneration)
-            executor.execute{
-                try{
-                    val uploaded=uploadFile(uri,key,{done,total->reportUploadProgress(key,"Загрузка",done,total)}){localPath,localMime,localSize->
-                        runOnUiThread{
-                            if(!cancelledUploads.contains(key)){
-                                pendingLocalUploadPaths[key]=localPath
-                                showPendingLocalPreview(key,localPath,name,localMime)
-                            }
-                        }
-                    }
-                    runOnUiThread{
-                        when (
-                            AttachmentUploadCompletionPolicy.decide(
-                                sourceChatId = uploadChatId,
-                                currentChatId = currentChatId(),
-                                cancelled = cancelledUploads.contains(key)
-                            )
-                        ) {
-                            AttachmentUploadCompletionTarget.DISCARD -> return@runOnUiThread
-                            AttachmentUploadCompletionTarget.CURRENT_COMPOSER -> {
-                                attachedFileIds.add(uploaded.id)
-                                attachedFileNames.add(uploaded.name)
-                                attachedFileSizes.add(uploaded.size)
-                                attachedFilePaths.add(uploaded.path)
-                                attachedFileMimes.add(uploaded.mime)
-                                forgetUploadUri(uri,"file")
-                                refreshAttachChips()
-                                persistComposerStateNow()
-                                status.text="Вложение готово: ${uploaded.name}"
-                            }
-                            AttachmentUploadCompletionTarget.SOURCE_CHAT -> {
-                                saveUploadedFileToComposer(uploadChatId,uploaded.id,uploaded.name,uploaded.size,uri.toString(),uploaded.path,uploaded.mime)
-                                status.text="Вложение загружено — оно сохранено в исходном чате"
-                            }
-                        }
-                    }
-                }catch(e:Exception){if(!cancelledUploads.contains(key))runOnUiThread{status.text="Ошибка файла: ${e.message}"}}
-                finally{ endUpload(uploadChatId, uploadGeneration); uploadProgress.remove(key); pendingLocalUploadPaths.remove(key); activePendingUploadKeys.remove(key) }
-            }
         }
     }
 

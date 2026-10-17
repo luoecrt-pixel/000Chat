@@ -36,7 +36,36 @@ class AstraDiagnostics(context: Context) {
         Log.d("AstraDiagnostics", line.trimEnd())
     }
 
-    private fun sanitizedValue(field: String, raw: Any?): String {
+    /** Redacts display/copy/export text without flattening its line structure. */
+    fun redactDisplayText(raw: String): String = DiagnosticDisplayText.redact(raw)
+
+    private fun sanitizedValue(field: String, raw: Any?): String = DiagnosticDisplayText.sanitizedValue(field, raw)
+
+    fun tail(maxLines: Int = 80): String = synchronized(lock) {
+        try {
+            if (!file.exists()) return@synchronized "Диагностический лог пока пуст."
+            file.readLines(Charsets.UTF_8).takeLast(maxLines.coerceIn(1, 300)).joinToString("\n")
+        } catch (e: Exception) {
+            "Не удалось прочитать лог: ${e.message}"
+        }
+    }
+
+    fun clear() = synchronized(lock) {
+        try { file.delete() } catch (_: Exception) {}
+    }
+
+    private fun rotate() {
+        val old = File(dir, "astra.log.1")
+        old.delete()
+        if (file.exists()) file.renameTo(old)
+    }
+}
+
+/** Pure sanitizer shared by the structured view and the existing diagnostic log. */
+internal object DiagnosticDisplayText {
+    fun redact(raw: String): String = raw.split('\n').joinToString("\n") { sanitizedValue("display_text", it) }
+
+    fun sanitizedValue(field: String, raw: Any?): String {
         if (Regex("(?i)(token|secret|api.?key|authorization|password|credential)").containsMatchIn(field)) {
             return "[REDACTED]"
         }
@@ -63,22 +92,4 @@ class AstraDiagnostics(context: Context) {
         return value
     }
 
-    fun tail(maxLines: Int = 80): String = synchronized(lock) {
-        try {
-            if (!file.exists()) return@synchronized "Диагностический лог пока пуст."
-            file.readLines(Charsets.UTF_8).takeLast(maxLines.coerceIn(1, 300)).joinToString("\n")
-        } catch (e: Exception) {
-            "Не удалось прочитать лог: ${e.message}"
-        }
-    }
-
-    fun clear() = synchronized(lock) {
-        try { file.delete() } catch (_: Exception) {}
-    }
-
-    private fun rotate() {
-        val old = File(dir, "astra.log.1")
-        old.delete()
-        if (file.exists()) file.renameTo(old)
-    }
 }
