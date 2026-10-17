@@ -2765,6 +2765,16 @@ data class ExistingMessageRow(
                 }
             }
         }
+        SqliteLargeTextQuery.query(readableDatabase, "openai_tool_checkpoints", arrayOf("request_checkpoint"),
+            "chat_id=?", arrayOf(chatId), null, null, null,
+            keyColumns = arrayOf("chat_id", "request_id")).use { c ->
+            while (c.moveToNext()) {
+                try {
+                    val cp = JSONObject(c.getString(0).orEmpty())
+                    out.addAll(LocalAttachmentReferences.openRouterPaths(cp.optJSONArray("attachments")))
+                } catch (_: Exception) {}
+            }
+        }
         out.addAll(recoveryArchivePaths(chatId))
         return out.toList()
     }
@@ -2788,6 +2798,21 @@ data class ExistingMessageRow(
         }
         out.addAll(recoveryArchivePaths())
         return out.toList()
+    }
+
+    fun listActiveOpenAiToolAttachmentPaths(): Set<String> {
+        val out = linkedSetOf<String>()
+        SqliteLargeTextQuery.query(readableDatabase, "openai_tool_checkpoints", arrayOf("request_checkpoint"),
+            null, null, null, null, null,
+            keyColumns = arrayOf("chat_id", "request_id")).use { c ->
+            while (c.moveToNext()) {
+                try {
+                    val cp = JSONObject(c.getString(0).orEmpty())
+                    out.addAll(LocalAttachmentReferences.openRouterPaths(cp.optJSONArray("attachments")))
+                } catch (_: Exception) {}
+            }
+        }
+        return out
     }
 
     fun removeLocalFile(path: String): Boolean {

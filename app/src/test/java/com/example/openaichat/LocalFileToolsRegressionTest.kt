@@ -6,8 +6,15 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 import org.robolectric.annotation.Config
 import java.io.File
+import java.nio.charset.Charset
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -30,6 +37,231 @@ class LocalFileToolsRegressionTest {
             File(a.textPath!!).writeBytes(byteArrayOf(0xc3.toByte(), 0x28))
             assertFalse(JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", a.id))).getBoolean("ok"))
         } finally { folder.deleteRecursively() }
+    }
+
+    @Test fun searchAcrossBufferBoundaryRetainsFullLeftSnippetContextAndHonorsLimitAndCaseInsensitivity() {
+        val folder = Files.createTempDirectory("search-boundary-").toFile()
+        try {
+            val leftContext = "L".repeat(LocalFileTools.SEARCH_LEFT_CONTEXT)
+            val query = ("КвантовыйПоиск😀" + "Ω".repeat(25)).take(320)
+            val rightContext = "R".repeat(LocalFileTools.SEARCH_RIGHT_CONTEXT)
+            // Place the query so its last 10 characters cross the 8192-char reader buffer boundary.
+            val prefixLen = 8192 - (query.length - 10) - leftContext.length
+            val prefix = "p".repeat(prefixLen)
+            val content = prefix + leftContext + query.uppercase() + rightContext + "tail " + query.lowercase()
+            val file = File(folder, "boundary-unicode.txt").apply { writeText(content, Charsets.UTF_8) }
+            val attachment = OpenRouterAttachmentStore.classifyLocalFile(file)
+            val tools = LocalFileTools(listOf(attachment))
+            val result = JSONObject(
+                tools.execute(
+                    "file_search",
+                    JSONObject().put("file_id", attachment.id).put("query", query).put("limit", 1)
+                )
+            )
+            assertTrue(result.getBoolean("ok"))
+            assertFalse(result.getBoolean("eof"))
+            assertFalse(result.getBoolean("all_matches_returned"))
+            val matches = result.getJSONArray("matches")
+            assertEquals(1, matches.length())
+            val match = matches.getJSONObject(0)
+            assertEquals((prefix.length + leftContext.length).toLong(), match.getLong("offset"))
+            val snippet = match.getString("snippet")
+            assertTrue("Boundary match must retain all 100 chars of left context", snippet.startsWith(leftContext + query.uppercase()))
+            assertFalse(snippet.first().isLowSurrogate())
+            assertFalse(snippet.last().isHighSurrogate())
+            val rest = JSONObject(tools.execute("file_search", JSONObject().put("file_id", attachment.id)
+                .put("query", query).put("offset", result.getLong("next_offset")).put("limit", 10)))
+            assertTrue(rest.getBoolean("all_matches_returned"))
+            assertEquals(1, rest.getJSONArray("matches").length())
+            val legacy = JSONObject(tools.execute("file_search", JSONObject().put("file_id", attachment.id)
+                .put("query", query).put("max_results", 1)))
+            assertEquals(1, legacy.getJSONArray("matches").length())
+            val pastEnd = JSONObject(tools.execute("file_search", JSONObject().put("file_id", attachment.id)
+                .put("query", query).put("offset", content.length + 1)))
+            assertTrue(pastEnd.getBoolean("all_matches_returned"))
+            assertTrue(pastEnd.getBoolean("eof"))
+        } finally { folder.deleteRecursively() }
+    }
+
+    @Test fun chatScopedArtifactsUseClassifyLocalFileAndExcludeForeignChats() {
+        val folder = Files.createTempDirectory("chat-artifacts-").toFile()
+        try {
+            val cp1251File = File(folder, "report-cp1251.txt").apply {
+                writeBytes("Отчёт по эксперименту №1".toByteArray(Charset.forName("windows-1251")))
+            }
+            val foreignFile = File(folder, "foreign-secret.txt").apply {
+                writeText("Чужой чат не должен быть виден", Charsets.UTF_8)
+            }
+            val localFiles = listOf(
+                JSONObject().put("chat_id", "chat-1").put("path", cp1251File.path)
+                    .put("filename", cp1251File.name).put("mime_type", "text/plain"),
+                JSONObject().put("chat_id", "chat-2").put("path", foreignFile.path)
+                    .put("filename", foreignFile.name).put("mime_type", "text/plain")
+            )
+            val context = RuntimeEnvironment.getApplication()
+            val lease = PreparedAttachmentFiles.lease(context)
+            val resolved = lease.capture().use {
+                OpenAiLocalFileToolBridge.attachments(emptyList(), localFiles, "chat-1", context)
+            }
+            assertEquals(1, resolved.size)
+            val item = resolved.single()
+            assertEquals("text", item.kind)
+            assertEquals("windows-1251", item.textEncoding)
+            assertNotNull(item.textPath)
+            val derivedFile = File(item.textPath!!)
+            assertEquals("Отчёт по эксперименту №1", derivedFile.readText(Charsets.UTF_8))
+
+            // Legacy local_<filename> alias and canonical file_id both resolve in LocalFileTools:
+            val tools = LocalFileTools(resolved)
+            val readByCanonical = JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", item.id)))
+            assertTrue(readByCanonical.getBoolean("ok"))
+            assertEquals("Отчёт по эксперименту №1", readByCanonical.getString("content"))
+            val readByLegacyAlias = JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", "local_${cp1251File.name}")))
+            assertTrue(readByLegacyAlias.getBoolean("ok"))
+            assertEquals("Отчёт по эксперименту №1", readByLegacyAlias.getString("content"))
+
+            // End-to-end checkpoint persistence and Stop cleanup of temporary .utf8 derivative:
+            ChatDatabase(context).use { db ->
+                db.ensureChat("chat-1", "Чат 1")
+                db.setActiveResponse("chat-1", "resp_1", "req_tool_1", "", "in_progress",
+                    System.currentTimeMillis(), "high", "high", false, 10, 1, true)
+                db.startRequestAccounting("chat-1", "req_tool_1", "openai", "gpt-5.4", "openai_api_key")
+                val body = JSONObject().put("model", "gpt-5.4").put("input", JSONArray())
+                OpenAiLocalFileToolBridge.configure(db, "chat-1", "req_tool_1", body, resolved)
+                val activePaths = db.listActiveOpenAiToolAttachmentPaths()
+                assertTrue("Active checkpoint must protect .utf8 derivative path", derivedFile.path in activePaths)
+
+                // Release lease while checkpoint is active: .utf8 derivative must stay on disk.
+                val activeOwners = PreparedAttachmentFiles.Owners(
+                    durable = db.listAllLocalFilePaths().toSet(),
+                    active = db.listActiveOpenAiToolAttachmentPaths()
+                )
+                lease.release(activeOwners)
+                assertTrue("Derivative must remain while OpenAI tool checkpoint is active", derivedFile.isFile)
+
+                // Once the request is stopped/finalized and checkpoint is removed, cleanupPending deletes the temporary .utf8 derivative while keeping original.
+                assertTrue(db.stopActiveRequestOnce("chat-1", "req_tool_1", removeUserMessage = true))
+                PreparedAttachmentFiles.cleanupPending(context) {
+                    PreparedAttachmentFiles.Owners(
+                        durable = db.listAllLocalFilePaths().toSet(),
+                        active = db.listActiveOpenAiToolAttachmentPaths()
+                    )
+                }
+                assertFalse("Temporary .utf8 derivative for local artifact must not leak after checkpoint removal", derivedFile.exists())
+                assertTrue("Original local artifact file must remain intact", cp1251File.isFile)
+            }
+        } finally { folder.deleteRecursively() }
+    }
+
+
+    @Test fun ambiguousLegacyAliasesFailClosedWhileCanonicalIdsRemainReadable() {
+        val folder = Files.createTempDirectory("ambiguous-files-").toFile()
+        try {
+            val first = File(folder, "one/report.txt").apply { parentFile!!.mkdirs(); writeText("first") }
+            val second = File(folder, "two/report.txt").apply { parentFile!!.mkdirs(); writeText("second") }
+            val a = OpenRouterAttachmentStore.classifyLocalFile(first)
+            val b = OpenRouterAttachmentStore.classifyLocalFile(second)
+            for (tools in listOf(LocalFileTools(listOf(a, b)), LocalFileTools(listOf(a)).apply { register(b) })) {
+                val ambiguous = JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", "local_report.txt")))
+                assertFalse(ambiguous.getBoolean("ok"))
+                assertTrue(ambiguous.getString("error").contains("Неоднозначный"))
+                assertEquals("first", JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", a.id))).getString("content"))
+                assertEquals("second", JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", b.id))).getString("content"))
+            }
+        } finally { folder.deleteRecursively() }
+    }
+
+    @Test fun missingArtifactDerivativeIsRebuiltUnderLeaseAndReusedAcrossResumedBatches() {
+        val context = RuntimeEnvironment.getApplication()
+        val chatId = "artifact-rebuild-${System.nanoTime()}"
+        val requestId = "request-rebuild"
+        val credential = "mock-artifact-key"
+        val model = "gpt-5.4"
+        val original = File(context.filesDir, "generated/$chatId/report.txt").apply {
+            parentFile!!.mkdirs()
+            writeBytes("Отчёт по эксперименту №1".toByteArray(Charset.forName("windows-1251")))
+        }
+        val server = MockWebServer().apply { start() }
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            chain.proceed(chain.request().newBuilder().url(server.url(chain.request().url.encodedPath)).build())
+        }.build()
+        var db = ChatDatabase(context)
+        var initialLease: PreparedAttachmentFiles.Lease? = null
+        try {
+            val lease = PreparedAttachmentFiles.lease(context).also { initialLease = it }
+            val attachment = lease.capture().use { OpenRouterAttachmentStore.classifyLocalFile(context, original) }
+            val oldDerivative = File(attachment.textPath!!)
+            val fingerprint = OpenAiInstructionChainPolicy.fingerprint(
+                GenerationInstructions("", "", null), credential, model)
+            db.upsertCurrentChat(chatId, "Rebuild", null, null, listOf(JSONObject()
+                .put("role", "user").put("provider", "openai").put("request_id", requestId)
+                .put("text", "Read the artifact").put(OpenAiInstructionChainPolicy.FINGERPRINT_FIELD, fingerprint)))
+            db.setActiveResponse(chatId, "resp_parent", requestId, "", "in_progress",
+                System.currentTimeMillis(), "high", "high", false, 10, 1, true)
+            db.startRequestAccounting(chatId, requestId, "openai", model, "openai_api_key")
+            OpenAiLocalFileToolBridge.configure(db, chatId, requestId,
+                JSONObject().put("model", model).put("background", true), listOf(attachment))
+            fun owners() = PreparedAttachmentFiles.Owners(db.listAllLocalFilePaths().toSet(), db.listActiveOpenAiToolAttachmentPaths())
+            lease.release(owners())
+            assertTrue(oldDerivative.delete())
+            fun toolCall(id: String, callId: String) = JSONObject().put("id", id).put("status", "completed")
+                .put("output", JSONArray().put(JSONObject().put("type", "function_call")
+                    .put("call_id", callId).put("name", "read_attached_file")
+                    .put("arguments", JSONObject().put("file_id", attachment.id).toString())))
+            var credentialLookups = 0
+            assertThrows(IOException::class.java) {
+                OpenAiLocalFileToolBridge.finish(context, db, chatId, requestId, toolCall("resp_parent", "call_1"), http,
+                    credential = {
+                        if (++credentialLookups == 2) throw IOException("Pause after prepared checkpoint")
+                        credential
+                    })
+            }
+            val prepared = db.getOpenAiToolCheckpoint(chatId, requestId)!!
+            assertEquals("prepared", prepared.getString("phase"))
+            assertEquals(0, server.requestCount)
+            val rebuiltPath = prepared.getJSONArray("attachments").getJSONObject(0).getString("text_path")
+            val rebuiltFile = File(rebuiltPath)
+            assertNotEquals(oldDerivative.path, rebuiltPath)
+            assertEquals(File(context.filesDir, "attachments").canonicalFile, rebuiltFile.canonicalFile.parentFile)
+            assertEquals("Отчёт по эксперименту №1", rebuiltFile.readText(Charsets.UTF_8))
+            assertTrue(rebuiltPath in db.listActiveOpenAiToolAttachmentPaths())
+            db.close()
+            db = ChatDatabase(context)
+            server.enqueue(MockResponse().setBody(toolCall("resp_child", "call_2").toString()))
+            server.enqueue(MockResponse().setBody(JSONObject().put("id", "resp_final").put("status", "completed")
+                .put("output", JSONArray()).toString()))
+            val observedPaths = mutableListOf<String>()
+            OpenAiLocalFileToolBridge.finish(context, db, chatId, requestId, toolCall("resp_parent", "call_1"), http,
+                credential = { credential }, onStatus = {
+                    observedPaths += db.getOpenAiToolCheckpoint(chatId, requestId)!!
+                        .getJSONArray("attachments").getJSONObject(0).getString("text_path")
+                })
+            assertEquals(2, server.requestCount)
+            assertTrue(observedPaths.isNotEmpty())
+            assertTrue(observedPaths.all { it == rebuiltPath })
+            assertEquals(rebuiltPath, db.getOpenAiToolCheckpoint(chatId, requestId)!!
+                .getJSONArray("attachments").getJSONObject(0).getString("text_path"))
+            repeat(2) {
+                val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+                val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+                assertTrue(result.getBoolean("ok"))
+                assertEquals("Отчёт по эксперименту №1", result.getString("content"))
+            }
+            assertEquals(2, db.getOpenAiToolCheckpoint(chatId, requestId)!!.getJSONObject("telemetry").getInt("rounds_completed"))
+            assertTrue(rebuiltFile.isFile)
+            assertTrue(db.stopActiveRequestOnce(chatId, requestId, removeUserMessage = true))
+            PreparedAttachmentFiles.cleanupPending(context, ::owners)
+            assertFalse("Temporary rebuilt derivative must be removed after Stop", rebuiltFile.exists())
+            assertTrue("Original generated artifact must survive", original.isFile)
+        } finally {
+            initialLease?.defer()
+            db.deleteChat(chatId)
+            db.close()
+            server.shutdown()
+            http.dispatcher.executorService.shutdown()
+            http.connectionPool.evictAll()
+            original.parentFile!!.deleteRecursively()
+        }
     }
 
     @Test fun oversizedOriginalPhotoFailsBeforeNetworkEncoding() {

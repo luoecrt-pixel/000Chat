@@ -170,50 +170,55 @@ class ChatMessageAdapter(
         itemById[item.id] = item
     }
 
-    private fun submitModel() {
-        differ.submitList(items.toList())
+    private fun submitModel(onCommitted: (() -> Unit)? = null) {
+        val snapshot = if (items.isEmpty()) null else items.toList()
+        if (onCommitted != null) {
+            differ.submitList(snapshot) { onCommitted() }
+        } else {
+            differ.submitList(snapshot)
+        }
     }
 
-    fun submitItems(newItems: List<ChatBubbleItem>) {
-        if (items == newItems) return
+    fun submitItems(newItems: List<ChatBubbleItem>, onCommitted: (() -> Unit)? = null) {
+        if (items == newItems && differ.currentList == newItems) {
+            onCommitted?.invoke()
+            return
+        }
         items.clear()
         items.addAll(newItems)
         rebuildModelIndexes()
-        submitModel()
+        submitModel(onCommitted)
     }
 
-    fun addItem(item: ChatBubbleItem) {
+    fun addItem(item: ChatBubbleItem, onCommitted: (() -> Unit)? = null) {
         items.add(item)
         itemById[item.id] = item
         itemIndexById[item.id] = items.lastIndex
-        submitModel()
+        submitModel(onCommitted)
     }
 
-    fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
+    fun replaceItem(id: String, item: ChatBubbleItem, onCommitted: (() -> Unit)? = null): Boolean {
         val index = itemIndexById[id] ?: return false
         val replacement = item.copy(id = id)
         refreshModelItem(index, replacement)
-        submitModel()
+        submitModel(onCommitted)
         return true
     }
 
     fun updateText(id: String, text: String): Boolean {
         val index = itemIndexById[id] ?: return false
         val current = items[index]
-        val updated = if (current.message == null) {
-            ChatBubbleItem.create(
-                id = current.id,
-                label = current.label,
-                text = text,
-                user = current.user,
-                annotations = current.annotations,
-                message = null,
-                chatIndex = current.chatIndex,
-                reasoningSummary = current.reasoningSummary
-            )
-        } else {
-            current.copy(text = text)
-        }
+        val updatedMessage = current.message?.let { JsonProtocol.objectCopy(it).put("text", text) }
+        val updated = ChatBubbleItem.create(
+            id = current.id,
+            label = current.label,
+            text = text,
+            user = current.user,
+            annotations = current.annotations,
+            message = updatedMessage,
+            chatIndex = current.chatIndex,
+            reasoningSummary = current.reasoningSummary
+        )
         refreshModelItem(index, updated)
         val displayPosition = displayPositionById[id]
         if (displayPosition != null) {
@@ -273,13 +278,16 @@ class ChatMessageAdapter(
         submitModel()
     }
 
-    fun clearItems() {
-        if (items.isEmpty()) return
+    fun clearItems(onCommitted: (() -> Unit)? = null) {
+        if (items.isEmpty() && differ.currentList.isEmpty()) {
+            onCommitted?.invoke()
+            return
+        }
         items.clear()
         itemById.clear()
         itemIndexById.clear()
         boundHolders.clear()
-        submitModel()
+        submitModel(onCommitted)
     }
 
     fun bodyForId(id: String): TextView? = boundHolders[id]?.body

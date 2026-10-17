@@ -203,8 +203,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private lateinit var diagnostics: AstraDiagnostics
     private lateinit var scroll: RecyclerView
     private lateinit var jumpToBottomBtn: TextView
-    private val perChatScrollAnchors = mutableMapOf<String, Pair<Int, Int>>()
+    private val perChatScrollAnchors = mutableMapOf<String, ChatScrollAnchor>()
     private val userScrollLockedChats = mutableSetOf<String>()
+    private var displayedChatId: String? = null
+    private var pendingScrollRestoreChatId: String? = null
+    private var pendingScrollRestoreAnchor: ChatScrollAnchor? = null
+    private var scrollRestoreGeneration: Long = 0L
+    private var applyingProgrammaticScroll: Boolean = false
+    private var laidOutFontScale: Float = 1f
+    private var laidOutViewportWidthPx: Int = 0
     private lateinit var messageAdapter: ChatMessageAdapter
     private lateinit var input: EditText
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -332,6 +339,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         pendingVectorStorePickerId = savedInstanceState?.getString("pending_vector_store_picker")
         pendingPickerChatId = savedInstanceState?.getString("pending_picker_chat")
         pendingPickerProvider = savedInstanceState?.getString("pending_picker_provider")
+        perChatScrollAnchors.clear()
+        userScrollLockedChats.clear()
+        if (savedInstanceState != null) {
+            perChatScrollAnchors.putAll(
+                ChatScrollPolicy.decodeAnchorsJson(savedInstanceState.getString("per_chat_scroll_anchors_v1"))
+            )
+            savedInstanceState.getStringArrayList("user_scroll_locked_chats_v1")?.forEach { id ->
+                if (id.isNotBlank()) userScrollLockedChats.add(id)
+            }
+            perChatScrollAnchors.forEach { (chatId, anchor) ->
+                if (anchor.isReadingLocked) userScrollLockedChats.add(chatId)
+            }
+        }
          activityResultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
              val requestCode = pendingActivityResultCode
              pendingActivityResultCode = null
@@ -376,6 +396,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        if (::scroll.isInitialized && scroll.height > 0 &&
+            ::messageAdapter.isInitialized && messageAdapter.itemCount > 0 &&
+            pendingScrollRestoreChatId != currentChatId()
+        ) {
+            captureCurrentScrollAnchor()
+        }
+        outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors))
+        outState.putStringArrayList("user_scroll_locked_chats_v1", ArrayList(userScrollLockedChats))
         pendingActivityResultCode?.let { outState.putInt("pending_result_code", it) }
         pendingCameraPath?.let { outState.putString("pending_camera_path", it) }
         pendingCameraChatId?.let { outState.putString("pending_camera_chat_id", it) }
@@ -425,6 +453,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         cancelPendingGitHubConfirmation()
         openAiLegacyConsentDialog?.dismiss()
         openAiLegacyConsentDialog = null
+        if (::scroll.isInitialized && scroll.height > 0 &&
+            ::messageAdapter.isInitialized && messageAdapter.itemCount > 0 &&
+            pendingScrollRestoreChatId != currentChatId()
+        ) {
+            captureCurrentScrollAnchor()
+        }
         persistComposerStateNow()
         activityVisible = false
         preIdCreateWatches.clear()
@@ -641,7 +675,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
         }
         if (::drawerList.isInitialized) refreshChatDrawer()
-        if (::messageAdapter.isInitialized) messageAdapter.notifyDataSetChanged()
+        val scale = resources.configuration.fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f
+        resources.displayMetrics.scaledDensity = resources.displayMetrics.density * scale
+        if (::messageAdapter.isInitialized) {
+            val chatId = currentChatId()
+            if (::scroll.isInitialized && scroll.height > 0 &&
+                messageAdapter.itemCount > 0 && pendingScrollRestoreChatId != chatId &&
+                perChatScrollAnchors[chatId] == null
+            ) {
+                captureCurrentScrollAnchor()
+            }
+            val savedAnchor = pendingScrollRestoreAnchor?.takeIf { pendingScrollRestoreChatId == chatId }
+                ?: perChatScrollAnchors[chatId]
+            val restoreGeneration = beginScrollRestore(chatId, savedAnchor)
+            messageAdapter.notifyDataSetChanged()
+            applyRestoredScrollState(chatId, savedAnchor, restoreGeneration)
+        }
     }
 
     private fun buildUi() {
@@ -717,8 +766,69 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
         )
         scroll = RecyclerView(this).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity).apply {
-                stackFromEnd = true
+            id = R.id.chat_messages_recycler
+            layoutManager = object : LinearLayoutManager(this@MainActivity) {
+                init {
+                    stackFromEnd = true
+                }
+
+                override fun onLayoutChildren(recycler: RecyclerView.Recycler?, state: RecyclerView.State?) {
+                    val mayRestore = state?.isPreLayout == false && itemCount > 0 && !applyingProgrammaticScroll
+                    if (mayRestore) {
+                        val chatId = currentChatId()
+                        val anchor = pendingScrollRestoreAnchor?.takeIf { pendingScrollRestoreChatId == chatId }
+                        if (anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))) {
+                            scrollToPositionWithOffset(ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot()), anchor.topOffsetPx)
+                        } else if (pendingScrollRestoreChatId == chatId) {
+                            scrollToPosition(itemCount - 1)
+                        } else if (chatId in userScrollLockedChats && childCount > 0) {
+                            val first = findFirstVisibleItemPosition()
+                            findViewByPosition(first)?.let { view ->
+                                // A cancelled restore must preserve the user's current viewport,
+                                // even when an unfinished rich card previously clamped its top to zero.
+                                scrollToPositionWithOffset(first, view.top - paddingTop)
+                            }
+                        }
+                    }
+                    super.onLayoutChildren(recycler, state)
+                    if (!mayRestore || width <= 0 || height <= 0) return
+                    val chatId = currentChatId()
+                    if (pendingScrollRestoreChatId != chatId) {
+                        laidOutFontScale = resources.configuration.fontScale
+                        laidOutViewportWidthPx = width
+                        return
+                    }
+                    val generation = scrollRestoreGeneration
+                    val anchor = pendingScrollRestoreAnchor
+                    val reading = anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))
+                    val position = if (reading && anchor != null) {
+                        ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot())
+                    } else itemCount - 1
+                    val view = findViewByPosition(position) ?: return
+                    if (view.height <= 0 || view.isLayoutRequested || isBubbleAsyncLayoutPending(view)) return
+                    val offset = if (reading && anchor != null) {
+                        val lineTop = if (anchor.charOffset > 0) findLineTopForCharOffset(view, anchor.charOffset) else null
+                        ChatScrollPolicy.resolveTopOffsetPx(anchor, view.height, width, resources.configuration.fontScale, lineTop)
+                    } else {
+                        val margin = (view.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: 0
+                        height - paddingTop - paddingBottom - view.height - margin
+                    }
+                    if (view.top - paddingTop != offset) {
+                        applyingProgrammaticScroll = true
+                        try {
+                            scrollToPositionWithOffset(position, offset)
+                            super.onLayoutChildren(recycler, state)
+                        } finally {
+                            applyingProgrammaticScroll = false
+                        }
+                    }
+                    val committed = findViewByPosition(position) ?: return
+                    if (committed.height > 0 && !committed.isLayoutRequested && !isBubbleAsyncLayoutPending(committed)) {
+                        completeScrollRestore(chatId, generation,
+                            if (reading) ChatScrollMode.READING_LOCKED else ChatScrollMode.FOLLOW_LATEST)
+                    }
+                }
+
             }
             adapter = messageAdapter
             itemAnimator = null
@@ -726,21 +836,31 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setPadding(dp(10), dp(6), dp(10), dp(12))
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    if (applyingProgrammaticScroll) {
+                        updateJumpToBottomButtonVisibility()
+                        return
+                    }
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                        cancelScrollRestore()
                         if (!isAtBottomPixels()) userScrollLockedChats.add(currentChatId())
-                    } else if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                    } else if (newState == RecyclerView.SCROLL_STATE_IDLE && pendingScrollRestoreChatId != currentChatId()) {
                         if (isAtBottomPixels()) userScrollLockedChats.remove(currentChatId())
                         captureCurrentScrollAnchor()
                     }
                     updateJumpToBottomButtonVisibility()
                 }
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                    if (dy < -dp(2) && !isAtBottomPixels()) {
+                    if (applyingProgrammaticScroll || pendingScrollRestoreChatId == currentChatId()) {
+                        updateJumpToBottomButtonVisibility()
+                        return
+                    }
+                    val draggingUp = recyclerView.scrollState == RecyclerView.SCROLL_STATE_DRAGGING && dy < 0
+                    if ((dy < -dp(2) || draggingUp) && !isAtBottomPixels()) {
                         userScrollLockedChats.add(currentChatId())
-                    } else if (isAtBottomPixels()) {
+                    } else if (dy > 0 && isAtBottomPixels()) {
                         userScrollLockedChats.remove(currentChatId())
                     }
-                    if (recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                    if (dy != 0 || recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
                         captureCurrentScrollAnchor()
                     }
                     updateJumpToBottomButtonVisibility()
@@ -1253,6 +1373,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         BackgroundResponseWorkScheduler.cancel(applicationContext, id, requestId)
         activeResponsePersistence.clearActiveResponse(id, expectedRequestId = requestId)
         if(responseId!=null && backgroundEnabled)cancelRemoteResponse(id,responseId,cancelCredential)
+        perChatScrollAnchors.remove(id)
+        userScrollLockedChats.remove(id)
         synchronized(composerMergeLock) {
             clearComposerState(id)
             chatDb.deleteChat(id)
@@ -1273,6 +1395,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (currentChatId()==id) {
             val newId = newChatId()
             prefs.edit().putString("current_chat",newId).apply()
+            displayedChatId = newId
+            cancelScrollRestore()
             chat.clear()
             currentResponseId=null
             baselineEffort=null
@@ -1905,7 +2029,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     // ---------- Chat ----------
     private fun attachmentOwners() = PreparedAttachmentFiles.Owners(
         chatDb.listAllLocalFilePaths().toSet() + LocalAttachmentReferences.allComposerPaths(prefs.all),
-        OpenRouterResponseRuntime.localFilePaths())
+        OpenRouterResponseRuntime.localFilePaths() + chatDb.listActiveOpenAiToolAttachmentPaths())
     private fun releasePreparedFiles(lease: PreparedAttachmentFiles.Lease) {
         try {
             executor.execute {
@@ -1922,6 +2046,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if (!dir.isDirectory) return
             val referenced = linkedSetOf<String>()
             referenced.addAll(chatDb.listAllLocalFilePaths())
+            referenced.addAll(chatDb.listActiveOpenAiToolAttachmentPaths())
             referenced.addAll(OpenRouterResponseRuntime.localFilePaths())
             referenced.addAll(LocalAttachmentReferences.allComposerPaths(prefs.all))
             val now = System.currentTimeMillis()
@@ -2117,8 +2242,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         responseFormat: JSONObject? = null,
         claudeRoute: OpenRouterClaudeRoute = OpenRouterClaudeRoute.AUTO
     ) {
-        activeAssistantItemId = addBubble(AssistantModelLabel.text(JSONObject()
-            .put("provider", "openrouter").put("requested_model", model)), "", false)
+        activeAssistantItemId = addBubble(
+            AssistantModelLabel.text(JSONObject().put("provider", "openrouter").put("requested_model", model)),
+            "",
+            false,
+            itemId = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
+        )
         requestAnswerNotificationPermission()
         OpenRouterResponseRuntime.start(applicationContext, OpenRouterRuntimeRequest(
             chatId, requestId, model, preparedMessages.messages, preparedMessages.attachments,
@@ -2147,7 +2276,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (active?.optString("request_id") == requestId) {
             if (activeAssistantItemId == null) {
                 val model = chatDb.listRequestAccounting(chatId).firstOrNull { it.optString("local_request_id") == requestId }?.optString("requested_model")
-                activeAssistantItemId = addBubble(AssistantModelLabel.text(JSONObject().put("requested_model", model)), "", false)
+                activeAssistantItemId = addBubble(
+                    AssistantModelLabel.text(JSONObject().put("requested_model", model)),
+                    "",
+                    false,
+                    itemId = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
+                )
             }
             activeAssistantItemId?.let { messageAdapter.updateText(it, JsonProtocol.string(active, "text")) }
             setBusy(true)
@@ -2278,6 +2412,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun newChat() {
+        captureCurrentScrollAnchor()
         persistComposerStateNow()
         activeResponseState.nextGeneration()
         cancelPendingGitHubConfirmation()
@@ -2287,6 +2422,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         persistCurrentChat()
         val id = newChatId()
         prefs.edit().putString("current_chat",id).apply()
+        displayedChatId = id
+        cancelScrollRestore()
         chat.clear()
         currentResponseId=null
         baselineEffort=null
@@ -3136,7 +3273,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         toolLabel.text=""
         refreshAttachChips()
 
-        val assistantItemId = addBubble("Astra","",false)
+        val assistantItemId = addBubble(
+            "Astra",
+            "",
+            false,
+            itemId = ChatScrollPolicy.activeAssistantIdentity(localRequestId, null, chat.size)
+        )
         activeAssistantItemId = assistantItemId
         val req=Request.Builder()
             .url("https://api.openai.com/v1/responses")
@@ -3807,10 +3949,21 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // A non-chain request must replay every available local turn as typed
         // input, not just text-only prior messages. The encoder checks original
         // attachment bytes and fails explicitly rather than silently dropping them.
-        val localToolsEnabled = !fileAnalysisEnabled && capturedFileHistory.any {
+        val chatOwnedLocalArtifacts = try {
+            chatDb.listLocalFiles().filter { JsonProtocol.string(it, "chat_id") == requestChatId }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val localToolsEnabled = !fileAnalysisEnabled && (capturedFileHistory.any {
             (it.optJSONArray("file_paths")?.length() ?: 0) > 0 ||
                 OpenAiLocalFileToolBridge.attachments(listOf(it)).isNotEmpty()
-        }
+        } || chatOwnedLocalArtifacts.any {
+            val name = JsonProtocol.string(it, "filename", JsonProtocol.string(it, "path"))
+            val mime = JsonProtocol.string(it, "mime_type")
+            mime.startsWith("text/") || mime == "application/json" ||
+                TextFileFormatPolicy.knownText(name) ||
+                TextFileFormatPolicy.extension(name) in TextFileFormatPolicy.office
+        })
         val typedHistoryNeeded = (!usableOpenAiChain && chat.isNotEmpty()) ||
             requestOpenRouterAttachments.isNotEmpty() || localToolsEnabled
         val hasFilesForAnalysis = capturedFileHistory.any { m ->
@@ -3856,10 +4009,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     ) { before, after ->
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     } else null
-                    if (usableOpenAiChain && localToolsEnabled && prepared != null) {
+                    val preparedToolAttachments = if (localToolsEnabled) {
+                        OpenAiLocalFileToolBridge.attachments(historySnapshot, chatOwnedLocalArtifacts, requestChatId, this@MainActivity)
+                    } else emptyList()
+                    if (localToolsEnabled && prepared != null) {
                         val parts = prepared.optJSONObject(prepared.length() - 1)?.optJSONArray("content")
-                        val currentIds = OpenAiLocalFileToolBridge.attachments(historySnapshot.takeLast(1)).map { it.id }.toSet()
-                        OpenAiLocalFileToolBridge.attachments(historySnapshot).filter { it.id !in currentIds }.forEach { file ->
+                        val alreadyEncodedIds = OpenAiLocalFileToolBridge.attachments(
+                            if (usableOpenAiChain) historySnapshot.takeLast(1) else historySnapshot
+                        ).map { it.id }.toSet()
+                        preparedToolAttachments.filter { it.id !in alreadyEncodedIds }.forEach { file ->
                             parts?.put(JSONObject().put("type", "input_text").put("text", LocalFileTools.descriptor(file)
                                 .put("reading", "Use search_attached_file, read_attached_file or read_attached_table with this file_id.").toString()))
                         }
@@ -3870,7 +4028,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         if (isRequestCurrent(requestChatId, requestGeneration) &&
                             pendingOpenAiPreparation.compareAndSet(localRequestId, null)) {
                             historySnapshot.last().optJSONArray("attachments")?.let { sentUserMessage.put("attachments", JsonProtocol.arrayCopy(it)) }
-                            commitPreparedOpenAi(prepared, containerFiles, if (localToolsEnabled) OpenAiLocalFileToolBridge.attachments(historySnapshot) else emptyList())
+                            commitPreparedOpenAi(prepared, containerFiles, preparedToolAttachments)
                         }
                         } finally { releasePreparedFiles(preparedFiles) }
                     }
@@ -6869,8 +7027,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
     private fun restoreCurrentChat(){
         val targetChatId = currentChatId()
-        val savedAnchor = perChatScrollAnchors[targetChatId]
-        messageAdapter.clearItems()
+        if (displayedChatId == targetChatId && ::scroll.isInitialized && scroll.height > 0 &&
+            ::messageAdapter.isInitialized && messageAdapter.itemCount > 0 &&
+            pendingScrollRestoreChatId != targetChatId
+        ) {
+            captureCurrentScrollAnchor()
+        }
+        val savedAnchor = pendingScrollRestoreAnchor?.takeIf { pendingScrollRestoreChatId == targetChatId }
+            ?: perChatScrollAnchors[targetChatId]
+        val switchingChats = displayedChatId != null && displayedChatId != targetChatId
+        if (switchingChats) {
+            messageAdapter.clearItems()
+        }
         chat.clear()
         clearAttachedSelection()
         refreshAttachChips()
@@ -6887,7 +7055,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val t=JsonProtocol.string(m, "text")
             chat.add(m)
             restoredItems += ChatBubbleItem.create(
-                id="chat-message-$i",
+                id=ChatScrollPolicy.messageIdentity(i, role=="user", m),
                 label=if(role=="user")"Ты" else AssistantModelLabel.text(m),
                 text=t,
                 user=role=="user",
@@ -6898,7 +7066,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             )
             if(role=="user")lastUserText=t
         }
-        messageAdapter.submitItems(restoredItems)
         val restoredTools = chat.lastOrNull { it.optString("role") == "assistant" }
             ?.optJSONArray("tools")
         toolLabel.text = restoredTools?.let { tools ->
@@ -6913,10 +7080,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
                     .firstOrNull { it.optString("request_id") == active.optString("request_id") }
             }
-            activeAssistantItemId=addBubble(AssistantModelLabel.text(
+            val activeLabel = AssistantModelLabel.text(
                 pendingModel?.let { JSONObject().put("provider", it.optString("provider"))
                     .put("requested_model", it.optString("requested_model")) } ?: JSONObject()
-            ),partial,false)
+            )
+            val activeId = ChatScrollPolicy.activeAssistantIdentity(
+                JsonProtocol.nonBlank(active, "request_id"),
+                JsonProtocol.nonBlank(active, "response_id"),
+                restoredItems.size
+            )
+            restoredItems += ChatBubbleItem.create(
+                id = activeId,
+                label = activeLabel,
+                text = partial,
+                user = false
+            )
+            activeAssistantItemId = activeId
             status.text=if(active.optString("status")=="queued")"Модель в очереди…" else "Продолжается генерация…"
             setBusy(true)
         }else{
@@ -6925,15 +7104,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setBusy(false)
         }
         restoreComposerState()
-        if (savedAnchor != null && restoredItems.isNotEmpty()) {
-            scroll.post {
-                val lm = scroll.layoutManager as? LinearLayoutManager ?: return@post
-                val pos = savedAnchor.first.coerceIn(0, (messageAdapter.itemCount - 1).coerceAtLeast(0))
-                lm.scrollToPositionWithOffset(pos, savedAnchor.second)
-                updateJumpToBottomButtonVisibility()
-            }
-        } else {
-            scroll.post { updateJumpToBottomButtonVisibility() }
+        displayedChatId = targetChatId
+        val restoreGeneration = beginScrollRestore(targetChatId, savedAnchor)
+        messageAdapter.submitItems(restoredItems) {
+            applyRestoredScrollState(targetChatId, savedAnchor, restoreGeneration)
         }
     }
 
@@ -8069,23 +8243,277 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun pixelDistanceFromBottom(): Int {
-        if (!::scroll.isInitialized) return 0
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized) return 0
+        val count = messageAdapter.itemCount
+        if (count <= 0) return 0
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return 0
+        val lastIndex = count - 1
+        val lastVisible = lm.findLastVisibleItemPosition()
+        val lastView = lm.findViewByPosition(lastIndex)
+        val bottomMargin = (lastView?.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: 0
         val range = scroll.computeVerticalScrollRange()
         val offset = scroll.computeVerticalScrollOffset()
         val extent = scroll.computeVerticalScrollExtent()
-        return (range - offset - extent).coerceAtLeast(0)
+        val scrollbarRemaining = (range - offset - extent).coerceAtLeast(0)
+        return ChatScrollPolicy.actualDistanceFromBottomPx(
+            itemCount = count,
+            lastVisiblePosition = lastVisible,
+            viewportHeightPx = scroll.height,
+            paddingBottomPx = scroll.paddingBottom,
+            lastItemBottomPx = lastView?.bottom,
+            lastItemBottomMarginPx = bottomMargin,
+            scrollbarRemainingPx = scrollbarRemaining,
+            maxFollowDistancePx = dp(64)
+        )
     }
 
     private fun isAtBottomPixels(): Boolean = pixelDistanceFromBottom() <= dp(64)
 
-    private fun captureCurrentScrollAnchor() {
+    private fun flushScrollLayoutIfReady() {
+        if (!::scroll.isInitialized || scroll.isComputingLayout || scroll.width <= 0 || scroll.height <= 0 || !scroll.isLayoutRequested) return
+        scroll.measure(
+            View.MeasureSpec.makeMeasureSpec(scroll.width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(scroll.height, View.MeasureSpec.EXACTLY)
+        )
+        scroll.layout(scroll.left, scroll.top, scroll.right, scroll.bottom)
+    }
+
+    private fun contentTextViewsInBubble(root: View): List<Pair<TextView, Int>> {
+        val out = mutableListOf<Pair<TextView, Int>>()
+        fun walk(view: View, topAcc: Int, isRootCardChildZero: Boolean) {
+            if (view.visibility != View.VISIBLE) return
+            if (isRootCardChildZero && view is TextView) return
+            if (view is TextView && view !is Button && view.text.isNotEmpty()) {
+                out.add(view to topAcc)
+                return
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    val child = view.getChildAt(i)
+                    walk(child, topAcc + child.top, view === root && i == 0)
+                }
+            }
+        }
+        walk(root, 0, false)
+        return out
+    }
+
+    private fun findCharOffsetAtViewportTop(card: View, targetYInCard: Int): Int {
+        var priorChars = 0
+        for ((tv, topInCard) in contentTextViewsInBubble(card)) {
+            val layout = tv.layout
+            val len = tv.text.length
+            if (layout != null && targetYInCard <= topInCard + tv.height) {
+                val localY = (targetYInCard - topInCard - tv.totalPaddingTop).coerceAtLeast(0)
+                val line = layout.getLineForVertical(localY)
+                return priorChars + layout.getLineStart(line)
+            }
+            priorChars += len
+        }
+        return 0
+    }
+
+    private fun findLineTopForCharOffset(card: View, charOffset: Int): Int? {
+        if (charOffset <= 0) return null
+        var priorChars = 0
+        val views = contentTextViewsInBubble(card)
+        for ((index, pair) in views.withIndex()) {
+            val (tv, topInCard) = pair
+            val len = tv.text.length
+            val layout = tv.layout
+            if (layout != null && (charOffset <= priorChars + len || index == views.lastIndex)) {
+                val localOffset = (charOffset - priorChars).coerceIn(0, len)
+                val line = layout.getLineForOffset(localOffset)
+                return topInCard + tv.totalPaddingTop + layout.getLineTop(line)
+            }
+            priorChars += len
+        }
+        return null
+    }
+
+    private fun captureCurrentScrollAnchor(preserveMode: ChatScrollMode? = null) {
         if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+        val chatId = currentChatId()
+        if (chatId.isBlank() || pendingScrollRestoreChatId == chatId) return
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return
         val firstPos = lm.findFirstVisibleItemPosition()
         if (firstPos < 0) return
-        val firstView = lm.findViewByPosition(firstPos)
-        val topOffset = (firstView?.top ?: 0) - scroll.paddingTop
-        perChatScrollAnchors[currentChatId()] = firstPos to topOffset
+        val firstView = lm.findViewByPosition(firstPos) ?: return
+        if (isBubbleAsyncLayoutPending(firstView) || firstView.isLayoutRequested) return
+        val topOffset = firstView.top - scroll.paddingTop
+        val snapshot = messageAdapter.snapshot()
+        val item = snapshot.getOrNull(firstPos)
+        val distanceFromBottom = pixelDistanceFromBottom()
+        val mode = preserveMode ?: if (chatId in userScrollLockedChats || distanceFromBottom > dp(64)) {
+            ChatScrollMode.READING_LOCKED
+        } else {
+            ChatScrollMode.FOLLOW_LATEST
+        }
+        val charOffset = if (firstView != null && topOffset < 0) {
+            findCharOffsetAtViewportTop(firstView, -topOffset)
+        } else 0
+        val effectiveWidth = if (laidOutViewportWidthPx > 0) laidOutViewportWidthPx else scroll.width
+        val effectiveFontScale = if (laidOutViewportWidthPx > 0) laidOutFontScale else resources.configuration.fontScale
+        perChatScrollAnchors[chatId] = ChatScrollAnchor(
+            messageId = item?.id ?: ChatScrollPolicy.messageIdentity(firstPos, item?.user == true, item?.message),
+            contentSignature = item?.contentSignature.orEmpty(),
+            position = firstPos,
+            topOffsetPx = topOffset,
+            mode = mode,
+            distanceFromBottomPx = distanceFromBottom,
+            itemHeightPx = firstView?.height ?: 0,
+            viewportWidthPx = effectiveWidth,
+            fontScale = effectiveFontScale,
+            charOffset = charOffset
+        )
+    }
+
+    private fun scrollToChatBottomNow() {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized) return
+        val count = messageAdapter.itemCount
+        if (count <= 0) return
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return
+        val lastIndex = count - 1
+        applyingProgrammaticScroll = true
+        try {
+            if (lm.findViewByPosition(lastIndex) == null) {
+                lm.scrollToPosition(lastIndex)
+                flushScrollLayoutIfReady()
+            }
+            val lastView = lm.findViewByPosition(lastIndex)
+            val viewportHeight = scroll.height - scroll.paddingTop - scroll.paddingBottom
+            if (lastView != null && viewportHeight > 0 && lastView.height > 0) {
+                val bottomMargin = (lastView.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: 0
+                val targetOffset = viewportHeight - lastView.height - bottomMargin
+                lm.scrollToPositionWithOffset(lastIndex, targetOffset)
+                flushScrollLayoutIfReady()
+            } else {
+                lm.scrollToPosition(lastIndex)
+                flushScrollLayoutIfReady()
+            }
+        } finally {
+            applyingProgrammaticScroll = false
+        }
+    }
+
+    private fun isBubbleAsyncLayoutPending(card: View): Boolean =
+        card.findViewWithTag<RichResponsePanel>("rich-response")?.isAsyncParsePending() == true
+
+    private fun beginScrollRestore(chatId: String, anchor: ChatScrollAnchor?): Long {
+        pendingScrollRestoreChatId = chatId
+        pendingScrollRestoreAnchor = anchor
+        return ++scrollRestoreGeneration
+    }
+
+    private fun cancelScrollRestore() {
+        scrollRestoreGeneration++
+        pendingScrollRestoreChatId = null
+        pendingScrollRestoreAnchor = null
+    }
+
+    private fun isScrollRestoreCurrent(chatId: String, generation: Long): Boolean =
+        currentChatId() == chatId && pendingScrollRestoreChatId == chatId && scrollRestoreGeneration == generation
+
+    private fun completeScrollRestore(chatId: String, generation: Long, mode: ChatScrollMode) {
+        if (!isScrollRestoreCurrent(chatId, generation)) return
+        laidOutFontScale = resources.configuration.fontScale
+        laidOutViewportWidthPx = scroll.width
+        pendingScrollRestoreChatId = null
+        pendingScrollRestoreAnchor = null
+        if (mode == ChatScrollMode.READING_LOCKED) userScrollLockedChats.add(chatId)
+        else userScrollLockedChats.remove(chatId)
+        captureCurrentScrollAnchor(preserveMode = mode)
+        updateJumpToBottomButtonVisibility()
+    }
+
+    private fun applyReadingAnchorNow(pos: Int, savedAnchor: ChatScrollAnchor): Boolean {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0 ||
+            scroll.isComputingLayout || scroll.width <= 0 || scroll.height <= 0) return false
+        val lm = scroll.layoutManager as? LinearLayoutManager ?: return false
+        val safePos = pos.coerceIn(0, messageAdapter.itemCount - 1)
+        applyingProgrammaticScroll = true
+        try {
+            lm.scrollToPositionWithOffset(safePos, savedAnchor.topOffsetPx)
+            flushScrollLayoutIfReady()
+            val view = lm.findViewByPosition(safePos) ?: return false
+            if (view.height <= 0 || view.isLayoutRequested || isBubbleAsyncLayoutPending(view)) return false
+            val charLineTop = if (savedAnchor.charOffset > 0) findLineTopForCharOffset(view, savedAnchor.charOffset) else null
+            val resolvedOffset = ChatScrollPolicy.resolveTopOffsetPx(
+                anchor = savedAnchor,
+                currentItemHeightPx = view.height,
+                currentViewportWidthPx = scroll.width,
+                currentFontScale = resources.configuration.fontScale,
+                charLineTopPx = charLineTop
+            )
+            if (view.top - scroll.paddingTop != resolvedOffset) {
+                lm.scrollToPositionWithOffset(safePos, resolvedOffset)
+                flushScrollLayoutIfReady()
+            }
+            val restored = lm.findViewByPosition(safePos) ?: return false
+            return restored.height > 0 && !restored.isLayoutRequested && !isBubbleAsyncLayoutPending(restored)
+        } finally {
+            applyingProgrammaticScroll = false
+        }
+    }
+
+    private fun tryPendingScrollRestore(targetChatId: String, generation: Long) {
+        if (!isScrollRestoreCurrent(targetChatId, generation) || scroll.isComputingLayout) return
+        if (messageAdapter.itemCount == 0) {
+            pendingScrollRestoreChatId = null
+            pendingScrollRestoreAnchor = null
+            updateJumpToBottomButtonVisibility()
+            return
+        }
+        val anchor = pendingScrollRestoreAnchor
+        val reading = anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))
+        if (reading && anchor != null) {
+            userScrollLockedChats.add(targetChatId)
+            val position = ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot())
+            if (applyReadingAnchorNow(position, anchor)) {
+                completeScrollRestore(targetChatId, generation, ChatScrollMode.READING_LOCKED)
+            }
+        } else {
+            userScrollLockedChats.remove(targetChatId)
+            scrollToChatBottomNow()
+            val lm = scroll.layoutManager as? LinearLayoutManager ?: return
+            val last = lm.findViewByPosition(messageAdapter.itemCount - 1)
+            if (scroll.width > 0 && scroll.height > 0 && last != null && last.height > 0 &&
+                !last.isLayoutRequested && !isBubbleAsyncLayoutPending(last)) {
+                completeScrollRestore(targetChatId, generation, ChatScrollMode.FOLLOW_LATEST)
+            }
+        }
+    }
+
+    private fun applyRestoredScrollState(targetChatId: String, savedAnchor: ChatScrollAnchor?, restoreGeneration: Long) {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized ||
+            !isScrollRestoreCurrent(targetChatId, restoreGeneration)) return
+        // The pending anchor is immutable until a measured target view commits or the user cancels.
+        pendingScrollRestoreAnchor = savedAnchor
+        tryPendingScrollRestore(targetChatId, restoreGeneration)
+        scroll.post {
+            if (!isScrollRestoreCurrent(targetChatId, restoreGeneration)) return@post
+            tryPendingScrollRestore(targetChatId, restoreGeneration)
+        }
+    }
+
+    private fun onBubbleAsyncLayoutCommitted(sourceChatId: String, itemId: String, card: View) {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized ||
+            pendingScrollRestoreChatId != sourceChatId || currentChatId() != sourceChatId) return
+        val generation = scrollRestoreGeneration
+        val items = messageAdapter.snapshot()
+        if (items.isEmpty()) return
+        val anchor = pendingScrollRestoreAnchor
+        val target = if (anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))) {
+            ChatScrollPolicy.resolveAnchorPosition(anchor, items)
+        } else items.lastIndex
+        if (items.getOrNull(target)?.id != itemId) return
+        // RichResponsePanel calls back from its layout; leave RecyclerView's current layout first.
+        scroll.post {
+            if (!isScrollRestoreCurrent(sourceChatId, generation)) return@post
+            val lm = scroll.layoutManager as? LinearLayoutManager ?: return@post
+            if (lm.findViewByPosition(target) !== card || messageAdapter.snapshot().getOrNull(target)?.id != itemId) return@post
+            tryPendingScrollRestore(sourceChatId, generation)
+        }
     }
 
     private fun updateJumpToBottomButtonVisibility() {
@@ -8094,47 +8522,38 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         jumpToBottomBtn.visibility = if (shouldShow) View.VISIBLE else View.GONE
     }
 
-    private fun fastSmoothScrollTo(targetPosition: Int, snapToStart: Boolean) {
-        val lm = scroll.layoutManager as? LinearLayoutManager ?: return
-        val scroller = object : androidx.recyclerview.widget.LinearSmoothScroller(this) {
-            override fun getVerticalSnapPreference(): Int =
-                if (snapToStart) SNAP_TO_START else SNAP_TO_END
-            override fun calculateSpeedPerPixel(displayMetrics: android.util.DisplayMetrics): Float =
-                9f / displayMetrics.densityDpi
-            override fun calculateTimeForScrolling(dx: Int): Int =
-                super.calculateTimeForScrolling(dx).coerceAtMost(110)
-        }
-        scroller.targetPosition = targetPosition.coerceIn(0, (messageAdapter.itemCount - 1).coerceAtLeast(0))
-        lm.startSmoothScroll(scroller)
-    }
-
     private fun handleTwoStageJumpClick() {
         if (!::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return
         val lastIndex = messageAdapter.itemCount - 1
         val firstVisible = lm.findFirstVisibleItemPosition()
-        val lastViewTop = lm.findViewByPosition(lastIndex)?.top
+        val lastViewTop = lm.findViewByPosition(lastIndex)?.let { it.top - scroll.paddingTop }
         val target = ChatScrollPolicy.jumpTarget(
             itemCount = messageAdapter.itemCount,
             firstVisiblePosition = firstVisible,
             lastItemTopPx = lastViewTop,
             topThresholdPx = dp(28)
         )
+        val chatId = currentChatId()
+        cancelScrollRestore()
         if (target == JumpButtonTarget.LAST_MESSAGE_START) {
-            userScrollLockedChats.add(currentChatId())
-            fastSmoothScrollTo(lastIndex, snapToStart = true)
-            scroll.postDelayed({
-                captureCurrentScrollAnchor()
-                updateJumpToBottomButtonVisibility()
-            }, 130L)
-        } else {
-            userScrollLockedChats.remove(currentChatId())
-            scroll.scrollBy(0, pixelDistanceFromBottom())
-            scroll.scrollToPosition(lastIndex)
-            scroll.post {
-                captureCurrentScrollAnchor()
-                updateJumpToBottomButtonVisibility()
+            applyingProgrammaticScroll = true
+            try {
+                lm.scrollToPositionWithOffset(lastIndex, 0)
+                flushScrollLayoutIfReady()
+            } finally {
+                applyingProgrammaticScroll = false
             }
+            if (isAtBottomPixels()) {
+                userScrollLockedChats.remove(chatId)
+                captureCurrentScrollAnchor(preserveMode = ChatScrollMode.FOLLOW_LATEST)
+            } else {
+                userScrollLockedChats.add(chatId)
+                captureCurrentScrollAnchor(preserveMode = ChatScrollMode.READING_LOCKED)
+            }
+            updateJumpToBottomButtonVisibility()
+        } else {
+            scrollToLatest(force = true)
         }
     }
 
@@ -8153,19 +8572,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         )
     }
 
-    private fun scrollToLatest(force: Boolean = false){
-        if(!::messageAdapter.isInitialized || messageAdapter.itemCount==0) return
-        if (force) userScrollLockedChats.remove(currentChatId())
-        if(!force && !isNearLatest()) {
+    private fun scrollToLatest(force: Boolean = false) {
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+        val chatId = currentChatId()
+        if (!force && (pendingScrollRestoreChatId == chatId || !isNearLatest())) {
             updateJumpToBottomButtonVisibility()
             return
         }
-        scroll.post{
-            if(messageAdapter.itemCount>0 && (force || isNearLatest())) {
-                scroll.scrollToPosition(messageAdapter.itemCount-1)
-                captureCurrentScrollAnchor()
-            }
-            updateJumpToBottomButtonVisibility()
+        userScrollLockedChats.remove(chatId)
+        val generation = beginScrollRestore(chatId, null)
+        tryPendingScrollRestore(chatId, generation)
+        scroll.post {
+            if (currentChatId() != chatId || scrollRestoreGeneration != generation) return@post
+            tryPendingScrollRestore(chatId, generation)
         }
     }
 
@@ -8211,6 +8630,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun bindChatBubbleCard(card:LinearLayout,item:ChatBubbleItem):TextView{
         val theme = currentTheme()
+        val scale = resources.configuration.fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f
+        resources.displayMetrics.scaledDensity = resources.displayMetrics.density * scale
         card.removeAllViews()
         card.orientation=LinearLayout.VERTICAL
         card.setPadding(dp(13),dp(10),dp(13),dp(10))
@@ -8247,7 +8668,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         input.setText("Продолжи предыдущий прерванный ответ с места остановки. Не повторяй уже написанное.")
                         sendMessage(false)
                     }
-                }))
+                },
+                onAsyncLayoutCommitted = { onBubbleAsyncLayoutCommitted(sourceChatId, item.id, card) }))
         }
 
         val message=item.message
@@ -8348,13 +8770,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         text:String,
         user:Boolean,
         annotations:JSONArray?=null,
-        message:JSONObject?=null
+        message:JSONObject?=null,
+        itemId:String?=null
     ):String{
         val chatIndex=message?.let{target->chat.indexOfFirst{it===target}.takeIf{it>=0}}
-        val id=if(chatIndex!=null){
-            "chat-${chatIndex}-${if(user)"user" else "assistant"}"
-        }else{
-            "bubble-${UUID.randomUUID()}"
+        val id=when{
+            !itemId.isNullOrBlank() -> itemId
+            chatIndex!=null -> ChatScrollPolicy.messageIdentity(chatIndex, user, message)
+            else -> "bubble-${UUID.randomUUID()}"
         }
         messageAdapter.addItem(
             ChatBubbleItem.create(

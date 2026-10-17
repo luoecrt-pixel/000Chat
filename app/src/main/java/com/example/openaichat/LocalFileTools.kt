@@ -11,8 +11,13 @@ import java.math.MathContext
 /** Request-scoped allow-list. A model cannot use these tools to read arbitrary device paths. */
 class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val active: () -> Boolean = { true }) {
     private val files = attachments.associateBy { it.id }.toMutableMap()
+    private val legacyAliases = mutableMapOf<String, String>()
+    private val ambiguousLegacyAliases = mutableSetOf<String>()
+    init { attachments.forEach(::registerLegacyAlias) }
     private val pages = LocalTextPageIndex()
     companion object {
+        const val SEARCH_LEFT_CONTEXT = 100
+        const val SEARCH_RIGHT_CONTEXT = 180
         val names = setOf("file_list", "file_info", "file_read_range", "file_search", "file_table_stats")
         fun schemas(): JSONArray = JSONArray().apply {
             val catalog = OpenRouterAppToolCatalog.tools()
@@ -27,11 +32,29 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
             .put("encoding_guessed", a.encodingGuessed)
             .put("reading", "Use file_info, file_search, file_read_range, or file_table_stats. Every part remains readable; choose partial or full processing for the task.")
     }
-    fun register(a: OpenRouterLocalAttachment) { files[a.id] = a }
+    private fun registerLegacyAlias(a: OpenRouterLocalAttachment) {
+        val fileName = File(a.path).name
+        if (fileName.isBlank()) return
+        val alias = "local_$fileName"
+        if (alias in ambiguousLegacyAliases) return
+        val existing = legacyAliases[alias]
+        if (existing == null || existing == a.id) legacyAliases[alias] = a.id
+        else { legacyAliases.remove(alias); ambiguousLegacyAliases.add(alias) }
+    }
+    fun register(a: OpenRouterLocalAttachment) {
+        files[a.id] = a
+        registerLegacyAlias(a)
+    }
     private fun file(args: JSONObject): OpenRouterLocalAttachment {
         if (!active()) throw IOException("Запрос остановлен")
         val id = args.getString("file_id")
-        return files[id]?.takeIf { File(it.textPath ?: it.path).isFile }
+        if (id !in files && id in ambiguousLegacyAliases)
+            throw IOException("Неоднозначный идентификатор файла: $id. Укажите точный file_id.")
+        val resolved = files[id] ?: legacyAliases[id]?.let { files[it] }
+        return resolved?.takeIf {
+            File(it.textPath ?: it.path).isFile ||
+                (it.kind == "text" && (it.textEncoding == null || it.textEncoding.equals("UTF-8", ignoreCase = true)) && File(it.path).isFile)
+        }
             ?: throw IOException("Файл недоступен в этом запросе: $id")
     }
     fun execute(name: String, args: JSONObject): String = try {
@@ -62,29 +85,52 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
     }
     private fun textFile(a: OpenRouterLocalAttachment): File {
         if (a.kind !in setOf("text", "document", "table")) throw IOException("Этот формат не является извлечённым текстом. Изображения/PDF передаются визуальной модели напрямую.")
-        return File(a.textPath ?: a.path)
+        val candidate = File(a.textPath ?: a.path)
+        if (candidate.isFile) return candidate
+        val original = File(a.path)
+        if (original.isFile && a.kind == "text" && (a.textEncoding == null || a.textEncoding.equals("UTF-8", ignoreCase = true))) {
+            return original
+        }
+        return candidate
     }
     private fun strictReader(file: File): java.io.Reader {
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
             .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
         return java.io.InputStreamReader(file.inputStream(), decoder)
     }
+    private fun retainTailWithSurrogateGuard(source: String, maxChars: Int): String {
+        if (maxChars <= 0 || source.isEmpty()) return ""
+        var start = (source.length - maxChars).coerceAtLeast(0)
+        if (start > 0 && start < source.length &&
+            Character.isLowSurrogate(source[start]) &&
+            Character.isHighSurrogate(source[start - 1])
+        ) {
+            start--
+        }
+        return source.substring(start)
+    }
     private fun search(a: OpenRouterLocalAttachment, args: JSONObject): JSONObject {
         val query = args.getString("query"); require(query.length in 1..512) { "query must contain 1..512 characters" }
         val start = args.optLong("offset", 0L); require(start >= 0)
-        val limit = args.optInt("limit", 20); require(limit in 1..50)
+        val maxResults = if (args.has("limit")) args.getInt("limit") else args.optInt("max_results", 20)
+        require(maxResults in 1..50)
         val matches = JSONArray()
         var position = 0L
         var carry = ""
         var scannedTo = start
         var eof = true
-        val carryWindow = maxOf(query.length - 1, 100)
+        // Preserve both the promised left snippet context (100 chars) and the maximum
+        // cross-buffer prefix of the query (query.length - 1) so boundary matches
+        // never lose their left context or split a surrogate pair.
+        val carryWindow = SEARCH_LEFT_CONTEXT + query.length - 1
         strictReader(textFile(a)).use { reader ->
             val buf = CharArray(8192)
             while (position < start) {
                 if (!active()) throw IOException("Поиск отменён")
                 val n = reader.read(buf, 0, minOf(buf.size.toLong(), start - position).toInt())
-                if (n < 0) return JSONObject().put("matches", matches).put("next_offset", position).put("eof", true)
+                if (n < 0) return JSONObject().put("matches", matches).put("next_offset", position)
+                    .put("eof", true).put("all_matches_returned", true).put("file_id", a.id)
+                carry = retainTailWithSurrogateGuard(carry + String(buf, 0, n), SEARCH_LEFT_CONTEXT)
                 position += n
             }
             while (true) {
@@ -96,24 +142,25 @@ class LocalFileTools(attachments: List<OpenRouterLocalAttachment>, private val a
                 while (at >= 0) {
                     val offset = base + at
                     if (offset >= start && offset + query.length > position) {
-                        var lo = (at - 100).coerceAtLeast(0)
-                        var hi = (at + query.length + 180).coerceAtMost(chunk.length)
+                        var lo = (at - SEARCH_LEFT_CONTEXT).coerceAtLeast(0)
+                        var hi = (at + query.length + SEARCH_RIGHT_CONTEXT).coerceAtMost(chunk.length)
                         if (lo < chunk.length && Character.isLowSurrogate(chunk[lo])) lo++
                         if (hi > lo && Character.isHighSurrogate(chunk[hi - 1])) hi--
                         matches.put(JSONObject().put("offset", offset).put("snippet", chunk.substring(lo, hi)))
-                        scannedTo = offset + 1
-                        if (matches.length() >= limit) { eof = false; break }
+                        if (matches.length() >= maxResults) {
+                            scannedTo = offset + 1; eof = false; break
+                        }
                     }
                     at = chunk.indexOf(query, at + 1, ignoreCase = true)
                 }
                 position += n
                 if (!eof) break
-                carry = chunk.takeLast(carryWindow)
+                carry = retainTailWithSurrogateGuard(chunk, carryWindow)
                 scannedTo = position
             }
         }
-        return JSONObject().put("matches", matches).put("next_offset", scannedTo).put("eof", eof)
-            .put("all_matches_returned", eof).put("file_id", a.id)
+        return JSONObject().put("file_id", a.id).put("matches", matches).put("next_offset", scannedTo)
+            .put("eof", eof).put("all_matches_returned", eof)
     }
     private fun statistics(a: OpenRouterLocalAttachment, args: JSONObject): JSONObject {
         val column = args.getInt("column"); require(column >= 1)
