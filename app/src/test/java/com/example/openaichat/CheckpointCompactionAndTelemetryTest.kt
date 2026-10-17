@@ -386,4 +386,162 @@ class CheckpointCompactionAndTelemetryTest {
             assertFalse(event.has("cost_usd"))
         }
     }
+
+    @Test fun stopAndReopenPreservesFullOpenRouterUsageBreakdownWithoutCountingSparseSnapshotsTwice() {
+        val parentUsage = JSONObject().put("prompt_tokens", 100).put("completion_tokens", 10).put("cost", 0.01)
+            .put("prompt_tokens_details", JSONObject().put("cached_tokens", 40).put("cache_write_tokens", 15))
+            .put("completion_tokens_details", JSONObject().put("reasoning_tokens", 5))
+            .put("cost_details", JSONObject().put("server_tool_cost", 0.002))
+        ChatDatabase(context).use { db ->
+            prepared(db, provider = "openrouter")
+            assertTrue(db.observeOpenRouterRound(chat, request, 0, "gen-parent", parentUsage))
+            repeat(2) {
+                assertTrue(db.observeOpenRouterRound(chat, request, 0, "gen-parent", JSONObject().put("prompt_tokens", 100)))
+                assertTrue(db.observeOpenRouterRound(chat, request, 0, "gen-parent", parentUsage))
+            }
+            assertTrue(db.observeOpenRouterRound(chat, request, 1, "gen-child", JSONObject()
+                .put("prompt_tokens", 150).put("completion_tokens", 20).put("cost", 0.02)
+                .put("prompt_tokens_details", JSONObject().put("cached_tokens", 60).put("cache_write_tokens", 0))
+                .put("completion_tokens_details", JSONObject().put("reasoning_tokens", 8))))
+            db.saveOpenRouterCheckpoint(chat, request, JSONObject().put("version", 1)
+                .put("tail", JSONArray().put(JSONObject().put("role", "assistant").put("content", "Paid tool round"))))
+            assertTrue(db.stopActiveRequestOnce(chat, request))
+            assertNull(db.getOpenRouterCheckpoint(chat, request))
+        }
+        ChatDatabase(context).use { db ->
+            val event = db.listRequestEvents(chat).single()
+            for (row in listOf(account(db), event)) {
+                assertEquals(250L, row.getLong("input_tokens"))
+                assertEquals(30L, row.getLong("output_tokens"))
+                assertEquals(100L, row.getLong("cached_tokens"))
+                assertEquals(15L, row.getLong("cache_write_tokens"))
+                assertEquals(13L, row.getLong("reasoning_tokens"))
+                assertEquals("provider_reported", row.getString("cost_kind"))
+                assertEquals(0.03, row.getString("cost_usd").toDouble(), 1e-12)
+                assertEquals(0.002, RequestEventFormatter.parseTelemetry(row)!!.getJSONObject("cost_details")
+                    .getJSONObject("cost_details").getDouble("server_tool_cost"), 1e-12)
+            }
+            val archivedUsage = db.getRequestRecoveryArchive(chat, request)!!.getJSONObject("usage")
+            assertEquals(15L, archivedUsage.getJSONObject("prompt_tokens_details").getLong("cache_write_tokens"))
+            assertEquals(13L, archivedUsage.getJSONObject("completion_tokens_details").getLong("reasoning_tokens"))
+        }
+    }
+
+    @Test fun unknownSecondRoundRemovesPartialKnownCostFromRecoveredAssistantAndLateRows() {
+        ChatDatabase(context).use { db ->
+            prepared(db, provider = "openrouter")
+            val partial = JSONObject().put("prompt_tokens", 100).put("completion_tokens", 10).put("cost", 0.01)
+            assertTrue(db.observeOpenRouterRound(chat, request, 0, "gen-parent", partial))
+            assertTrue(db.observeOpenRouterRound(chat, request, 1, "gen-child", JSONObject()
+                .put("prompt_tokens", 150).put("completion_tokens", 20)))
+            assertTrue(finish(db, assistant().put("provider", "openrouter").put("usage", partial)))
+            val message = db.getChat(chat)!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals(250L, message.getJSONObject("usage").getLong("prompt_tokens"))
+            assertFalse(message.getJSONObject("usage").has("cost"))
+            assertEquals("unknown", account(db).getString("cost_kind"))
+            assertFalse(account(db).has("cost_usd"))
+            assertTrue(db.recordRequestAccounting(chat, request, "completed", usage = partial, reportedCostUsd = 0.01))
+            db.recordRequestEvent(chat, "request_completed", request, "openrouter", "gpt-test", "gpt-test",
+                ModelCatalog.Match.EXACT, "completed", inputTokens = 100, reportedCostUsd = 0.01)
+            db.recordEffortMetric(request, chat, "general", "high", "high", false,
+                8, 1, 25, 100, 0, 0, 10, 0, true, null, estimatedCostUsd = 0.01, costKind = "provider_reported")
+            for (row in listOf(account(db), db.listRequestEvents(chat).single())) {
+                assertEquals(250L, row.getLong("input_tokens"))
+                assertEquals("unknown", row.getString("cost_kind"))
+                assertFalse(row.has("cost_usd"))
+            }
+            assertEquals(1L, db.usageTotals().getLong("unknown_cost_requests"))
+        }
+    }
+
+    @Test fun directTerminalOpenRouterCostWithoutRoundRowsSurvivesAccountingEventAndMetricWrites() {
+        ChatDatabase(context).use { db ->
+            for (cost in listOf(0.0, 0.025)) {
+                prepared(db, provider = "openrouter")
+                val direct = JSONObject().put("prompt_tokens", 100).put("completion_tokens", 10).put("cost", cost)
+                assertTrue(finish(db, assistant().put("provider", "openrouter").put("usage", direct)))
+                assertTrue(db.listOpenRouterRounds(chat, request).isEmpty())
+                assertTrue(db.recordRequestAccounting(chat, request, "completed", usage = direct, reportedCostUsd = cost))
+                db.recordRequestEvent(chat, "request_completed", request, "openrouter", "gpt-test", "gpt-test",
+                    ModelCatalog.Match.EXACT, "completed", inputTokens = 100, reportedCostUsd = cost)
+                db.recordEffortMetric(request, chat, "general", "high", "high", false,
+                    8, 1, 25, 100, 0, 0, 10, 0, true, null, estimatedCostUsd = cost, costKind = "provider_reported")
+                for (row in listOf(account(db), db.listRequestEvents(chat).single())) {
+                    assertEquals("provider_reported", row.getString("cost_kind"))
+                    assertEquals(cost, row.getString("cost_usd").toDouble(), 1e-12)
+                }
+                assertEquals(1L, db.usageTotals().getLong("known_cost_requests"))
+                assertEquals(cost, db.usageTotals().getDouble("provider_reported_cost_usd"), 1e-12)
+                db.deleteChat(chat)
+            }
+        }
+    }
+
+    @Test fun malformedOptionalAccountingTelemetryDoesNotAbortStopLateAccountingOrReconciliation() {
+        ChatDatabase(context).use { db ->
+            prepared(db)
+            assertTrue(db.saveOpenAiToolCheckpoint(chat, request, checkpoint()))
+            fun corruptTelemetry() = db.writableDatabase.execSQL(
+                "UPDATE request_accounting SET telemetry_summary='broken-optional-json' WHERE chat_id=? AND local_request_id=?",
+                arrayOf(chat, request))
+            corruptTelemetry()
+            assertTrue(db.stopActiveRequestOnce(chat, request))
+            assertNotNull(db.getRequestRecoveryArchive(chat, request))
+            assertEquals(100L, account(db).getLong("input_tokens"))
+            corruptTelemetry()
+            assertTrue(db.recordRequestAccounting(chat, request, "cancelled", responseId = "resp_child",
+                usage = usage(20)))
+            assertEquals(120L, account(db).getLong("input_tokens"))
+            corruptTelemetry()
+            assertTrue(db.reconcileStoppedOpenAiResponse(chat, request, "resp_child",
+                JSONObject().put("id", "resp_child").put("status", "cancelled").put("usage", usage(20))))
+            assertEquals(120L, account(db).getLong("input_tokens"))
+            assertEquals(120L, db.listRequestEvents(chat).single().getLong("input_tokens"))
+            assertEquals("stopped", account(db).getString("local_status"))
+            assertEquals(1, db.listRequestEvents(chat).size)
+        }
+    }
+
+    @Test fun missingAccountingLedgerRestoresTerminalMessageAndValidNewerAccountingWinsLaterSnapshot() {
+        ChatDatabase(context).use { db ->
+            prepared(db)
+            val saved = checkpoint()
+            assertTrue(db.saveOpenAiToolCheckpoint(chat, request, saved))
+            val combined = OpenAiUsageLedger.resolve(saved, raw("resp_child", "Answer", 20))
+            val message = assistant().put(OpenAiUsageLedger.FIELD, combined)
+                .put("usage", OpenAiUsageLedger.total(combined))
+                .put("telemetry_summary", JSONObject().put(OpenAiUsageLedger.FIELD, combined))
+            assertTrue(finish(db, message))
+            assertNull(db.getRequestRecoveryArchive(chat, request))
+            db.writableDatabase.execSQL("UPDATE request_accounting SET telemetry_summary=NULL WHERE chat_id=? AND local_request_id=?",
+                arrayOf(chat, request))
+            assertTrue(db.recordRequestAccounting(chat, request, "completed", responseId = "resp_child", usage = usage(25)))
+            assertEquals(125L, account(db).getLong("input_tokens"))
+            // A delayed marked total from before the latest terminal GET must not undo its child snapshot.
+            assertTrue(db.recordRequestAccounting(chat, request, "completed", responseId = "resp_child",
+                usage = OpenAiUsageLedger.total(combined),
+                telemetrySummary = JSONObject().put(OpenAiUsageLedger.FIELD, combined)))
+            assertEquals(125L, account(db).getLong("input_tokens"))
+        }
+    }
+
+    @Test fun malformedPaidImageIsArchivedAsFailedWithoutAbortingStopOrLosingRawResult() {
+        ChatDatabase(context).use { db ->
+            prepared(db)
+            // One base64 sextet cannot represent even a single byte.
+            val malformedImage = JSONObject().put("type", "image_generation_call").put("id", "ig_bad").put("result", "A")
+            val paidResponse = raw("resp_child", "Keep paid text", 150)
+            paidResponse.getJSONArray("output").put(malformedImage)
+            assertTrue(db.saveOpenAiToolCheckpoint(chat, request, checkpoint(legacy = true)
+                .put("phase", "finished").put("final_response", paidResponse)))
+            assertTrue(db.stopActiveRequestOnce(chat, request))
+            assertNull(db.getOpenAiToolCheckpoint(chat, request))
+            val archive = db.getRequestRecoveryArchive(chat, request)!!
+            assertEquals("Keep paid text", archive.getString("text"))
+            assertEquals("FAILED", archive.getJSONArray("generated_images").getJSONObject(0).getString("state"))
+            assertEquals("A", archive.getJSONArray("openai_protocol_output").getJSONObject(1).getString("result"))
+            assertEquals(150L, account(db).getLong("input_tokens"))
+            assertEquals("stopped", account(db).getString("local_status"))
+        }
+    }
 }

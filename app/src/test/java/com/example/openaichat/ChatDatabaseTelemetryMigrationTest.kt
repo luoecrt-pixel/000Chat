@@ -40,7 +40,7 @@ class ChatDatabaseTelemetryMigrationTest {
         }
         var legacyCreate = create.replaceFirst("CREATE TABLE $table", "CREATE TABLE legacy_$table")
         for (name in omitted) legacyCreate = legacyCreate.replace(
-            Regex(",\\s*" + name + "\\s+TEXT(?:\\s+NOT NULL\\s+DEFAULT 'unknown')?"), "")
+            Regex(",\\s*" + Regex.escape(name) + "\\s+(?:TEXT|INTEGER)(?:\\s+NOT NULL\\s+DEFAULT 'unknown')?"), "")
         sql.execSQL(legacyCreate)
         val names = columns.joinToString(",") { "\"$it\"" }
         sql.execSQL("INSERT INTO legacy_$table ($names) SELECT $names FROM $table")
@@ -48,6 +48,14 @@ class ChatDatabaseTelemetryMigrationTest {
         sql.execSQL("ALTER TABLE legacy_$table RENAME TO $table")
         indexes.forEach(sql::execSQL)
     }
+
+    private fun columns(sql: SQLiteDatabase, table: String): Set<String> =
+        sql.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            buildSet {
+                val nameColumn = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) add(cursor.getString(nameColumn))
+            }
+        }
 
     private fun seedLegacy(version: Int) {
         ChatDatabase(context).use { db ->
@@ -60,14 +68,18 @@ class ChatDatabaseTelemetryMigrationTest {
             db.recordEffortMetric("local_old", "legacy", "general", "high", "high", false,
                 8, 0, 25, 10, 0, 0, 5, 0, true, null, 0.125, "estimated")
             assertTrue(db.startRequestAccounting("legacy", "local_old", "openai", "gpt-test", "slot"))
-            assertTrue(db.recordRequestAccounting("legacy", "local_old", "completed", reportedCostUsd = 0.0))
+            assertTrue(db.recordRequestAccounting("legacy", "local_old", "completed",
+                usage = JSONObject().put("input_tokens", 10).put("output_tokens", 5), reportedCostUsd = 0.0))
         }
         SQLiteDatabase.openDatabase(context.getDatabasePath(databaseName).path, null, SQLiteDatabase.OPEN_READWRITE).use { sql ->
             sql.execSQL("PRAGMA foreign_keys=OFF")
             removeNewColumns(sql, "messages", setOf("telemetry_summary", "openai_usage_ledger"))
-            removeNewColumns(sql, "request_accounting", setOf("telemetry_summary"))
+            removeNewColumns(sql, "request_accounting", setOf("telemetry_summary", "cache_write_tokens"))
             removeNewColumns(sql, "request_events", setOf("telemetry_summary"))
             removeNewColumns(sql, "effort_metrics", setOf("cost_kind"))
+            removeNewColumns(sql, "openrouter_request_rounds", setOf("usage_snapshot"))
+            assertFalse(columns(sql, "request_accounting").contains("cache_write_tokens"))
+            assertFalse(columns(sql, "openrouter_request_rounds").contains("usage_snapshot"))
             sql.execSQL("DROP TABLE request_recovery_archive")
             sql.version = version
         }
@@ -77,6 +89,11 @@ class ChatDatabaseTelemetryMigrationTest {
         repeat(2) {
             ChatDatabase(context).use { db ->
                 assertEquals(25, db.readableDatabase.version)
+                assertTrue(columns(db.readableDatabase, "messages").containsAll(setOf("telemetry_summary", "openai_usage_ledger")))
+                assertTrue(columns(db.readableDatabase, "request_accounting").containsAll(setOf("telemetry_summary", "cache_write_tokens")))
+                assertTrue(columns(db.readableDatabase, "request_events").contains("telemetry_summary"))
+                assertTrue(columns(db.readableDatabase, "effort_metrics").contains("cost_kind"))
+                assertTrue(columns(db.readableDatabase, "openrouter_request_rounds").contains("usage_snapshot"))
                 val messages = db.getChat("legacy")!!.getJSONArray("messages")
                 assertEquals(2, messages.length())
                 assertEquals("paid answer", messages.getJSONObject(1).getString("text"))
@@ -86,7 +103,11 @@ class ChatDatabaseTelemetryMigrationTest {
                 assertEquals(1, totals.getInt("unknown_cost_requests"))
                 assertEquals(0, totals.getInt("known_cost_requests"))
                 assertEquals(0.0, totals.getDouble("provider_reported_cost_usd"), 0.0)
-                assertEquals("provider_reported", db.listRequestAccounting("legacy").single().getString("cost_kind"))
+                val accounting = db.listRequestAccounting("legacy").single()
+                assertEquals("provider_reported", accounting.getString("cost_kind"))
+                assertEquals(0.0, accounting.getDouble("cost_usd"), 0.0)
+                assertEquals(10L, accounting.getLong("input_tokens"))
+                assertEquals(5L, accounting.getLong("output_tokens"))
                 assertTrue(db.recordRequestTelemetry("legacy", "local_old", JSONObject().put("calls_executed", 4)))
                 assertEquals(4, JSONObject(db.listRequestAccounting("legacy").single()
                     .getString("telemetry_summary")).getInt("calls_executed"))

@@ -121,6 +121,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 http_request_id TEXT,
                 input_tokens INTEGER,
                 cached_tokens INTEGER,
+                cache_write_tokens INTEGER,
                 output_tokens INTEGER,
                 reasoning_tokens INTEGER,
                 cost_kind TEXT NOT NULL DEFAULT 'unknown',
@@ -855,6 +856,37 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             "chat_id=? AND local_request_id=?", arrayOf(chatId, requestId), null, null, null,
             "1", arrayOf("chat_id", "local_request_id")).use { c -> if (c.moveToFirst()) c.getString(0) else null }
 
+    /** Repair optional accounting diagnostics from the winning durable terminal, never from raw totals. */
+    private fun restoredOpenAiAccountingTelemetryInDb(db: SQLiteDatabase, chatId: String, requestId: String,
+        raw: String?): JSONObject {
+        val telemetry = raw?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject()
+        if (OpenAiUsageLedger.total(telemetry.optJSONObject(OpenAiUsageLedger.FIELD)) != null) return telemetry
+        // A Stop archive is its winning terminal claim and is newer than any prior visible partial.
+        // Read paid archive JSON strictly: corruption there must fail closed, unlike optional diagnostics.
+        val archivedLedger = SqliteLargeTextQuery.query(db, "request_recovery_archive", arrayOf("recovery_message"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+            "1", arrayOf("chat_id", "request_id")).use { c ->
+            if (!c.moveToFirst()) null else JSONObject(c.getString(0)).let { message ->
+                message.optJSONObject(OpenAiUsageLedger.FIELD)
+                    ?: message.optJSONObject("telemetry_summary")?.optJSONObject(OpenAiUsageLedger.FIELD)
+            }
+        }?.takeIf { OpenAiUsageLedger.total(it) != null }
+        val durableLedger = archivedLedger ?: SqliteLargeTextQuery.query(db, MESSAGE_TABLE,
+            arrayOf(OpenAiUsageLedger.FIELD, "telemetry_summary"),
+            "chat_id=? AND request_id=? AND role='assistant' AND provider='openai' " +
+                "AND status IN ('completed','cancelled','failed','incomplete','stopped')",
+            arrayOf(chatId, requestId), null, null, "position DESC", "1", arrayOf("id")).use { c ->
+            if (!c.moveToFirst()) null else {
+                val explicit = if (c.isNull(0)) null else JSONObject(c.getString(0))
+                explicit?.takeIf { OpenAiUsageLedger.total(it) != null } ?: c.getString(1)?.let {
+                    runCatching { JSONObject(it) }.getOrNull()?.optJSONObject(OpenAiUsageLedger.FIELD)
+                }?.takeIf { OpenAiUsageLedger.total(it) != null }
+            }
+        }
+        durableLedger?.let { telemetry.put(OpenAiUsageLedger.FIELD, OpenAiUsageLedger.merge(null, it)) }
+        return telemetry
+    }
+
     private fun readAccountingInDb(db: SQLiteDatabase, chatId: String, requestId: String): JSONObject? =
         SqliteLargeTextQuery.query(db, REQUEST_ACCOUNTING_TABLE,
             arrayOf("local_status", "cost_kind", "cost_usd", "input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens",
@@ -941,7 +973,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             }
             if (JsonProtocol.string(message, "text").isBlank() && fallbackText.isNotBlank()) message.put("text", fallbackText)
             if (!message.has("generated_images") && model.generatedImageResults.isNotEmpty()) {
-                message.put("generated_images", GeneratedImageStore.save(appContext.filesDir, model.generatedImageResults) { _, failure -> throw failure })
+                // Keep one FAILED entry and the original encoded output when an individual image
+                // cannot be saved. A damaged image must not abort Stop or discard paid text/usage.
+                message.put("generated_images", GeneratedImageStore.save(appContext.filesDir, model.generatedImageResults) { _, _ -> })
             }
         }
         if (or != null && !message.has("openrouter_protocol"))
@@ -950,7 +984,12 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (router) {
             aggregateOpenRouterUsageInDb(db, chatId, requestId)?.let { persistedUsage ->
                 OpenRouterUsageAccumulator.mergeSnapshot(message.optJSONObject("usage"), persistedUsage)
-                    ?.let { message.put("usage", it) }
+                    ?.let { merged ->
+                        // mergeSnapshot preserves sparse observations within ONE round; here the
+                        // persisted aggregate is authoritative about whether ALL rounds have cost.
+                        if (!persistedUsage.has("cost")) merged.remove("cost")
+                        message.put("usage", merged)
+                    }
                 val breakdown = OpenRouterUsageSnapshot.extractCostDetails(message.optJSONObject("usage"))
                 FileBackedIoTelemetry.mergeTelemetryJson(message.optJSONObject("telemetry_summary")?.toString(),
                     FileBackedIoTelemetry.mergeCompactTelemetry(costDetails = breakdown))
@@ -961,7 +1000,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             // Marked aggregates merge as ledgers; they are never reinserted under a single response ID.
             val ledger = OpenAiUsageLedger.resolve(oa, message)
             val paidLedger = OpenAiUsageLedger.merge(ledger, durable?.optJSONObject(OpenAiUsageLedger.FIELD))
-            val existingLedger = accountingTelemetryRaw?.let(::JSONObject)?.optJSONObject(OpenAiUsageLedger.FIELD)
+            val existingLedger = accountingTelemetryRaw?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?.optJSONObject(OpenAiUsageLedger.FIELD)
             val combined = OpenAiUsageLedger.merge(existingLedger, paidLedger)
             OpenAiUsageLedger.total(combined)?.let { message.put("usage", it) }
             if (combined.length() > 0) message.put(OpenAiUsageLedger.FIELD, combined)
@@ -1446,10 +1486,15 @@ data class ExistingMessageRow(
             val knownCost = existing[1]
             val capturedProvider = existing[2]
             val existingProviderStatus = existing[3]
-            val savedTelemetry = readAccountingTelemetryInDb(db, chatId, localRequestId)
+            val rawSavedTelemetry = readAccountingTelemetryInDb(db, chatId, localRequestId)
+            val savedTelemetry = if (capturedProvider == "openai" && localStatus != "running") {
+                restoredOpenAiAccountingTelemetryInDb(db, chatId, localRequestId, rawSavedTelemetry)
+                    .takeIf { it.length() > 0 }?.toString()
+            } else rawSavedTelemetry
             val merged = FileBackedIoTelemetry.mergeTelemetryJson(savedTelemetry, telemetrySummary)?.let(::JSONObject)
             if (capturedProvider == "openai" && localStatus != "running") {
-                val savedLedger = savedTelemetry?.let(::JSONObject)?.optJSONObject(OpenAiUsageLedger.FIELD)
+                val savedLedger = savedTelemetry?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    ?.optJSONObject(OpenAiUsageLedger.FIELD)
                 val incomingLedger = telemetrySummary?.optJSONObject(OpenAiUsageLedger.FIELD)
                 if (savedLedger != null && incomingLedger != null) {
                     // A delayed aggregate callback may predate the final GET reconciliation. Existing
@@ -1589,7 +1634,7 @@ data class ExistingMessageRow(
                 arrayOf(chatId, localRequestId, responseId), null, null, null, "1").use { it.moveToFirst() }
             if (!captured) return@transaction
             val raw = readAccountingTelemetryInDb(db, chatId, localRequestId)
-            val telemetry = raw?.let(::JSONObject) ?: JSONObject()
+            val telemetry = restoredOpenAiAccountingTelemetryInDb(db, chatId, localRequestId, raw)
             val ledger = OpenAiUsageLedger.observe(telemetry.optJSONObject(OpenAiUsageLedger.FIELD), responseId, usage, status)
             val total = OpenAiUsageLedger.total(ledger)
             if (ledger.length() > 0) telemetry.put(OpenAiUsageLedger.FIELD, ledger)
@@ -1732,6 +1777,12 @@ data class ExistingMessageRow(
             "chat_id=? AND local_request_id=? AND provider='openrouter'", arrayOf(chatId, localRequestId),
             null, null, null, "1").use { it.moveToFirst() && it.getInt(0) == 1 }
         if (!sealed) return
+        // No round ledger means there is no authoritative aggregate. Preserve direct terminal
+        // accounting (including confirmed zero) for legacy/preflight and single-shot callers.
+        val hasRound = db.query(OPENROUTER_ROUND_TABLE, arrayOf("round_index"),
+            "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId),
+            null, null, null, "1").use { it.moveToFirst() }
+        if (!hasRound) return
         val usage = aggregateOpenRouterUsageInDb(db, chatId, localRequestId)
         val cost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
         val summary = FileBackedIoTelemetry.mergeCompactTelemetry(costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
