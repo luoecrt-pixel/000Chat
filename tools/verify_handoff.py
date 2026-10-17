@@ -28,7 +28,7 @@ def validate(documents: dict[str, str]) -> None:
     assert re.search(r"^### \d+\. ", active, re.M), "missing active tasks"
     assert active.count("— **следующий**") == 1, "mark exactly one next task"
     assert re.search(r"^### \d+\. ", later, re.M), "missing future tasks"
-    assert "instructions" in active, "confirmed GPT blocker should remain until fixed"
+    # Completed requirements leave the active plan; do not pin a resolved blocker to a keyword.
     assert "## Владение состоянием" in history, "essential history missing"
 
     # No fixed PR count, hard-coded SHA, timestamp, or mandatory log of finished tasks.

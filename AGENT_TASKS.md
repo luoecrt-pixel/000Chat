@@ -4,11 +4,12 @@
 
 ## Исходное состояние и очередь
 
-- Сверено 16.10.2026 с `main` `e096b8be2961c113a75694de9f37bd166de9c019` (J / PR #174 влит). Перед реализацией повторно проверить actual main, PR и CI.
+- Сверено 17.10.2026 с `main` `e096b8be2961c113a75694de9f37bd166de9c019` (J / PR #174 влит). Перед новой реализацией повторно проверить actual main, PR и CI.
 - Реализованы: основа OpenAI Responses/instructions/recovery и сохранение outputs (A); защитные срезы OpenRouter/файлов/ключей; основные навигация и жесты F; темы, настройки и бренд G; локальные tools GPT, мульти-фото и автоматические научные preview H/I. Остатки прежних критериев перечислены ниже. Непустые черновики видны как «Черновик», пустые новые сессии скрыты — это актуальное уточнение правила #2.
-- Текущий пакет — **#21 + K / #29 + #18.1–2**, ветка `feat/package-k-atomic-accounting-and-uploads`: snapshot платных настроек, единый upload на Send, атомарная компактизация checkpoint, раздельный учёт raw/aggregate usage, диагностика и детализация подтверждённой цены. Приёмка текущей ветки и Debug/Release CI ещё не завершена; ожидание CI владелец оставил себе. Матрица фактических проверок — в PR.
-- После этого приоритетны восстановление чтения (#3) и прочие остатки B/C/D. Темы в M (#31) завершают старые требования; экспорт чата N (#32) и GitHub для GPT в L (#30) — расширения.
-- Затем завершать B/C/D (#12–16, #18, #21–22, остаток #24) по риску и зависимости; небольшие UI-доработки #5/#31 допустимы параллельно. Не начинать L или крупные новые transports/миграции до контрольного аудита ниже.
+- **J / #28 принят в PR #174:** разные bytes и порядок мульти-фото, retry дочернего GET без повторного платного POST, lifecycle/Stop ownership, живой статус восстановления, telemetry tool-раундов и ручные научные preview. Не назначать этот пакет заново; визуальная и live/device-приёмка остаётся в #9.
+- **#21 + K / #29 + #18.1–2 выполнены и закрыты в рабочем плане:** snapshot платных настроек на Send, отложенный upload без дублей, атомарная компактизация checkpoint с сохранением оплаченных данных, идемпотентный учёт раундов, диагностика и честный unknown/zero cost. Код — [PR #175](https://github.com/luoecrt-pixel/000Chat/pull/175), ветка `feat/package-k-atomic-accounting-and-uploads`; Debug/Release CI успешны. PR пока Draft, в main эти изменения ещё не влиты; независимый review/merge остаётся процессом PR. Матрица доказательств и точный code SHA — в PR. Не назначать завершённую реализацию повторно.
+- Следующая реализация — восстановление чтения (#3) и прочие остатки B/C/D. Темы в M (#31) завершают старые требования; экспорт чата N (#32) и GitHub для GPT в L (#30) — расширения.
+- Затем завершать B/C/D (#12–16, #18.3, #22, остаток #24) по риску и зависимости; небольшие UI-доработки #5/#31 допустимы параллельно. Не начинать L или крупные новые transports/миграции до контрольного аудита ниже.
 - Последнее уточнение владельца: #26/#27 отложены до практической потребности в Messages-only возможностях. Текущий transport — OpenRouter Chat Completions с provider Anthropic. Compose Android (будущий №22) не зависит от KMP/iOS (будущий №23).
 - Физический телефон, production signing и публикация — только по отдельному поручению (#9/#10).
 
@@ -24,26 +25,7 @@
 
 ## Текущие задачи
 
-### 21. [B · P1/P2, текущая ветка] Один snapshot платных настроек и отсутствие лишних upload — **следующий**
-
-Opt-in анализа файлов, контейнер 1g с выбором размера, защита XML/EXIF/структурированных документов и маршрут фото реализованы. Следующие критерии входят в текущую ветку и остаются открытыми до её приёмки:
-
-- Сохранить существующий захват модели, ключа и `instructions` на Send; захватить immutable snapshot **всех** tools/options: web/file search, Code Interpreter/memory, image generation, parallel tools, compaction и прочих request flags. Сейчас `commitPreparedOpenAi()` после асинхронной подготовки повторно читает prefs. Изменение настроек в процессе подготовки не должно незаметно менять уже начатый запрос или включать платный tool.
-- Устранить двойной upload не-визуальных файлов при `file_analysis_tools=true`: picker загружает `note.txt`, затем `OpenAiFileAnalysis.prepare()` может загрузить те же bytes как `note.txt.txt`; cache key включает имя. Переиспользовать подходящий file ID либо отложить upload до окончательного выбора пути, сохранив credential/purpose/bytes binding и исходную кодировку.
-
-**Приёмка:** controlled async preparation с изменением prefs до commit; wire JSON соответствует snapshot Send. Настоящий picker→Send mock считает `/v1/files` POST и сверяет bytes/IDs для текста, structured document и mixed image+text, с анализом on/off, account switch, Stop и недоступным оригиналом. Различать необходимый производный файл и ненужный повтор одинакового содержимого; не удалять original ради дедупликации.
-
-### 29. [K · P1/P2, текущая ветка] Очистка checkpoint и диагностика завершённых запросов
-
-1. Компактировать/удалять тяжёлый checkpoint конкретного `(chat_id, request_id)` **в транзакции успешной финализации**, в `completeActiveRequestOnce` / `finalizeCurrentChatIfActiveRequest` и связанных путях Activity/Worker. Одного изменения `clearActiveResponse()` недостаточно: основной финализатор уже очищает ownership раньше.
-2. **До удаления** сохранить полный terminal/partial output, usage и компактную telemetry в durable message/ledger. Не оставлять `final_response/template/prior_output` ради статистики. Незавершённые idle/prepared/waiting и finished-before-commit не удалять преждевременно; failure recorder ещё читает `prior_output`. `posting` означает неопределённый исход с запретом повторного POST: сохранить partial/usage/диагностику до его компактизации, не считать его автоматически возобновляемым. Сохранить каскадное удаление и совместимость SQLite v25; миграция только при необходимости выбранной схемы.
-3. **OpenRouter имеет существующую очистку:** `OpenRouterResponseRuntime.finally` и восстановление в Activity уже вызывают `clearOpenRouterCheckpoint`. Проверить её связь с успешным terminal/partial commit и перенести удаление в owner-aware транзакцию там, где нужно; fault injection при ошибке финализации/rollback. Не считать отсутствие очистки доказанным и не удалять protocol history/подписи/round ledger вместе с временным checkpoint.
-4. В `showDiagnostics()` и существующей компактной telemetry-плашке выводить сводку tools/раундов/статусов и фактический `FileBackedIoTelemetry`: files, source read passes/bytes, work time. Это счётчики wrapper-объектов, а не вся дисковая активность приложения, сеть, токены или деньги. OpenRouter уже пишет per-round `openrouter_file_io` в diagnostics; нужен структурированный итог без двойного суммирования накопительных snapshots. Для OpenAI определить collection и request-level deltas; после удаления тяжёлого checkpoint итоги сохраняются.
-5. «Экономию байтов» показывать только с отдельными счётчиками действительно пропущенных чтений либо явно обозначенным расчётным baseline; существующий readBytes сам её не доказывает. Ограничить объём UI, сохранить redaction экрана/Copy/share. Удаление строк освобождает SQLite pages для повторного использования, но не гарантирует немедленного уменьшения файла БД/WAL; не запускать VACUUM после каждого ответа.
-
-**Приёмка:** DB/Activity/Worker tests успешной финализации, rollback, crash до/после commit, Stop/partial extraction, stale callback/requestId и Delete/replacement. После reopen полный ответ/usage/компактные итоги доступны, тяжёлый checkpoint исчезает только после корректного commit; активный новый request не повреждён.
-
-### 3. [F · P1/P2, остаток] Позиция чтения при пересоздании Activity
+### 3. [F · P1/P2, остаток] Позиция чтения при пересоздании Activity — **следующий**
 
 Anchors/scroll lock реализованы в памяти экземпляра Activity, но `perChatScrollAnchors` / `userScrollLockedChats` не сохраняются в saved state; RecyclerView создаётся без стабильного view ID. Поэтому recreate/rotation не закрыты.
 
@@ -85,13 +67,14 @@ Default Anthropic внутри OpenRouter и уважение явно сохр�
 
 `debug.echo_upstream_body` — только отдельный явно разрешённый dev-only режим на synthetic/контролируемых данных, off по умолчанию; production/обычная диагностика не получает сырые keys/messages/paths. Флаг не нужен основной пользовательской функции citations.
 
-### 18. [D · P1 для unknown, P2 для детализации] Стоимость и актуальные тарифы
+### 18. [D · P2, остаток #18.3] Актуальные тарифы и политика оценок
 
-1. **В текущей ветке, до приёмки:** устранить `reportedCost == null → 0.0` в `OpenRouterUsageSnapshot.from()` через весь путь DB/metrics/events/formatter/UI: confirmed zero, unknown и estimate различимы, включая Stop/reopen. Не ограничиваться одной nullable строкой без проверки потребителей.
-2. **В текущей ветке, до приёмки:** сохранять/показывать приходящие `cost_details`, `server_tool_cost`, `upstream_inference_cost`, `iterations[]`, `server_tool_use`, `service_tier` по фактической API-схеме, **без повторного добавления к usage.cost**. Существующие per-round ledger/reconciliation сохранить.
-3. HTTPS цены OpenRouter `/models` и подходящего `/models/{author}/{slug}/endpoints`, TTL/дата/статус оценки. Неизвестные tool/cache-write тарифы не выдумывать. Устранить захардкоженные оценки Activity/Worker через provider/model-aware policy; тариф OpenRouter не переносить на OpenAI.
+Unknown/zero/estimate и детализация фактической стоимости (#18.1–2) закрыты в PR #175; повторно их не реализовывать. Осталось:
 
-**Приёмка:** 2/10 раундов, поздний usage после Stop, zero/unknown, cached read/write, tiers/tools, reopen, stale/corrupt metadata, offline и 401/402/429. Оценка не заменяет факт; отказ нового preflight не стирает подтверждённые ранние раунды.
+- Получать HTTPS цены OpenRouter `/models` и подходящего `/models/{author}/{slug}/endpoints`, хранить TTL/дату/статус оценки. Неизвестные tool/cache-write тарифы не выдумывать.
+- Заменить захардкоженные оценки Activity/Worker на provider/model-aware policy; тариф OpenRouter не переносить на OpenAI. Оценка не заменяет подтверждённый расход, включая фактический ноль.
+
+**Приёмка остатка:** cache read/write, tiers/tools и отсутствующие тарифы; stale/corrupt metadata, offline, 401/402/429, reopen. Новый preflight или ошибка получения цен не стирают подтверждённые предыдущие раунды и не превращают unknown в ноль. Live сверка тарифа/счёта остаётся в #9.
 
 ### 22. [D · P2, остаток] Старый ownership seam и bounded recovery resources
 
@@ -106,13 +89,13 @@ Default Anthropic внутри OpenRouter и уважение явно сохр�
 
 GPT bridge реализован; не создавать заново. В регистрации `db.listLocalFiles()` использовать общий `classifyLocalFile` или эквивалентный безопасный контракт кодировки/структуры вместо ручного kind и безусловного UTF-8. Проверить каталоги GPT/Claude: доступность message attachments и созданных артефактов своего чата должна быть определена явно, без доступа к чужим файлам.
 
-В `LocalFileTools.search` overlap учитывает длину query **и** обещанный левый snippet context. Проверить длинный Unicode query на границе buffer без бесконтрольного heap. Не дублировать `file_info` ради старого имени, если list/read metadata уже закрывают задачу. Сохранить безопасные IDs/диапазоны, original bytes и Stop/checkpoint semantics #28.
+В `LocalFileTools.search` overlap учитывает длину query **и** обещанный левый snippet context. Проверить длинный Unicode query на границе buffer без бесконтрольного heap. Не дублировать `file_info` ради старого имени, если list/read metadata уже закрывают задачу. Сохранить безопасные IDs/диапазоны, original bytes и Stop/checkpoint semantics J / PR #174 и K / PR #175.
 
 ### 5. [G · P2, остаток] Длинные научные ответы и визуальные критерии
 
 `ResponseTextPages` режет по 32 000 символов с защитой только surrogate pairs. Для завершённой формулы на границе страницы переносить целый блок либо давать явный fallback для source больше безопасного UI budget. Не повреждать source/copy/history/API input и не создавать бесконечный WebView.
 
-Ручные preview — #28. На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
+Ручные preview реализованы в J / PR #174, включая выключенное auto-preview; повторная реализация не нужна. На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
 
 Шторка #4 реализована: порог от исходного положения, velocity/reversal. CANCEL/multitouch/interruption и визуальная плавность остаются частью приёмки; не объявлять их багами без воспроизведения.
 
@@ -123,7 +106,7 @@ GPT bridge реализован; не создавать заново. В рег
 
 ### 32. [N · P2, отдельное расширение] Экспорт диалога в Markdown и текст
 
-Текущий TXT-export отдельного сообщения уже сохраняет сырой source; порча формул/таблиц не доказана. Добавить отдельные UTF-8 `.md` и `.txt` экспорты всей беседы с порядком/ролями, code fences/формулами/таблицами и краткими summaries (tool/status/result file). Источник для OpenRouter — structured tool_trace; для OpenAI такого поля сейчас нет: нормализовать безопасные metadata typed function_call/function_call_output из `openai_protocol_output` либо сохранить отдельный durable summary при J/K. Не выдумывать неизвестный статус и не выгружать сырые arguments/output JSON вместо сводки. Для TXT сохранить тот же читаемый исходник Markdown без служебных JSON. Не добавлять hidden prompts/reasoning/encrypted_content/checkpoints/secrets; не удалять пользовательский текст regex. Raw export сообщения сохранить. Tests для обоих providers: кириллица, nested fences, inline math/table, failed/cancelled tools, реальные attachments и открытие обоих файлов без искажения source. Независимо от тем M, без обязательного объединения в один PR.
+Текущий TXT-export отдельного сообщения уже сохраняет сырой source; порча формул/таблиц не доказана. Добавить отдельные UTF-8 `.md` и `.txt` экспорты всей беседы с порядком/ролями, code fences/формулами/таблицами и краткими summaries (tool/status/result file). Источник для OpenRouter — structured tool_trace; для OpenAI такого поля сейчас нет: нормализовать безопасные metadata typed function_call/function_call_output из `openai_protocol_output` либо сохранить отдельный durable summary при реализации N. Имена `executed_tools` и общие счётчики K не заменяют поимённые статусы/результаты вызовов для экспорта. Не выдумывать неизвестный статус и не выгружать сырые arguments/output JSON вместо сводки. Для TXT сохранить тот же читаемый исходник Markdown без служебных JSON. Не добавлять hidden prompts/reasoning/encrypted_content/checkpoints/secrets; не удалять пользовательский текст regex. Raw export сообщения сохранить. Tests для обоих providers: кириллица, nested fences, inline math/table, failed/cancelled tools, реальные attachments и открытие обоих файлов без искажения source. Независимо от тем M, без обязательного объединения в один PR.
 
 ### 30. [L · P2, отдельное расширение] GitHub read-only tools для OpenAI
 
