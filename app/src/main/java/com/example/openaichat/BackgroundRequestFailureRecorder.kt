@@ -38,9 +38,13 @@ object BackgroundRequestFailureRecorder {
         // emitting its first visible text delta. Persist the exact received
         // typed items and readable summary even if the assistant text is empty.
         // Otherwise the Worker clears the owned checkpoint and loses paid data.
+        var unrecoverableIndexedCheckpoint: String? = null
         val recovered = try {
             ResponseIndexedCheckpoint.restore(active)
         } catch (_: UnrecoverableResponsesCheckpointException) {
+            // An explicit failure may release this cursor only after the exact damaged
+            // snapshot is archived by the same transaction as its failed assistant.
+            unrecoverableIndexedCheckpoint = JsonProtocol.nonBlank(active, "indexed_checkpoint")
             null
         }
         val checkpoint = db.getOpenAiToolCheckpoint(chatId, localRequestId)
@@ -80,7 +84,7 @@ object BackgroundRequestFailureRecorder {
         receivedFilesDir?.let {
             OpenAiRawSseArchive.attachToMessage(sourceMessage, it, chatId, localRequestId)
         }
-        if ((partial.isNotBlank() || typed.length() > 0 || summary.isNotBlank() ||
+        if ((partial.isNotBlank() || typed.length() > 0 || summary.isNotBlank() || unrecoverableIndexedCheckpoint != null ||
                 sourceMessage.has("annotations") || usage != null || compactTelemetry != null) && items.none {
                 it.optString("role") == "assistant" && it.optString("request_id") == localRequestId
             }) {
@@ -120,7 +124,7 @@ object BackgroundRequestFailureRecorder {
         if (!db.finalizeCurrentChatIfActiveRequest(
                 chatId, chat.optString("title", "Новый чат"), previousResponseId,
                 chat.optString("baseline_effort").takeIf { it.isNotBlank() && it != "null" },
-                items, localRequestId
+                items, localRequestId, unrecoverableIndexedCheckpoint = unrecoverableIndexedCheckpoint
             )) return false
 
         db.recordRequestAccounting(

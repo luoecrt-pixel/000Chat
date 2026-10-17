@@ -803,7 +803,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         responseId: String?,
         baselineEffort: String?,
         messages: List<JSONObject>,
-        expectedRequestId: String
+        expectedRequestId: String,
+        unrecoverableIndexedCheckpoint: String? = null
     ): Boolean {
         // Reject a single terminal assistant with a foreign/missing local request_id.
         // Otherwise a provider HTTP request ID can consume the active claim while
@@ -813,7 +814,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             JsonProtocol.string(messages[0], "request_id") != expectedRequestId) return false
         return completeActiveRequestOnce(id, expectedRequestId) { db ->
         val provided = messages.lastOrNull { it.optString("role") == "assistant" && it.optString("request_id") == expectedRequestId }
-        val assistant = recoverAssistantInDb(db, id, expectedRequestId, provided, provided?.optString("status") ?: "failed")
+        val assistant = recoverAssistantInDb(db, id, expectedRequestId, provided,
+            provided?.optString("status") ?: "failed", unrecoverableIndexedCheckpoint)
         if (assistant != null) {
             persistTerminalAssistantInDb(db, id, expectedRequestId, assistant)
             queueAnswerNotification(db, id, expectedRequestId, assistant.optString("status") == "completed")
@@ -916,7 +918,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     /** Restores paid terminal output as well as the current indexed SSE partial before deleting any cursor. */
     private fun recoverAssistantInDb(db: SQLiteDatabase, chatId: String, requestId: String,
-        provided: JSONObject?, terminalStatus: String): JSONObject? {
+        provided: JSONObject?, terminalStatus: String, unrecoverableIndexedCheckpoint: String? = null): JSONObject? {
         val oa = readCheckpointInDb(db, "openai_tool_checkpoints", "request_checkpoint", chatId, requestId)
         val or = readCheckpointInDb(db, "openrouter_checkpoints", "protocol", chatId, requestId)
         val capturedProvider = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("provider"),
@@ -924,36 +926,51 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             .use { if (it.moveToFirst()) it.getString(0) else null }
         val router = or != null || provided?.optString("provider") == "openrouter" || capturedProvider == "openrouter"
         val active = SqliteLargeTextQuery.query(db, CHAT_TABLE,
-            arrayOf("active_response_id", "active_text", "active_indexed_checkpoint"), "id=? AND active_request_id=?",
+            arrayOf("active_response_id", "active_text", "active_indexed_checkpoint",
+                "active_last_sequence_number", "active_status"), "id=? AND active_request_id=?",
             arrayOf(chatId, requestId), null, null, null, "1").use { c ->
             if (!c.moveToFirst()) JSONObject() else JSONObject().apply {
                 c.getString(0)?.let { put("response_id", it) }
                 put("text", c.getString(1) ?: "")
                 c.getString(2)?.let { put("indexed_checkpoint", it) }
+                put("last_sequence_number", c.getLong(3))
+                c.getString(4)?.let { put("status", it) }
             }
         }
         var durable = OpenAiLocalFileToolBridge.durableResponse(oa)
+        var unrecoverableIndexedState: JSONObject? = null
         if (!router && JsonProtocol.nonBlank(active, "indexed_checkpoint") != null) {
-            val state = ResponseIndexedCheckpoint.restore(active)
-            val current = OpenAiEffectiveResponse.assemble(state.terminalResponse, state)
-            val canonicalReceived = oa?.optJSONObject("received_response")
-            val canonicalReceivedWins = canonicalReceived?.optString("status") in
-                setOf("completed", "cancelled", "failed", "incomplete") &&
-                canonicalReceived?.let { JsonProtocol.nonBlank(it, "id") } == JsonProtocol.nonBlank(current, "id")
-            // Bridge received_response is persisted after reading the provider envelope. An older
-            // indexed terminal cursor for the same ID must not replace its paid text/images/usage.
-            if (oa?.optString("phase") != "finished" && !canonicalReceivedWins) {
-                val prior = oa?.optJSONArray("prior_output") ?: JSONArray()
-                val output = JsonProtocol.arrayCopy(prior)
-                if (JsonProtocol.nonBlank(current, "id") != oa?.let { JsonProtocol.nonBlank(it, "parent_id") }) {
-                    current.optJSONArray("output")?.let { items ->
-                        for (i in 0 until items.length()) output.put(JsonProtocol.copy(items.get(i)))
+            val state = try {
+                ResponseIndexedCheckpoint.restore(active)
+            } catch (error: UnrecoverableResponsesCheckpointException) {
+                // Only the failure recorder that observed THIS exact snapshot can quarantine it.
+                // Stop, generic failure claims and ordinary terminal callbacks still fail closed.
+                if (provided == null || terminalStatus != "failed" || unrecoverableIndexedCheckpoint == null ||
+                    JsonProtocol.string(active, "indexed_checkpoint") != unrecoverableIndexedCheckpoint) throw error
+                unrecoverableIndexedState = JsonProtocol.objectCopy(active)
+                null
+            }
+            if (state != null) {
+                val current = OpenAiEffectiveResponse.assemble(state.terminalResponse, state)
+                val canonicalReceived = oa?.optJSONObject("received_response")
+                val canonicalReceivedWins = canonicalReceived?.optString("status") in
+                    setOf("completed", "cancelled", "failed", "incomplete") &&
+                    canonicalReceived?.let { JsonProtocol.nonBlank(it, "id") } == JsonProtocol.nonBlank(current, "id")
+                // Bridge received_response is persisted after reading the provider envelope. An older
+                // indexed terminal cursor for the same ID must not replace its paid text/images/usage.
+                if (oa?.optString("phase") != "finished" && !canonicalReceivedWins) {
+                    val prior = oa?.optJSONArray("prior_output") ?: JSONArray()
+                    val output = JsonProtocol.arrayCopy(prior)
+                    if (JsonProtocol.nonBlank(current, "id") != oa?.let { JsonProtocol.nonBlank(it, "parent_id") }) {
+                        current.optJSONArray("output")?.let { items ->
+                            for (i in 0 until items.length()) output.put(JsonProtocol.copy(items.get(i)))
+                        }
                     }
+                    if (output.length() > 0) current.put("output", output)
+                    val ledger = OpenAiUsageLedger.resolve(oa, current)
+                    OpenAiUsageLedger.attach(current, ledger)
+                    durable = current
                 }
-                if (output.length() > 0) current.put("output", output)
-                val ledger = OpenAiUsageLedger.resolve(oa, current)
-                OpenAiUsageLedger.attach(current, ledger)
-                durable = current
             }
         }
         val message = provided?.let(JsonProtocol::objectCopy) ?: JSONObject()
@@ -1018,6 +1035,12 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ?.let { message.put("telemetry_summary", JSONObject(it)) }
         val evidence = provided != null || oa != null || or != null ||
             JsonProtocol.string(message, "text").isNotBlank() || message.has("openai_protocol_output")
+        unrecoverableIndexedState?.let { source ->
+            // Keep the original raw bytes and envelope out of model replay, but durably available
+            // before the active cursor is released. An archive write failure rolls everything back.
+            persistTerminalAssistantInDb(db, chatId, requestId,
+                JsonProtocol.objectCopy(message).put("unrecoverable_indexed_state", source), archive = true)
+        }
         return message.takeIf { evidence }
     }
 

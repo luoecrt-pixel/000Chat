@@ -233,7 +233,7 @@ class OpenAiWorkerToolRecoveryTest {
             assertEquals(32, OpenAiUsageLedger.total(assistant.getJSONObject(OpenAiUsageLedger.FIELD))!!.getInt("input_tokens"))
             val accounting = db.listRequestAccounting(chatId).single()
             assertEquals(32, accounting.getInt("input_tokens")); assertEquals(40, accounting.getInt("output_tokens"))
-            assertTelemetry(accounting.getJSONObject("telemetry_summary"))
+            assertTelemetry(JSONObject(accounting.getString("telemetry_summary")))
             assertEquals(32, db.listRequestEvents(chatId).single().getInt("input_tokens"))
         }
         assertEquals(ListenableWorker.Result.success(), runBlocking { worker(chatId, requestId).doWork() })

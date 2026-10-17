@@ -234,6 +234,23 @@ class BackgroundResponseWorkerCheckpointIntegrationTest {
                 assertEquals("paid fragment", assistant.getString("text"))
                 assertEquals("failed", assistant.getString("status"))
                 assertTrue(assistant.getString("error").contains("not preserved"))
+                val archive = db.getRequestRecoveryArchive(chatId, requestId)!!
+                val source = archive.getJSONObject("unrecoverable_indexed_state")
+                assertEquals(damaged.toString(), source.getString("indexed_checkpoint"))
+                assertEquals(responseId, source.getString("response_id"))
+                assertEquals("paid fragment", source.getString("text"))
+                assertEquals(5L, source.getLong("last_sequence_number"))
+                assertEquals("completed", source.getString("status"))
+                assertFalse("Damaged cursor must never become model replay metadata",
+                    assistant.has("unrecoverable_indexed_state"))
+                assertEquals(1, db.listRequestEvents(chatId).size)
+            }
+            assertEquals(ListenableWorker.Result.success(),
+                runBlocking { worker(chatId, responseId, requestId).doWork() })
+            ChatDatabase(context).use { db ->
+                assertNotNull(db.getRequestRecoveryArchive(chatId, requestId))
+                assertEquals(2, db.getChat(chatId)!!.getJSONArray("messages").length())
+                assertEquals(1, db.listRequestEvents(chatId).size)
             }
         } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
     }

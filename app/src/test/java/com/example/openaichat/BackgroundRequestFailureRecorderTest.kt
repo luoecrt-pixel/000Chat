@@ -115,6 +115,165 @@ class BackgroundRequestFailureRecorderTest {
         .put("telemetry", JSONObject().put("rounds_completed", 1).put("calls_executed", 1)
             .put("executed_tools", JSONArray().put("read_attached_file")))
 
+    private fun damagedTerminalCheckpoint(db: ChatDatabase, requestId: String): String {
+        val partial = ResponseEventReducer.reduce(ResponseEventState(responseId = "resp_x"),
+            JSONObject().put("type", "response.output_text.delta").put("output_index", 0)
+                .put("content_index", 0).put("delta", "paid fragment")).state
+        val damaged = JSONObject(ResponseIndexedCheckpoint.serialize(partial))
+            .put("terminal_state", "completed") // Missing the canonical terminal_response.
+        damaged.getJSONArray("typed_output_items").put(JSONObject().put("output_index", 1)
+            .put("item", JSONObject().put("type", "reasoning").put("id", "rs_untrusted")
+                .put("encrypted_content", "exact signed bytes retained only in raw archive")))
+        // Noncanonical formatting proves archival retains the original string, not a parsed rewrite.
+        val raw = "\n" + damaged.toString(2) + "\n"
+        db.updateActiveResponse("chat", "resp_x", partial.text, "completed", 5, requestId, raw)
+        assertThrows(UnrecoverableResponsesCheckpointException::class.java) {
+            ResponseIndexedCheckpoint.restore(db.getActiveResponse("chat")!!)
+        }
+        return raw
+    }
+
+    @Test fun damagedTerminalFailureArchivesExactIndexedStateAndCommitsFailedPartialAfterReopen() {
+        lateinit var raw: String
+        val requestId = ChatDatabase(context).use { db ->
+            val id = prepared(db, activeText = "")
+            raw = damagedTerminalCheckpoint(db, id)
+            id
+        }
+        ChatDatabase(context).use { db ->
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId, "resp_x", "failed",
+                "unrecoverable_checkpoint: Terminal Responses output was not preserved"))
+            assertNull(db.getActiveResponse("chat"))
+        }
+        ChatDatabase(context).use { db ->
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals("paid fragment", assistant.getString("text"))
+            assertEquals("failed", assistant.getString("status"))
+            assertTrue(assistant.getString("error").contains("not preserved"))
+            // An invalid indexed state cannot become trusted signed replay for the next request.
+            assertFalse(assistant.has("openai_protocol_output"))
+            val archive = db.getRequestRecoveryArchive("chat", requestId)!!
+            val savedState = archive.getJSONObject("unrecoverable_indexed_state")
+            assertEquals(raw, savedState.getString("indexed_checkpoint"))
+            assertEquals("resp_x", savedState.getString("response_id"))
+            assertEquals("paid fragment", savedState.getString("text"))
+            assertEquals("completed", savedState.getString("status"))
+            assertEquals(5L, savedState.getLong("last_sequence_number"))
+            assertEquals("failed", db.listRequestAccounting("chat").single().getString("local_status"))
+            assertEquals("request_failed", db.listRequestEvents("chat").single().getString("event_type"))
+            assertFalse(BackgroundRequestFailureRecorder.persist(db, "chat", requestId, "resp_x", "failed", "duplicate"))
+            assertEquals(2, db.getChat("chat")!!.getJSONArray("messages").length())
+            assertEquals(raw, db.getRequestRecoveryArchive("chat", requestId)!!
+                .getJSONObject("unrecoverable_indexed_state").getString("indexed_checkpoint"))
+        }
+    }
+
+    @Test fun damagedIndexedArchiveWriteFailureRollsBackTerminalMessageOwnershipAndPaidToolCheckpoint() {
+        lateinit var raw: String
+        val requestId = ChatDatabase(context).use { db ->
+            val id = prepared(db, activeText = "")
+            raw = damagedTerminalCheckpoint(db, id)
+            val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
+            assertTrue(db.saveOpenAiToolCheckpoint("chat", id, checkpoint(ledger, "waiting")
+                .put("prior_output", JSONArray().put(JSONObject().put("type", "reasoning").put("id", "rs_good")
+                    .put("encrypted_content", "known-good-parent")))))
+            db.writableDatabase.execSQL("""CREATE TRIGGER abort_damaged_archive BEFORE INSERT ON request_recovery_archive
+                BEGIN SELECT RAISE(ABORT, 'injected archive failure'); END""")
+            assertThrows(android.database.sqlite.SQLiteException::class.java) {
+                BackgroundRequestFailureRecorder.persist(db, "chat", id, "resp_x", "failed", "unrecoverable_checkpoint")
+            }
+            assertEquals(raw, db.getActiveResponse("chat")!!.getString("indexed_checkpoint"))
+            assertTrue(db.isActiveRequest("chat", id))
+            assertNotNull(db.getOpenAiToolCheckpoint("chat", id))
+            assertNull(db.getRequestRecoveryArchive("chat", id))
+            assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
+            assertEquals("running", db.listRequestAccounting("chat").single().getString("local_status"))
+            assertTrue(db.listRequestEvents("chat").isEmpty())
+            db.writableDatabase.execSQL("DROP TRIGGER abort_damaged_archive")
+            id
+        }
+        ChatDatabase(context).use { db ->
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", requestId, "resp_x", "failed", "unrecoverable_checkpoint"))
+            assertNull(db.getActiveResponse("chat"))
+            assertNull(db.getOpenAiToolCheckpoint("chat", requestId))
+            val archive = db.getRequestRecoveryArchive("chat", requestId)!!
+            assertEquals(raw, archive.getJSONObject("unrecoverable_indexed_state").getString("indexed_checkpoint"))
+            assertEquals(100L, archive.getJSONObject("usage").getLong("input_tokens"))
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            val output = assistant.getJSONArray("openai_protocol_output")
+            assertEquals(1, output.length())
+            assertEquals("known-good-parent", output.getJSONObject(0).getString("encrypted_content"))
+            assertEquals(100L, db.listRequestAccounting("chat").single().getLong("input_tokens"))
+        }
+    }
+
+    @Test fun staleDamagedCheckpointFailureCannotArchiveOrClearReplacementRequest() {
+        ChatDatabase(context).use { db ->
+            val staleRequest = prepared(db, activeText = "")
+            damagedTerminalCheckpoint(db, staleRequest)
+            db.setActiveResponse("chat", "resp_new", "local_replacement", "new partial", "in_progress",
+                System.currentTimeMillis(), "high", "high", false, 15, 0, true)
+            assertFalse(BackgroundRequestFailureRecorder.persist(db, "chat", staleRequest, "resp_x", "failed", "unrecoverable_checkpoint"))
+            val active = db.getActiveResponse("chat")!!
+            assertEquals("local_replacement", active.getString("request_id"))
+            assertEquals("resp_new", active.getString("response_id"))
+            assertEquals("new partial", active.getString("text"))
+            assertNull(db.getRequestRecoveryArchive("chat", staleRequest))
+            assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
+            assertTrue(db.listRequestEvents("chat").isEmpty())
+        }
+    }
+
+    @Test fun rawOnlyDamagedIndexedCursorCreatesExplicitFailedAssistantAndArchiveWithoutVisibleText() {
+        val raw = "malformed raw-only indexed cursor: exact original bytes"
+        val requestId = ChatDatabase(context).use { db ->
+            val id = prepared(db, activeText = "")
+            db.updateActiveResponse("chat", "resp_x", "", "in_progress", 7, id, raw)
+            assertTrue(BackgroundRequestFailureRecorder.persist(db, "chat", id, "resp_x", "failed", "unrecoverable_checkpoint"))
+            assertNull(db.getActiveResponse("chat"))
+            id
+        }
+        ChatDatabase(context).use { db ->
+            val assistant = db.getChat("chat")!!.getJSONArray("messages").getJSONObject(1)
+            assertEquals("", assistant.getString("text"))
+            assertEquals("failed", assistant.getString("status"))
+            assertEquals("unrecoverable_checkpoint", assistant.getString("error"))
+            assertFalse(assistant.has("openai_protocol_output"))
+            val state = db.getRequestRecoveryArchive("chat", requestId)!!.getJSONObject("unrecoverable_indexed_state")
+            assertEquals(raw, state.getString("indexed_checkpoint"))
+            assertEquals("", state.getString("text"))
+            assertEquals(7L, state.getLong("last_sequence_number"))
+            assertEquals("failed", db.listRequestAccounting("chat").single().getString("local_status"))
+            assertEquals("request_failed", db.listRequestEvents("chat").single().getString("event_type"))
+        }
+    }
+
+    @Test fun failureSnapshotTokenCannotQuarantineDifferentCurrentDamagedBytesUnderSameRequestOwner() {
+        ChatDatabase(context).use { db ->
+            val requestId = prepared(db, activeText = "")
+            val olderRaw = damagedTerminalCheckpoint(db, requestId)
+            val currentRaw = JSONObject(olderRaw).put("newer_snapshot", true).toString()
+            db.writableDatabase.execSQL("UPDATE chats SET active_indexed_checkpoint=? WHERE id=? AND active_request_id=?",
+                arrayOf(currentRaw, "chat", requestId))
+            val ledger = OpenAiUsageLedger.observe(null, "resp_parent", usage(100, 10), "completed")
+            assertTrue(db.saveOpenAiToolCheckpoint("chat", requestId, checkpoint(ledger, "waiting")))
+            val failed = JSONObject().put("role", "assistant").put("provider", "openai")
+                .put("request_id", requestId).put("response_id", "resp_x").put("status", "failed")
+                .put("text", "paid fragment").put("error", "unrecoverable_checkpoint")
+            assertThrows(UnrecoverableResponsesCheckpointException::class.java) {
+                db.finalizeCurrentChatIfActiveRequest("chat", "Worker chat", null, null, listOf(failed), requestId,
+                    unrecoverableIndexedCheckpoint = olderRaw)
+            }
+            assertTrue(db.isActiveRequest("chat", requestId))
+            assertEquals(currentRaw, db.getActiveResponse("chat")!!.getString("indexed_checkpoint"))
+            assertNotNull(db.getOpenAiToolCheckpoint("chat", requestId))
+            assertNull(db.getRequestRecoveryArchive("chat", requestId))
+            assertEquals(1, db.getChat("chat")!!.getJSONArray("messages").length())
+            assertEquals("running", db.listRequestAccounting("chat").single().getString("local_status"))
+            assertTrue(db.listRequestEvents("chat").isEmpty())
+        }
+    }
+
     @Test fun finishedDurableResponseSurvivesFailureAndCompactionWithoutCountingAggregateAsChildUsage() {
         var requestId = ""
         ChatDatabase(context).use { db ->
