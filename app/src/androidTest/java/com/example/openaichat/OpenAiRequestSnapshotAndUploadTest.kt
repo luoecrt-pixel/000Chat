@@ -105,6 +105,7 @@ class OpenAiRequestSnapshotAndUploadTest {
     }
 
     @After fun after() {
+        observedActivity = null
         ResumableResponseStreamClient.transportForTests = null
         SecureStore(context).setApiKey(oldKey)
         ChatDatabase(context).use { db -> chats.forEach {
@@ -156,6 +157,7 @@ class OpenAiRequestSnapshotAndUploadTest {
             .apply { isAccessible = true }.invoke(activity, false)
     }
     private fun initialize(activity: MainActivity): String {
+        observedActivity = activity
         activity.newChat(); setField(activity, "client", http)
         return activity.currentChatIdForTesting().also(chats::add)
     }
@@ -185,10 +187,17 @@ class OpenAiRequestSnapshotAndUploadTest {
         }
         // The SQLite terminal claim precedes the queued Activity completion callback. A second
         // Send must wait for that callback to commit history and release the real UI busy guard.
-        durable && uiSnapshot(responseId)?.let { ui ->
-            ui.chatId == chatId && ui.expectedResponseInHistory && ui.sendEnabled && !ui.stopVisible
-        } == true
+        if (!durable) return@awaitCondition false
+        if (!hasLiveObservedActivity()) return@awaitCondition true
+        // A timed-out sample of a live UI is not proof that Send is ready. A closed
+        // screen or an observed different chat only needs the durable completion.
+        val ui = uiSnapshot(responseId) ?: return@awaitCondition !hasLiveObservedActivity()
+        ui.chatId != chatId || (ui.expectedResponseInHistory && ui.sendEnabled && !ui.stopVisible)
     }
+
+    private fun hasLiveObservedActivity(): Boolean = observedActivity?.let {
+        !it.isDestroyed && !it.isFinishing
+    } == true
 
     private data class UiSnapshot(
         val chatId: String,
@@ -208,7 +217,7 @@ class OpenAiRequestSnapshotAndUploadTest {
         val sampled = CountDownLatch(1)
         Handler(Looper.getMainLooper()).post {
             try {
-                if (observedActivity !== activity || activity.isDestroyed) return@post
+                if (observedActivity !== activity || activity.isDestroyed || activity.isFinishing) return@post
                 val status = (field(activity, "status") as TextView).text.toString()
                 // Categories only: status can contain provider errors or paths; never print raw UI text.
                 val category = when {
@@ -251,6 +260,26 @@ class OpenAiRequestSnapshotAndUploadTest {
     private fun tools(body: JSONObject): List<JSONObject> = body.optJSONArray("tools")?.let { arr ->
         (0 until arr.length()).map { arr.getJSONObject(it) }
     }.orEmpty()
+
+    @Test fun completedRequestRemainsObservableAfterChatSwitchAndActivityClose() {
+        var completedChat = ""
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                completedChat = initialize(activity)
+                send(activity, "Complete before switching chats")
+            }
+            val (uploads, _) = takeUploadsAndResponse("completion-lifecycle", syntheticKey)
+            assertTrue(uploads.isEmpty())
+            awaitCompleted(completedChat, 1)
+            scenario.onActivity { activity ->
+                assertNotEquals(completedChat, initialize(activity))
+            }
+            // The visible chat has no copy of this response; its durable owner still completed.
+            awaitCompleted(completedChat, 1)
+        }
+        awaitCompleted(completedChat, 1)
+        assertEquals("Observing completion must never send another request", 1, server.requestCount)
+    }
 
     @Test fun disabledPaidSettingsCannotBeEnabledByPreferenceChangesDuringActualOpenAiPreparation() =
         assertSnapshot(initiallyEnabled = false)

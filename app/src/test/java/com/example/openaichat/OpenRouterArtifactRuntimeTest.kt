@@ -180,8 +180,17 @@ class OpenRouterArtifactRuntimeTest {
                 }
             }
             val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
-            OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
-            awaitRuntimeAndCleanup()
+            try {
+                OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
+                awaitRuntimeAndCleanup()
+            } finally {
+                OpenRouterResponseRuntime.cancel(requestId)
+                try {
+                    awaitRuntimeAndCleanup()
+                } finally {
+                    if (!OpenRouterResponseRuntime.uses(client)) client.close()
+                }
+            }
             dispatchFailure.get()?.let { throw AssertionError("Runtime artifact exchange failed", it) }
             assertEquals(3, server.requestCount)
             assertNotNull("Runtime never exposed its normalized artifact", derivative.get())

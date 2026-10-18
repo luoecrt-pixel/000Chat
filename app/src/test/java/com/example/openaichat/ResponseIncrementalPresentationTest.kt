@@ -1,10 +1,16 @@
 package com.example.openaichat
 
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Test
 import java.util.concurrent.CancellationException
 
 class ResponseIncrementalPresentationTest {
+    @After fun clearCachedPageLayout() {
+        ResponseTextPages::class.java.getDeclaredField("cachedLayout")
+            .apply { isAccessible = true }.set(null, null)
+    }
+
     @Test fun everyStreamingPrefixMatchesACompleteParseIncludingProvisionalClosures() {
         val source = "Intro\n\n````text\n``` literal\n````\n\n" +
             "<file name=\"a.txt\">\nfile\n</file>\n" +
