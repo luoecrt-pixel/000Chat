@@ -2,24 +2,12 @@
 
 Единственный рабочий план. Правила — [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md), причины прежних решений — [PROJECT_HISTORY.md](PROJECT_HISTORY.md). Номера сохранены для связи с поручениями; выполненные части исключены из активных задач.
 
-## Исходное состояние и очередь
+## Очередь
 
-- База после J / PR #174 — `main` `e096b8be2961c113a75694de9f37bd166de9c019`. Перед новой реализацией повторно проверить актуальные main, PR и CI; этот baseline не означает, что main остаётся на прежнем SHA.
-- Реализованы: основа OpenAI Responses/instructions/recovery и сохранение outputs (A); защитные срезы OpenRouter/файлов/ключей; основные навигация и жесты F; темы, настройки и бренд G; локальные tools GPT, мульти-фото и автоматические научные preview H/I. Остатки прежних критериев перечислены ниже. Непустые черновики видны как «Черновик», пустые новые сессии скрыты — это актуальное уточнение правила #2.
-- **J / #28 принят в PR #174:** разные bytes и порядок мульти-фото, retry дочернего GET без повторного платного POST, lifecycle/Stop ownership, живой статус восстановления, telemetry tool-раундов и ручные научные preview. Не назначать этот пакет заново; визуальная и live/device-приёмка остаётся в #9.
-- **#21 + K / #29 + #18.1–2 выполнены и закрыты в рабочем плане:** snapshot платных настроек на Send, отложенный upload без дублей, атомарная компактизация checkpoint с сохранением оплаченных данных, идемпотентный учёт раундов, диагностика и честный unknown/zero cost. Код, независимое заключение, матрица доказательств, точный code SHA и статус вливания — в [PR #175](https://github.com/luoecrt-pixel/000Chat/pull/175); Debug/Release CI успешны. Не назначать завершённую реализацию повторно.
-- Текущая стабилизация #3/#24 и границ страниц #5 — [Draft PR #176](https://github.com/luoecrt-pixel/000Chat/pull/176). После его приёмки — прочие остатки B/C/D. Темы в M (#31) завершают старые требования; экспорт чата N (#32) и GitHub для GPT в L (#30) — расширения.
-- Затем завершать B/C/D (#12–16, #18.3, #22, остаток #24) по риску и зависимости; небольшие UI-доработки #5/#31 допустимы параллельно. Не начинать L или крупные новые transports/миграции до контрольного аудита ниже.
-- Последнее уточнение владельца: #26/#27 отложены до практической потребности в Messages-only возможностях. Текущий transport — OpenRouter Chat Completions с provider Anthropic. Compose Android (будущий №22) не зависит от KMP/iOS (будущий №23).
+- Перед следующей реализацией сверить актуальные main, PR, код и CI. Следующий рубеж — контрольный аудит ниже; крупные новые transports, миграции и L не начинать до него.
+- После аудита продолжить B/C/D (#12–16, #18.3, #22) по риску и зависимости; небольшие UI-доработки #5/#31 допустимы параллельно. Экспорт N (#32) и GitHub для GPT в L (#30) — отдельные расширения.
+- #26/#27 отложены до практической потребности в Messages-only возможностях. Текущий transport — OpenRouter Chat Completions с provider Anthropic. Compose Android (будущий №22) не зависит от KMP/iOS (будущий №23).
 - Физический телефон, production signing и публикация — только по отдельному поручению (#9/#10).
-
-### Контрольный рубеж: отдельный полный аудит
-
-Исторические аудиты и разборы уже существовали: PR #104/#111, #131 и #149. Не выдавать их исправленные находки за непроведённый первый аудит или новый backlog. Ниже запланирован отдельный будущий checkpoint на зафиксированном main, а не повтор всех прежних ревизий.
-
-После короткой стабилизации сопоставить прежние находки с уже влитыми исправлениями и оставшимися задачами, уточнить scope checkpoint, зафиксировать один baseline `main` SHA и таблицу открытых работ. Два новых независимых агента отдельно проверяют Android/lifecycle/SQLite/files и GPT/Claude protocols/security/accounting в этом scope; P0/P1 перепроверяются перекрёстно, результат — один отчёт без дублей. Прежняя Issue #161 удалена (GitHub возвращает 410); её ссылка не является доступным заданием.
-
-Условия старта: A принят, релевантные CI/регрессии подтверждены для baseline, нет незакрытого подтверждённого неотложного P0/P1. Некритичный backlog не должен бесконечно откладывать аудит. Известные остатки не выдавать за новые находки. Настоящая сверка плана и обычные PR-review не заменяют полный аудит; его не автозапускают после каждого PR.
 
 ### Граница готовности PR
 
@@ -27,17 +15,13 @@
 
 ## Текущие задачи
 
-### 3. [F · P1/P2] Позиция чтения при пересоздании Activity — реализация в PR #176, ожидает CI/приёмки — **следующий**
+### Контрольный рубеж: отдельный полный аудит — **следующий**
 
-Реализованы стабильный view ID, saved-state anchors/режим чтения, ожидание commit `AsyncListDiffer` и готовности async rich layout, отмена устаревших поколений при жесте/смене чата/Stop/Destroy, сохранение pending-якоря для восстановления. Во время доразбора стрима сохраняется уже измеренная позиция, выбранная пользователем; поздний рост ответа докручивается только в режиме follow. Явные переходы не перетираются автоматическим сохранением viewport; reflow при изменении ширины/шрифта восстанавливает строку целевого символа. Cold launch следует в конец, reading restore сохраняет позицию.
+Сопоставить прежние находки с текущим кодом и оставшимися задачами, уточнить scope, зафиксировать один baseline `main` SHA и таблицу открытых работ. Два новых независимых агента отдельно проверяют Android/lifecycle/SQLite/files и GPT/Claude protocols/security/accounting в этом scope; P0/P1 перепроверяются перекрёстно, результат — один отчёт без дублей.
 
-Временные signatures — фиксированный SHA-256, saved-state codec ограничен 128 якорями и 65 536 UTF-16 символами, текущий чат приоритетен; текст истории не сокращается. Независимый неограниченный список lock IDs в Bundle не сохраняется. Масштаб шрифта использует штатный `sp`, без изменения `scaledDensity`.
-
-**Приёмка:** Activity tests A→B→A, середина высокого последнего ответа, background delta, rotation/recreate/saved-state restore, theme/font resize, отдельный cold launch. Тот же читаемый текст без прыжка/«рогатки»; фактическое расстояние до низа, отдельная политика Send/явной кнопки перехода.
+Условия старта: релевантные CI/регрессии подтверждены для baseline, нет незакрытого подтверждённого неотложного P0/P1. Некритичный backlog не должен бесконечно откладывать аудит. Известные остатки не выдавать за новые находки. Сверка плана и обычные PR-review не заменяют этот аудит; его не автозапускают после каждого PR.
 
 ### 12. [C · P1/P2, остаток] Claude route/cache и сохранение сброса signed reasoning
-
-Default Anthropic внутри OpenRouter и уважение явно сохранённого Auto реализованы. Осталось:
 
 - Wire matrix `AUTO/ANTHROPIC × 1h/5m/off × tools/system/history`; согласовать top-level automatic cache с реально поддерживаемым маршрутом Auto, не смешивать несовместимые nested 5m/top-level 1h. Сохранить explicit breakpoints, историю и route/fallback policy.
 - После `checkBinding()` сохранять в SQLite факт безопасного сброса несовместимых `reasoning_details`, чтобы warning не повторялся каждый turn; не менять оригинальную хронологию/подписи без причины. Тестировать model/key/tools/route/system mismatch и reopen.
@@ -57,7 +41,7 @@ Default Anthropic внутри OpenRouter и уважение явно сохр�
 
 ### 15. [B · P1/P2, остаток] Retention, удаление server files и request-wide limits OpenAI
 
-Локальная fail-closed защита общих файлов/канонических путей реализована. Определить policy retention/`expires_after` для поддерживаемых purpose и сообщить пользователю сроки. Безопасный `DELETE /v1/files/{id}` — при последней ссылке согласно policy, с учётом других чатов, drafts/active requests, Vector Store и account binding. Cache clear не считается server delete. Remote error/expired ID/account switch не запускает скрытый upload/resend и не удаляет original.
+Определить policy retention/`expires_after` для поддерживаемых purpose и сообщить пользователю сроки. Безопасный `DELETE /v1/files/{id}` — при последней ссылке согласно policy, с учётом других чатов, drafts/active requests, Vector Store и account binding. Cache clear не считается server delete. Remote error/expired ID/account switch не запускает скрытый upload/resend и не удаляет original.
 
 Сохранить исходный критерий проверки `purpose` по MIME (`user_data`/`vision`) и лимитов **реально отправляемого запроса**, включая replay/history/local manifests, а не только текущий выбор. Нынешняя сумма `requestFileSizes` сама по себе полноту budget не доказывает. Сначала сверить текущую API-схему/лимиты; это acceptance investigation, не доказанный live отказ.
 
@@ -65,13 +49,11 @@ Default Anthropic внутри OpenRouter и уважение явно сохр�
 
 ### 16. [D · P2, остаток] Web citations, engine и dev-only диагностика OpenRouter
 
-`X-Generation-Id` до SSE и per-round reconciliation реализованы. Осталось хранение/отображение web_search/web_fetch annotations/citations (согласовать с #13), явный выбор поддерживаемого engine и совместимость route/tools/images.
+Добавить хранение/отображение web_search/web_fetch annotations/citations (согласовать с #13), явный выбор поддерживаемого engine и совместимость route/tools/images.
 
 `debug.echo_upstream_body` — только отдельный явно разрешённый dev-only режим на synthetic/контролируемых данных, off по умолчанию; production/обычная диагностика не получает сырые keys/messages/paths. Флаг не нужен основной пользовательской функции citations.
 
 ### 18. [D · P2, остаток #18.3] Актуальные тарифы и политика оценок
-
-Unknown/zero/estimate и детализация фактической стоимости (#18.1–2) закрыты в PR #175; повторно их не реализовывать. Осталось:
 
 - Получать HTTPS цены OpenRouter `/models` и подходящего `/models/{author}/{slug}/endpoints`, хранить TTL/дату/статус оценки. Неизвестные tool/cache-write тарифы не выдумывать.
 - Заменить захардкоженные оценки Activity/Worker на provider/model-aware policy; тариф OpenRouter не переносить на OpenAI. Оценка не заменяет подтверждённый расход, включая фактический ноль.
@@ -87,19 +69,11 @@ Unknown/zero/estimate и детализация фактической стои�
 
 Сохранить различие OpenAI resumable background Response и OpenRouter inference: после потери SSE — partial/checkpoint/known-or-unknown cost, без скрытого второго платного запроса. Статусы «генерация / связь потеряна / получение результата / неполный / готово» соответствуют реальности. Existing Stop/Delete/Edit/notification fixes не переделывать без причины.
 
-### 24. [B/H · P2] Нормализация артефактов и контекст поиска — реализация в PR #176, ожидает приёмки
-
-Реализация в PR #176: GPT/Claude регистрируют артефакты через общий `classifyLocalFile`, ограничивают их текущим чатом и сохраняют кодировку/структуру. Отсутствующий `.utf8` пересоздаётся под lease, обновлённый manifest сохраняется в checkpoint до инструментов; оригинал не удаляется, временный derivative защищён активным владельцем и очищается после commit завершения/ошибки Activity или Worker и после Stop. Не создавать bridge заново.
-
-Восстановлены прежние CSV/XLSX statistics и контракты поиска (`limit`, case-insensitive, `all_matches_returned`); overlap учитывает длину query и левый context с surrogate guard. Неоднозначный legacy alias отвергается, canonical ID остаётся доступен. Приёмка: реальные GPT batches с SQLite reopen/Stop и OpenRouter SSE runtime с нормализацией, запретом чужих артефактов и cleanup; результат/CI — в PR #176. Сохранить original bytes и Stop/checkpoint semantics J / PR #174 и K / PR #175.
-
 ### 5. [G · P2, остаток] Длинные научные ответы и визуальные критерии
 
-В PR #176 реализованы перенос завершённой формулы без разрыва на границе страницы, проверка 16 000 символов именно LaTeX-тела, предупреждение на содержащей формулу странице и явный fallback для source больше 512 000 символов. Oversized страницы вычисляются без глобального удержания исходника, source/copy/history/API input сохраняются полностью. Это закрывает срез границ страниц и памяти, но не весь пункт #5.
+На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
 
-Ручные preview реализованы в J / PR #174, включая выключенное auto-preview; повторная реализация не нужна. На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
-
-Шторка #4 реализована: порог от исходного положения, velocity/reversal. CANCEL/multitouch/interruption и визуальная плавность остаются частью приёмки; не объявлять их багами без воспроизведения.
+Для шторки #4 проверить CANCEL/multitouch/interruption и визуальную плавность; не объявлять их багами без воспроизведения.
 
 ### 31. [M · P2] Остальные диалоги и видимый бренд
 
@@ -118,7 +92,7 @@ Unknown/zero/estimate и детализация фактической стои�
 
 Поиск кода GitHub из дополнительного пожелания — отдельное расширение L: `search_code` сейчас отсутствует в каталоге/executor. Сначала определить поддерживаемый endpoint, repo/ref scope и полноту поиска; реализовать allow-list/rate-limit/pagination/result-size tests. Не выдавать чтение каталогов за готовый индексный поиск по коду и не обещать лёгкое включение готового инструмента.
 
-**Приёмка:** Responses→GitHub mock→function output→child response в Activity/Worker, allow/deny repo/branches, traversal, unknown tool, 401/403/429, pagination/recovery и wire-count без повторного платного POST. Это новая функция, не обязательный незакрытый остаток #24.
+**Приёмка:** Responses→GitHub mock→function output→child response в Activity/Worker, allow/deny repo/branches, traversal, unknown tool, 401/403/429, pagination/recovery и wire-count без повторного платного POST.
 
 ### 9. [H-Release, по отдельному поручению] Приёмка APK и live provider
 
@@ -140,7 +114,7 @@ Unknown/zero/estimate и детализация фактической стои�
 
 ## Планы на потом
 
-Идеи не являются scope следующего PR. Проверять существующий код и доступность API выбранному аккаунту/transport. Сохранены прежние номера; будущие №9/№10 объединены с активными #18/реализованной #23 и отдельно не повторяются.
+Идеи не являются scope следующего PR. Проверять существующий код и доступность API выбранному аккаунту/transport. Номера сохранены для связи с прежними пожеланиями.
 
 ### 1. [P2] Версии ответа и обратимость
 Альтернативы regenerate/edit и возврат к branch point; сначала pure snapshot/branch contract + DB test.
@@ -164,7 +138,7 @@ Pure policy состояний/действий: продолжить, повт�
 Local snapshot до сообщения с новым chatId, сохранностью originals/shared references.
 
 ### 8. [P2] Настройки генерации по capabilities
-ModelCapabilities/GenerationSettings для обоих builders; temperature отдельно от reasoning effort. System/developer prompts реализованы.
+ModelCapabilities/GenerationSettings для обоих builders; temperature отдельно от reasoning effort.
 
 ### 11. [P2] Приватность и бюджет OpenRouter
 Opt-in data_collection=deny/ZDR, бюджет/отказ, resolved model. Capabilities/цены — #14/#18.
@@ -182,7 +156,7 @@ Citations/context management/per-turn effort/deferred tools после подт�
 Datetime/advisor/subagent/tool_search после проверки доступности и явного выбора платных функций. Image generation исключён.
 
 ### 16. [P3] Управление маршрутами OpenRouter
-Дополнительные routing/privacy options по выбору. X-OpenRouter-Cache:false уже внедрён, повторной задачи нет.
+Дополнительные routing/privacy options по выбору.
 
 ### 17. [P2, направление одобрено] Долговременная память
 Неизменяемая хронология + индекс выбранных фактов/заметок с первоисточником + durable stages агентной работы, без тихой обрезки истории.
@@ -216,4 +190,4 @@ STT audio/transcriptions, TTS audio/speech, затем Realtime WebRTC с кра
 | 1000269193.jpg, 1000269194.jpg | Mermaid/HTML/SVG source+preview, реальные file/tool cards |
 | 1000269200.jpg | Typography Markdown/code/table |
 | 1000269202.jpg, 1000269204.jpg | Формулы/диаграммы/безопасный preview, статусы/actions tools/files |
-| 1000269206.jpg | Gray: фон #CED8DA, шапка #8199A5; палитра реализована |
+| 1000269206.jpg | Gray: фон #CED8DA, шапка #8199A5 |
