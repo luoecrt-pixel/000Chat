@@ -62,7 +62,8 @@ class ReconciliationBoundedDecoderTest {
             assertEquals(0, outcome.retrievals)
             assertFalse(outcome.hasUsage)
             assertTrue(outcome.decoderDiagnostic.orEmpty().contains("HTTP 401"))
-            assertTrue(outcome.decoderDiagnostic.orEmpty().contains("byte limit"))
+            assertTrue("Expected byte limit for oversized HTTP 401, got: ${outcome.decoderDiagnostic}",
+                outcome.decoderDiagnostic.orEmpty().contains("byte limit"))
             assertFalse(outcome.decoderDiagnostic.orEmpty().contains("synthetic-key"))
             assertEquals(1, server.requestCount)
         }
@@ -101,7 +102,8 @@ class ReconciliationBoundedDecoderTest {
                 }
             assertEquals(1, count)
             assertEquals(403, diagnostics.single().first)
-            assertTrue(diagnostics.single().second.contains("byte limit"))
+            assertTrue("Expected byte limit for oversized HTTP 403, got: ${diagnostics.single().second}",
+                diagnostics.single().second.contains("byte limit"))
             assertFalse(diagnostics.single().second.contains("synthetic-key"))
             assertEquals(1, server.requestCount)
         }
