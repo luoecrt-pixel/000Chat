@@ -795,7 +795,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val preserveViewport = !explicitScrollPending
                     if (state?.isPreLayout == false) explicitScrollPending = false
                     val mayRestore = state?.isPreLayout == false && itemCount > 0 && !applyingProgrammaticScroll &&
-                        !scrollCallbacksStopped && !isFinishing && !isDestroyed
+                        !scrollCallbacksStopped && !isFinishing && !isDestroyed && !messageAdapter.isListCommitPending()
                     if (mayRestore) {
                         val chatId = currentChatId()
                         val geometryChanged = laidOutViewportWidthPx > 0 && width > 0 &&
@@ -811,9 +811,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         adjustingLayoutAnchor = true
                         try {
                             if (anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))) {
-                                scrollToPositionWithOffset(ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot()), anchor.topOffsetPx)
+                                scrollToPositionWithOffset(ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.committedSnapshot()), anchor.topOffsetPx)
                             } else if (pendingScrollRestoreChatId == chatId) {
-                                scrollToPosition(itemCount - 1)
+                                val last = findViewByPosition(itemCount - 1)
+                                if (last != null && last.height > 0 && height > 0) {
+                                    val margin = (last.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: 0
+                                    scrollToPositionWithOffset(itemCount - 1,
+                                        height - paddingTop - paddingBottom - last.height - margin)
+                                } else scrollToPosition(itemCount - 1)
                             } else if (preserveViewport && chatId in userScrollLockedChats && childCount > 0) {
                                 val first = findFirstVisibleItemPosition()
                                 findViewByPosition(first)?.let { view ->
@@ -837,10 +842,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val anchor = pendingScrollRestoreAnchor
                     val reading = anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))
                     val position = if (reading && anchor != null) {
-                        ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot())
+                        ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.committedSnapshot())
                     } else itemCount - 1
                     val view = findViewByPosition(position) ?: return
-                    if (view.height <= 0 || view.isLayoutRequested || isBubbleAsyncLayoutPending(view)) return
+                    if (view.height <= 0 || view.isLayoutRequested) return
+                    if (reading && isBubbleAsyncLayoutPending(view)) return
                     val offset = if (reading && anchor != null) {
                         val lineTop = if (anchor.charOffset > 0) findLineTopForCharOffset(view, anchor.charOffset) else null
                         ChatScrollPolicy.resolveTopOffsetPx(anchor, view.height, width, resources.configuration.fontScale, lineTop)
@@ -887,11 +893,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     updateJumpToBottomButtonVisibility()
                 }
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                    if (applyingProgrammaticScroll || pendingScrollRestoreChatId == currentChatId()) {
+                    if (applyingProgrammaticScroll) {
                         updateJumpToBottomButtonVisibility()
                         return
                     }
                     val draggingUp = recyclerView.scrollState == RecyclerView.SCROLL_STATE_DRAGGING && dy < 0
+                    if (draggingUp) cancelScrollRestore()
+                    if (pendingScrollRestoreChatId == currentChatId()) {
+                        updateJumpToBottomButtonVisibility()
+                        return
+                    }
                     if ((dy < -dp(2) || draggingUp) && !isAtBottomPixels()) {
                         userScrollLockedChats.add(currentChatId())
                     } else if (dy > 0 && isAtBottomPixels()) {
@@ -8369,7 +8380,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun captureCurrentScrollAnchor(preserveMode: ChatScrollMode? = null) {
-        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0 || messageAdapter.isListCommitPending()) return
         val chatId = currentChatId()
         if (chatId.isBlank() || pendingScrollRestoreChatId == chatId) return
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return
@@ -8378,7 +8389,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val firstView = lm.findViewByPosition(firstPos) ?: return
         if (isBubbleAsyncLayoutPending(firstView) || firstView.isLayoutRequested) return
         val topOffset = firstView.top - scroll.paddingTop
-        val snapshot = messageAdapter.snapshot()
+        val snapshot = messageAdapter.committedSnapshot()
         val item = snapshot.getOrNull(firstPos)
         val distanceFromBottom = pixelDistanceFromBottom()
         val mode = preserveMode ?: if (chatId in userScrollLockedChats || distanceFromBottom > dp(64)) {
@@ -8406,7 +8417,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun scrollToChatBottomNow() {
-        if (!::scroll.isInitialized || !::messageAdapter.isInitialized) return
+        if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.isListCommitPending() || scroll.isComputingLayout) return
         val count = messageAdapter.itemCount
         if (count <= 0) return
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return
@@ -8471,7 +8482,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingScrollRestoreChatId == chatId && scrollRestoreGeneration == generation
 
     private fun completeScrollRestore(chatId: String, generation: Long, mode: ChatScrollMode) {
-        if (!isScrollRestoreCurrent(chatId, generation)) return
+        if (!isScrollRestoreCurrent(chatId, generation) || messageAdapter.isListCommitPending()) return
         laidOutFontScale = resources.configuration.fontScale
         laidOutViewportWidthPx = scroll.width
         pendingScrollRestoreChatId = null
@@ -8484,7 +8495,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun applyReadingAnchorNow(pos: Int, savedAnchor: ChatScrollAnchor): Boolean {
         if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.itemCount == 0 ||
-            scroll.isComputingLayout || scroll.width <= 0 || scroll.height <= 0) return false
+            messageAdapter.isListCommitPending() || scroll.isComputingLayout || scroll.width <= 0 || scroll.height <= 0) return false
         val lm = scroll.layoutManager as? LinearLayoutManager ?: return false
         val safePos = pos.coerceIn(0, messageAdapter.itemCount - 1)
         applyingProgrammaticScroll = true
@@ -8513,7 +8524,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun tryPendingScrollRestore(targetChatId: String, generation: Long) {
-        if (!isScrollRestoreCurrent(targetChatId, generation) || scroll.isComputingLayout) return
+        if (!isScrollRestoreCurrent(targetChatId, generation) || scroll.isComputingLayout || messageAdapter.isListCommitPending()) return
         if (messageAdapter.itemCount == 0) {
             pendingScrollRestoreChatId = null
             pendingScrollRestoreAnchor = null
@@ -8524,7 +8535,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val reading = anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))
         if (reading && anchor != null) {
             userScrollLockedChats.add(targetChatId)
-            val position = ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.snapshot())
+            val position = ChatScrollPolicy.resolveAnchorPosition(anchor, messageAdapter.committedSnapshot())
             if (applyReadingAnchorNow(position, anchor)) {
                 completeScrollRestore(targetChatId, generation, ChatScrollMode.READING_LOCKED)
             }
@@ -8553,22 +8564,37 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun onBubbleAsyncLayoutCommitted(sourceChatId: String, itemId: String, card: View) {
-        if (!::scroll.isInitialized || !::messageAdapter.isInitialized ||
-            !isScrollRestoreCurrent(sourceChatId, scrollRestoreGeneration)) return
+        if (scrollCallbacksStopped || isFinishing || isDestroyed || !::scroll.isInitialized ||
+            !::messageAdapter.isInitialized || currentChatId() != sourceChatId || messageAdapter.isListCommitPending()) return
         val generation = scrollRestoreGeneration
-        val items = messageAdapter.snapshot()
+        val items = messageAdapter.committedSnapshot()
         if (items.isEmpty()) return
-        val anchor = pendingScrollRestoreAnchor
-        val target = if (anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))) {
-            ChatScrollPolicy.resolveAnchorPosition(anchor, items)
-        } else items.lastIndex
-        if (items.getOrNull(target)?.id != itemId) return
-        // RichResponsePanel calls back from its layout; leave RecyclerView's current layout first.
+        if (isScrollRestoreCurrent(sourceChatId, generation)) {
+            val anchor = pendingScrollRestoreAnchor
+            val target = if (anchor != null && (anchor.isReadingLocked || anchor.distanceFromBottomPx > dp(64))) {
+                ChatScrollPolicy.resolveAnchorPosition(anchor, items)
+            } else items.lastIndex
+            if (items.getOrNull(target)?.id != itemId) return
+            scroll.post {
+                if (!isScrollRestoreCurrent(sourceChatId, generation) || messageAdapter.isListCommitPending()) return@post
+                val lm = scroll.layoutManager as? LinearLayoutManager ?: return@post
+                if (lm.findViewByPosition(target) !== card || messageAdapter.committedSnapshot().getOrNull(target)?.id != itemId) return@post
+                tryPendingScrollRestore(sourceChatId, generation)
+            }
+            return
+        }
+        val lastIndex = items.lastIndex
+        if (items[lastIndex].id != itemId) return
         scroll.post {
-            if (!isScrollRestoreCurrent(sourceChatId, generation)) return@post
+            if (scrollCallbacksStopped || isFinishing || isDestroyed || currentChatId() != sourceChatId ||
+                scrollRestoreGeneration != generation || pendingScrollRestoreChatId != null ||
+                messageAdapter.isListCommitPending() || sourceChatId in userScrollLockedChats ||
+                scroll.scrollState == RecyclerView.SCROLL_STATE_DRAGGING) return@post
             val lm = scroll.layoutManager as? LinearLayoutManager ?: return@post
-            if (lm.findViewByPosition(target) !== card || messageAdapter.snapshot().getOrNull(target)?.id != itemId) return@post
-            tryPendingScrollRestore(sourceChatId, generation)
+            if (lm.findViewByPosition(lastIndex) !== card || messageAdapter.committedSnapshot().getOrNull(lastIndex)?.id != itemId) return@post
+            scrollToChatBottomNow()
+            captureCurrentScrollAnchor(preserveMode = ChatScrollMode.FOLLOW_LATEST)
+            updateJumpToBottomButtonVisibility()
         }
     }
 
@@ -8630,18 +8656,35 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun scrollToLatest(force: Boolean = false) {
         if (scrollCallbacksStopped || isFinishing || isDestroyed || !::scroll.isInitialized ||
-            !::messageAdapter.isInitialized || messageAdapter.itemCount == 0) return
+            !::messageAdapter.isInitialized) return
         val chatId = currentChatId()
-        if (!force && (pendingScrollRestoreChatId == chatId || !isNearLatest())) {
+        if (force) {
+            userScrollLockedChats.remove(chatId)
+            val generation = beginScrollRestore(chatId, null)
+            if (!messageAdapter.isListCommitPending()) tryPendingScrollRestore(chatId, generation)
+            scroll.post { if (isScrollRestoreCurrent(chatId, generation)) tryPendingScrollRestore(chatId, generation) }
+            return
+        }
+        if (messageAdapter.itemCount == 0 || messageAdapter.isListCommitPending()) return
+        if (pendingScrollRestoreChatId == chatId || !isNearLatest()) {
             updateJumpToBottomButtonVisibility()
             return
         }
-        userScrollLockedChats.remove(chatId)
-        val generation = beginScrollRestore(chatId, null)
-        tryPendingScrollRestore(chatId, generation)
+        val generation = scrollRestoreGeneration
+        if (scroll.width > 0 && scroll.height > 0 && !scroll.isComputingLayout) {
+            scrollToChatBottomNow()
+            captureCurrentScrollAnchor(preserveMode = ChatScrollMode.FOLLOW_LATEST)
+            updateJumpToBottomButtonVisibility()
+        }
         scroll.post {
-            if (currentChatId() != chatId || scrollRestoreGeneration != generation) return@post
-            tryPendingScrollRestore(chatId, generation)
+            if (scrollCallbacksStopped || isFinishing || isDestroyed || currentChatId() != chatId ||
+                scrollRestoreGeneration != generation || pendingScrollRestoreChatId == chatId ||
+                messageAdapter.isListCommitPending()) return@post
+            if (messageAdapter.itemCount > 0 && isNearLatest()) {
+                scrollToChatBottomNow()
+                captureCurrentScrollAnchor(preserveMode = ChatScrollMode.FOLLOW_LATEST)
+            }
+            updateJumpToBottomButtonVisibility()
         }
     }
 
@@ -8834,6 +8877,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             chatIndex!=null -> ChatScrollPolicy.messageIdentity(chatIndex, user, message)
             else -> "bubble-${UUID.randomUUID()}"
         }
+        val sourceChatId = currentChatId()
+        val followAfterCommit = user || isNearLatest() ||
+            (pendingScrollRestoreChatId == sourceChatId && pendingScrollRestoreAnchor == null)
+        val generation = if (user) {
+            userScrollLockedChats.remove(sourceChatId)
+            beginScrollRestore(sourceChatId, null)
+        } else scrollRestoreGeneration
         messageAdapter.addItem(
             ChatBubbleItem.create(
                 id=id,
@@ -8845,8 +8895,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 chatIndex=chatIndex,
                 reasoningSummary=message?.optString("reasoning_summary")?.trim()?.takeIf{it.isNotBlank()}
             )
-        )
-        scrollToLatest(force = user)
+        ) {
+            if (!scrollCallbacksStopped && !isFinishing && !isDestroyed &&
+                currentChatId() == sourceChatId && scrollRestoreGeneration == generation) {
+                if (isScrollRestoreCurrent(sourceChatId, generation)) tryPendingScrollRestore(sourceChatId, generation)
+                else if (followAfterCommit && sourceChatId !in userScrollLockedChats) {
+                    scrollToChatBottomNow()
+                    captureCurrentScrollAnchor(preserveMode = ChatScrollMode.FOLLOW_LATEST)
+                    updateJumpToBottomButtonVisibility()
+                } else scrollToLatest()
+            }
+        }
         return id
     }
 

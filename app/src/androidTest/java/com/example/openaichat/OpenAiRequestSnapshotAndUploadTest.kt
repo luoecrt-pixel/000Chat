@@ -53,6 +53,10 @@ class OpenAiRequestSnapshotAndUploadTest {
     private val files = linkedSetOf<File>()
     private val responseCounter = AtomicInteger()
     private val uploadCounter = AtomicInteger()
+    private val sendCounter = AtomicInteger()
+    private val requestCounter = AtomicInteger()
+    private val attemptedPaths = java.util.concurrent.CopyOnWriteArrayList<String>()
+    @Volatile private var observedActivity: MainActivity? = null
     private val settings = listOf(
         "provider", "model", "current_chat", "background_responses", "background_responses_migrated_v25",
         "response_notifications", "reasoning", "reasoning_mode", "text_format", "json_schema", "system_prompt",
@@ -82,8 +86,10 @@ class OpenAiRequestSnapshotAndUploadTest {
         val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
         server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
         http = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
-            .addInterceptor { chain -> chain.proceed(chain.request().newBuilder()
-                .url(server.url(chain.request().url.encodedPath)).build()) }.build()
+            .addInterceptor { chain ->
+                attemptedPaths.add(chain.request().url.encodedPath.takeIf { it in setOf("/v1/files", "/v1/responses") } ?: "other")
+                chain.proceed(chain.request().newBuilder().url(server.url(chain.request().url.encodedPath)).build())
+            }.build()
         ResumableResponseStreamClient.transportForTests = http to server.url("/")
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
@@ -140,6 +146,8 @@ class OpenAiRequestSnapshotAndUploadTest {
     private fun invoke(activity: MainActivity, method: String) = MainActivity::class.java.getDeclaredMethod(method)
         .apply { isAccessible = true }.invoke(activity)
     private fun send(activity: MainActivity, text: String = "Inspect the complete attached files") {
+        observedActivity = activity
+        sendCounter.incrementAndGet()
         (field(activity, "input") as EditText).setText(text)
         MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType)
             .apply { isAccessible = true }.invoke(activity, false)
@@ -172,7 +180,33 @@ class OpenAiRequestSnapshotAndUploadTest {
             } == true
         }
     }
-    private fun request(): RecordedRequest = server.takeRequest(20, TimeUnit.SECONDS) ?: error("No expected HTTPS request")
+    private fun request(): RecordedRequest {
+        val ordinal = requestCounter.incrementAndGet()
+        return server.takeRequest(20, TimeUnit.SECONDS) ?: run {
+            var ui = "unavailable"
+            var chatId: String? = null
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                observedActivity?.let { activity ->
+                    chatId = activity.currentChatIdForTesting()
+                    val status = (field(activity, "status") as? TextView)?.text?.toString().orEmpty()
+                    // Categories only: status can contain provider errors or paths; never print raw UI text.
+                    val category = when {
+                        status.contains("ошиб", true) -> "error"
+                        status.contains("подготов", true) -> "preparing"
+                        status.contains("загруз", true) -> "uploading"
+                        status.contains("останов", true) -> "stopped"
+                        else -> "other"
+                    }
+                    val sendEnabled = (field(activity, "send") as? android.view.View)?.isEnabled
+                    val stopVisible = (field(activity, "stop") as? android.view.View)?.visibility == android.view.View.VISIBLE
+                    ui = "statusCategory=$category,statusLength=${status.length},sendEnabled=$sendEnabled,stopVisible=$stopVisible"
+                }
+            }
+            val activeStatus = chatId?.let { id -> ChatDatabase(context).use { it.getActiveResponse(id)?.optString("status") } }
+                ?.takeIf { it in setOf("queued", "in_progress", "completed", "failed", "cancelled", "incomplete") } ?: "none-or-other"
+            error("No expected HTTPS request at send=${sendCounter.get()},request=$ordinal: serverRequestCount=${server.requestCount},attemptedPaths=$attemptedPaths,$ui,activeResponse=$activeStatus")
+        }
+    }
     private fun tools(body: JSONObject): List<JSONObject> = body.optJSONArray("tools")?.let { arr ->
         (0 until arr.length()).map { arr.getJSONObject(it) }
     }.orEmpty()

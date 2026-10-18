@@ -12,9 +12,6 @@
 - Затем завершать B/C/D (#12–16, #18.3, #22, остаток #24) по риску и зависимости; небольшие UI-доработки #5/#31 допустимы параллельно. Не начинать L или крупные новые transports/миграции до контрольного аудита ниже.
 - Последнее уточнение владельца: #26/#27 отложены до практической потребности в Messages-only возможностях. Текущий transport — OpenRouter Chat Completions с provider Anthropic. Compose Android (будущий №22) не зависит от KMP/iOS (будущий №23).
 - Физический телефон, production signing и публикация — только по отдельному поручению (#9/#10).
-- **Реализация (2026-10-18):** ветка `feat/stabilize-scroll-paging-local-tools` от `main` `3ade9087cbb58118b07fde750c10fd6cee09a655`: saved-state/async rich layout/отмена старых scroll callbacks (#3), границы формул (#5), нормализация/поиск/временные файлы (#24). Дополнительно ограничены сигнатуры и размер Bundle, устранены мутации системного `scaledDensity`, oversized source больше не удерживается глобальным кэшем. Точный code SHA, полная матрица проверок и текущие Debug/Release runs — в PR #176. Ожидание CI и решение Draft → Ready / merge оставлены владельцу.
-- **Приёмка PR #176:** ранние два UI-сбоя исправлены и адресные UI-тесты прошли; полный финальный Debug/Release прогон и статус CI сверять по актуальному head в PR. Настоящий OS process death и визуальная приёмка устройства не подменяются Parcel/Robolectric simulation. Пункт #5 целиком не закрыт; остаток визуальных требований указан ниже.
-- **Локальные проверки 2026-10-18:** 656 Debug + 656 Release unit/Robolectric tests, 0 ошибок/пропусков; `compileDebugAndroidTestKotlin`, `lintDebug`, `lintRelease`, `assembleDebug`, `assembleRelease`, `bundleRelease` — PASS. Четыре Python verifier/mutation скрипта и `git diff --check` — PASS. Реализация завершена локально; следующий шаг #3 — CI/приёмка PR, не повторная реализация пройденных контрактов.
 
 ### Контрольный рубеж: отдельный полный аудит
 

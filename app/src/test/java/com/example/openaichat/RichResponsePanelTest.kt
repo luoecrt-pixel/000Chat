@@ -388,4 +388,62 @@ class RichResponsePanelTest {
         assertRendererSandbox(reopened, false)
     }
 
+    private fun finishAsyncParse(panel: RichResponsePanel) {
+        val job = RichResponsePanel::class.java.getDeclaredField("parseJob").apply { isAccessible = true }
+            .get(panel) as? java.util.concurrent.Future<*>
+        assertNotNull("Expected a published parser job", job)
+        job!!.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun layoutAsyncPanel(panel: RichResponsePanel) {
+        panel.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        panel.layout(0, 0, 1080, panel.measuredHeight)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    @Test fun cancelledAsyncParserReleasesJobAndAllowsTheNextSnapshot() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val activity = controller.get()
+            val panel = RichResponsePanel(activity, {}, {})
+            activity.setContentView(panel)
+            RichResponsePanel.beforeAsyncParseForTests = { throw java.util.concurrent.CancellationException() }
+            panel.submit(ChatBubbleItem.create("cancelled", "OpenAI", "word ".repeat(6500), false))
+            finishAsyncParse(panel)
+            assertFalse("Cancellation must not leave parseJob permanently pending", panel.isAsyncParsePending())
+            RichResponsePanel.beforeAsyncParseForTests = null
+            panel.submit(ChatBubbleItem.create("cancelled", "OpenAI", "Recovered snapshot", false))
+            assertTrue(descendants(panel).filterIsInstance<TextView>().any { it.text.toString().contains("Recovered snapshot") })
+        } finally {
+            RichResponsePanel.beforeAsyncParseForTests = null
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test fun unchangedAsyncSnapshotSettlesAfterMeasuredLayoutWithoutReplacingChildren() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val activity = controller.get()
+            var commits = 0
+            val panel = RichResponsePanel(activity, {}, {}, onAsyncLayoutCommitted = { commits++ })
+            activity.setContentView(panel)
+            val item = ChatBubbleItem.create("unchanged", "OpenAI", "word ".repeat(6500), false)
+            panel.submit(item)
+            finishAsyncParse(panel)
+            layoutAsyncPanel(panel)
+            assertFalse(panel.isAsyncParsePending())
+            assertEquals(1, commits)
+            val firstChild = panel.getChildAt(0)
+            panel.submit(item)
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(121))
+            finishAsyncParse(panel)
+            layoutAsyncPanel(panel)
+            assertSame("An unchanged parser prefix must retain the existing child", firstChild, panel.getChildAt(0))
+            assertFalse("An unchanged-size commit must settle too", panel.isAsyncParsePending())
+            assertEquals(2, commits)
+        } finally { controller.pause().stop().destroy() }
+    }
+
 }

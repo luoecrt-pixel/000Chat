@@ -181,17 +181,23 @@ class ChatMessageAdapter(
         itemById[item.id] = item
     }
 
+    private val modelRevision = java.util.concurrent.atomic.AtomicLong(0L)
+    @Volatile private var committedRevision = 0L
+
     private fun submitModel(onCommitted: (() -> Unit)? = null) {
+        val revision = modelRevision.incrementAndGet()
         val snapshot = if (items.isEmpty()) null else items.toList()
-        if (onCommitted != null) {
-            differ.submitList(snapshot) { onCommitted() }
-        } else {
-            differ.submitList(snapshot)
+        differ.submitList(snapshot) {
+            committedRevision = maxOf(committedRevision, revision)
+            onCommitted?.invoke()
         }
     }
 
+    fun isListCommitPending(): Boolean =
+        committedRevision != modelRevision.get() || differ.currentList.size != items.size
+
     fun submitItems(newItems: List<ChatBubbleItem>, onCommitted: (() -> Unit)? = null) {
-        if (items == newItems && differ.currentList == newItems) {
+        if (!isListCommitPending() && items == newItems && differ.currentList == newItems) {
             onCommitted?.invoke()
             return
         }
@@ -290,7 +296,7 @@ class ChatMessageAdapter(
     }
 
     fun clearItems(onCommitted: (() -> Unit)? = null) {
-        if (items.isEmpty() && differ.currentList.isEmpty()) {
+        if (!isListCommitPending() && items.isEmpty() && differ.currentList.isEmpty()) {
             onCommitted?.invoke()
             return
         }
@@ -310,4 +316,6 @@ class ChatMessageAdapter(
     fun itemAt(index: Int): ChatBubbleItem? = items.getOrNull(index)
 
     fun snapshot(): List<ChatBubbleItem> = items.toList()
+
+    fun committedSnapshot(): List<ChatBubbleItem> = differ.currentList
 }

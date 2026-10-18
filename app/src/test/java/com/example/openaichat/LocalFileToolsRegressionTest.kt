@@ -139,14 +139,8 @@ class LocalFileToolsRegressionTest {
                 lease.release(activeOwners)
                 assertTrue("Derivative must remain while OpenAI tool checkpoint is active", derivedFile.isFile)
 
-                // Once the request is stopped/finalized and checkpoint is removed, cleanupPending deletes the temporary .utf8 derivative while keeping original.
+                // The production Stop path releases checkpoint ownership and cleans its journal.
                 assertTrue(db.stopActiveRequestOnce("chat-1", "req_tool_1", removeUserMessage = true))
-                PreparedAttachmentFiles.cleanupPending(context) {
-                    PreparedAttachmentFiles.Owners(
-                        durable = db.listAllLocalFilePaths().toSet(),
-                        active = db.listActiveOpenAiToolAttachmentPaths()
-                    )
-                }
                 assertFalse("Temporary .utf8 derivative for local artifact must not leak after checkpoint removal", derivedFile.exists())
                 assertTrue("Original local artifact file must remain intact", cp1251File.isFile)
             }
@@ -169,6 +163,46 @@ class LocalFileToolsRegressionTest {
                 assertEquals("second", JSONObject(tools.execute("file_read_range", JSONObject().put("file_id", b.id))).getString("content"))
             }
         } finally { folder.deleteRecursively() }
+    }
+
+    @Test fun terminalCommitCleansCheckpointOnlyDerivativeWhileStaleOwnerPreservesIt() {
+        val context = RuntimeEnvironment.getApplication()
+        val chatId = "artifact-terminal-${System.nanoTime()}"
+        val requestId = "request-terminal"
+        val original = File(context.filesDir, "generated/$chatId/report.txt").apply {
+            parentFile!!.mkdirs()
+            writeBytes("Отчёт".toByteArray(Charset.forName("windows-1251")))
+        }
+        val lease = PreparedAttachmentFiles.lease(context)
+        ChatDatabase(context).use { db ->
+            try {
+                val attachment = lease.capture().use {
+                    OpenRouterAttachmentStore.classifyLocalFile(context, original)
+                }
+                val derivative = File(attachment.textPath!!)
+                db.ensureChat(chatId, "Terminal cleanup")
+                db.setActiveResponse(chatId, "resp_terminal", requestId, "", "in_progress",
+                    System.currentTimeMillis(), "high", "high", false, 1, 1, true)
+                db.startRequestAccounting(chatId, requestId, "openai", "gpt-5.4", "openai_api_key")
+                OpenAiLocalFileToolBridge.configure(db, chatId, requestId,
+                    JSONObject().put("model", "gpt-5.4"), listOf(attachment))
+                lease.release(PreparedAttachmentFiles.Owners(
+                    db.listAllLocalFilePaths().toSet(), db.listActiveOpenAiToolAttachmentPaths()))
+                fun answer(owner: String) = JSONObject().put("role", "assistant").put("provider", "openai")
+                    .put("request_id", owner).put("status", "completed").put("text", "Done")
+                assertFalse(db.finalizeCurrentChatIfActiveRequest(chatId, "Terminal cleanup", "resp_terminal",
+                    "high", listOf(answer("stale-request")), "stale-request"))
+                assertTrue("Losing terminal owner must preserve active derivative", derivative.isFile)
+                assertTrue(db.finalizeCurrentChatIfActiveRequest(chatId, "Terminal cleanup", "resp_terminal",
+                    "high", listOf(answer(requestId)), requestId))
+                assertFalse("Winning terminal commit must clean checkpoint-only derivative", derivative.exists())
+                assertTrue("Terminal cleanup must preserve imported original", original.isFile)
+            } finally {
+                lease.defer()
+                db.deleteChat(chatId)
+                original.parentFile!!.deleteRecursively()
+            }
+        }
     }
 
     @Test fun missingArtifactDerivativeIsRebuiltUnderLeaseAndReusedAcrossResumedBatches() {
@@ -250,7 +284,6 @@ class LocalFileToolsRegressionTest {
             assertEquals(2, db.getOpenAiToolCheckpoint(chatId, requestId)!!.getJSONObject("telemetry").getInt("rounds_completed"))
             assertTrue(rebuiltFile.isFile)
             assertTrue(db.stopActiveRequestOnce(chatId, requestId, removeUserMessage = true))
-            PreparedAttachmentFiles.cleanupPending(context, ::owners)
             assertFalse("Temporary rebuilt derivative must be removed after Stop", rebuiltFile.exists())
             assertTrue("Original generated artifact must survive", original.isFile)
         } finally {

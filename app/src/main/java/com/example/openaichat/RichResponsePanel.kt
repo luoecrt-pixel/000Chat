@@ -47,6 +47,7 @@ import org.commonmark.node.Text
 import java.io.ByteArrayInputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.FutureTask
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 
@@ -69,6 +70,7 @@ class RichResponsePanel(
     private var footer: View? = null
     private val dialogs = mutableListOf<AlertDialog>()
     private var parseJob: Future<*>? = null
+    private var parseJobVersion: Long? = null
     private var asyncLayoutPending = false
     private val parseVersion = AtomicLong()
     private var parserSession = ResponseBlockParser.Session()
@@ -135,7 +137,7 @@ class RichResponsePanel(
         latest = item
         if (renderId != item.id) {
             parseVersion.incrementAndGet()
-            parseJob?.cancel(true); parseJob = null; asyncLayoutPending = false
+            parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
             parserSession = ResponseBlockParser.Session()
             renderId = item.id; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
         }
@@ -151,7 +153,7 @@ class RichResponsePanel(
     private fun render(item: ChatBubbleItem) {
         if (parseJob != null) return // Finish one snapshot while incoming snapshots are conflated.
         val autoPreview = scientificAssets && context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_scientific_preview", true)
-        if (autoPreview != autoScientificPreview) { rendered.clear(); formulaRanges.clear(); removeAllViews(); footer = null; autoScientificPreview = autoPreview }
+        if (autoPreview != autoScientificPreview) { rendered.clear(); formulaRanges.clear(); removeAllViews(); footer = null; asyncLayoutPending = false; autoScientificPreview = autoPreview }
         val version = parseVersion.incrementAndGet()
         val session = parserSession
         val previous = rendered.map { it.first }
@@ -175,29 +177,66 @@ class RichResponsePanel(
             return Triple(blocks, prefix, formulas)
         }
         if (item.text.length > 32_000) {
-            parseJob = parsers.submit {
+            fun releaseOwnedJob(): Boolean {
+                if (parseJobVersion != version) return false
+                parseJob = null
+                parseJobVersion = null
+                return true
+            }
+            fun scheduleNewerSnapshot() {
+                if (!detached && latest != null && latest !== item && !scheduled && parseJob == null) {
+                    scheduled = true
+                    handler.post(refresh)
+                }
+            }
+            // Publish the job before starting it; a fast parser never races Future assignment.
+            val job = FutureTask<Unit> {
                 val prepared = try { beforeAsyncParseForTests?.invoke(); prepare() }
-                catch (_: CancellationException) { return@submit }
+                catch (_: CancellationException) {
+                    handler.post {
+                        if (releaseOwnedJob()) asyncLayoutPending = false
+                        scheduleNewerSnapshot()
+                    }
+                    return@FutureTask
+                }
                 catch (_: Exception) { Triple(listOf<ResponseBlockParser.Block>(ResponseBlockParser.Block.Prose(item.text)), 0, emptyMap()) }
                 handler.post {
-                    if (!detached && parseVersion.get() == version && latest?.id == item.id) {
-                        parseJob = null
+                    val owned = releaseOwnedJob()
+                    if (owned && !detached && parseVersion.get() == version && latest?.id == item.id) {
                         asyncLayoutPending = true
                         applyBlocks(item, prepared.first, prepared.second, prepared.third)
+                        scheduleAsyncLayoutCommitCheck(version)
                         if (latest !== item && !scheduled) { scheduled = true; handler.postDelayed(refresh, 120L) }
+                    } else {
+                        scheduleNewerSnapshot()
                     }
                 }
             }
+            parseJobVersion = version
+            parseJob = job
+            parsers.execute(job)
         } else {
+            asyncLayoutPending = false
             try { val prepared = prepare(); if (!cancelled()) applyBlocks(item, prepared.first, prepared.second, prepared.third) }
             catch (_: CancellationException) { /* A new snapshot owns this panel. */ }
             catch (_: Exception) { if (!cancelled()) applyBlocks(item, listOf(ResponseBlockParser.Block.Prose(item.text)), 0) }
         }
     }
 
+    private fun scheduleAsyncLayoutCommitCheck(version: Long) {
+        requestLayout()
+        handler.post {
+            if (detached || parseVersion.get() != version || parseJob != null || !asyncLayoutPending) return@post
+            if (width > 0 && height > 0 && !isLayoutRequested) {
+                asyncLayoutPending = false
+                onAsyncLayoutCommitted?.invoke()
+            }
+        }
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        if (asyncLayoutPending && parseJob == null) {
+        if (asyncLayoutPending && parseJob == null && width > 0 && height > 0) {
             asyncLayoutPending = false
             onAsyncLayoutCommitted?.invoke()
         }
@@ -608,7 +647,7 @@ class RichResponsePanel(
     }
     override fun onDetachedFromWindow() {
         detached = true; parseVersion.incrementAndGet()
-        parseJob?.cancel(true); parseJob = null; asyncLayoutPending = false
+        parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
         latest = null
         handler.removeCallbacks(refresh); scheduled = false
         dialogs.toList().forEach { it.dismiss() }
