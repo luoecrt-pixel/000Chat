@@ -22,6 +22,55 @@ class OpenRouterErrorClassifierTest {
     private fun stream(events: String) = MockResponse().setHeader("Content-Type", "text/event-stream")
         .setBody(events + "data: [DONE]\n\n")
 
+    @Test fun immutableThinkingHttp400ExplainsSafeOptionsWithoutRetryOrSecretDisclosure() {
+        val server = MockWebServer(); server.start()
+        val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+        val rejection = "messages.19.content.1: `thinking` or `redacted_thinking` blocks in the latest assistant " +
+            "message cannot be modified. These blocks must remain as they were in the original response."
+        val secret = "sk-or-v1-SyntheticSecretForRedaction12345"
+        try {
+            // OpenRouter can forward the explanation in its outer message or in metadata.raw.
+            for (location in listOf("outer", "raw_object", "raw_string")) {
+                val providerError = JSONObject().put("error", JSONObject().put("type", "invalid_request_error")
+                    .put("code", "signed_context_rejected").put("message", "$secret $rejection"))
+                val metadata = JSONObject().put("provider_name", "Anthropic").put("flagged_input", "PRIVATE_INPUT")
+                if (location != "outer") metadata.put("raw", if (location == "raw_string") providerError.toString() else providerError)
+                val error = JSONObject().put("code", 400)
+                    .put("message", if (location == "outer") "$secret $rejection" else "Provider returned error")
+                    .put("metadata", metadata)
+                server.enqueue(MockResponse().setResponseCode(400).setBody(JSONObject().put("error", error).toString()))
+                val failure = assertThrows(OpenRouterUpstreamException::class.java) { complete(client) }
+                assertEquals("HTTP", failure.stage)
+                assertEquals(400, failure.httpStatus)
+                assertEquals("Anthropic", failure.providerName)
+                assertEquals(if (location == "outer") "400" else "invalid_request_error", failure.errorType)
+                if (location != "outer") assertEquals("signed_context_rejected", failure.providerCode)
+                assertFalse(failure.retryEligible)
+                assertTrue(failure.message.orEmpty().contains("исходные модель и маршрут"))
+                assertTrue(failure.message.orEmpty().contains("начните новый чат"))
+                assertTrue(failure.message.orEmpty().contains("История сохранена"))
+                assertTrue(failure.message.orEmpty().contains("автоматический повтор не выполнялся"))
+                assertTrue(failure.message.orEmpty().contains("messages.19.content.1"))
+                assertFalse(failure.message.orEmpty().contains(secret))
+                assertFalse(failure.safeMetadata.orEmpty().contains(secret))
+                assertFalse(failure.safeMetadata.orEmpty().contains("PRIVATE_INPUT"))
+                assertEquals("POST", server.takeRequest(2, TimeUnit.SECONDS)!!.method)
+                assertEquals("Unexpected retry after $location", null, server.takeRequest(100, TimeUnit.MILLISECONDS))
+            }
+            assertEquals(3, server.requestCount)
+        } finally { client.close(); server.shutdown() }
+    }
+
+    @Test fun unrelatedThinkingValidationAndServerErrorsDoNotSuggestSignedContextReset() {
+        for ((status, message) in listOf(400 to "Unsupported thinking effort", 500 to
+            "thinking blocks cannot be modified")) {
+            val failure = OpenRouterErrorClassifier.classify(JSONObject().put("code", status).put("message", message),
+                "HTTP", 0, status)
+            assertEquals(status, failure.httpStatus)
+            assertFalse(failure.message.orEmpty().contains("исходные модель и маршрут"))
+        }
+    }
+
     @Test
     fun httpRateLimitPreservesRetryAfterDisablesResponseCacheAndNeverRetries() {
         val server = MockWebServer(); server.start()

@@ -87,7 +87,8 @@ object OpenRouterResponseRuntime {
         val trace = JSONArray()
         var partial = ""
         var protocolNotice: String? = null
-        var lastCheckpoint = 0L
+        var lastCheckpoint: Long? = null
+        var textCheckpointSequence = 0L
         var fatalFailure = false
         var github: GitHubToolExecutor? = null
         var latestFileIoJson: JSONObject? = null
@@ -199,11 +200,16 @@ object OpenRouterResponseRuntime {
                 onRoundObserved = { round, id, usage -> db.observeOpenRouterRound(r.chatId, r.requestId, round, id, usage) },
                 onTextDelta = { text ->
                     partial = text
+                    // OpenRouter has no server SSE sequence. This cursor belongs to
+                    // the single runtime writer, never to an OpenAI response stream.
+                    val sequence = textCheckpointSequence++
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastCheckpoint >= 500L && active()) {
-                        lastCheckpoint = now
-                        db.updateActiveResponse(r.chatId, text = text, status = "in_progress", expectedRequestId = r.requestId)
-                        OpenRouterUiBridge.changed(r.chatId, r.requestId)
+                    val previousCheckpoint = lastCheckpoint
+                    if ((previousCheckpoint == null || now - previousCheckpoint >= 500L) && active()) {
+                        if (db.checkpointOpenRouterResponse(r.chatId, r.requestId, text, sequence)) {
+                            lastCheckpoint = now
+                            OpenRouterUiBridge.changed(r.chatId, r.requestId)
+                        }
                     }
                 },
                 onPayloadObserved = { round, size -> diagnostics.log("openrouter_http_payload", mapOf("chat_id" to r.chatId, "request_id" to r.requestId, "round" to round, "model" to r.model, "json_bytes" to size)) },
