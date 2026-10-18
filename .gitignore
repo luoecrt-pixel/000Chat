@@ -1,5 +1,6 @@
 # Android / Gradle: generated and machine-local files
 .gradle/
+.kotlin/
 **/build/
 local.properties
 .idea/

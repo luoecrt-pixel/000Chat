@@ -29,20 +29,21 @@ data class ChatScrollAnchor(
         get() = mode == ChatScrollMode.READING_LOCKED
 
     fun toJson(): JSONObject = JSONObject()
-        .put("message_id", messageId)
-        .put("content_signature", contentSignature)
+        .put("message_id", messageId.takeIf { it.length <= ChatScrollPolicy.MAX_SAVED_ANCHOR_ID_CHARS }.orEmpty())
+        .put("content_signature", contentSignature.takeIf { it.length <= ChatScrollPolicy.MAX_SAVED_ANCHOR_SIGNATURE_CHARS }.orEmpty())
         .put("position", position)
         .put("top_offset_px", topOffsetPx)
         .put("mode", mode.name)
         .put("distance_from_bottom_px", distanceFromBottomPx)
         .put("item_height_px", itemHeightPx)
         .put("viewport_width_px", viewportWidthPx)
-        .put("font_scale", fontScale.toDouble())
+        .put("font_scale", fontScale.takeIf { it.isFinite() && it > 0f }?.toDouble() ?: 1.0)
         .put("char_offset", charOffset)
 
     companion object {
         fun fromJson(json: JSONObject): ChatScrollAnchor? {
             val messageId = JsonProtocol.string(json, "message_id")
+                .takeIf { it.length <= ChatScrollPolicy.MAX_SAVED_ANCHOR_ID_CHARS }.orEmpty()
             val position = json.optInt("position", -1)
             if (messageId.isBlank() && position < 0) return null
             val rawMode = JsonProtocol.string(json, "mode")
@@ -52,7 +53,8 @@ data class ChatScrollAnchor(
                 .takeIf { it.isFinite() && it > 0f } ?: 1f
             return ChatScrollAnchor(
                 messageId = messageId,
-                contentSignature = JsonProtocol.string(json, "content_signature"),
+                contentSignature = JsonProtocol.string(json, "content_signature")
+                    .takeIf { it.length <= ChatScrollPolicy.MAX_SAVED_ANCHOR_SIGNATURE_CHARS }.orEmpty(),
                 position = position.coerceAtLeast(0),
                 topOffsetPx = json.optInt("top_offset_px", 0),
                 mode = mode,
@@ -72,6 +74,17 @@ data class ChatScrollAnchor(
  * resolve across AsyncListDiffer commits, tall bubbles, and recreation.
  */
 object ChatScrollPolicy {
+    // Saved reading hints are disposable UI metadata, never the source of chat
+    // content. Keep their complete JSON well below Android's shared Bundle limit.
+    const val MAX_SAVED_ANCHORS = 128
+    const val MAX_SAVED_ANCHOR_ID_CHARS = 256
+    const val MAX_SAVED_ANCHOR_SIGNATURE_CHARS = 64
+    const val MAX_SAVED_ANCHORS_JSON_CHARS = 65_536
+    private const val MAX_SAVED_ANCHORS_JSON_DEPTH = 4
+
+    fun isValidSavedChatId(chatId: String): Boolean =
+        chatId.length <= MAX_SAVED_ANCHOR_ID_CHARS && chatId.isNotBlank()
+
     fun shouldScrollToLatest(
         itemCount: Int,
         lastVisiblePosition: Int,
@@ -201,26 +214,63 @@ object ChatScrollPolicy {
         return scrollbarRemainingPx.coerceAtLeast(0)
     }
 
-    fun encodeAnchorsJson(anchors: Map<String, ChatScrollAnchor>): String {
-        val root = JSONObject()
-        for ((chatId, anchor) in anchors) {
-            if (chatId.isNotBlank()) {
-                root.put(chatId, anchor.toJson())
-            }
+    fun encodeAnchorsJson(
+        anchors: Map<String, ChatScrollAnchor>,
+        preferredChatId: String? = null
+    ): String {
+        val encoded = StringBuilder("{")
+        var savedCount = 0
+        fun appendAnchor(chatId: String, anchor: ChatScrollAnchor) {
+            if (!isValidSavedChatId(chatId)) return
+            val entry = JSONObject.quote(chatId) + ":" + anchor.toJson().toString()
+            val commaChars = if (savedCount > 0) 1 else 0
+            // Account for escaping and the final closing brace, rather than
+            // estimating the bound from the unescaped source strings.
+            if (encoded.length + commaChars + entry.length + 1 > MAX_SAVED_ANCHORS_JSON_CHARS) return
+            if (savedCount > 0) encoded.append(',')
+            encoded.append(entry)
+            savedCount++
         }
-        return root.toString()
+        preferredChatId?.let { chatId -> anchors[chatId]?.let { appendAnchor(chatId, it) } }
+        for ((chatId, anchor) in anchors) {
+            if (savedCount >= MAX_SAVED_ANCHORS) break
+            if (chatId != preferredChatId) appendAnchor(chatId, anchor)
+        }
+        return encoded.append('}').toString()
     }
 
     fun decodeAnchorsJson(raw: String?): Map<String, ChatScrollAnchor> {
-        if (raw.isNullOrBlank()) return emptyMap()
+        if (raw == null || raw.length > MAX_SAVED_ANCHORS_JSON_CHARS || raw.isBlank()) return emptyMap()
+        if (!hasBoundedSavedAnchorJsonDepth(raw)) return emptyMap()
         val root = try { JSONObject(raw) } catch (_: Exception) { return emptyMap() }
         val out = linkedMapOf<String, ChatScrollAnchor>()
         val keys = root.keys()
-        while (keys.hasNext()) {
+        while (keys.hasNext() && out.size < MAX_SAVED_ANCHORS) {
             val chatId = keys.next()
+            if (!isValidSavedChatId(chatId)) continue
             val obj = root.optJSONObject(chatId) ?: continue
             ChatScrollAnchor.fromJson(obj)?.let { out[chatId] = it }
         }
         return out
+    }
+
+    private fun hasBoundedSavedAnchorJsonDepth(raw: String): Boolean {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (char in raw) {
+            if (inString) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == '"') inString = false
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '{', '[' -> if (++depth > MAX_SAVED_ANCHORS_JSON_DEPTH) return false
+                    '}', ']' -> if (--depth < 0) return false
+                }
+            }
+        }
+        return depth == 0 && !inString
     }
 }

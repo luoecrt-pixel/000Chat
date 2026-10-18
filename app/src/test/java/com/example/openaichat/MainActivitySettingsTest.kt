@@ -40,6 +40,8 @@ class MainActivitySettingsTest {
     private var controller: ActivityController<MainActivity>? = null
 
     @Before fun before() {
+        RuntimeEnvironment.setFontScale(1f)
+        RuntimeEnvironment.setQualifiers("w1080dp-h1800dp-mdpi")
         val context = RuntimeEnvironment.getApplication()
         try {
             androidx.work.WorkManager.getInstance(context)
@@ -56,6 +58,7 @@ class MainActivitySettingsTest {
         RichResponsePanel.beforeAsyncParseForTests = null
         ShadowAlertDialog.getLatestAlertDialog()?.dismiss()
         controller?.destroy()
+        RuntimeEnvironment.setFontScale(1f)
         prefs.edit().clear().commit()
     }
 
@@ -72,6 +75,19 @@ class MainActivitySettingsTest {
 
     private fun views(view: View): List<View> = listOf(view) +
         if (view is ViewGroup) (0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList()
+    private fun layoutWindow(activity: MainActivity, width: Int = 1080, height: Int = 1800) {
+        @Suppress("DEPRECATION") val display = activity.windowManager.defaultDisplay
+        val shadowDisplay = shadowOf(display)
+        @Suppress("DEPRECATION")
+        if (display.width != width || display.height != height) {
+            shadowDisplay.setWidth(width)
+            shadowDisplay.setHeight(height)
+        }
+        val decor = activity.window.decorView
+        decor.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+        decor.layout(0, 0, width, height)
+    }
     private fun widgets(dialog: AlertDialog) = views(dialog.window!!.decorView)
     private fun labels(dialog: AlertDialog) = widgets(dialog).filterIsInstance<TextView>().map { it.text.toString() }
     private fun checkbox(dialog: AlertDialog, prefix: String) = widgets(dialog).filterIsInstance<CheckBox>()
@@ -261,9 +277,7 @@ class MainActivitySettingsTest {
         fun rv(act: MainActivity) = MainActivity::class.java.getDeclaredField("scroll").apply { isAccessible = true }.get(act) as RecyclerView
         fun jumpBtn(act: MainActivity) = MainActivity::class.java.getDeclaredField("jumpToBottomBtn").apply { isAccessible = true }.get(act) as TextView
         fun layoutRv(act: MainActivity, w: Int = 1080, h: Int = 1800) {
-            val view = rv(act)
-            view.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY))
-            view.layout(0, 0, w, h)
+            layoutWindow(act, w, h)
         }
         layoutRv(activity)
         shadowOf(Looper.getMainLooper()).idle()
@@ -334,7 +348,7 @@ class MainActivitySettingsTest {
         layoutRv(activity)
         assertEquals(readingOffset, lm.findViewByPosition(lastIndex)!!.top - scroll.paddingTop)
 
-        activity.resources.configuration.fontScale = 1.3f
+        RuntimeEnvironment.setFontScale(1.3f)
         MainActivity::class.java.getDeclaredMethod("applyTheme").apply { isAccessible = true }.invoke(activity)
         shadowOf(Looper.getMainLooper()).idle()
         layoutRv(activity)
@@ -344,7 +358,7 @@ class MainActivitySettingsTest {
             -(lineTop.invoke(activity, scaledView, readingChar) as Int), scaledOffset)
         assertTrue("Font scale increase must keep reading offset negative inside tall message", scaledOffset < 0)
         assertTrue("chat-a" in locked)
-        activity.resources.configuration.fontScale = 1.0f
+        RuntimeEnvironment.setFontScale(1f)
         MainActivity::class.java.getDeclaredMethod("applyTheme").apply { isAccessible = true }.invoke(activity)
         shadowOf(Looper.getMainLooper()).idle()
         layoutRv(activity)
@@ -388,6 +402,52 @@ class MainActivitySettingsTest {
         assertEquals(View.GONE, jumpBtn(recreated).visibility)
     }
 
+    @Test fun systemFontScaleMatrixUsesNativeSpAndPreservesTheReadingLine() {
+        val context = RuntimeEnvironment.getApplication()
+        val answer = (1..100).joinToString("\n\n") { "Масштабируемый ответ, абзац $it: читаемое объяснение без ручного изменения системных метрик." }
+        ChatDatabase(context).use { db ->
+            db.ensureChat("font-scale", "Масштаб")
+            db.upsertCurrentChat("font-scale", "Масштаб", null, null, listOf(
+                JSONObject().put("role", "assistant").put("request_id", "font-answer")
+                    .put("status", "completed").put("text", answer)))
+        }
+        prefs.edit().putString("current_chat", "font-scale").commit()
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().also { controller = it }.get()
+        val recycler = MainActivity::class.java.getDeclaredField("scroll").apply { isAccessible = true }.get(activity) as RecyclerView
+        val lm = recycler.layoutManager as LinearLayoutManager
+        val readChar = MainActivity::class.java.getDeclaredMethod("findCharOffsetAtViewportTop", View::class.java, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        val lineTop = MainActivity::class.java.getDeclaredMethod("findLineTopForCharOffset", View::class.java, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        fun layout() {
+            layoutWindow(activity)
+        }
+        layout(); shadowOf(Looper.getMainLooper()).idle(); layout()
+        val bottomOffset = lm.findViewByPosition(0)!!.top - recycler.paddingTop
+        assertTrue(bottomOffset < -450)
+        recycler.scrollBy(0, bottomOffset + 450)
+        layout()
+        for (scale in listOf(1f, 1.3f, 1.6f, 2f)) {
+            val before = lm.findViewByPosition(0)!!
+            val beforeOffset = before.top - recycler.paddingTop
+            val targetChar = readChar.invoke(activity, before, -beforeOffset) as Int
+            val previousScale = activity.resources.configuration.fontScale
+            RuntimeEnvironment.setFontScale(scale)
+            @Suppress("DEPRECATION") val systemScaledDensity = activity.resources.displayMetrics.scaledDensity
+            MainActivity::class.java.getDeclaredMethod("applyTheme").apply { isAccessible = true }.invoke(activity)
+            shadowOf(Looper.getMainLooper()).idle(); layout()
+            @Suppress("DEPRECATION") val afterThemeDensity = activity.resources.displayMetrics.scaledDensity
+            assertEquals("Theme must preserve system metrics at fontScale=$scale", systemScaledDensity, afterThemeDensity, 0f)
+            val card = lm.findViewByPosition(0)!!
+            val offset = card.top - recycler.paddingTop
+            val expectedOffset = if (scale == previousScale) beforeOffset else -(lineTop.invoke(activity, card, targetChar) as Int)
+            assertEquals("Reading line at fontScale=$scale", expectedOffset, offset)
+            val text = views(card).filterIsInstance<TextView>().first { it.text.contains("Масштабируемый ответ") }
+            val nativeReference = TextView(activity).apply { textSize = 16f }
+            assertEquals("Use framework sp conversion at fontScale=$scale", nativeReference.textSize, text.textSize, 0.01f)
+        }
+    }
+
     @Test fun asyncAnswerRestoreRetainsDeepAnchorUntilParsedContentIsLaidOut() {
         val context = RuntimeEnvironment.getApplication()
         val longAnswer = (1..900).joinToString("\n\n") {
@@ -413,9 +473,7 @@ class MainActivitySettingsTest {
         val recycler = MainActivity::class.java.getDeclaredField("scroll").apply { isAccessible = true }.get(activity) as RecyclerView
         val lm = recycler.layoutManager as LinearLayoutManager
         fun layout() {
-            recycler.measure(View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(1800, View.MeasureSpec.EXACTLY))
-            recycler.layout(0, 0, 1080, 1800)
+            layoutWindow(activity)
         }
         fun currentPanel(): RichResponsePanel? = lm.findViewByPosition(0)?.let { card ->
             views(card).filterIsInstance<RichResponsePanel>().firstOrNull()

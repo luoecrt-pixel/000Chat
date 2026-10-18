@@ -4,6 +4,7 @@ package com.example.openaichat
 object ResponseTextPages {
     const val CHARACTERS = 32_000
     const val SAFE_UI_SOURCE_BUDGET = 512_000
+    private const val OVERSIZED_PAGE_STRIDE = CHARACTERS - 1
 
     data class Page(
         val index: Int,
@@ -23,8 +24,7 @@ object ResponseTextPages {
         if (cached != null && cached.source == source) {
             return cached.slices
         }
-        val oversizedSource = source.length > SAFE_UI_SOURCE_BUDGET
-        val formulas = if (!oversizedSource && source.length > CHARACTERS &&
+        val formulas = if (source.length > CHARACTERS &&
             (source.indexOf('$') >= 0 || source.indexOf('\\') >= 0)
         ) {
             try { MathDelimiterScanner.scan(source) } catch (_: Exception) { emptyList() }
@@ -38,11 +38,7 @@ object ResponseTextPages {
         var start = 0
         while (start < source.length) {
             var end = minOf(source.length.toLong(), start.toLong() + CHARACTERS).toInt()
-            var notice: String? = if (oversizedSource) {
-                "Источник превышает безопасный бюджет UI-разбора формул; показан полный текст по страницам."
-            } else {
-                null
-            }
+            var notice: String? = null
             if (end < source.length) {
                 val crossing = formulas.firstOrNull { it.start < end && it.end > end }
                 if (crossing != null) {
@@ -82,9 +78,35 @@ object ResponseTextPages {
         return slices
     }
 
+    private fun oversizedPage(source: String, requested: Int): Page {
+        // A spare UTF-16 unit keeps every page within CHARACTERS when a boundary moves
+        // back over a surrogate pair. Each page needs only its two boundaries, no scan/cache.
+        val count = ((source.length.toLong() + OVERSIZED_PAGE_STRIDE - 1) /
+            OVERSIZED_PAGE_STRIDE).toInt()
+        val index = requested.coerceIn(0, count - 1)
+        fun boundary(offset: Long): Int {
+            val end = minOf(source.length.toLong(), offset).toInt()
+            return if (end > 0 && end < source.length &&
+                Character.isHighSurrogate(source[end - 1]) &&
+                Character.isLowSurrogate(source[end])
+            ) end - 1 else end
+        }
+        val start = boundary(index.toLong() * OVERSIZED_PAGE_STRIDE)
+        val end = boundary((index.toLong() + 1) * OVERSIZED_PAGE_STRIDE)
+        return Page(
+            index = index,
+            count = count,
+            text = source.substring(start, end),
+            fallbackNotice = "Источник превышает безопасный бюджет UI-разбора формул; показан полный текст по страницам."
+        )
+    }
+
     fun page(source: String, requested: Int): Page {
         if (source.isEmpty()) {
             return Page(index = 0, count = 1, text = "")
+        }
+        if (source.length > SAFE_UI_SOURCE_BUDGET) {
+            return oversizedPage(source, requested)
         }
         val slices = computeSlices(source)
         val count = slices.size.coerceAtLeast(1)

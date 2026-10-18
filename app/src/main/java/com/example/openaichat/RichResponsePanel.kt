@@ -108,8 +108,6 @@ class RichResponsePanel(
     private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
     private fun text(value: CharSequence = "") = TextView(context).apply {
         val theme = currentTheme()
-        val scale = resources.configuration.fontScale.takeIf { it.isFinite() && it > 0f } ?: 1f
-        resources.displayMetrics.scaledDensity = resources.displayMetrics.density * scale
         text = value; textSize = 16f; setTextColor(theme.textPrimary)
         setLinkTextColor(theme.accent); setPadding(0, dp(5), 0, dp(5))
         setTextIsSelectable(true); movementMethod = LinkMovementMethod.getInstance()

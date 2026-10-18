@@ -169,8 +169,9 @@ assert 'cell?.put("formula", "")' in xlsx and '"formula_si"' in xlsx
 ids_xml = (ROOT / "app/src/main/res/values/strings.xml").read_text()
 assert 'name="chat_messages_recycler"' in ids_xml, "RecyclerView requires a stable resource ID"
 assert 'id = R.id.chat_messages_recycler' in main_activity, "MainActivity RecyclerView must bind stable R.id.chat_messages_recycler"
-assert 'outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors))' in main_activity, "Scroll anchors must be saved in onSaveInstanceState"
-assert 'outState.putStringArrayList("user_scroll_locked_chats_v1", ArrayList(userScrollLockedChats))' in main_activity, "Scroll lock state must be saved in onSaveInstanceState"
+assert 'outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors, currentChatId()))' in main_activity, "Bounded scroll anchors must be saved with the current chat preferred"
+assert 'if (anchor.isReadingLocked) userScrollLockedChats.add(chatId)' in main_activity, "Scroll lock state must be restored from bounded anchors"
+assert 'ArrayList(userScrollLockedChats)' not in main_activity, "Saved state must not contain an unbounded duplicate scroll-lock list"
 assert 'ChatScrollPolicy.decodeAnchorsJson(savedInstanceState.getString("per_chat_scroll_anchors_v1"))' in main_activity, "Scroll anchors must be restored from savedInstanceState"
 scroll_policy = (ROOT / "app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt").read_text()
 assert 'fun actualDistanceFromBottomPx(' in scroll_policy and 'fun resolveAnchorPosition(' in scroll_policy and 'fun resolveTopOffsetPx(' in scroll_policy

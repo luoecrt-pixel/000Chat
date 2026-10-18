@@ -6,6 +6,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -34,13 +35,23 @@ data class ChatBubbleItem(
             val signature = if (message != null) {
                 ChatMessageFingerprint.of(message)
             } else {
+                val digest = MessageDigest.getInstance("SHA-256")
                 listOf(
                     label,
                     text,
                     user.toString(),
                     annotations?.toString().orEmpty(),
                     reasoningSummary.orEmpty()
-                ).joinToString("\u001f")
+                ).forEach { field ->
+                    val bytes = field.toByteArray(Charsets.UTF_8)
+                    // Length-prefix each field so content containing a separator
+                    // cannot hide a change in a neighboring rendered field.
+                    repeat(4) { byteIndex ->
+                        digest.update((bytes.size ushr (24 - byteIndex * 8)).toByte())
+                    }
+                    digest.update(bytes)
+                }
+                digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
             }
             return ChatBubbleItem(
                 id = id,

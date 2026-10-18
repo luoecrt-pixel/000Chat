@@ -35,7 +35,7 @@ def main():
             ("text_slices_lose_nul_or_unicode", "app/src/main/java/com/example/openaichat/SqliteLargeTextQuery.kt",
              lambda text: text.replace("substr(CAST($field AS BLOB),?,?)", "substr($field,?,?)", 1)),
             ("missing_saved_scroll_anchors", "app/src/main/java/com/example/openaichat/MainActivity.kt",
-             lambda text: text.replace('outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors))', '// dropped saved anchors', 1)),
+             lambda text: text.replace('outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors, currentChatId()))', '// dropped saved anchors', 1)),
             ("truncated_search_left_context_overlap", "app/src/main/java/com/example/openaichat/LocalFileTools.kt",
              lambda text: text.replace('val carryWindow = SEARCH_LEFT_CONTEXT + query.length - 1', 'val carryWindow = maxOf(query.length - 1, 100)', 1)),
         ]

@@ -96,14 +96,48 @@ class ResponseIncrementalPresentationTest {
         val exact = "A".repeat(ResponseTextPages.SAFE_UI_SOURCE_BUDGET - formula.length) + formula
         assertEquals(512_000, exact.length)
         val first = ResponseTextPages.page(exact, 0)
+        val boundedLayout = cachedPageLayout()!!
+        assertEquals(exact, cachedPageSource(boundedLayout))
         for (index in 0 until first.count) assertNull(ResponseTextPages.page(exact, index).fallbackNotice)
         assertEquals(exact, (0 until first.count).joinToString("") { ResponseTextPages.page(exact, it).text })
+        assertSame("Bounded answers must reuse their computed layout", boundedLayout, cachedPageLayout())
 
         val over = exact + "B"
         assertEquals(512_001, over.length)
         val oversized = ResponseTextPages.page(over, 0)
         for (index in 0 until oversized.count) assertNotNull(ResponseTextPages.page(over, index).fallbackNotice)
         assertEquals(over, (0 until oversized.count).joinToString("") { ResponseTextPages.page(over, it).text })
+        assertSame("Oversized answers must not replace the bounded cache", boundedLayout, cachedPageLayout())
+        assertEquals(exact, cachedPageSource(boundedLayout))
+    }
+
+    @Test fun oversizedPagesStayBoundedLosslessAndDoNotRetainTheirSource() {
+        val bounded = "cached bounded answer"
+        ResponseTextPages.page(bounded, 0)
+        val boundedLayout = cachedPageLayout()!!
+        val stride = ResponseTextPages.CHARACTERS - 1
+        val characters = CharArray(stride * 20 + 1) { 'x' }
+        for (boundary in 1..20 step 2) {
+            characters[boundary * stride - 1] = '\uD83D'
+            characters[boundary * stride] = '\uDE00'
+        }
+        val source = String(characters) + "\u0000tail"
+        assertTrue(source.length > ResponseTextPages.SAFE_UI_SOURCE_BUDGET)
+        val first = ResponseTextPages.page(source, Int.MIN_VALUE)
+        val pages = (0 until first.count).map { ResponseTextPages.page(source, it) }
+        assertEquals(0, first.index)
+        assertEquals(pages.last(), ResponseTextPages.page(source, Int.MAX_VALUE))
+        assertEquals(source, pages.joinToString("") { it.text })
+        pages.forEach {
+            assertNotNull(it.fallbackNotice)
+            assertTrue(it.text.isNotEmpty())
+            assertTrue(it.text.length <= ResponseTextPages.CHARACTERS)
+            assertFalse(it.text.first().isLowSurrogate())
+            assertFalse(it.text.last().isHighSurrogate())
+        }
+        assertTrue(pages.any { it.text.length == ResponseTextPages.CHARACTERS })
+        assertSame(boundedLayout, cachedPageLayout())
+        assertSame(bounded, cachedPageSource(boundedLayout))
     }
 
     @Test fun unclosedFormulaAcrossBoundaryRemainsLossless() {
@@ -164,4 +198,10 @@ class ResponseIncrementalPresentationTest {
         assertTrue(ResponseRenderSafety.nativeHtmlBlock("x<sup>2</sup><br/>y<sub>0</sub>"))
         assertFalse(ResponseRenderSafety.nativeHtmlBlock("<sup>x</sup><unfinished"))
     }
+
+    private fun cachedPageLayout(): Any? = ResponseTextPages::class.java
+        .getDeclaredField("cachedLayout").apply { isAccessible = true }.get(null)
+
+    private fun cachedPageSource(layout: Any): String = layout.javaClass
+        .getDeclaredField("source").apply { isAccessible = true }.get(layout) as String
 }
