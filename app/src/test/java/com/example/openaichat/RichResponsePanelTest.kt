@@ -18,6 +18,12 @@ import org.robolectric.Shadows
 import org.robolectric.shadows.ShadowAlertDialog
 import java.time.Duration
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -388,12 +394,43 @@ class RichResponsePanelTest {
         assertRendererSandbox(reopened, false)
     }
 
+    private fun parserJob(panel: RichResponsePanel): Future<*>? =
+        RichResponsePanel::class.java.getDeclaredField("parseJob").apply { isAccessible = true }
+            .get(panel) as? Future<*>
+
     private fun finishAsyncParse(panel: RichResponsePanel) {
-        val job = RichResponsePanel::class.java.getDeclaredField("parseJob").apply { isAccessible = true }
-            .get(panel) as? java.util.concurrent.Future<*>
+        val job = parserJob(panel)
         assertNotNull("Expected a published parser job", job)
-        job!!.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        job!!.get(10, TimeUnit.SECONDS)
         Shadows.shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private class ParserGate {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        fun block() {
+            entered.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+            while (release.count > 0 && System.nanoTime() < deadline) {
+                try { if (release.await(100, TimeUnit.MILLISECONDS)) return }
+                catch (_: InterruptedException) { /* Let a cancelled old job finish after the new job owns the panel. */ }
+            }
+            check(release.count == 0L) { "Test did not release the parser" }
+        }
+    }
+
+    private fun parserExecutor(): ExecutorService = RichResponsePanel::class.java.getDeclaredField("parsers")
+        .apply { isAccessible = true }.get(null) as ExecutorService
+
+    private fun awaitParserExecutorIdle() {
+        val both = CountDownLatch(2)
+        val tasks = (1..2).map {
+            parserExecutor().submit {
+                both.countDown()
+                check(both.await(10, TimeUnit.SECONDS)) { "Parser executor did not drain" }
+            }
+        }
+        tasks.forEach { it.get(15, TimeUnit.SECONDS) }
     }
 
     private fun layoutAsyncPanel(panel: RichResponsePanel) {
@@ -422,27 +459,178 @@ class RichResponsePanelTest {
         }
     }
 
-    @Test fun unchangedAsyncSnapshotSettlesAfterMeasuredLayoutWithoutReplacingChildren() {
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun unchangedAsyncSnapshotSettlesAfterMeasuredLayoutWithoutReplacingChildren() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val gate = ParserGate()
         try {
             val activity = controller.get()
             var commits = 0
             val panel = RichResponsePanel(activity, {}, {}, onAsyncLayoutCommitted = { commits++ })
-            activity.setContentView(panel)
             val item = ChatBubbleItem.create("unchanged", "OpenAI", "word ".repeat(6500), false)
             panel.submit(item)
             finishAsyncParse(panel)
+            assertTrue("Prepared children are not a measurable layout", panel.isAsyncParsePending())
+            assertEquals(0, commits)
             layoutAsyncPanel(panel)
             assertFalse(panel.isAsyncParsePending())
             assertEquals(1, commits)
             val firstChild = panel.getChildAt(0)
+            RichResponsePanel.beforeAsyncParseForTests = gate::block
             panel.submit(item)
             Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(121))
-            finishAsyncParse(panel)
+            assertTrue(gate.entered.await(10, TimeUnit.SECONDS))
+            val job = parserJob(panel)!!
+            gate.release.countDown()
+            job.get(10, TimeUnit.SECONDS)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertTrue("An unchanged prefix still waits for its requested layout", panel.isAsyncParsePending())
+            assertEquals(1, commits)
             layoutAsyncPanel(panel)
             assertSame("An unchanged parser prefix must retain the existing child", firstChild, panel.getChildAt(0))
             assertFalse("An unchanged-size commit must settle too", panel.isAsyncParsePending())
             assertEquals(2, commits)
+        } finally {
+            gate.release.countDown()
+            RichResponsePanel.beforeAsyncParseForTests = null
+            awaitParserExecutorIdle()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun cancelledOldParseCannotClearAReboundJobOrCommitItsChildren() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val oldGate = ParserGate()
+        val newGate = ParserGate()
+        try {
+            var commits = 0
+            val panel = RichResponsePanel(controller.get(), {}, {}, onAsyncLayoutCommitted = { commits++ })
+            val calls = AtomicInteger()
+            RichResponsePanel.beforeAsyncParseForTests = {
+                if (calls.getAndIncrement() == 0) oldGate.block() else newGate.block()
+            }
+            panel.submit(ChatBubbleItem.create("old", "OpenAI", "Old source ".repeat(3300), false))
+            assertTrue(oldGate.entered.await(10, TimeUnit.SECONDS))
+            panel.submit(ChatBubbleItem.create("new", "OpenAI", "New source ".repeat(3300), false))
+            assertTrue(newGate.entered.await(10, TimeUnit.SECONDS))
+            val newJob = parserJob(panel)
+            oldGate.release.countDown()
+            // The other worker is held by newGate, so this task runs only after the cancelled old parser exits.
+            parserExecutor().submit {}.get(10, TimeUnit.SECONDS)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertSame("An old cancellation callback cannot release the current job", newJob, parserJob(panel))
+            assertTrue(panel.isAsyncParsePending())
+            assertEquals(0, panel.childCount)
+            assertEquals(0, commits)
+            newGate.release.countDown()
+            newJob!!.get(10, TimeUnit.SECONDS)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            layoutAsyncPanel(panel)
+            assertFalse(panel.isAsyncParsePending())
+            assertEquals(1, commits)
+            val renderedText = descendants(panel).filterIsInstance<TextView>().joinToString { it.text }
+            assertTrue(renderedText.contains("New source"))
+            assertFalse(renderedText.contains("Old source"))
+        } finally {
+            oldGate.release.countDown(); newGate.release.countDown()
+            RichResponsePanel.beforeAsyncParseForTests = null
+            awaitParserExecutorIdle()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun submittingTheSameSnapshotWhileParsingRetainsAPreviewSettingChange() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val firstGate = ParserGate()
+        val secondGate = ParserGate()
+        val prefs = controller.get().getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        val oldAuto = if (prefs.contains("response_scientific_preview")) prefs.getBoolean("response_scientific_preview", true) else null
+        try {
+            prefs.edit().putBoolean("response_scientific_preview", true).commit()
+            val panel = RichResponsePanel(controller.get(), {}, {})
+            val calls = AtomicInteger()
+            RichResponsePanel.beforeAsyncParseForTests = {
+                if (calls.getAndIncrement() == 0) firstGate.block() else secondGate.block()
+            }
+            val item = ChatBubbleItem.create("preview", "OpenAI", "```math\nx^2\n```\n\n" + "word ".repeat(6500), false)
+            panel.submit(item)
+            assertTrue(firstGate.entered.await(10, TimeUnit.SECONDS))
+            val firstJob = parserJob(panel)!!
+            prefs.edit().putBoolean("response_scientific_preview", false).commit()
+            panel.submit(item) // Same identity and object: the submission itself must survive the busy parser.
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(121))
+            firstGate.release.countDown()
+            firstJob.get(10, TimeUnit.SECONDS)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(121))
+            assertTrue("The deferred preview change must start another parse", secondGate.entered.await(10, TimeUnit.SECONDS))
+            val secondJob = parserJob(panel)!!
+            secondGate.release.countDown()
+            secondJob.get(10, TimeUnit.SECONDS)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            layoutAsyncPanel(panel)
+            assertEquals(2, calls.get())
+            assertFalse(panel.isAsyncParsePending())
+            assertTrue(descendants(panel).none { it is WebView })
+            assertTrue(descendants(panel).filterIsInstance<Button>().any { it.text == "Превью формулы" })
+        } finally {
+            firstGate.release.countDown(); secondGate.release.countDown()
+            RichResponsePanel.beforeAsyncParseForTests = null
+            awaitParserExecutorIdle()
+            prefs.edit().apply { if (oldAuto == null) remove("response_scientific_preview") else putBoolean("response_scientific_preview", oldAuto) }.commit()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun lateCancelledParserCannotRescheduleAnAlreadyCommittedReboundSnapshot() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val oldGate = ParserGate()
+        try {
+            val panel = RichResponsePanel(controller.get(), {}, {})
+            val calls = AtomicInteger()
+            RichResponsePanel.beforeAsyncParseForTests = {
+                if (calls.getAndIncrement() == 0) oldGate.block()
+            }
+            panel.submit(ChatBubbleItem.create("old", "OpenAI", "Old source ".repeat(3300), false))
+            assertTrue(oldGate.entered.await(10, TimeUnit.SECONDS))
+            panel.submit(ChatBubbleItem.create("new", "OpenAI", "New source ".repeat(3300), false))
+            finishAsyncParse(panel)
+            layoutAsyncPanel(panel)
+            assertFalse(panel.isAsyncParsePending())
+            oldGate.release.countDown()
+            awaitParserExecutorIdle()
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+            awaitParserExecutorIdle()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("A stale callback cannot start another render after the new owner committed", 2, calls.get())
+            assertFalse(panel.isAsyncParsePending())
+        } finally {
+            oldGate.release.countDown()
+            RichResponsePanel.beforeAsyncParseForTests = null
+            awaitParserExecutorIdle()
+            controller.pause().stop().destroy()
+        }
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun synchronousReplacementClearsAnUnmeasuredAsyncLayoutAndItsOldCallback() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            var commits = 0
+            val panel = RichResponsePanel(controller.get(), {}, {}, onAsyncLayoutCommitted = { commits++ })
+            panel.submit(ChatBubbleItem.create("replace", "OpenAI", "word ".repeat(6500), false))
+            finishAsyncParse(panel)
+            assertTrue(panel.isAsyncParsePending())
+            assertEquals(0, commits)
+            panel.submit(ChatBubbleItem.create("replace", "OpenAI", "A short replacement", false))
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(121))
+            layoutAsyncPanel(panel)
+            assertFalse(panel.isAsyncParsePending())
+            assertEquals("A short native render must not deliver an old async commit", 0, commits)
+            assertTrue(descendants(panel).filterIsInstance<TextView>().any { it.text.toString() == "A short replacement" })
         } finally { controller.pause().stop().destroy() }
     }
 

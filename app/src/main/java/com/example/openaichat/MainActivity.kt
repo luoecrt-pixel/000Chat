@@ -8387,7 +8387,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val firstPos = lm.findFirstVisibleItemPosition()
         if (firstPos < 0) return
         val firstView = lm.findViewByPosition(firstPos) ?: return
-        if (isBubbleAsyncLayoutPending(firstView) || firstView.isLayoutRequested) return
+        if (firstView.isLayoutRequested) return
+        val panel = firstView.findViewWithTag<RichResponsePanel>("rich-response")
+        // A streaming parse can be pending while the prior children still represent a
+        // measured, usable viewport. Preserve a user's gesture on those children, but
+        // never capture a placeholder or newly installed, unmeasured rich layout.
+        if (panel?.isAsyncParsePending() == true &&
+            (panel.childCount == 0 || panel.height <= 0 || panel.isLayoutRequested)) return
         val topOffset = firstView.top - scroll.paddingTop
         val snapshot = messageAdapter.committedSnapshot()
         val item = snapshot.getOrNull(firstPos)

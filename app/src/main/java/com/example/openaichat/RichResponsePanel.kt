@@ -65,6 +65,7 @@ class RichResponsePanel(
     }
     private val handler = Handler(Looper.getMainLooper())
     private var latest: ChatBubbleItem? = null
+    private var submissionRevision = 0L
     private var scheduled = false
     private val rendered = mutableListOf<Pair<ResponseBlockParser.Block, View>>()
     private var footer: View? = null
@@ -135,9 +136,11 @@ class RichResponsePanel(
     fun submit(item: ChatBubbleItem) {
         detached = false
         latest = item
+        submissionRevision++
         if (renderId != item.id) {
             parseVersion.incrementAndGet()
             parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
+            handler.removeCallbacks(refresh); scheduled = false
             parserSession = ResponseBlockParser.Session()
             renderId = item.id; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
         }
@@ -155,6 +158,7 @@ class RichResponsePanel(
         val autoPreview = scientificAssets && context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("response_scientific_preview", true)
         if (autoPreview != autoScientificPreview) { rendered.clear(); formulaRanges.clear(); removeAllViews(); footer = null; asyncLayoutPending = false; autoScientificPreview = autoPreview }
         val version = parseVersion.incrementAndGet()
+        val submittedRevision = submissionRevision
         val session = parserSession
         val previous = rendered.map { it.first }
         val previousFormulas = formulaRanges.toMap()
@@ -184,7 +188,7 @@ class RichResponsePanel(
                 return true
             }
             fun scheduleNewerSnapshot() {
-                if (!detached && latest != null && latest !== item && !scheduled && parseJob == null) {
+                if (!detached && latest != null && submissionRevision != submittedRevision && !scheduled && parseJob == null) {
                     scheduled = true
                     handler.post(refresh)
                 }
@@ -194,8 +198,10 @@ class RichResponsePanel(
                 val prepared = try { beforeAsyncParseForTests?.invoke(); prepare() }
                 catch (_: CancellationException) {
                     handler.post {
-                        if (releaseOwnedJob()) asyncLayoutPending = false
-                        scheduleNewerSnapshot()
+                        if (releaseOwnedJob()) {
+                            asyncLayoutPending = false
+                            scheduleNewerSnapshot()
+                        }
                     }
                     return@FutureTask
                 }
@@ -206,8 +212,8 @@ class RichResponsePanel(
                         asyncLayoutPending = true
                         applyBlocks(item, prepared.first, prepared.second, prepared.third)
                         scheduleAsyncLayoutCommitCheck(version)
-                        if (latest !== item && !scheduled) { scheduled = true; handler.postDelayed(refresh, 120L) }
-                    } else {
+                        if (submissionRevision != submittedRevision && !scheduled) { scheduled = true; handler.postDelayed(refresh, 120L) }
+                    } else if (owned) {
                         scheduleNewerSnapshot()
                     }
                 }

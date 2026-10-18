@@ -4,6 +4,8 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.AsyncListDiffer
+import androidx.recyclerview.widget.AsyncDifferConfig
+import androidx.recyclerview.widget.AdapterListUpdateCallback
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import java.security.MessageDigest
@@ -77,6 +79,7 @@ class ChatMessageAdapter(
 
     companion object {
         private const val PAYLOAD_TEXT = "text"
+        @Volatile internal var diffExecutorForTests: java.util.concurrent.Executor? = null
     }
 
     class ViewHolder(val card: LinearLayout) : RecyclerView.ViewHolder(card) {
@@ -90,7 +93,7 @@ class ChatMessageAdapter(
     private val displayPositionById = mutableMapOf<String, Int>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
 
-    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
+    private val differ = AsyncListDiffer(AdapterListUpdateCallback(this), AsyncDifferConfig.Builder(object : DiffUtil.ItemCallback<ChatBubbleItem>() {
         override fun areItemsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
             oldItem.id == newItem.id
 
@@ -98,7 +101,7 @@ class ChatMessageAdapter(
             oldItem.contentSignature == newItem.contentSignature &&
                 oldItem.text == newItem.text &&
                 oldItem.reasoningSummary == newItem.reasoningSummary
-    })
+    }).apply { diffExecutorForTests?.let(::setBackgroundThreadExecutor) }.build())
 
     init {
         differ.addListListener { _, current ->
@@ -317,5 +320,6 @@ class ChatMessageAdapter(
 
     fun snapshot(): List<ChatBubbleItem> = items.toList()
 
-    fun committedSnapshot(): List<ChatBubbleItem> = differ.currentList
+    /** Keep the committed order while exposing the same live payloads used by onBindViewHolder. */
+    fun committedSnapshot(): List<ChatBubbleItem> = differ.currentList.map { itemById[it.id] ?: it }
 }

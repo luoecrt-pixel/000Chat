@@ -193,6 +193,21 @@ class LocalFileToolsRegressionTest {
                 assertFalse(db.finalizeCurrentChatIfActiveRequest(chatId, "Terminal cleanup", "resp_terminal",
                     "high", listOf(answer("stale-request")), "stale-request"))
                 assertTrue("Losing terminal owner must preserve active derivative", derivative.isFile)
+                db.writableDatabase.execSQL("""CREATE TRIGGER abort_derivative_terminal
+                    BEFORE UPDATE OF active_request_id ON chats
+                    WHEN OLD.id='$chatId' AND NEW.active_request_id IS NULL
+                    BEGIN SELECT RAISE(ABORT, 'injected terminal failure'); END""")
+                try {
+                    assertThrows(android.database.sqlite.SQLiteException::class.java) {
+                        db.finalizeCurrentChatIfActiveRequest(chatId, "Terminal cleanup", "resp_terminal",
+                            "high", listOf(answer(requestId)), requestId)
+                    }
+                    assertTrue("Rollback must preserve the derivative protected by its checkpoint", derivative.isFile)
+                    assertTrue(db.isActiveRequest(chatId, requestId))
+                    assertNotNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+                } finally {
+                    db.writableDatabase.execSQL("DROP TRIGGER abort_derivative_terminal")
+                }
                 assertTrue(db.finalizeCurrentChatIfActiveRequest(chatId, "Terminal cleanup", "resp_terminal",
                     "high", listOf(answer(requestId)), requestId))
                 assertFalse("Winning terminal commit must clean checkpoint-only derivative", derivative.exists())
@@ -201,6 +216,54 @@ class LocalFileToolsRegressionTest {
                 lease.defer()
                 db.deleteChat(chatId)
                 original.parentFile!!.deleteRecursively()
+            }
+        }
+    }
+
+    @Test fun terminalCleanupPreservesAnotherActiveRequestsDerivativeUntilItsOwnStop() {
+        val context = RuntimeEnvironment.getApplication()
+        val folder = Files.createTempDirectory("parallel-derivatives-").toFile()
+        val leases = mutableListOf<PreparedAttachmentFiles.Lease>()
+        val chatIds = (1..2).map { "parallel-derivative-$it-${System.nanoTime()}" }
+        ChatDatabase(context).use { db ->
+            try {
+                val originals = (1..2).map { index ->
+                    File(folder, "source-$index.txt").apply {
+                        writeBytes("Отчёт $index".toByteArray(Charset.forName("windows-1251")))
+                    }
+                }
+                val originalBytes = originals.map { it.readBytes() }
+                val attachments = originals.map { original ->
+                    val lease = PreparedAttachmentFiles.lease(context).also(leases::add)
+                    lease.capture().use { OpenRouterAttachmentStore.classifyLocalFile(context, original) }
+                }
+                val derivatives = attachments.map { File(it.textPath!!) }
+                chatIds.forEachIndexed { index, chatId ->
+                    db.ensureChat(chatId, "Parallel cleanup")
+                    db.setActiveResponse(chatId, "resp_$index", "req_$index", "", "in_progress",
+                        System.currentTimeMillis(), "high", "high", false, 1, 1, true)
+                    db.startRequestAccounting(chatId, "req_$index", "openai", "gpt-5.4", "openai_api_key")
+                    OpenAiLocalFileToolBridge.configure(db, chatId, "req_$index",
+                        JSONObject().put("model", "gpt-5.4"), listOf(attachments[index]))
+                }
+                val owners = PreparedAttachmentFiles.Owners(
+                    db.listAllLocalFilePaths().toSet(), db.listActiveOpenAiToolAttachmentPaths())
+                leases.forEach { it.release(owners) }
+                assertTrue(derivatives.all { it.isFile })
+                val answer = JSONObject().put("role", "assistant").put("provider", "openai")
+                    .put("request_id", "req_0").put("status", "completed").put("text", "Done")
+                assertTrue(db.finalizeCurrentChatIfActiveRequest(chatIds[0], "Parallel cleanup",
+                    "resp_0", "high", listOf(answer), "req_0"))
+                assertFalse("The completed request no longer owns its temporary derivative", derivatives[0].exists())
+                assertTrue("Another active checkpoint must protect its derivative", derivatives[1].isFile)
+                assertTrue(db.isActiveRequest(chatIds[1], "req_1"))
+                assertTrue(db.stopActiveRequestOnce(chatIds[1], "req_1", removeUserMessage = true))
+                assertFalse("The second derivative is released only after its own Stop", derivatives[1].exists())
+                originals.forEachIndexed { index, file -> assertArrayEquals(originalBytes[index], file.readBytes()) }
+            } finally {
+                leases.forEach { it.defer() }
+                chatIds.forEach { db.deleteChat(it) }
+                folder.deleteRecursively()
             }
         }
     }

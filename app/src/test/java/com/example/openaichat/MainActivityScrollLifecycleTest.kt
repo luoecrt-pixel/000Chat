@@ -52,6 +52,7 @@ class MainActivityScrollLifecycleTest {
     }
 
     @After fun after() {
+        ChatMessageAdapter.diffExecutorForTests = null
         RichResponsePanel.beforeAsyncParseForTests = null
         parserGates.forEach { it.release.countDown() }
         controller?.pause()?.stop()?.destroy()
@@ -60,6 +61,165 @@ class MainActivityScrollLifecycleTest {
         shadowOf(Looper.getMainLooper()).idle()
         prefs.edit().clear().commit()
     }
+
+    @Test fun queuedUserAndAssistantCommitsKeepFollowPendingUntilTheDisplayedListContainsBoth() {
+        val diffTasks = java.util.ArrayDeque<Runnable>()
+        ChatMessageAdapter.diffExecutorForTests = java.util.concurrent.Executor { diffTasks.addLast(it) }
+        seedStreamingChat("Ready")
+        val activity = launch()
+        awaitRendered(activity)
+        val adapter = field<ChatMessageAdapter>(activity, "messageAdapter")
+        val userId = activity.addBubble("User", "Next question", true)
+        val answerId = activity.addBubble("Assistant", "Next answer", false)
+        assertEquals(2, diffTasks.size)
+        assertTrue(adapter.isListCommitPending())
+        assertEquals(1, adapter.itemCount)
+        assertEquals(3, adapter.snapshot().size)
+        val generation = field<Long>(activity, "scrollRestoreGeneration")
+        shadowOf(Looper.getMainLooper()).idle()
+        layout(activity)
+        assertEquals("stream", field<String?>(activity, "pendingScrollRestoreChatId"))
+        assertEquals(generation, field<Long>(activity, "scrollRestoreGeneration"))
+        diffTasks.removeFirst().run()
+        shadowOf(Looper.getMainLooper()).idle()
+        layout(activity)
+        assertEquals("A superseded user-only diff cannot finish the restore", 1, adapter.itemCount)
+        assertEquals("stream", field<String?>(activity, "pendingScrollRestoreChatId"))
+        diffTasks.removeFirst().run()
+        awaitCondition("The actual committed list must finish the pending follow") {
+            shadowOf(Looper.getMainLooper()).idle()
+            layout(activity)
+            !adapter.isListCommitPending() && field<String?>(activity, "pendingScrollRestoreChatId") == null
+        }
+        assertEquals(listOf(userId, answerId), adapter.committedSnapshot().takeLast(2).map { it.id })
+        assertEquals(0, distanceFromBottom(activity))
+        assertFalse("stream" in locks(activity))
+    }
+
+    @Test fun onStartWaitsForWorkerHistoryDiffBeforeCompletingTheSavedReadingAnchor() {
+        val diffTasks = java.util.ArrayDeque<Runnable>()
+        ChatMessageAdapter.diffExecutorForTests = java.util.concurrent.Executor { diffTasks.addLast(it) }
+        val source = streamingSource().take(31_999)
+        seedStreamingChat(source)
+        val activity = launch()
+        awaitRendered(activity)
+        val anchor = readDeepIntoAnswer(activity)
+        controller!!.pause().stop()
+        ChatDatabase(RuntimeEnvironment.getApplication()).use { db ->
+            val messages = db.getChat("stream")!!.getJSONArray("messages")
+            db.upsertCurrentChat("stream", "Stream", null, null,
+                listOf(messages.getJSONObject(0), JSONObject().put("role", "assistant")
+                    .put("request_id", "worker-answer").put("status", "completed").put("text", "Worker completed")))
+        }
+        controller!!.start().resume().visible()
+        val adapter = field<ChatMessageAdapter>(activity, "messageAdapter")
+        assertTrue(adapter.isListCommitPending())
+        assertEquals(1, adapter.itemCount)
+        assertEquals(2, adapter.snapshot().size)
+        shadowOf(Looper.getMainLooper()).idle()
+        layout(activity)
+        assertEquals("The old displayed list cannot satisfy the new history restore", "stream",
+            field<String?>(activity, "pendingScrollRestoreChatId"))
+        assertEquals(anchor, field<ChatScrollAnchor>(activity, "pendingScrollRestoreAnchor"))
+        while (diffTasks.isNotEmpty()) diffTasks.removeFirst().run()
+        awaitRendered(activity)
+        assertEquals(2, adapter.itemCount)
+        assertEquals(anchor.topOffsetPx, layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop)
+        assertTrue("stream" in locks(activity))
+    }
+
+    @Test fun streamingAcrossAsyncThresholdFollowsLateGrowthButRespectsUpwardUserGesture() {
+        val source = streamingSource()
+        seedStreamingChat(source.take(31_999))
+        val activity = launch()
+        awaitRendered(activity)
+        val adapter = field<ChatMessageAdapter>(activity, "messageAdapter")
+        val answerId = adapter.snapshot().single().id
+        assertEquals(0, distanceFromBottom(activity))
+        assertNull(field<String?>(activity, "pendingScrollRestoreChatId"))
+        val offsetBeforeAsync = layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop
+        assertTrue("The initial answer must exceed the viewport", offsetBeforeAsync < -500)
+
+        val firstGate = pauseParsers()
+        adapter.updateText(answerId, source.take(32_001))
+        idleStreamFrame(activity)
+        assertTrue(firstGate.firstEntered.await(5, TimeUnit.SECONDS))
+        assertTrue(panel(activity)!!.isAsyncParsePending())
+        assertNull("Ordinary streaming must not arm a blocking restore", field<String?>(activity, "pendingScrollRestoreChatId"))
+        assertEquals("Crossing 32K cannot jump the measured viewport while parsing is held", offsetBeforeAsync,
+            layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop)
+        firstGate.release.countDown()
+        awaitRendered(activity)
+        assertEquals("Late async growth must align FOLLOW_LATEST even without a pending restore", 0, distanceFromBottom(activity))
+        assertFalse("stream" in locks(activity))
+
+        val offsetBeforeSecondParse = layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop
+        val secondGate = pauseParsers()
+        adapter.updateText(answerId, source.take(64_000))
+        idleStreamFrame(activity)
+        assertTrue(secondGate.firstEntered.await(5, TimeUnit.SECONDS))
+        assertNull(field<String?>(activity, "pendingScrollRestoreChatId"))
+        assertEquals("A pending 64K expansion must keep the last measured viewport", offsetBeforeSecondParse,
+            layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop)
+        secondGate.release.countDown()
+        awaitRendered(activity)
+        assertEquals("A second large asynchronous expansion must still follow the real bottom", 0, distanceFromBottom(activity))
+        assertFalse("stream" in locks(activity))
+
+        val readingGate = pauseParsers()
+        adapter.updateText(answerId, source)
+        idleStreamFrame(activity)
+        assertTrue(readingGate.firstEntered.await(5, TimeUnit.SECONDS))
+        // Drive RecyclerView's real state and scroll listener while the parser is still gated.
+        RecyclerView::class.java.getDeclaredMethod("setScrollState", Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(recycler(activity), RecyclerView.SCROLL_STATE_DRAGGING)
+        recycler(activity).scrollBy(0, -400)
+        layout(activity)
+        val readingOffset = layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop
+        assertTrue("The gesture must enter reading mode before the async completion", "stream" in locks(activity))
+        RecyclerView::class.java.getDeclaredMethod("setScrollState", Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(recycler(activity), RecyclerView.SCROLL_STATE_IDLE)
+        val savedWhileParsing = Bundle()
+        controller!!.saveInstanceState(savedWhileParsing)
+        val savedReadingAnchor = ChatScrollPolicy.decodeAnchorsJson(parcelRoundTrip(savedWhileParsing).first
+            .getString("per_chat_scroll_anchors_v1")).getValue("stream")
+        assertEquals("Saving during a pending append parse must retain the user's new reading mode",
+            ChatScrollMode.READING_LOCKED, savedReadingAnchor.mode)
+        assertEquals("The measured old content is a valid anchor before the new parser finishes",
+            readingOffset, savedReadingAnchor.topOffsetPx)
+        readingGate.release.countDown()
+        awaitRendered(activity)
+        assertEquals("Late async completion must preserve the user's viewport", readingOffset,
+            layoutManager(activity).findViewByPosition(0)!!.top - recycler(activity).paddingTop)
+        assertTrue("stream" in locks(activity))
+        assertTrue(distanceFromBottom(activity) > 0)
+        assertEquals(source, adapter.committedSnapshot().single().text)
+    }
+
+    private fun streamingSource(): String = (1..1_000).joinToString("\n\n") {
+        "Paragraph $it: enough visible words and lines for a substantial native scrolling answer."
+    }.also { assertTrue(it.length >= 64_000) }
+
+    private fun seedStreamingChat(source: String) {
+        ChatDatabase(RuntimeEnvironment.getApplication()).use { db ->
+            db.ensureChat("stream", "Stream")
+            db.upsertCurrentChat("stream", "Stream", null, null, listOf(JSONObject().put("role", "assistant")
+                .put("request_id", "stream-answer").put("status", "completed").put("text", source)))
+        }
+        prefs.edit().putString("current_chat", "stream").commit()
+    }
+
+    private fun idleStreamFrame(activity: MainActivity) {
+        shadowOf(Looper.getMainLooper()).idleFor(150, TimeUnit.MILLISECONDS)
+        layout(activity)
+        MainActivity::class.java.getDeclaredMethod("scrollToLatest", Boolean::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(activity, false)
+        shadowOf(Looper.getMainLooper()).idleFor(150, TimeUnit.MILLISECONDS)
+        layout(activity)
+    }
+
+    private fun distanceFromBottom(activity: MainActivity): Int = MainActivity::class.java
+        .getDeclaredMethod("pixelDistanceFromBottom").apply { isAccessible = true }.invoke(activity) as Int
 
     @Test fun savedStateBoundsTransientAnswerSignatureAndManyAnchorsAndLocksWithoutChangingSource() {
         ChatDatabase(RuntimeEnvironment.getApplication()).use { it.ensureChat("bounded", "Bounded") }

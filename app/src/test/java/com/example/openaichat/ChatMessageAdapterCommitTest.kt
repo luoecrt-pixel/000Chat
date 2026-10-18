@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.After
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -17,6 +18,38 @@ import java.util.concurrent.TimeUnit
 @RunWith(RobolectricTestRunner::class)
 @LooperMode(LooperMode.Mode.PAUSED)
 class ChatMessageAdapterCommitTest {
+    @After fun resetExecutor() { ChatMessageAdapter.diffExecutorForTests = null }
+
+    @Test fun committedOrderUsesTheLatestPayloadAndSupersededSubmissionDoesNotCommitEarly() {
+        val tasks = java.util.ArrayDeque<Runnable>()
+        ChatMessageAdapter.diffExecutorForTests = java.util.concurrent.Executor { tasks.addLast(it) }
+        val context = RuntimeEnvironment.getApplication()
+        val adapter = ChatMessageAdapter({ LinearLayout(context) }, { _, _ -> TextView(context) }, { it.text })
+        val first = ChatBubbleItem.create("first", "Assistant", "Before", false)
+        adapter.submitItems(listOf(first))
+        assertTrue(adapter.updateText("first", "Latest payload"))
+        assertFalse(adapter.isListCommitPending())
+        assertEquals("Latest payload", adapter.committedSnapshot().single().text)
+        assertEquals(adapter.snapshot().single().contentSignature, adapter.committedSnapshot().single().contentSignature)
+        var staleCommits = 0
+        var latestCommits = 0
+        adapter.addItem(ChatBubbleItem.create("second", "User", "Question", true)) { staleCommits++ }
+        adapter.addItem(ChatBubbleItem.create("third", "Assistant", "Answer", false)) { latestCommits++ }
+        assertEquals(2, tasks.size)
+        tasks.removeFirst().run()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(adapter.isListCommitPending())
+        assertEquals(1, adapter.itemCount)
+        assertEquals(0, staleCommits)
+        tasks.removeFirst().run()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(adapter.isListCommitPending())
+        assertEquals(3, adapter.itemCount)
+        assertEquals(0, staleCommits)
+        assertEquals(1, latestCommits)
+        assertEquals("Latest payload", adapter.committedSnapshot().first().text)
+    }
+
     @Test
     fun structuralCommitSeparatesQueuedModelFromDisplayedItems() {
         val context = RuntimeEnvironment.getApplication()

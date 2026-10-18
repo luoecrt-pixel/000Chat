@@ -101,6 +101,63 @@ class BackgroundRequestFailureRecorderTest {
         }
     }
 
+    @Test fun reopenedWorkerFailureCleansCheckpointOnlyDerivativeAndStaleRecorderPreservesIt() {
+        val chatId = "worker-derivative-${System.nanoTime()}"
+        val originalBytes = "Отчёт для фонового восстановления".toByteArray(Charsets.UTF_8)
+        val original = File(context.filesDir, "generated/$chatId/report.txt").apply {
+            parentFile!!.mkdirs()
+            writeBytes(originalBytes)
+        }
+        val lease = PreparedAttachmentFiles.lease(context)
+        var derivative: File? = null
+        try {
+            val attachment = lease.capture().use {
+                OpenRouterAttachmentStore.classifyLocalFile(context, original)
+            }
+            val derived = File(checkNotNull(attachment.textPath))
+            derivative = derived
+            assertNotEquals(original.canonicalPath, derived.canonicalPath)
+            val requestId = ChatDatabase(context).use { db ->
+                val request = prepared(db, chatId)
+                OpenAiLocalFileToolBridge.configure(db, chatId, request,
+                    JSONObject().put("model", "test-actual-model"), listOf(attachment))
+                assertTrue(derived.path in db.listActiveOpenAiToolAttachmentPaths())
+                lease.release(PreparedAttachmentFiles.Owners(
+                    durable = db.listAllLocalFilePaths().toSet(),
+                    active = db.listActiveOpenAiToolAttachmentPaths()
+                ))
+                assertTrue("Active checkpoint must protect the released lease's derivative", derived.isFile)
+                assertFalse(BackgroundRequestFailureRecorder.persist(db, chatId, "stale-request",
+                    "resp_x", "failed", "late_worker_failure"))
+                assertTrue("A stale Worker must leave the active derivative intact", derived.isFile)
+                assertTrue(db.isActiveRequest(chatId, request))
+                request
+            }
+
+            // The Worker opens its own helper; no Activity or test-only cleanup participates.
+            ChatDatabase(context).use { db ->
+                assertTrue(BackgroundRequestFailureRecorder.persist(db, chatId, requestId,
+                    "resp_x", "failed", "recovery_auth_401"))
+                assertNull(db.getActiveResponse(chatId))
+                assertNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+                assertFalse("Winning Worker failure must clean the checkpoint-only derivative", derived.exists())
+                assertArrayEquals("Worker cleanup must preserve original bytes", originalBytes, original.readBytes())
+                val assistant = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
+                assertEquals("partial text", assistant.getString("text"))
+                assertEquals("failed", assistant.getString("status"))
+                assertEquals("failed", db.listRequestAccounting(chatId).single().getString("local_status"))
+                assertEquals("request_failed", db.listRequestEvents(chatId).single().getString("event_type"))
+                assertFalse(BackgroundRequestFailureRecorder.persist(db, chatId, requestId,
+                    "resp_x", "failed", "duplicate_worker_failure"))
+                assertEquals(2, db.getChat(chatId)!!.getJSONArray("messages").length())
+            }
+        } finally {
+            lease.defer()
+            derivative?.delete()
+            original.parentFile!!.deleteRecursively()
+        }
+    }
+
     private fun usage(input: Long, output: Long = 0L) = JSONObject()
         .put("input_tokens", input).put("output_tokens", output)
         .put("input_tokens_details", JSONObject().put("cached_tokens", input / 10))

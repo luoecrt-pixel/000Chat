@@ -6,7 +6,10 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.widget.EditText
 import android.widget.TextView
 import androidx.core.content.FileProvider
@@ -174,37 +177,75 @@ class OpenAiRequestSnapshotAndUploadTest {
         fail(message)
     }
     private fun awaitCompleted(chatId: String, index: Int) = awaitCondition("Response $index was not committed") {
-        ChatDatabase(context).use { db ->
+        val responseId = "resp_k_$index"
+        val durable = ChatDatabase(context).use { db ->
             db.getActiveResponse(chatId) == null && db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
-                (0 until messages.length()).any { messages.optJSONObject(it)?.optString("response_id") == "resp_k_$index" }
+                (0 until messages.length()).any { messages.optJSONObject(it)?.optString("response_id") == responseId }
             } == true
         }
+        // The SQLite terminal claim precedes the queued Activity completion callback. A second
+        // Send must wait for that callback to commit history and release the real UI busy guard.
+        durable && uiSnapshot(responseId)?.let { ui ->
+            ui.chatId == chatId && ui.expectedResponseInHistory && ui.sendEnabled && !ui.stopVisible
+        } == true
     }
-    private fun request(): RecordedRequest {
+
+    private data class UiSnapshot(
+        val chatId: String,
+        val expectedResponseInHistory: Boolean,
+        val statusCategory: String,
+        val statusLength: Int,
+        val sendEnabled: Boolean,
+        val stopVisible: Boolean
+    ) {
+        fun safeDescription(): String = "statusCategory=$statusCategory,statusLength=$statusLength," +
+            "sendEnabled=$sendEnabled,stopVisible=$stopVisible"
+    }
+
+    private fun uiSnapshot(expectedResponseId: String? = null): UiSnapshot? {
+        val activity = observedActivity ?: return null
+        val snapshot = AtomicReference<UiSnapshot?>()
+        val sampled = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).post {
+            try {
+                if (observedActivity !== activity || activity.isDestroyed) return@post
+                val status = (field(activity, "status") as TextView).text.toString()
+                // Categories only: status can contain provider errors or paths; never print raw UI text.
+                val category = when {
+                    status.contains("ошиб", true) -> "error"
+                    status.contains("подготов", true) -> "preparing"
+                    status.contains("загруз", true) -> "uploading"
+                    status.contains("останов", true) -> "stopped"
+                    else -> "other"
+                }
+                val history = field(activity, "chat") as List<*>
+                snapshot.set(UiSnapshot(
+                    chatId = activity.currentChatIdForTesting(),
+                    expectedResponseInHistory = expectedResponseId != null && history.any {
+                        (it as? JSONObject)?.optString("response_id") == expectedResponseId
+                    },
+                    statusCategory = category,
+                    statusLength = status.length,
+                    sendEnabled = (field(activity, "send") as View).isEnabled,
+                    stopVisible = (field(activity, "stop") as View).visibility == View.VISIBLE
+                ))
+            } finally {
+                sampled.countDown()
+            }
+        }
+        // A blocked UI must produce bounded diagnostics, rather than hanging runOnMainSync.
+        return if (sampled.await(2, TimeUnit.SECONDS)) snapshot.get() else null
+    }
+
+    private fun request(stage: String): RecordedRequest {
         val ordinal = requestCounter.incrementAndGet()
         return server.takeRequest(20, TimeUnit.SECONDS) ?: run {
-            var ui = "unavailable"
-            var chatId: String? = null
-            InstrumentationRegistry.getInstrumentation().runOnMainSync {
-                observedActivity?.let { activity ->
-                    chatId = activity.currentChatIdForTesting()
-                    val status = (field(activity, "status") as? TextView)?.text?.toString().orEmpty()
-                    // Categories only: status can contain provider errors or paths; never print raw UI text.
-                    val category = when {
-                        status.contains("ошиб", true) -> "error"
-                        status.contains("подготов", true) -> "preparing"
-                        status.contains("загруз", true) -> "uploading"
-                        status.contains("останов", true) -> "stopped"
-                        else -> "other"
-                    }
-                    val sendEnabled = (field(activity, "send") as? android.view.View)?.isEnabled
-                    val stopVisible = (field(activity, "stop") as? android.view.View)?.visibility == android.view.View.VISIBLE
-                    ui = "statusCategory=$category,statusLength=${status.length},sendEnabled=$sendEnabled,stopVisible=$stopVisible"
-                }
-            }
-            val activeStatus = chatId?.let { id -> ChatDatabase(context).use { it.getActiveResponse(id)?.optString("status") } }
+            val ui = uiSnapshot()
+            val activeStatus = ui?.chatId?.let { id -> ChatDatabase(context).use { it.getActiveResponse(id)?.optString("status") } }
                 ?.takeIf { it in setOf("queued", "in_progress", "completed", "failed", "cancelled", "incomplete") } ?: "none-or-other"
-            error("No expected HTTPS request at send=${sendCounter.get()},request=$ordinal: serverRequestCount=${server.requestCount},attemptedPaths=$attemptedPaths,$ui,activeResponse=$activeStatus")
+            error("No expected HTTPS request at stage=$stage,send=${sendCounter.get()},request=$ordinal: " +
+                "serverRequestCount=${server.requestCount},attemptedPaths=$attemptedPaths," +
+                "${ui?.safeDescription() ?: "ui=unavailable-or-main-thread-blocked"},activeResponse=$activeStatus")
         }
     }
     private fun tools(body: JSONObject): List<JSONObject> = body.optJSONArray("tools")?.let { arr ->
@@ -329,12 +370,12 @@ class OpenAiRequestSnapshotAndUploadTest {
             scenario.onActivity { chatId = initialize(it); pick(it, listOf(note)) }
             awaitPrepared(scenario, 1); assertEquals(0, server.requestCount)
             scenario.onActivity { send(it) }
-            val (firstUploads, firstBody) = takeUploadsAndResponse()
+            val (firstUploads, firstBody) = takeUploadsAndResponse("first-account", syntheticKey)
             assertEquals(1, firstUploads.size); assertEquals(setOf("file_k_1"), containerFileIds(firstBody))
             awaitCompleted(chatId, 1)
             val secondKey = "sk-synthetic-k-second-account-${UUID.randomUUID()}"
             scenario.onActivity { assertTrue(SecureStore(context).setApiKey(secondKey)); send(it, "Analyze under the new account") }
-            val (secondUploads, secondBody) = takeUploadsAndResponse()
+            val (secondUploads, secondBody) = takeUploadsAndResponse("changed-account", secondKey)
             assertEquals(1, secondUploads.size)
             assertEquals("Bearer $secondKey", secondUploads.single().getHeader("Authorization"))
             assertArrayEquals(note.readBytes(), multipartFile(secondUploads.single()).second)
@@ -479,11 +520,21 @@ class OpenAiRequestSnapshotAndUploadTest {
         }
         prepared
     }
-    private fun takeUploadsAndResponse(): Pair<List<RecordedRequest>, JSONObject> {
+    private fun takeUploadsAndResponse(
+        stage: String = "send-${sendCounter.get()}",
+        expectedCredential: String? = null
+    ): Pair<List<RecordedRequest>, JSONObject> {
         val uploads = mutableListOf<RecordedRequest>()
-        var next = request()
-        while (next.path == "/v1/files") { uploads.add(next); next = request() }
+        var next = request("$stage:upload-or-response")
+        while (next.path == "/v1/files") {
+            uploads.add(next)
+            next = request("$stage:after-upload-${uploads.size}")
+        }
         assertEquals("POST", next.method); assertEquals("/v1/responses", next.path)
+        expectedCredential?.let {
+            assertTrue("Responses must use the credential captured for $stage",
+                next.getHeader("Authorization") == "Bearer $it")
+        }
         return uploads to JSONObject(next.body.readUtf8())
     }
     private fun containerFileIds(body: JSONObject): Set<String> = tools(body).single { it.optString("type") == "code_interpreter" }
