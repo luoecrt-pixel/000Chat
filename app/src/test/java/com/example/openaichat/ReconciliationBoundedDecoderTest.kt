@@ -1,6 +1,7 @@
 package com.example.openaichat
 
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
@@ -62,7 +63,8 @@ class ReconciliationBoundedDecoderTest {
             assertEquals(0, outcome.retrievals)
             assertFalse(outcome.hasUsage)
             assertTrue(outcome.decoderDiagnostic.orEmpty().contains("HTTP 401"))
-            assertTrue(outcome.decoderDiagnostic.orEmpty().contains("byte limit"))
+            assertTrue("Expected bounded decoder limit for oversized HTTP 401, got: ${outcome.decoderDiagnostic}",
+                isBoundedDecoderLimitMessage(outcome.decoderDiagnostic))
             assertFalse(outcome.decoderDiagnostic.orEmpty().contains("synthetic-key"))
             assertEquals(1, server.requestCount)
         }
@@ -101,10 +103,30 @@ class ReconciliationBoundedDecoderTest {
                 }
             assertEquals(1, count)
             assertEquals(403, diagnostics.single().first)
-            assertTrue(diagnostics.single().second.contains("byte limit"))
+            assertTrue("Expected bounded decoder limit for oversized HTTP 403, got: ${diagnostics.single().second}",
+                isBoundedDecoderLimitMessage(diagnostics.single().second))
             assertFalse(diagnostics.single().second.contains("synthetic-key"))
             assertEquals(1, server.requestCount)
         }
+    }
+
+    @Test fun readBodyEnforcesExactByteLimitDeterministicallyWithSmallCap() {
+        val limits = BoundedResponseDecoder.BodyLimits(maxBytes = 128, maxChars = 512)
+        val boundary = "x".repeat(128)
+        boundary.toResponseBody().use { body ->
+            assertEquals(boundary, BoundedResponseDecoder.readBody(body, limits))
+        }
+        "x".repeat(256).toResponseBody().use { body ->
+            val failure = assertThrows(ResponsesSseLimitException::class.java) {
+                BoundedResponseDecoder.readBody(body, limits)
+            }
+            assertEquals("HTTP body byte limit exceeded: 128 bytes", failure.message)
+        }
+    }
+
+    private fun isBoundedDecoderLimitMessage(diagnostic: String?): Boolean {
+        val text = diagnostic.orEmpty()
+        return text.contains("byte limit") || text.contains("лимит памяти")
     }
 
     private fun rounds() = listOf(JSONObject().put("generation_id", "gen-owned").put("cost_kind", "unknown"))

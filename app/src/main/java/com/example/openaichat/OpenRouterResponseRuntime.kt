@@ -32,6 +32,7 @@ object OpenRouterResponseRuntime {
     private class Work(val context: Context, val request: OpenRouterRuntimeRequest, val client: OpenRouterChatClient) {
         val launched = AtomicBoolean(false)
         val cancelled = AtomicBoolean(false)
+        val runtimeAttachments = java.util.concurrent.CopyOnWriteArrayList<OpenRouterLocalAttachment>()
         @Volatile var call: Call? = null
         @Volatile var cancelReason = "Соединение прервано"
     }
@@ -40,7 +41,9 @@ object OpenRouterResponseRuntime {
     fun contains(requestId: String) = work.containsKey(requestId)
     fun uses(client: OpenRouterChatClient) = work.values.any { it.client === client }
     fun count() = work.size
-    fun localFilePaths(): Set<String> = work.values.flatMap { w -> w.request.attachments.flatMap { listOfNotNull(it.path, it.textPath, it.wirePath) } }.toSet()
+    fun localFilePaths(): Set<String> = work.values.flatMap { w ->
+        (w.request.attachments + w.runtimeAttachments).flatMap { listOfNotNull(it.path, it.textPath, it.wirePath) }
+    }.toSet()
     fun chatFor(requestId: String) = work[requestId]?.request?.chatId
     fun cancelForChat(chatId: String, reason: String = "Остановлено пользователем") {
         if (chatId.isBlank()) return
@@ -119,25 +122,34 @@ object OpenRouterResponseRuntime {
         }
         fun base(text: String) = JSONObject().put("role", "assistant").put("provider", "openrouter")
             .put("requested_model", r.model).put("request_id", r.requestId).put("text", text)
+        val runtimeLease = PreparedAttachmentFiles.lease(item.context)
+        val runtimeLeaseScope = runtimeLease.capture()
         try {
             if (!active()) throw java.io.IOException(item.cancelReason)
             if (OpenRouterClaudeRoute.isClaude(r.model)) diagnostics.log("openrouter_route", mapOf(
                 "request_id" to r.requestId, "model" to r.model, "route" to r.claudeRoute.preference,
                 "image_base64_limit" to r.claudeRoute.imageBase64Limit, "request_byte_limit" to r.claudeRoute.requestByteLimit))
             val fileTools = LocalFileTools(r.attachments, ::active)
-            db.listLocalFiles().filter { it.optString("chat_id") == r.chatId }.forEach { a ->
-                val file = File(a.getString("path"))
+            val existingCanonicalPaths = r.attachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
+            db.listLocalFiles().filter { JsonProtocol.string(it, "chat_id") == r.chatId }.forEach { a ->
+                val rawPath = JsonProtocol.nonBlank(a, "path") ?: return@forEach
+                val file = File(rawPath)
                 if (!file.isFile) return@forEach
-                val mime = a.optString("mime_type")
+                val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return@forEach
+                if (!existingCanonicalPaths.add(canonical)) return@forEach
+                val mime = JsonProtocol.string(a, "mime_type")
                 val name = JsonProtocol.string(a, "filename", file.name)
-                val kind = when {
-                    mime.startsWith("text/") || mime == "application/json" || TextFileFormatPolicy.knownText(name) -> "text"
-                    mime.startsWith("image/") -> "image"
-                    mime == "application/pdf" -> "pdf"
-                    else -> "binary"
+                try {
+                    val classified = if (mime.isNotBlank()) {
+                        OpenRouterAttachmentStore.classifyLocalFile(item.context, file, name, mime)
+                    } else {
+                        OpenRouterAttachmentStore.classifyLocalFile(item.context, file, name)
+                    }
+                    item.runtimeAttachments.add(classified)
+                    fileTools.register(classified)
+                } catch (_: Exception) {
+                    // Unsupported or binary local artifacts are not registered as text tools.
                 }
-                fileTools.register(OpenRouterLocalAttachment("local_" + file.name, name, kind, file.path, mime, file.length(), "",
-                    textPath = file.path.takeIf { kind == "text" }, textEncoding = "UTF-8".takeIf { kind == "text" }))
             }
             val artifactTools = LocalArtifactToolExecutor(item.context)
             if (r.github) {
@@ -164,8 +176,13 @@ object OpenRouterResponseRuntime {
                             }
                             artifacts.add(a)
                             val file = File(a.getString("path"))
-                            val f = OpenRouterLocalAttachment("local_" + file.name, a.getString("filename"), "text", file.path,
-                                a.getString("mime_type"), file.length(), "", textPath = file.path, textEncoding = "UTF-8")
+                            val f = OpenRouterAttachmentStore.classifyLocalFile(
+                                item.context,
+                                file,
+                                a.getString("filename"),
+                                a.getString("mime_type")
+                            )
+                            item.runtimeAttachments.add(f)
                             fileTools.register(f)
                             a.put("file_id", f.id).toString()
                         }
@@ -255,6 +272,7 @@ object OpenRouterResponseRuntime {
             try { OpenRouterUiBridge.changed(r.chatId, r.requestId) } catch (_: Throwable) { }
             throw fatal
         } finally {
+            try { runtimeLeaseScope.close() } catch (_: Exception) {}
             item.call = null
             try { github?.close() } catch (_: Exception) {}
             try {
@@ -272,12 +290,15 @@ object OpenRouterResponseRuntime {
             } catch (_: Exception) { /* Unknown cost stays unknown. */ }
             work.remove(r.requestId, item)
             if (!fatalFailure) try {
-                PreparedAttachmentFiles.cleanupPending(item.context) {
-                    PreparedAttachmentFiles.Owners(db.listAllLocalFilePaths().toSet() +
+                val owners = PreparedAttachmentFiles.Owners(
+                    db.listAllLocalFilePaths().toSet() +
                         LocalAttachmentReferences.allComposerPaths(item.context.getSharedPreferences("app", Context.MODE_PRIVATE).all),
-                        localFilePaths())
-                }
-            } catch (_: Exception) { /* Leave the journal for the next healthy startup. */ }
+                    localFilePaths() + db.listActiveOpenAiToolAttachmentPaths()
+                )
+                runtimeLease.release(owners)
+                PreparedAttachmentFiles.cleanupPending(item.context) { owners }
+            } catch (_: Exception) { runtimeLease.defer() }
+            else runtimeLease.defer()
             try {
                 if (!uses(item.client) && !OpenRouterUiBridge.ownsClient(item.client)) item.client.close()
                 if (work.values.none { it.request.background }) item.context.stopService(Intent(item.context, OpenRouterResponseService::class.java))

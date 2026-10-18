@@ -165,4 +165,26 @@ assert 'JsonProtocol.string(event, "delta")' in reducer and 'JsonProtocol.nonBla
 xlsx = (ROOT / "app/src/main/java/com/example/openaichat/StructuredDocumentExtractor.kt").read_text()
 assert 'cell?.put("formula", "")' in xlsx and '"formula_si"' in xlsx
 
+# Task #3, #5, #24 guards:
+ids_xml = (ROOT / "app/src/main/res/values/strings.xml").read_text()
+assert 'name="chat_messages_recycler"' in ids_xml, "RecyclerView requires a stable resource ID"
+assert 'id = R.id.chat_messages_recycler' in main_activity, "MainActivity RecyclerView must bind stable R.id.chat_messages_recycler"
+assert 'outState.putString("per_chat_scroll_anchors_v1", ChatScrollPolicy.encodeAnchorsJson(perChatScrollAnchors, currentChatId()))' in main_activity, "Bounded scroll anchors must be saved with the current chat preferred"
+assert 'if (anchor.isReadingLocked) userScrollLockedChats.add(chatId)' in main_activity, "Scroll lock state must be restored from bounded anchors"
+assert 'ArrayList(userScrollLockedChats)' not in main_activity, "Saved state must not contain an unbounded duplicate scroll-lock list"
+assert 'ChatScrollPolicy.decodeAnchorsJson(savedInstanceState.getString("per_chat_scroll_anchors_v1"))' in main_activity, "Scroll anchors must be restored from savedInstanceState"
+scroll_policy = (ROOT / "app/src/main/java/com/example/openaichat/ChatScrollPolicy.kt").read_text()
+assert 'fun actualDistanceFromBottomPx(' in scroll_policy and 'fun resolveAnchorPosition(' in scroll_policy and 'fun resolveTopOffsetPx(' in scroll_policy
+pages_src = (ROOT / "app/src/main/java/com/example/openaichat/ResponseTextPages.kt").read_text()
+assert 'MathDelimiterScanner.scan(source)' in pages_src and 'crossing.start > start' in pages_src, "ResponseTextPages must preserve closed formulas across 32K boundaries"
+local_tools = (ROOT / "app/src/main/java/com/example/openaichat/LocalFileTools.kt").read_text()
+assert 'val carryWindow = SEARCH_LEFT_CONTEXT + query.length - 1' in local_tools, "LocalFileTools.search overlap must include both left snippet context and query length"
+orr_runtime = (ROOT / "app/src/main/java/com/example/openaichat/OpenRouterResponseRuntime.kt").read_text()
+assert 'OpenRouterAttachmentStore.classifyLocalFile(' in orr_runtime, "OpenRouterResponseRuntime must classify local files via OpenRouterAttachmentStore.classifyLocalFile"
+assert 'textEncoding = "UTF-8".takeIf' not in orr_runtime, "Unconditional UTF-8 local file registration must not remain in OpenRouterResponseRuntime"
+chat_db_src = (ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt").read_text()
+assert 'fun listActiveOpenAiToolAttachmentPaths(' in chat_db_src, "ChatDatabase must expose active OpenAI tool checkpoint attachment paths separately from durable paths"
+assert 'cachedLayout' in pages_src, "ResponseTextPages must cache computed page slices to avoid repeated O(N) formula scans"
+assert 'legacyAliases' in local_tools, "LocalFileTools must support legacy local_<filename> alias lookup"
+
 print(f"Implementation lexical/schema checks: PASS ({len(files)} Kotlin files; SQLite definitions, v20->v21->v22 additive columns, FK cleanup, long UTF-8/NUL byte slices). Android compilation/tests remain separate.")

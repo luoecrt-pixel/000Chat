@@ -6,7 +6,10 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.widget.EditText
 import android.widget.TextView
 import androidx.core.content.FileProvider
@@ -53,6 +56,10 @@ class OpenAiRequestSnapshotAndUploadTest {
     private val files = linkedSetOf<File>()
     private val responseCounter = AtomicInteger()
     private val uploadCounter = AtomicInteger()
+    private val sendCounter = AtomicInteger()
+    private val requestCounter = AtomicInteger()
+    private val attemptedPaths = java.util.concurrent.CopyOnWriteArrayList<String>()
+    @Volatile private var observedActivity: MainActivity? = null
     private val settings = listOf(
         "provider", "model", "current_chat", "background_responses", "background_responses_migrated_v25",
         "response_notifications", "reasoning", "reasoning_mode", "text_format", "json_schema", "system_prompt",
@@ -82,8 +89,10 @@ class OpenAiRequestSnapshotAndUploadTest {
         val clientTls = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
         server = MockWebServer().apply { useHttps(serverTls.sslSocketFactory(), false); start() }
         http = OkHttpClient.Builder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager)
-            .addInterceptor { chain -> chain.proceed(chain.request().newBuilder()
-                .url(server.url(chain.request().url.encodedPath)).build()) }.build()
+            .addInterceptor { chain ->
+                attemptedPaths.add(chain.request().url.encodedPath.takeIf { it in setOf("/v1/files", "/v1/responses") } ?: "other")
+                chain.proceed(chain.request().newBuilder().url(server.url(chain.request().url.encodedPath)).build())
+            }.build()
         ResumableResponseStreamClient.transportForTests = http to server.url("/")
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
@@ -96,6 +105,7 @@ class OpenAiRequestSnapshotAndUploadTest {
     }
 
     @After fun after() {
+        observedActivity = null
         ResumableResponseStreamClient.transportForTests = null
         SecureStore(context).setApiKey(oldKey)
         ChatDatabase(context).use { db -> chats.forEach {
@@ -140,11 +150,14 @@ class OpenAiRequestSnapshotAndUploadTest {
     private fun invoke(activity: MainActivity, method: String) = MainActivity::class.java.getDeclaredMethod(method)
         .apply { isAccessible = true }.invoke(activity)
     private fun send(activity: MainActivity, text: String = "Inspect the complete attached files") {
+        observedActivity = activity
+        sendCounter.incrementAndGet()
         (field(activity, "input") as EditText).setText(text)
         MainActivity::class.java.getDeclaredMethod("sendMessage", Boolean::class.javaPrimitiveType)
             .apply { isAccessible = true }.invoke(activity, false)
     }
     private fun initialize(activity: MainActivity): String {
+        observedActivity = activity
         activity.newChat(); setField(activity, "client", http)
         return activity.currentChatIdForTesting().also(chats::add)
     }
@@ -166,16 +179,107 @@ class OpenAiRequestSnapshotAndUploadTest {
         fail(message)
     }
     private fun awaitCompleted(chatId: String, index: Int) = awaitCondition("Response $index was not committed") {
-        ChatDatabase(context).use { db ->
+        val responseId = "resp_k_$index"
+        val durable = ChatDatabase(context).use { db ->
             db.getActiveResponse(chatId) == null && db.getChat(chatId)?.optJSONArray("messages")?.let { messages ->
-                (0 until messages.length()).any { messages.optJSONObject(it)?.optString("response_id") == "resp_k_$index" }
+                (0 until messages.length()).any { messages.optJSONObject(it)?.optString("response_id") == responseId }
             } == true
         }
+        // The SQLite terminal claim precedes the queued Activity completion callback. A second
+        // Send must wait for that callback to commit history and release the real UI busy guard.
+        if (!durable) return@awaitCondition false
+        if (!hasLiveObservedActivity()) return@awaitCondition true
+        // A timed-out sample of a live UI is not proof that Send is ready. A closed
+        // screen or an observed different chat only needs the durable completion.
+        val ui = uiSnapshot(responseId) ?: return@awaitCondition !hasLiveObservedActivity()
+        ui.chatId != chatId || (ui.expectedResponseInHistory && ui.sendEnabled && !ui.stopVisible)
     }
-    private fun request(): RecordedRequest = server.takeRequest(20, TimeUnit.SECONDS) ?: error("No expected HTTPS request")
+
+    private fun hasLiveObservedActivity(): Boolean = observedActivity?.let {
+        !it.isDestroyed && !it.isFinishing
+    } == true
+
+    private data class UiSnapshot(
+        val chatId: String,
+        val expectedResponseInHistory: Boolean,
+        val statusCategory: String,
+        val statusLength: Int,
+        val sendEnabled: Boolean,
+        val stopVisible: Boolean
+    ) {
+        fun safeDescription(): String = "statusCategory=$statusCategory,statusLength=$statusLength," +
+            "sendEnabled=$sendEnabled,stopVisible=$stopVisible"
+    }
+
+    private fun uiSnapshot(expectedResponseId: String? = null): UiSnapshot? {
+        val activity = observedActivity ?: return null
+        val snapshot = AtomicReference<UiSnapshot?>()
+        val sampled = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).post {
+            try {
+                if (observedActivity !== activity || activity.isDestroyed || activity.isFinishing) return@post
+                val status = (field(activity, "status") as TextView).text.toString()
+                // Categories only: status can contain provider errors or paths; never print raw UI text.
+                val category = when {
+                    status.contains("ошиб", true) -> "error"
+                    status.contains("подготов", true) -> "preparing"
+                    status.contains("загруз", true) -> "uploading"
+                    status.contains("останов", true) -> "stopped"
+                    else -> "other"
+                }
+                val history = field(activity, "chat") as List<*>
+                snapshot.set(UiSnapshot(
+                    chatId = activity.currentChatIdForTesting(),
+                    expectedResponseInHistory = expectedResponseId != null && history.any {
+                        (it as? JSONObject)?.optString("response_id") == expectedResponseId
+                    },
+                    statusCategory = category,
+                    statusLength = status.length,
+                    sendEnabled = (field(activity, "send") as View).isEnabled,
+                    stopVisible = (field(activity, "stop") as View).visibility == View.VISIBLE
+                ))
+            } finally {
+                sampled.countDown()
+            }
+        }
+        // A blocked UI must produce bounded diagnostics, rather than hanging runOnMainSync.
+        return if (sampled.await(2, TimeUnit.SECONDS)) snapshot.get() else null
+    }
+
+    private fun request(stage: String): RecordedRequest {
+        val ordinal = requestCounter.incrementAndGet()
+        return server.takeRequest(20, TimeUnit.SECONDS) ?: run {
+            val ui = uiSnapshot()
+            val activeStatus = ui?.chatId?.let { id -> ChatDatabase(context).use { it.getActiveResponse(id)?.optString("status") } }
+                ?.takeIf { it in setOf("queued", "in_progress", "completed", "failed", "cancelled", "incomplete") } ?: "none-or-other"
+            error("No expected HTTPS request at stage=$stage,send=${sendCounter.get()},request=$ordinal: " +
+                "serverRequestCount=${server.requestCount},attemptedPaths=$attemptedPaths," +
+                "${ui?.safeDescription() ?: "ui=unavailable-or-main-thread-blocked"},activeResponse=$activeStatus")
+        }
+    }
     private fun tools(body: JSONObject): List<JSONObject> = body.optJSONArray("tools")?.let { arr ->
         (0 until arr.length()).map { arr.getJSONObject(it) }
     }.orEmpty()
+
+    @Test fun completedRequestRemainsObservableAfterChatSwitchAndActivityClose() {
+        var completedChat = ""
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                completedChat = initialize(activity)
+                send(activity, "Complete before switching chats")
+            }
+            val (uploads, _) = takeUploadsAndResponse("completion-lifecycle", syntheticKey)
+            assertTrue(uploads.isEmpty())
+            awaitCompleted(completedChat, 1)
+            scenario.onActivity { activity ->
+                assertNotEquals(completedChat, initialize(activity))
+            }
+            // The visible chat has no copy of this response; its durable owner still completed.
+            awaitCompleted(completedChat, 1)
+        }
+        awaitCompleted(completedChat, 1)
+        assertEquals("Observing completion must never send another request", 1, server.requestCount)
+    }
 
     @Test fun disabledPaidSettingsCannotBeEnabledByPreferenceChangesDuringActualOpenAiPreparation() =
         assertSnapshot(initiallyEnabled = false)
@@ -295,12 +399,12 @@ class OpenAiRequestSnapshotAndUploadTest {
             scenario.onActivity { chatId = initialize(it); pick(it, listOf(note)) }
             awaitPrepared(scenario, 1); assertEquals(0, server.requestCount)
             scenario.onActivity { send(it) }
-            val (firstUploads, firstBody) = takeUploadsAndResponse()
+            val (firstUploads, firstBody) = takeUploadsAndResponse("first-account", syntheticKey)
             assertEquals(1, firstUploads.size); assertEquals(setOf("file_k_1"), containerFileIds(firstBody))
             awaitCompleted(chatId, 1)
             val secondKey = "sk-synthetic-k-second-account-${UUID.randomUUID()}"
             scenario.onActivity { assertTrue(SecureStore(context).setApiKey(secondKey)); send(it, "Analyze under the new account") }
-            val (secondUploads, secondBody) = takeUploadsAndResponse()
+            val (secondUploads, secondBody) = takeUploadsAndResponse("changed-account", secondKey)
             assertEquals(1, secondUploads.size)
             assertEquals("Bearer $secondKey", secondUploads.single().getHeader("Authorization"))
             assertArrayEquals(note.readBytes(), multipartFile(secondUploads.single()).second)
@@ -445,11 +549,21 @@ class OpenAiRequestSnapshotAndUploadTest {
         }
         prepared
     }
-    private fun takeUploadsAndResponse(): Pair<List<RecordedRequest>, JSONObject> {
+    private fun takeUploadsAndResponse(
+        stage: String = "send-${sendCounter.get()}",
+        expectedCredential: String? = null
+    ): Pair<List<RecordedRequest>, JSONObject> {
         val uploads = mutableListOf<RecordedRequest>()
-        var next = request()
-        while (next.path == "/v1/files") { uploads.add(next); next = request() }
+        var next = request("$stage:upload-or-response")
+        while (next.path == "/v1/files") {
+            uploads.add(next)
+            next = request("$stage:after-upload-${uploads.size}")
+        }
         assertEquals("POST", next.method); assertEquals("/v1/responses", next.path)
+        expectedCredential?.let {
+            assertTrue("Responses must use the credential captured for $stage",
+                next.getHeader("Authorization") == "Bearer $it")
+        }
         return uploads to JSONObject(next.body.readUtf8())
     }
     private fun containerFileIds(body: JSONObject): Set<String> = tools(body).single { it.optString("type") == "code_interpreter" }

@@ -4,8 +4,11 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.AsyncListDiffer
+import androidx.recyclerview.widget.AsyncDifferConfig
+import androidx.recyclerview.widget.AdapterListUpdateCallback
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -34,13 +37,23 @@ data class ChatBubbleItem(
             val signature = if (message != null) {
                 ChatMessageFingerprint.of(message)
             } else {
+                val digest = MessageDigest.getInstance("SHA-256")
                 listOf(
                     label,
                     text,
                     user.toString(),
                     annotations?.toString().orEmpty(),
                     reasoningSummary.orEmpty()
-                ).joinToString("\u001f")
+                ).forEach { field ->
+                    val bytes = field.toByteArray(Charsets.UTF_8)
+                    // Length-prefix each field so content containing a separator
+                    // cannot hide a change in a neighboring rendered field.
+                    repeat(4) { byteIndex ->
+                        digest.update((bytes.size ushr (24 - byteIndex * 8)).toByte())
+                    }
+                    digest.update(bytes)
+                }
+                digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
             }
             return ChatBubbleItem(
                 id = id,
@@ -66,6 +79,7 @@ class ChatMessageAdapter(
 
     companion object {
         private const val PAYLOAD_TEXT = "text"
+        @Volatile internal var diffExecutorForTests: java.util.concurrent.Executor? = null
     }
 
     class ViewHolder(val card: LinearLayout) : RecyclerView.ViewHolder(card) {
@@ -79,7 +93,7 @@ class ChatMessageAdapter(
     private val displayPositionById = mutableMapOf<String, Int>()
     private val boundHolders = mutableMapOf<String, ViewHolder>()
 
-    private val differ = AsyncListDiffer(this, object : DiffUtil.ItemCallback<ChatBubbleItem>() {
+    private val differ = AsyncListDiffer(AdapterListUpdateCallback(this), AsyncDifferConfig.Builder(object : DiffUtil.ItemCallback<ChatBubbleItem>() {
         override fun areItemsTheSame(oldItem: ChatBubbleItem, newItem: ChatBubbleItem): Boolean =
             oldItem.id == newItem.id
 
@@ -87,7 +101,7 @@ class ChatMessageAdapter(
             oldItem.contentSignature == newItem.contentSignature &&
                 oldItem.text == newItem.text &&
                 oldItem.reasoningSummary == newItem.reasoningSummary
-    })
+    }).apply { diffExecutorForTests?.let(::setBackgroundThreadExecutor) }.build())
 
     init {
         differ.addListListener { _, current ->
@@ -170,50 +184,61 @@ class ChatMessageAdapter(
         itemById[item.id] = item
     }
 
-    private fun submitModel() {
-        differ.submitList(items.toList())
+    private val modelRevision = java.util.concurrent.atomic.AtomicLong(0L)
+    @Volatile private var committedRevision = 0L
+
+    private fun submitModel(onCommitted: (() -> Unit)? = null) {
+        val revision = modelRevision.incrementAndGet()
+        val snapshot = if (items.isEmpty()) null else items.toList()
+        differ.submitList(snapshot) {
+            committedRevision = maxOf(committedRevision, revision)
+            onCommitted?.invoke()
+        }
     }
 
-    fun submitItems(newItems: List<ChatBubbleItem>) {
-        if (items == newItems) return
+    fun isListCommitPending(): Boolean =
+        committedRevision != modelRevision.get() || differ.currentList.size != items.size
+
+    fun submitItems(newItems: List<ChatBubbleItem>, onCommitted: (() -> Unit)? = null) {
+        if (!isListCommitPending() && items == newItems && differ.currentList == newItems) {
+            onCommitted?.invoke()
+            return
+        }
         items.clear()
         items.addAll(newItems)
         rebuildModelIndexes()
-        submitModel()
+        submitModel(onCommitted)
     }
 
-    fun addItem(item: ChatBubbleItem) {
+    fun addItem(item: ChatBubbleItem, onCommitted: (() -> Unit)? = null) {
         items.add(item)
         itemById[item.id] = item
         itemIndexById[item.id] = items.lastIndex
-        submitModel()
+        submitModel(onCommitted)
     }
 
-    fun replaceItem(id: String, item: ChatBubbleItem): Boolean {
+    fun replaceItem(id: String, item: ChatBubbleItem, onCommitted: (() -> Unit)? = null): Boolean {
         val index = itemIndexById[id] ?: return false
         val replacement = item.copy(id = id)
         refreshModelItem(index, replacement)
-        submitModel()
+        submitModel(onCommitted)
         return true
     }
 
     fun updateText(id: String, text: String): Boolean {
         val index = itemIndexById[id] ?: return false
         val current = items[index]
-        val updated = if (current.message == null) {
-            ChatBubbleItem.create(
-                id = current.id,
-                label = current.label,
-                text = text,
-                user = current.user,
-                annotations = current.annotations,
-                message = null,
-                chatIndex = current.chatIndex,
-                reasoningSummary = current.reasoningSummary
-            )
-        } else {
-            current.copy(text = text)
-        }
+        val updatedMessage = current.message?.let { JsonProtocol.objectCopy(it).put("text", text) }
+        val updated = ChatBubbleItem.create(
+            id = current.id,
+            label = current.label,
+            text = text,
+            user = current.user,
+            annotations = current.annotations,
+            message = updatedMessage,
+            chatIndex = current.chatIndex,
+            reasoningSummary = current.reasoningSummary
+        )
         refreshModelItem(index, updated)
         val displayPosition = displayPositionById[id]
         if (displayPosition != null) {
@@ -273,13 +298,16 @@ class ChatMessageAdapter(
         submitModel()
     }
 
-    fun clearItems() {
-        if (items.isEmpty()) return
+    fun clearItems(onCommitted: (() -> Unit)? = null) {
+        if (!isListCommitPending() && items.isEmpty() && differ.currentList.isEmpty()) {
+            onCommitted?.invoke()
+            return
+        }
         items.clear()
         itemById.clear()
         itemIndexById.clear()
         boundHolders.clear()
-        submitModel()
+        submitModel(onCommitted)
     }
 
     fun bodyForId(id: String): TextView? = boundHolders[id]?.body
@@ -291,4 +319,7 @@ class ChatMessageAdapter(
     fun itemAt(index: Int): ChatBubbleItem? = items.getOrNull(index)
 
     fun snapshot(): List<ChatBubbleItem> = items.toList()
+
+    /** Keep the committed order while exposing the same live payloads used by onBindViewHolder. */
+    fun committedSnapshot(): List<ChatBubbleItem> = differ.currentList.map { itemById[it.id] ?: it }
 }
