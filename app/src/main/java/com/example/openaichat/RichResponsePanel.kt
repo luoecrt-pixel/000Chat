@@ -7,6 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -96,8 +99,8 @@ class RichResponsePanel(
         .usePlugin(object : AbstractMarkwonPlugin() {
             override fun configureTheme(builder: io.noties.markwon.core.MarkwonTheme.Builder) {
                 val theme = currentTheme()
-                builder.codeTextColor(theme.textPrimary).codeBackgroundColor(theme.cardBg)
-                    .blockQuoteColor(theme.accent).linkColor(theme.accent)
+                builder.codeTextColor(theme.codeText).codeBackgroundColor(theme.codeBg)
+                    .blockQuoteColor(theme.mathBorder).linkColor(theme.accent)
             }
             override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
                 builder.linkResolver(LinkResolver { _, link -> openLink(link) })
@@ -117,8 +120,24 @@ class RichResponsePanel(
     }
     private fun button(label: String, action: () -> Unit) = Button(context).apply {
         val theme = currentTheme()
-        text = label; textSize = 12f; minWidth = 0; minimumWidth = 0; setTextColor(theme.accent)
+        text = label; textSize = 12f; isAllCaps = false
+        minWidth = 0; minimumWidth = 0; minHeight = dp(40); minimumHeight = dp(40)
+        setPadding(dp(10), dp(5), dp(10), dp(5)); setTextColor(theme.accent)
+        backgroundTintList = null
+        background = RippleDrawable(ColorStateList.valueOf((theme.accent and 0xFFFFFF) or 0x22000000),
+            shape(theme.buttonBg, theme.surfaceBorder), null)
+        layoutParams = LayoutParams(-2, -2).apply { marginEnd = dp(5); topMargin = dp(3); bottomMargin = dp(3) }
         setOnClickListener { action() }
+    }
+    private fun shape(fill: Int, border: Int) = GradientDrawable().apply {
+        setColor(fill); setStroke(dp(1).coerceAtLeast(1), border)
+        cornerRadii = floatArrayOf(16f, 16f, 10f, 10f, 18f, 18f, 10f, 10f)
+            .map { it * resources.displayMetrics.density }.toFloatArray()
+    }
+    private fun card(fill: Int, border: Int = currentTheme().surfaceBorder) = column().apply {
+        background = shape(fill, border)
+        setPadding(dp(10), dp(5), dp(10), dp(7))
+        layoutParams = LayoutParams(-1, -2).apply { topMargin = dp(5); bottomMargin = dp(5) }
     }
     private fun column() = LinearLayout(context).apply { orientation = VERTICAL }
     private fun row() = LinearLayout(context).apply { orientation = HORIZONTAL }
@@ -265,7 +284,13 @@ class RichResponsePanel(
             if (trace.length() > 20) extra.addView(text("Последние 20 из ${trace.length()} действий").apply { textSize = 12f })
             for (index in maxOf(0, trace.length() - 20) until trace.length()) trace.optJSONObject(index)?.let { entry ->
                 val state = JsonProtocol.nonBlank(entry, "status") ?: if (entry.optBoolean("ok", true)) "готово" else "ошибка"
-                extra.addView(text("${JsonProtocol.string(entry, "name")} · $state").apply { textSize = 12f })
+                val theme = currentTheme()
+                val failed = !entry.optBoolean("ok", true) || state.lowercase() in setOf("error", "failed", "ошибка")
+                extra.addView(card(if (failed) theme.errorBg else theme.toolBg).apply {
+                    addView(text("${JsonProtocol.string(entry, "name")} · $state").apply {
+                        textSize = 12f; setTextColor(if (failed) theme.errorText else theme.toolText)
+                    })
+                })
             }
         }
         val annotations = item.annotations ?: item.message?.optJSONArray("annotations")
@@ -302,16 +327,19 @@ class RichResponsePanel(
                 val rendered = bridgeMarkwonSpansForHtml(markwon.render(node))
                 ScientificRendererDocument.mathInText(android.text.Html.toHtml(rendered, android.text.Html.TO_HTML_PARAGRAPH_LINES_INDIVIDUAL), prepared)
             }) else addView(native)
-            if (formulas.isNotEmpty()) addView(button("Превью формул (${formulas.size})") { formulaPreview(formulas) })
+            if (formulas.isNotEmpty() && !autoScientificPreview)
+                addView(button("Превью формул (${formulas.size})") { formulaPreview(formulas) })
         }
         is ResponseBlockParser.Block.Code -> code(block, index)
         is ResponseBlockParser.Block.Details -> details(block, index)
         is ResponseBlockParser.Block.Table -> table(block, tableStates.getOrPut(index) { TableState() })
-        is ResponseBlockParser.Block.File -> column().apply {
+        is ResponseBlockParser.Block.File -> card(currentTheme().fileBg).apply {
             if (!ResponseRenderSafety.textFilename(block.name)) {
                 addView(text("Имя или формат текстового файла недопустимы; показан исходник.")); addView(pagedText(block.raw, index, false))
             } else {
-                addView(text("📄 ${block.name} · ${utf8Bytes(block.content)} байт · ${if (block.closed) "UTF-8" else "создаётся…"}"))
+                addView(text("📄 ${block.name} · ${utf8Bytes(block.content)} байт · ${if (block.closed) "UTF-8" else "создаётся…"}").apply {
+                    setTextColor(currentTheme().fileText)
+                })
                 if (block.closed) addView(row().apply {
                     addView(button("Сохранить") { saveFile(block) })
                     addView(button("Копировать") { copy(block.content) })
@@ -396,47 +424,59 @@ class RichResponsePanel(
         } catch (_: Exception) { text = source }
     }
 
-    private fun code(block: ResponseBlockParser.Block.Code, index: Int): View = column().apply {
-        addView(row().apply {
-            addView(text(block.language.ifBlank { "text" } + if (block.closed) "" else " · пишется…").apply { textSize = 12f }, LayoutParams(0, -2, 1f))
-            addView(button("Копировать") { copy(block.content) })
-        })
-        if (block.closed && autoScientificPreview && block.language.lowercase() in setOf("latex", "tex", "math", "mermaid", "svg")) {
-            val visual = when (block.language.lowercase()) {
-                "mermaid" -> if (ScientificRendererDocument.mermaidProblem(block.content) == null) MermaidDiagramView(context, block.content) else null
-                "svg" -> if (block.content.length <= 200_000) safeSvg(block.content) else null
-                else -> if (block.content.length <= ScientificRendererDocument.MAX_MATH_CHARACTERS) ScientificMathView(context, block.content) else null
-            }
-            if (visual != null) { addView(visual); return@apply }
-        }
-        if (block.closed && scientificAssets) {
-            if (block.language.equals("mermaid", true)) addView(button("Превью диаграммы") {
-                val problem = ScientificRendererDocument.mermaidProblem(block.content)
-                if (problem != null) previewNotice(problem) else scientificPreview(block.content) { ScientificRendererDocument.mermaid(block.content) }
+    private fun code(block: ResponseBlockParser.Block.Code, index: Int): View {
+        val theme = currentTheme()
+        val language = block.language.lowercase()
+        val scientific = language in setOf("latex", "tex", "math")
+        val diagram = language in setOf("mermaid", "svg")
+        val fill = when { scientific -> theme.mathBg; diagram -> theme.diagramBg; else -> theme.codeBg }
+        val ink = when { scientific -> theme.mathText; diagram -> theme.diagramText; else -> theme.codeText }
+        val border = when { scientific -> theme.mathBorder; diagram -> theme.diagramBorder; else -> theme.codeBorder }
+        return card(fill, border).apply {
+            addView(row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(text(block.language.ifBlank { "text" } + if (block.closed) "" else " · пишется…").apply {
+                    textSize = 12f; setTextColor(ink)
+                }, LayoutParams(0, -2, 1f))
+                addView(button("Копировать") { copy(block.content) })
             })
-            if (block.language.lowercase() in setOf("latex", "tex", "math")) addView(button("Превью формулы") {
-                formulaPreview(listOf(MathDelimiterScanner.Formula(0, block.content.length, block.content, block.content, true)))
-            })
-        }
-        if (block.closed && block.language.lowercase() in setOf("html", "svg"))
-            addView(button(if (block.language.equals("svg", true)) "Превью SVG" else "Код / Превью") { preview(block) })
-        if (block.content.length > 100_000) {
-            addView(pagedText(block.content, index, true))
-            return@apply
-        }
-        setBackgroundColor(currentTheme().cardBg)
-        val body = text(block.content).apply {
-            typeface = Typeface.MONOSPACE; textSize = 14f; setHorizontallyScrolling(true)
-            if (block.closed && block.content.length <= 100_000 && block.language.lowercase() in
-                setOf("kt", "kotlin", "java", "py", "python", "js", "javascript", "ts", "typescript", "json", "sql", "sh", "bash")) {
-                val styled = SpannableStringBuilder(block.content)
-                Regex("\\b(class|fun|def|return|if|else|for|while|import|from|val|var|const|let|public|private|true|false|null|SELECT|FROM|WHERE)\\b")
-                    .findAll(block.content).forEach { match -> styled.setSpan(ForegroundColorSpan(currentTheme().accent),
-                        match.range.first, match.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-                text = styled
+            if (block.closed && autoScientificPreview && block.language.lowercase() in setOf("latex", "tex", "math", "mermaid", "svg")) {
+                val visual = when (block.language.lowercase()) {
+                    "mermaid" -> if (ScientificRendererDocument.mermaidProblem(block.content) == null) MermaidDiagramView(context, block.content) else null
+                    "svg" -> if (block.content.length <= 200_000) safeSvg(block.content) else null
+                    else -> if (block.content.length <= ScientificRendererDocument.MAX_MATH_CHARACTERS) ScientificMathView(context, block.content) else null
+                }
+                if (visual != null) { addView(visual); return@apply }
             }
+            if (block.closed && scientificAssets) {
+                if (block.language.equals("mermaid", true)) addView(button("Превью диаграммы") {
+                    val problem = ScientificRendererDocument.mermaidProblem(block.content)
+                    if (problem != null) previewNotice(problem) else scientificPreview(block.content) { ScientificRendererDocument.mermaid(block.content) }
+                })
+                if (block.language.lowercase() in setOf("latex", "tex", "math")) addView(button("Превью формулы") {
+                    formulaPreview(listOf(MathDelimiterScanner.Formula(0, block.content.length, block.content, block.content, true)))
+                })
+            }
+            if (block.closed && block.language.lowercase() in setOf("html", "svg"))
+                addView(button(if (block.language.equals("svg", true)) "Превью SVG" else "Код / Превью") { preview(block) })
+            if (block.content.length > 100_000) {
+                addView(pagedText(block.content, index, true))
+                return@apply
+            }
+            val body = text(block.content).apply {
+                setTextColor(ink)
+                typeface = Typeface.MONOSPACE; textSize = 14f; setHorizontallyScrolling(true)
+                if (block.closed && block.content.length <= 100_000 && block.language.lowercase() in
+                    setOf("kt", "kotlin", "java", "py", "python", "js", "javascript", "ts", "typescript", "json", "sql", "sh", "bash")) {
+                    val styled = SpannableStringBuilder(block.content)
+                    Regex("\\b(class|fun|def|return|if|else|for|while|import|from|val|var|const|let|public|private|true|false|null|SELECT|FROM|WHERE)\\b")
+                        .findAll(block.content).forEach { match -> styled.setSpan(ForegroundColorSpan(theme.accent),
+                            match.range.first, match.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
+                    text = styled
+                }
+            }
+            addView(HorizontalScrollView(context).apply { isFillViewport = false; addView(body, LayoutParams(-2, -2)) }, LayoutParams(-1, -2))
         }
-        addView(HorizontalScrollView(context).apply { isFillViewport = false; addView(body, LayoutParams(-2, -2)) }, LayoutParams(-1, -2))
     }
 
     private fun pagedText(source: String, index: Int, code: Boolean): View = column().apply {
@@ -472,10 +512,11 @@ class RichResponsePanel(
         show()
     }
 
-    private fun details(block: ResponseBlockParser.Block.Details, index: Int): View = column().apply {
+    private fun details(block: ResponseBlockParser.Block.Details, index: Int): View = card(currentTheme().logBg).apply {
         if (detailDepth >= 8) { addView(pagedText(block.raw, index, false)); return@apply }
         val state = detailStates.getOrPut(index) { DetailsState(block.expanded) }
         val caption = button("") {}
+        caption.setTextColor(currentTheme().logText)
         val holder = column()
         fun refresh() {
             caption.text = (if (state.expanded) "▾ " else "▸ ") + block.summary + if (block.closed) "" else " · создаётся…"
@@ -490,7 +531,7 @@ class RichResponsePanel(
         addView(caption); addView(holder); refresh()
     }
 
-    private fun table(block: ResponseBlockParser.Block.Table, state: TableState): View = column().apply {
+    private fun table(block: ResponseBlockParser.Block.Table, state: TableState): View = card(currentTheme().tableRowBg).apply {
         val theme = currentTheme()
         var shown = 0
         val grid = column()
@@ -533,18 +574,21 @@ class RichResponsePanel(
 
     private fun safeSvg(source: String): View = object : LinearLayout(context) {
         private val theme = currentTheme()
-        private val original = text(source).apply { typeface = Typeface.MONOSPACE; visibility = GONE }
+        private val original = text(source).apply { typeface = Typeface.MONOSPACE; setTextColor(theme.diagramText); visibility = GONE }
         private val notice = text().apply { textSize = 12f; visibility = GONE }
+        private val retry = button("Повторить превью") { showPreview() }.apply { visibility = GONE }
         private var web: WebView? = null
+        private var retryRequired = false
 
         private fun destroyRenderer() {
             val old = web ?: return
             web = null; removeView(old); old.stopLoading(); old.destroy()
         }
         private fun showPreview() {
+            retryRequired = false
             if (web == null) {
                 val renderer = WebView(context).apply {
-                    setBackgroundColor(theme.assistantBubbleBg)
+                    setBackgroundColor(theme.diagramBg)
                     settings.javaScriptEnabled = false; settings.allowFileAccess = false; settings.allowContentAccess = false
                     settings.domStorageEnabled = false; settings.blockNetworkLoads = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -556,23 +600,27 @@ class RichResponsePanel(
                             if (web === view) {
                                 destroyRenderer(); original.visibility = VISIBLE
                                 notice.text = "Превью недоступно; исходный код сохранён."; notice.visibility = VISIBLE
+                                retryRequired = true
+                                retry.visibility = VISIBLE
                             }
                             return true
                         }
                     }
                 }
                 web = renderer; addView(renderer, LayoutParams(-1, dp(240)))
-                renderer.loadDataWithBaseURL("https://preview.invalid/", ResponseRenderSafety.previewDocument(source, theme), "text/html", "UTF-8", null)
+                renderer.loadDataWithBaseURL("https://preview.invalid/", ResponseRenderSafety.previewDocument(source,
+                    theme.copy(assistantBubbleBg = theme.diagramBg, textPrimary = theme.diagramText)), "text/html", "UTF-8", null)
             }
-            original.visibility = GONE; notice.visibility = GONE; web?.visibility = VISIBLE
+            original.visibility = GONE; notice.visibility = GONE; retry.visibility = GONE; web?.visibility = VISIBLE
         }
         init {
             orientation = VERTICAL
-            addView(row().apply {
-                addView(button("Исходный код") { original.visibility = VISIBLE; web?.visibility = GONE })
-                addView(button("Превью") { showPreview() })
-            })
-            addView(notice); addView(original); showPreview()
+            setBackgroundColor(theme.diagramBg)
+            addView(notice); addView(retry); addView(original); showPreview()
+        }
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            if (web == null && !retryRequired) showPreview()
         }
         override fun onDetachedFromWindow() {
             destroyRenderer(); original.visibility = VISIBLE
@@ -582,7 +630,7 @@ class RichResponsePanel(
 
     private fun preview(block: ResponseBlockParser.Block.Code) {
         if (block.content.length > 200_000) {
-            val dialog = AlertDialog.Builder(context).setMessage("Превью слишком велико для безопасной обработки на телефоне. Исходный код доступен полностью.")
+            val dialog = AppThemeViews.dialog(context, currentTheme()).setMessage("Превью слишком велико для безопасной обработки на телефоне. Исходный код доступен полностью.")
                 .setPositiveButton("Закрыть", null).create()
             dialogs.add(dialog); dialog.setOnDismissListener { dialogs.remove(dialog) }; dialog.show(); return
         }
@@ -614,7 +662,7 @@ class RichResponsePanel(
             addView(button("Превью") { if (!destroyed) { original.visibility = GONE; web.visibility = VISIBLE } })
         })
         tabs.addView(original); tabs.addView(web, LayoutParams(-1, dp(360)))
-        val dialog = AlertDialog.Builder(context).setTitle("Превью без скриптов и сети").setView(tabs).setPositiveButton("Закрыть", null).create()
+        val dialog = AppThemeViews.dialog(context, currentTheme()).setTitle("Превью без скриптов и сети").setView(tabs).setPositiveButton("Закрыть", null).create()
         dialogs.add(dialog); dialog.setOnDismissListener {
             dialogs.remove(dialog)
             if (!destroyed) { web.stopLoading(); destroyed = true; web.destroy() }
@@ -622,7 +670,7 @@ class RichResponsePanel(
     }
 
     private fun previewNotice(message: String) {
-        val dialog = AlertDialog.Builder(context).setMessage(message).setPositiveButton("Закрыть", null).create()
+        val dialog = AppThemeViews.dialog(context, currentTheme()).setMessage(message).setPositiveButton("Закрыть", null).create()
         dialogs.add(dialog); dialog.setOnDismissListener { dialogs.remove(dialog) }; dialog.show()
     }
     private fun scientificPreview(source: String, document: () -> String) {
@@ -634,7 +682,7 @@ class RichResponsePanel(
     private fun formulaPreview(formulas: List<MathDelimiterScanner.Formula>) {
         if (formulas.sumOf { it.latex.length.toLong() } > ScientificRendererDocument.MAX_MATH_CHARACTERS) {
             if (formulas.size == 1) { previewNotice("Формула слишком велика для превью. Исходник сохранён полностью."); return }
-            val dialog = AlertDialog.Builder(context).setTitle("Выберите формулу для превью")
+            val dialog = AppThemeViews.dialog(context, currentTheme()).setTitle("Выберите формулу для превью")
                 .setItems(formulas.mapIndexed { i, formula -> "${i + 1}. ${formula.source.take(80)}" }.toTypedArray()) { _, index -> formulaPreview(listOf(formulas[index])) }
                 .setNegativeButton("Закрыть", null).create()
             dialogs.add(dialog); dialog.setOnDismissListener { dialogs.remove(dialog) }; dialog.show(); return

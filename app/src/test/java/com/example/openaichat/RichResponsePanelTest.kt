@@ -104,7 +104,7 @@ class RichResponsePanelTest {
         }
     }
 
-    @Test fun scientificBlocksPreviewAutomaticallyInEveryThemeAndCanShowCompleteSource() {
+    @Test fun scientificBlocksPreviewWithoutSourceControlsAndRestoreCompleteSourceOnFailure() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val activity = controller.get()
         val prefs = activity.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
@@ -118,13 +118,16 @@ class RichResponsePanelTest {
                 activity.setContentView(panel)
                 val all = descendants(panel)
                 assertEquals(3, all.filterIsInstance<WebView>().size)
-                assertTrue(all.filterIsInstance<Button>().any { it.text == "Исходный код" })
+                assertTrue(all.filterIsInstance<Button>().none { it.visibility == View.VISIBLE && it.text == "Исходный код" })
                 val svg = all.filterIsInstance<WebView>().single { !it.settings.javaScriptEnabled }
                 assertFalse(svg.settings.allowFileAccess); assertTrue(svg.settings.blockNetworkLoads)
-                all.filterIsInstance<Button>().filter { it.text == "Исходный код" }.forEach { it.performClick() }
+                all.filterIsInstance<WebView>().filter { it.settings.javaScriptEnabled }.forEach {
+                    it.webChromeClient!!.onReceivedTitle(it, "renderer:failed")
+                }
                 val native = descendants(panel).filterIsInstance<TextView>().single { it.text.toString() == "x^2\n" }
-                assertEquals(theme.textPrimary, native.currentTextColor)
+                assertEquals(theme.mathText, native.currentTextColor)
                 assertEquals(View.VISIBLE, native.visibility)
+                assertTrue(descendants(panel).filterIsInstance<Button>().any { it.visibility == View.VISIBLE && it.text == "Повторить превью" })
             }
             prefs.edit().putBoolean("response_scientific_preview", false).commit()
             val disabled = RichResponsePanel(activity, {}, {})
@@ -368,30 +371,97 @@ class RichResponsePanelTest {
         assertTrue(descendants(inline).filterIsInstance<TextView>().none { it.text.toString().contains("Форматирование не завершено") })
     }
 
-    @Test fun automaticSvgUsesHorizontalTabsAndCanReopenAfterDetachWithoutAStaleWebView() = withPreviewSetting(true) { activity ->
+    @Test fun automaticSvgHasNoSourceTabsAndReopensAfterDetachWithoutAStaleWebView() = withPreviewSetting(true) { activity ->
         val source = "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"5\"/></svg>\n"
         val panel = RichResponsePanel(activity, {}, {})
         panel.submit(ChatBubbleItem.create("svg-reopen", "OpenAI", "```svg\n$source```", false))
         activity.setContentView(panel)
         val first = descendants(panel).filterIsInstance<WebView>().single()
-        val sourceButton = descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Исходный код" }
-        val previewButton = descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Превью" }
-        assertSame(sourceButton.parent, previewButton.parent)
-        assertEquals(LinearLayout.HORIZONTAL, (sourceButton.parent as LinearLayout).orientation)
-        sourceButton.performClick()
-        assertEquals(View.GONE, first.visibility)
+        assertTrue(descendants(panel).filterIsInstance<Button>().none { it.visibility == View.VISIBLE && it.text.toString() in setOf("Исходный код", "Превью") })
         val original = descendants(panel).filterIsInstance<TextView>().single { it.text.toString() == source }
-        assertEquals(View.VISIBLE, original.visibility)
-        previewButton.performClick()
+        assertEquals(View.GONE, original.visibility)
         assertEquals(View.VISIBLE, first.visibility)
         activity.setContentView(View(activity))
         assertTrue(descendants(panel).none { it is WebView })
         assertEquals(View.VISIBLE, original.visibility)
         activity.setContentView(panel)
-        previewButton.performClick()
         val reopened = descendants(panel).filterIsInstance<WebView>().single()
         assertNotSame(first, reopened)
         assertRendererSandbox(reopened, false)
+    }
+
+    @Test fun svgRendererFailureRestoresSourceAndAnExplicitRetryWithoutAddingSourceTabs() = withPreviewSetting(true) { activity ->
+        val source = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>Наука 😀</text></svg>\n"
+        val panel = RichResponsePanel(activity, {}, {})
+        panel.submit(ChatBubbleItem.create("svg-failure", "OpenAI", "```svg\n$source```", false))
+        activity.setContentView(panel)
+        val first = descendants(panel).filterIsInstance<WebView>().single()
+        first.webViewClient.onRenderProcessGone(first, object : android.webkit.RenderProcessGoneDetail() {
+            override fun didCrash() = true
+            override fun rendererPriorityAtExit() = 0
+        })
+        assertTrue(descendants(panel).none { it is WebView })
+        val original = descendants(panel).filterIsInstance<TextView>().single { it.text.toString() == source }
+        assertEquals(View.VISIBLE, original.visibility)
+        val retry = descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Повторить превью" }
+        assertEquals(View.VISIBLE, retry.visibility)
+        activity.setContentView(View(activity))
+        activity.setContentView(panel)
+        assertTrue("Reattachment must keep a diagnosed failure until explicit retry", descendants(panel).none { it is WebView })
+        assertEquals(View.VISIBLE, original.visibility)
+        retry.performClick()
+        assertEquals(View.GONE, original.visibility)
+        val reopened = descendants(panel).filterIsInstance<WebView>().single()
+        assertNotSame(first, reopened)
+        assertRendererSandbox(reopened, false)
+    }
+
+    @Test fun automaticMathKeepsItsFailureSourceAcrossReattachmentUntilExplicitRetry() = withPreviewSetting(true) { activity ->
+        val source = "\\unsupported{Наука 😀}"
+        val panel = ScientificMathView(activity, source)
+        activity.setContentView(panel)
+        val first = descendants(panel).filterIsInstance<WebView>().single()
+        first.webChromeClient!!.onReceivedTitle(first, "renderer:failed")
+        activity.setContentView(View(activity))
+        activity.setContentView(panel)
+        assertTrue(descendants(panel).none { it is WebView })
+        assertTrue(descendants(panel).filterIsInstance<TextView>().any { it.visibility == View.VISIBLE && it.text.toString() == source })
+        descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Повторить превью" }.performClick()
+        val reopened = descendants(panel).filterIsInstance<WebView>().single()
+        assertNotSame(first, reopened)
+        assertRendererSandbox(reopened, true)
+    }
+
+    @Test fun richCardsAndControlsUseTheirSemanticThemeAndCopyTheExactOriginal() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        val prefs = activity.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        try {
+            for (id in AppThemePalette.themes) {
+                prefs.edit().putString("app_theme", id).putBoolean("response_scientific_preview", false).commit()
+                val theme = AppThemePalette.byId(id)
+                for ((language, expected) in listOf("text" to theme.codeBg, "math" to theme.mathBg, "mermaid" to theme.diagramBg)) {
+                    val source = "literal_source 😀\n"
+                    val panel = RichResponsePanel(activity, {}, {})
+                    panel.submit(ChatBubbleItem.create("$id-$language", "Claude", "```$language\n$source```", false))
+                    val card = panel.getChildAt(0)
+                    val background = card.background as android.graphics.drawable.GradientDrawable
+                    assertEquals(expected, background.color!!.defaultColor)
+                    assertTrue(background.cornerRadii!![0] > background.cornerRadii!![2])
+                    val copy = descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Копировать" }
+                    val ripple = copy.background as android.graphics.drawable.RippleDrawable
+                    val fill = ripple.getDrawable(0) as android.graphics.drawable.GradientDrawable
+                    assertEquals(theme.buttonBg, fill.color!!.defaultColor)
+                    assertEquals(theme.accent, copy.currentTextColor)
+                    copy.performClick()
+                    val clipboard = activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    assertEquals(source, clipboard.primaryClip!!.getItemAt(0).text.toString())
+                }
+            }
+        } finally {
+            prefs.edit().remove("app_theme").remove("response_scientific_preview").commit()
+            controller.pause().stop().destroy()
+        }
     }
 
     private fun parserJob(panel: RichResponsePanel): Future<*>? =

@@ -47,10 +47,31 @@ object ScientificRendererDocument {
         return document("math-text", scriptData(JSONObject().put("html", html).put("prefix", prepared.prefix).put("items", items).toString()))
     }
     fun themed(document: String, theme: ThemeColors): String {
+        // Change only our first stylesheet. A matching string inside model data
+        // must remain byte-for-byte identical, including signed/copied sources.
+        val styleStart = document.indexOf("<style>")
+        if (styleStart < 0) return document
+        val start = document.indexOf(THEME_START, styleStart)
+        val end = document.indexOf(THEME_END, (start + THEME_START.length).coerceAtLeast(0))
+        if (start != styleStart + "<style>".length || end < 0 ||
+            end + THEME_END.length != document.indexOf("</style>", styleStart)) return document
+        return document.replaceRange(start + THEME_START.length, end, style(theme))
+    }
+    private const val THEME_START = "/*integral-theme:start*/"
+    private const val THEME_END = "/*integral-theme:end*/"
+    private fun style(theme: ThemeColors): String {
         fun css(color: Int) = "#%06x".format(color and 0xFFFFFF)
-        return document.replace("color:#fff;background:#1c1d22", "color:${css(theme.textPrimary)};background:${css(theme.assistantBubbleBg)}")
-            .replace("theme:'dark'", "theme:'base',themeVariables:{primaryColor:'${css(theme.cardBg)}',primaryTextColor:'${css(theme.textPrimary)}',lineColor:'${css(theme.accent)}',secondaryColor:'${css(theme.tableRowBg)}'}")
-            .replace("color:#ffb4ab", "color:${css(theme.accent)}")
+        return """
+            :root{--math-bg:${css(theme.mathBg)};--math-text:${css(theme.mathText)};--math-border:${css(theme.mathBorder)};--diagram-bg:${css(theme.diagramBg)};--diagram-text:${css(theme.diagramText)};--diagram-border:${css(theme.diagramBorder)}}
+            body{margin:8px;color:${css(theme.textPrimary)};background:${css(theme.assistantBubbleBg)};font:16px/1.5 sans-serif;overflow-wrap:anywhere}
+            section,.display-formula{display:block;overflow:auto;margin:8px 0;padding:12px;color:var(--math-text);background:var(--math-bg);border:1px solid var(--math-border);border-radius:18px 10px 18px 10px}
+            .inline-formula{color:var(--math-text);background:var(--math-bg);border-radius:6px;padding:2px 3px}
+            .failed{white-space:pre-wrap;color:${css(theme.errorText)};background:${css(theme.errorBg)};border:1px solid ${css(theme.errorText)};border-radius:12px;padding:8px}
+            blockquote{margin:8px 0;border-left:3px solid var(--math-border);border-radius:3px 12px 12px 3px;padding:8px 12px;background:var(--math-bg)}
+            pre,code,tt{font-family:monospace;color:${css(theme.codeText)};background:${css(theme.codeBg)};border-radius:6px}
+            #result.mermaid{overflow:auto;padding:10px;color:var(--diagram-text);background:var(--diagram-bg);border:1px solid var(--diagram-border);border-radius:18px 10px 18px 10px}
+            svg{max-width:100%;height:auto}p{margin:6px 0}.katex-display{margin:0.35em 0}
+        """.trimIndent()
     }
 
     private fun document(mode: String, data: String): String {
@@ -76,7 +97,7 @@ object ScientificRendererDocument {
                 const item = items.get(match[0]); if (!item) throw new Error('Unknown formula token');
                 fragment.appendChild(document.createTextNode(text.slice(start,match.index)));
                 const formula = document.createElement('span'); fragment.appendChild(formula);
-                if (item.display) formula.className = 'display-formula';
+                formula.className = item.display ? 'display-formula' : 'inline-formula';
                 try { katex.render(item.latex, formula, {displayMode:item.display, throwOnError:true, trust:false, maxExpand:1000, maxSize:20, strict:'warn', macros:{}}); }
                 catch (_) { formula.textContent = item.source; formula.className = 'failed'; }
                 start = pattern.lastIndex; replaced++;
@@ -94,7 +115,9 @@ object ScientificRendererDocument {
         """ else """
             const source = $data;
             const {default:mermaid} = await import('./response-renderer/mermaid/mermaid.esm.min.mjs');
-            mermaid.initialize({startOnLoad:false, securityLevel:'strict', htmlLabels:false, flowchart:{htmlLabels:false}, theme:'dark', maxTextSize:50000, maxEdges:500, suppressErrorRendering:true});
+            const colors = getComputedStyle(document.documentElement);
+            const color = name => colors.getPropertyValue(name).trim();
+            mermaid.initialize({startOnLoad:false, securityLevel:'strict', htmlLabels:false, flowchart:{htmlLabels:false}, theme:'base',themeVariables:{primaryColor:color('--diagram-bg'),primaryTextColor:color('--diagram-text'),primaryBorderColor:color('--diagram-border'),lineColor:color('--diagram-text'),secondaryColor:color('--math-bg'),secondaryTextColor:color('--math-text'),tertiaryColor:color('--math-bg'),edgeLabelBackground:color('--diagram-bg')}, maxTextSize:50000, maxEdges:500, suppressErrorRendering:true});
             const rendered = await mermaid.render('answerDiagram', source);
             const doc = new DOMParser().parseFromString(rendered.svg, 'image/svg+xml');
             if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'svg') throw new Error('Invalid SVG');
@@ -107,6 +130,6 @@ object ScientificRendererDocument {
             result.appendChild(document.importNode(doc.documentElement, true));
         """
         val katex = if (mode.startsWith("math")) """<link rel="stylesheet" href="./response-renderer/katex/katex.min.css"><script src="./response-renderer/katex/katex.min.js"></script>""" else ""
-        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="$csp">$katex<style>body{margin:12px;color:#fff;background:#1c1d22;font:16px sans-serif}section{overflow:auto;padding:12px 0}.display-formula{display:block;overflow:auto}.failed{white-space:pre-wrap;color:#ffb4ab}blockquote{border-left:3px solid #888;padding-left:12px}pre,code,tt{font-family:monospace}svg{max-width:100%;height:auto}</style></head><body><div id="result"></div><script type="module" nonce="$nonce">const result=document.getElementById('result');try{$engine await document.fonts.ready;document.title='renderer:ready';}catch(_){result.textContent='Превью недоступно. Исходник доступен в приложении.';document.title='renderer:failed';}</script></body></html>"""
+        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="$csp">$katex<style>$THEME_START${style(AppThemePalette.DARK)}$THEME_END</style></head><body><div id="result" class="$mode"></div><script type="module" nonce="$nonce">const result=document.getElementById('result');try{$engine await document.fonts.ready;document.title='renderer:ready';}catch(_){result.textContent='Превью недоступно. Исходник доступен в приложении.';document.title='renderer:failed';}</script></body></html>"""
     }
 }

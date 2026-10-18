@@ -46,8 +46,8 @@ object RichTextRenderer {
                     appendPlain(i + 3, end)
                     out.setSpan(TypefaceSpan("monospace"), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     theme?.let {
-                        out.setSpan(ForegroundColorSpan(it.textPrimary), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                        out.setSpan(BackgroundColorSpan(it.cardBg), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(ForegroundColorSpan(it.codeText), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(BackgroundColorSpan(it.codeBg), start, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     }
                     i = end + 3
                     continue
@@ -117,8 +117,8 @@ object RichTextRenderer {
                     appendPlain(i + 1, end)
                     out.setSpan(TypefaceSpan("monospace"), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     theme?.let {
-                        out.setSpan(ForegroundColorSpan(it.textPrimary), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                        out.setSpan(BackgroundColorSpan(it.cardBg), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(ForegroundColorSpan(it.codeText), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        out.setSpan(BackgroundColorSpan(it.codeBg), outStart, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     }
                     sourceToOutput[i]=outStart; sourceToOutput[end]=out.length
                     i = end + 1

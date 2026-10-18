@@ -62,9 +62,12 @@ class ScientificRendererDeviceTest {
                         assertTrue("Automatic previews did not render for $id", ready.await(25, TimeUnit.SECONDS))
                         val theme = AppThemePalette.byId(id)
                         val expected = "\"rgb(${android.graphics.Color.red(theme.assistantBubbleBg)}, ${android.graphics.Color.green(theme.assistantBubbleBg)}, ${android.graphics.Color.blue(theme.assistantBubbleBg)})\""
-                        previews.get().forEach { web ->
+                        previews.get().forEachIndexed { index, web ->
                             assertEquals(expected, evaluate(scenario, web, "getComputedStyle(document.body).backgroundColor"))
                             assertEquals("true", evaluate(scenario, web, "!!document.querySelector('.katex, #result svg')"))
+                            val surface = if (index == 0) theme.mathBg else theme.diagramBg
+                            val expectedSurface = "\"rgb(${android.graphics.Color.red(surface)}, ${android.graphics.Color.green(surface)}, ${android.graphics.Color.blue(surface)})\""
+                            assertEquals(expectedSurface, evaluate(scenario, web, "getComputedStyle(document.querySelector('section,#result.mermaid')).backgroundColor"))
                         }
                     } finally { scenario.onActivity { dialogRef.get().dismiss() } }
                 }
@@ -116,9 +119,10 @@ class ScientificRendererDeviceTest {
                 assertEquals("\"undefined\"", evaluate(scenario, webRef.get(), "typeof window.Android"))
                 scenario.onActivity {
                     val panel = panelRef.get()
-                    descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "Исходный код" }.performClick()
-                    assertNull("Source action disposes its renderer", findWeb(panel))
-                    assertTrue(descendants(panel).filterIsInstance<TextView>().any { it.visibility == View.VISIBLE && it.text.toString().contains("${'$'}x^2${'$'}") })
+                    assertTrue(descendants(panel).filterIsInstance<Button>().none { it.visibility == View.VISIBLE && it.text.toString() == "Исходный код" })
+                    assertSame(webRef.get(), findWeb(panel))
+                    assertTrue("Native source remains available for renderer failure", descendants(panel).filterIsInstance<TextView>()
+                        .any { it.text.toString().contains("${'$'}x^2${'$'}") })
                 }
             } finally {
                 scenario.onActivity { dialogRef.get()?.dismiss() }

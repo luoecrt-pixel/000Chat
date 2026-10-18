@@ -103,7 +103,7 @@ object ScientificRendererPreview {
         tabs.addView(Button(context).apply { text = "Превью"; setOnClickListener { if (!destroyed) { web.visibility = View.VISIBLE; originalScroll.visibility = View.GONE } } })
         column.addView(notice); column.addView(tabs); column.addView(originalScroll)
         column.addView(web, LinearLayout.LayoutParams(-1, (360 * density).toInt()))
-        val dialog = AlertDialog.Builder(context).setTitle("Формулы и диаграммы").setView(column).setPositiveButton("Закрыть", null).create()
+        val dialog = AppThemeViews.dialog(context, theme).setTitle("Формулы и диаграммы").setView(column).setPositiveButton("Закрыть", null).create()
         dialog.setOnDismissListener { handler.removeCallbacks(timeout); destroyWeb(); closed(dialog) }
         dialog.setOnShowListener {
             handler.postDelayed(timeout, 12_000)

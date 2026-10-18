@@ -671,10 +671,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
 
     fun renameChat(id: String, title: String) {
+        val normalizedTitle = title.ifBlank { "Чат" }
         writableDatabase.update(CHAT_TABLE, ContentValues().apply {
-            put("title", title.ifBlank { "Чат" })
+            put("title", normalizedTitle)
             put("updated_at", System.currentTimeMillis())
-        }, "id=?", arrayOf(id))
+        }, "id=? AND title!=?", arrayOf(id, normalizedTitle))
     }
 
     fun deleteChat(id: String) {
@@ -706,9 +707,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.transaction { db ->
             // UI snapshots can be older than Worker/async metadata, even when they have
             // the same number of messages. Never rewrite existing rows here.
-            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?",
-                arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
-            if (!exists) return@transaction
+            val storedTitle = SqliteLargeTextQuery.query(db, CHAT_TABLE, arrayOf("title"), "id=?",
+                arrayOf(id), null, null, null, "1").use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            if (storedTitle == null) return@transaction
             val known = mutableSetOf<String>()
             val stoppedRequests = mutableSetOf<String>()
             db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("local_request_id"),
@@ -738,6 +739,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             // A Worker may have inserted an assistant at position N while the UI
             // produced another user at position N. Append by request identity,
             // not by the count or stale positional alignment.
+            var appended = false
             messages.forEach { snapshot ->
                 val role = snapshot.optString("role")
                 val requestId = snapshot.optString("request_id")
@@ -749,14 +751,19 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     db.insertOrThrow(MESSAGE_TABLE, null,
                         messageContentValues(id, nextPosition++, copy,
                             ChatMessageFingerprint.of(copy)))
+                    appended = true
                 }
             }
-            val values = ContentValues().apply {
-                if (title.isNotBlank()) put("title", title)
-                // Response/effort metadata is owned by terminal writer, not stale UI.
-                put("updated_at", System.currentTimeMillis())
+            val titleChanged = title.isNotBlank() && title != storedTitle
+            if (appended || titleChanged) {
+                val values = ContentValues().apply {
+                    if (titleChanged) put("title", title)
+                    // Opening/leaving a chat and saving settings are not content changes.
+                    // Response/effort metadata is owned by terminal writer, not stale UI.
+                    put("updated_at", System.currentTimeMillis())
+                }
+                db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
             }
-            db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
             committed = true
         }
         return committed
