@@ -52,7 +52,17 @@ Safety code SHA: `3f82418d0021526e763e6b069728ea74a3d3a51a`, на основе W
 
 **Статические проверки:** UI WIP `f9a2bb6`: verify_handoff, verify_v4_17_0, verify_implementation PASS. Safety: verify_handoff и verify_implementation PASS; verify_v4_17_0 FAIL на устаревшем lexical требовании `updateMessageFileLocalState` (удалено в identity-aware attachment fix). Это отдельный незакрытый verifier gap safety-пакета; не возвращать unsafe mutation helper ради зелёного токена. Mutation suite после адаптации verifier ещё обязателен. UI mutation suites также реально прошли: implementation 7 negative mutations + positive control; v4 verifier 10 negative mutations + positive control. git diff --check PASS.
 
-**UI targeted run:** первая попытка скомпилировала production, затем test compile упал на недоступном Notification.foregroundServiceBehavior в SessionPresentationTest:162. Это ошибка тестового harness; исправлена в `cd9326e` на проверки публичных sound/vibrate/channel fields (дефер не выдаётся за runtime-проверенный). Повторно запущены FingerDrawerLayoutTest, ChatMessageLayoutManagerTest, ChatDatabaseChatOrderingTest, MainActivityChatOrderingTest, SessionPresentationTest. Итог будет дописан перед паузой; пока это не доказательство PASS.
+**UI targeted run, итог:** code/test SHA `cd9326e` (production UI runtime тот же, что f9a2bb6). Первая попытка скомпилировала production, затем test compile упал на недоступном Notification.foregroundServiceBehavior в SessionPresentationTest:162. Ошибка harness исправлена на публичные sound/vibrate/channel fields; deferred behavior не выдаётся за runtime-проверенный. Повторный Debug production/test compile PASS, 26 tests:22PASS/4failures/0errors/0skips.
+
+| UI test class | Tests | Failures | Итог |
+| --- | ---: | ---: | --- |
+| ChatDatabaseChatOrderingTest | 5 | 0 | SQLite ordering/reopen/no-op scenarios PASS |
+| MainActivityChatOrderingTest | 1 | 0 | Actual switch/settings/newChat PASS |
+| ChatMessageLayoutManagerTest | 3 | 0 | Baseline first-focus jump reproduced and narrow fix passes; editable/keyboard/explicit scroll PASS. Это Robolectric, не физический телефон. |
+| FingerDrawerLayoutTest | 13 | 2 | `interruptedSettleFollowsNewFingerAndTapDoesNotFreezePanelHalfOpen` и `ordinaryVerticalScrollStillMovesContent` FAIL; остальные11PASS. Не объявлять drawer принятым. |
+| SessionPresentationTest | 4 | 2 | `footerCopiesNewestRawAdapterSourceAndDialogPreservesSpinnerSelection` (foreground colour expected≠actual) и `activePreviewBecomesAccountingAndExpandedLogContainsLatestOnlyAtBottom` FAIL. Остальные2PASS. Нужно отделить реальную UI ошибку от недостатка fixture. |
+
+Новых изменений по этим четырём падениям в ограниченное окно не внесено. Все Gradle runs завершены; фоновых сборок на паузе не оставлено. Исполняемые противоречия присланным protocol replacements сохранены отдельно, не смешаны с failures рабочего WIP.
 
 ## Точка дальнейшей работы
 
