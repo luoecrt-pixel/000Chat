@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Looper
+import android.os.Bundle
 import android.widget.EditText
 import org.json.JSONObject
 import org.junit.After
@@ -20,6 +21,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowAlertDialog
 import java.io.File
+import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
@@ -98,5 +100,27 @@ class MainActivityConversationExportTest {
         await("SAF output was not committed") { destination.exists() && !snapshot.exists() }
         assertArrayEquals(expected, destination.readBytes())
         assertTrue(destination.readText().contains(raw))
+    }
+
+    @Test fun startupCleanupPreservesSavedPickerAndSafStillWritesOriginalSnapshot() {
+        val snapshot = start(0)
+        val expected = snapshot.readBytes()
+        val staleTime = System.currentTimeMillis() - ConversationExportSnapshots.RETENTION_MS - 60_000
+        assertTrue(snapshot.setLastModified(staleTime))
+        val orphan = File(snapshot.parentFile, "dialog_${UUID.randomUUID()}.txt").apply {
+            writeText("abandoned private text")
+            assertTrue(setLastModified(staleTime))
+        }
+        val saved = Bundle()
+        controller!!.saveInstanceState(saved).pause().stop().destroy()
+        controller = Robolectric.buildActivity(MainActivity::class.java).create(saved).start().resume().visible()
+        activity = controller!!.get()
+        await("Startup cleanup did not remove stale orphan") { !orphan.exists() }
+        assertEquals(snapshot.path, field("pendingExportPath"))
+        assertTrue(snapshot.exists())
+        val destination = File(context.cacheDir, "conversation-output.md")
+        activity.handleActivityResult(5104, Activity.RESULT_OK, Intent().setData(Uri.fromFile(destination)))
+        await("Restored picker did not finish export") { destination.exists() && !snapshot.exists() }
+        assertArrayEquals(expected, destination.readBytes())
     }
 }

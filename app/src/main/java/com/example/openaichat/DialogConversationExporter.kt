@@ -6,6 +6,7 @@ import org.json.JSONObject
 /** An explicit, readable export surface; protocol objects are never serialized. */
 object DialogConversationExporter {
     private const val ACTIVE_MARKER = "_dialog_export_active"
+    private const val WRITE_CHUNK_CHARS = 8 * 1024
     enum class Format(val extension: String, val mimeType: String, val label: String) {
         MARKDOWN("md", "text/markdown", "Markdown (.md)"),
         TEXT("txt", "text/plain", "Текст (.txt)")
@@ -23,9 +24,16 @@ object DialogConversationExporter {
     )
 
     fun export(title: String, messages: JSONArray?, activeResponse: JSONObject? = null, format: Format = Format.MARKDOWN): String =
-        export(title, if (messages == null) emptyList() else (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }, activeResponse, format)
+        buildString { writeTo(this, title, messages, activeResponse, format) }
 
-    fun export(title: String, messages: List<JSONObject>, activeResponse: JSONObject? = null, format: Format = Format.MARKDOWN): String {
+    fun export(title: String, messages: List<JSONObject>, activeResponse: JSONObject? = null, format: Format = Format.MARKDOWN): String =
+        buildString { writeTo(this, title, messages, activeResponse, format) }
+
+    /** Writes incrementally without assembling a second, whole-conversation String. Does not close [out]. */
+    fun writeTo(out: Appendable, title: String, messages: JSONArray?, activeResponse: JSONObject? = null, format: Format = Format.MARKDOWN) =
+        writeTo(out, title, if (messages == null) emptyList() else (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }, activeResponse, format)
+
+    fun writeTo(out: Appendable, title: String, messages: List<JSONObject>, activeResponse: JSONObject? = null, format: Format = Format.MARKDOWN) {
         val visible = messages.filter { text(it, "role") in setOf("user", "assistant") }.toMutableList()
         if (activeResponse != null && text(activeResponse, "role").let { it.isEmpty() || it == "assistant" }) {
             val active = JsonProtocol.objectCopy(activeResponse).put("role", "assistant").put(ACTIVE_MARKER, true)
@@ -46,8 +54,10 @@ object DialogConversationExporter {
                 }
             }
         }
-        return buildString {
-            append(if (format == Format.MARKDOWN) "# " else "").append(title).append("\n\n")
+        with(out) {
+            append(if (format == Format.MARKDOWN) "# " else "")
+            appendBounded(title)
+            append("\n\n")
             visible.forEach { message ->
                 val assistant = text(message, "role") == "assistant"
                 append(if (format == Format.MARKDOWN) "## " else "")
@@ -55,12 +65,24 @@ object DialogConversationExporter {
                 if (assistant && message.optBoolean(ACTIVE_MARKER)) append(" — незавершённый активный ответ")
                 append("\n\n")
                 // Never trim or filter message source: spaces, fences, math and Unicode are data.
-                append(text(message, "text")).append("\n\n")
+                appendBounded(text(message, "text"))
+                append("\n\n")
                 if (assistant) append("Статус: ").append(status(message)).append("\n")
                 attachments(message).forEach { append("Вложение: ").append(it).append("\n") }
                 if (assistant) tools(message).forEach { append("Инструмент: ").append(it).append("\n") }
                 append('\n')
             }
+        }
+    }
+
+    private fun Appendable.appendBounded(value: String) {
+        var start = 0
+        while (start < value.length) {
+            var end = start + minOf(WRITE_CHUNK_CHARS, value.length - start)
+            // Keep UTF-16 pairs together even for consumers that encode each append independently.
+            if (end < value.length && value[end - 1].isHighSurrogate() && value[end].isLowSurrogate()) end--
+            append(value, start, end)
+            start = end
         }
     }
 

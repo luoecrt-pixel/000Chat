@@ -1,5 +1,7 @@
 package com.example.openaichat
 
+import java.io.IOException
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -116,4 +118,84 @@ class DialogConversationExporterTest {
         active.put("role", "system").put("text", "HIDDEN_ACTIVE")
         assertFalse(DialogConversationExporter.export("Title", listOf(stored), active).contains("HIDDEN_ACTIVE"))
     }
+
+    @Test fun streamingBothOverloadsMatchExactUtf8ForFormatsActiveAndSafeMetadata() {
+        val input = message("user", "  Привет 😀\n\$x\$\n")
+            .put("file_names", JSONArray().put("план.md"))
+        val stored = message("assistant", "Part").put("request_id", "r").put("status", "in_progress")
+            .put("tool_trace", JSONArray().put(JSONObject().put("name", "web_fetch").put("ok", false)))
+            .put("reasoning_details", "HIDDEN_REASONING")
+        val active = JSONObject().put("request_id", "r").put("text", "Partial 😀").put("status", "in_progress")
+        val messages = listOf(message("system", "HIDDEN_SYSTEM"), input, stored)
+        for (format in DialogConversationExporter.Format.values()) {
+            val prefix = if (format == DialogConversationExporter.Format.MARKDOWN) "# " else ""
+            val section = if (format == DialogConversationExporter.Format.MARKDOWN) "## " else ""
+            val expected = prefix + "Диалог\n\n" + section + "Пользователь\n\n" +
+                "  Привет 😀\n\$x\$\n\n\nВложение: план.md\n\n" + section +
+                "Ассистент — незавершённый активный ответ\n\nPartial 😀\n\n" +
+                "Статус: выполняется\nИнструмент: web_fetch — ошибка\n\n"
+            val fromList = StringBuilder()
+            DialogConversationExporter.writeTo(fromList, "Диалог", messages, active, format)
+            val fromArray = StringBuilder()
+            DialogConversationExporter.writeTo(fromArray, "Диалог", JSONArray(messages), active, format)
+            assertArrayEquals(expected.toByteArray(Charsets.UTF_8), fromList.toString().toByteArray(Charsets.UTF_8))
+            assertEquals(expected, fromArray.toString())
+            assertEquals(expected, DialogConversationExporter.export("Диалог", messages, active, format))
+            assertEquals(expected, DialogConversationExporter.export("Диалог", JSONArray(messages), active, format))
+        }
+        assertEquals("Part", stored.getString("text"))
+        assertFalse(active.has("role"))
+    }
+
+    @Test fun largeUnicodeSourceStreamsBoundedChunksWithExactUtf8AndNoWholeOutputAppend() {
+        // The first pair crosses the normal chunk boundary unless the writer handles it explicitly.
+        val source = "a".repeat(8191) + "😀Кириллица\n| x | y |\n```kt\nval x = 1\n```\n".repeat(50000)
+        for (format in DialogConversationExporter.Format.values()) {
+            val sink = DigestAppendable()
+            DialogConversationExporter.writeTo(sink, "Большой диалог", listOf(message("user", source)), format = format)
+            val expected = MessageDigest.getInstance("SHA-256")
+            val heading = if (format == DialogConversationExporter.Format.MARKDOWN) "# Большой диалог\n\n## Пользователь\n\n" else "Большой диалог\n\nПользователь\n\n"
+            expected.update(heading.toByteArray(Charsets.UTF_8))
+            expected.update(source.toByteArray(Charsets.UTF_8))
+            expected.update("\n\n\n".toByteArray(Charsets.UTF_8))
+            assertArrayEquals(expected.digest(), sink.digest.digest())
+            assertTrue(sink.largestAppend <= 8192)
+            assertTrue(sink.appends > source.length / 8192)
+        }
+    }
+
+    @Test fun streamingFailurePropagatesWithoutMutatingMessages() {
+        val input = message("assistant", "Partial").put("request_id", "r").put("status", "in_progress")
+        val active = JSONObject().put("request_id", "r").put("text", "Partial extended")
+        val original = input.toString()
+        val sink = object : Appendable {
+            override fun append(value: CharSequence?): Appendable = throw IOException("disk full")
+            override fun append(value: CharSequence?, start: Int, end: Int): Appendable = throw IOException("disk full")
+            override fun append(value: Char): Appendable = throw IOException("disk full")
+        }
+        try {
+            DialogConversationExporter.writeTo(sink, "Title", listOf(input), active)
+            fail("Writer failure must reach the snapshot owner for cleanup")
+        } catch (expected: IOException) {
+            assertEquals("disk full", expected.message)
+        }
+        assertEquals(original, input.toString())
+        assertFalse(active.has("role"))
+    }
+
+    private class DigestAppendable : Appendable {
+        val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
+        var largestAppend = 0
+        var appends = 0
+        override fun append(value: CharSequence?): Appendable = append(value, 0, value?.length ?: 4)
+        override fun append(value: CharSequence?, start: Int, end: Int): Appendable {
+            val chars = value ?: "null"
+            largestAppend = maxOf(largestAppend, end - start)
+            appends++
+            digest.update(chars.subSequence(start, end).toString().toByteArray(Charsets.UTF_8))
+            return this
+        }
+        override fun append(value: Char): Appendable = append(value.toString())
+    }
+
 }

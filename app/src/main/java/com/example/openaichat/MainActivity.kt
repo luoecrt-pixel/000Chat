@@ -323,6 +323,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
     private var pendingExportPath: String? = null
+    private val exportSnapshots by lazy { ConversationExportSnapshots(File(filesDir, "exports")) }
     private val conversationExportPreparing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var pendingPickerChatId: String? = null
     private var pendingPickerProvider: String? = null
@@ -337,7 +338,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
         pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
         pendingCameraProvider = savedInstanceState?.getString("pending_camera_provider")
-        pendingExportPath = savedInstanceState?.getString("pending_export_path")
+        pendingExportPath = exportSnapshots.retain(savedInstanceState?.getString("pending_export_path"))
         pendingSaveSourcePath = savedInstanceState?.getString("pending_save_path")
         pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
         pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
@@ -394,6 +395,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         OpenRouterUiBridge.attach(this)
         openNotificationChat(intent)
         executor.execute { cleanupOrphanOpenRouterAttachments() }
+        executor.execute { exportSnapshots.cleanup() }
         diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "git_sha" to BuildConfig.BUILD_GIT_SHA, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
     }
 
@@ -1413,16 +1415,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     active = chatDb.getActiveResponse(sourceChatId)
                     db.setTransactionSuccessful()
                 } finally { db.endTransaction() }
-                val text = DialogConversationExporter.export(source.optString("title"),
-                    source.optJSONArray("messages") ?: JSONArray(), active, format)
-                val directory = File(filesDir, "exports").apply { mkdirs() }
-                val file = File(directory, "dialog_${UUID.randomUUID()}.${format.extension}")
+                exportSnapshots.cleanup()
+                val file = exportSnapshots.create(format)
                 snapshot = file
-                file.writeText(text, Charsets.UTF_8)
+                file.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    DialogConversationExporter.writeTo(writer, source.optString("title"),
+                        source.optJSONArray("messages") ?: JSONArray(), active, format)
+                }
                 runOnUiThread {
                     conversationExportPreparing.set(false)
                     if (!activityVisible || isFinishing || isDestroyed) {
-                        file.delete()
+                        exportSnapshots.delete(file.path)
                         return@runOnUiThread
                     }
                     pendingExportPath = file.absolutePath
@@ -1433,7 +1436,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }, pickExportTxt)
                 }
             } catch (_: Exception) {
-                snapshot?.delete()
+                exportSnapshots.delete(snapshot?.path)
                 conversationExportPreparing.set(false)
                 runOnUiThread { if (activityVisible && !isDestroyed) status.text = "Не удалось подготовить экспорт диалога" }
             }
@@ -6253,14 +6256,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(c!=RESULT_OK || d==null) {
             if (r == pickVectorStoreFile) pendingVectorStorePickerId = null
             if (r == pickExportTxt) {
-                pendingExportPath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+                exportSnapshots.delete(pendingExportPath)
                 pendingExportPath = null
             }
             return
         }
         if(r==pickExportTxt){
             val uri=d.data ?: run {
-                pendingExportPath?.let { File(it).delete() }
+                exportSnapshots.delete(pendingExportPath)
                 pendingExportPath=null
                 return
             }
@@ -6269,15 +6272,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(source.isNullOrBlank()){ status.text="Экспорт больше недоступен"; return }
             executor.execute {
                 try {
-                    val snapshot=File(source)
-                    if(!snapshot.isFile) throw IOException("Снимок экспорта не найден")
+                    val snapshot=exportSnapshots.requireFile(source)
                     val out=contentResolver.openOutputStream(uri)
                         ?: throw IOException("Не удалось открыть файл для записи")
                     snapshot.inputStream().use { input -> out.use { output -> input.copyTo(output, 64*1024) } }
                     runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Экспорт сохранён" }
                 } catch(e:Exception) {
                     runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Не удалось сохранить экспорт" }
-                } finally { try { File(source).delete() } catch (_: Exception) {} }
+                } finally { exportSnapshots.delete(source) }
             }
             return
         }
@@ -6376,7 +6378,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingPickerChatId = null
             pendingPickerProvider = null
             if (requestCode == pickExportTxt) {
-                pendingExportPath?.let { File(it).delete() }
+                exportSnapshots.delete(pendingExportPath)
                 pendingExportPath = null
             }
             status.text = "Операция недоступна: ${e.message}"
