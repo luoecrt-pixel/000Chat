@@ -1,3 +1,19 @@
+# 19.10.2026 — сохранение к границе 15 минут, снова пауза
+
+**Фактическая остановка06:11UTC:** final production Debug и Debug unit-test compile PASS; полный testDebugUnitTest и lintAnalyzeDebug были запущены, но не завершились до лимита. Локальные Gradle daemon/worker остановлены; exit1 от принудительной остановки не считать установленной новой регрессией. Полного final Debug green, завершённых lintDebug/assembleDebug/AndroidTest compile и local Release на последнем code нет. Последний runtime/test code —5b6a7ad; этот финальный docs checkpoint запускает новую пару CI через `[ci]`. Работа снова приостановлена, продолжение только по новому поручению.
+
+
+Окно продолжения05:57–06:12UTC заканчивается; после сохранения работу приостановить до нового поручения. Подробный актуальный результат — начало DEEP_REVIEW_2026-10-19.md. Новая реализация #32/#33 и интеграция выполнены, но final acceptance **не объявлен**.
+
+- UI интегрирована с c918ed9 в51cb852; последующие code-уточнения5b6a7ad. Footer👍/👎/Копировать/Повторить без single-messageTXT; latest request-aware ownership и draft guards; `.md`/`.txt` whole-dialog из drawer, safe typed tool metadata, rawsource, active marker/dedupe, SAF/cancel cleanup.
+- Safety c918ed9 обе push CI success. Integrated51cb852 Release39207589053 attempt1 **success** (test/lintRelease/assembleRelease/bundleRelease); Debug39207589120 ещё выполнялся. Последние уточнения нуждаются в новых CI на final head, финальный push запускается с `[ci]`; не выдавать предыдущие run за доказательство нового head.
+- Новые tests: exporter9, exportSAF2, presentation7. Первый локальный broad run отменён после baseline-red active-no-new-chunk на ранее скомпилированной production версии; исправление сохранено5b6a7ad. Повторная финальная команда testDebugUnitTest/lintDebug/assembleDebug/compileDebugAndroidTestKotlin: production Debug compile PASS, остальное на06:10UTC ещё выполняется. По границе окна завершить процессы и записать фактический итог; не оставлять локальный Gradle работать на паузе. Full local Release в это окно не завершён.
+- Static verify_handoff/v4/implementation PASS; v4 mutations18negative+positive и implementation7negative+positive PASS. Main/PR/Ready/публикация/production signing/live billing/физический телефон не выполнялись. Обе исходные ветки сохранены, safety не переписывалась.
+
+Далее только по новому поручению: сверить последний code head и реально завершённые CI/шаги; завершить именно acceptance, не переделывать реализацию по устаревшему отчёту. Known signed400/age/legacy-account-binding границы из прежнего отчёта остаются.
+
+---
+
 # 19.10.2026 06:01 UTC — новое разрешение на 10–15 минут, экспорт/футер и интеграция
 
 Владелец разрешил продолжить #32/#33 и интеграцию на 10–15 минут (старт05:57:04UTC, абсолютная граница06:12UTC). Это новое поручение приоритетнее паузы ниже. Main d515161 и отсутствие open PR повторно проверены. Safety c918ed9 Debug39201447117 и Release39201447163 — оба push attempt1 success, включая Android instrumentation.

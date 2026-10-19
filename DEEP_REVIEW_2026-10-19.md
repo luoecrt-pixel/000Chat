@@ -1,5 +1,8 @@
 # Дополнение 19.10.2026 — #32/#33 и интеграция, окно 05:57–06:12 UTC
 
+**Фактическая остановка06:11UTC:** final production Debug и Debug unit-test compile PASS; полный testDebugUnitTest и lintAnalyzeDebug были запущены, но не завершились до лимита. Локальные Gradle daemon/worker остановлены; exit1 от принудительной остановки не считать установленной новой регрессией. Полного final Debug green, завершённых lintDebug/assembleDebug/AndroidTest compile и local Release на последнем code нет. Последний runtime/test code —5b6a7ad; этот финальный docs checkpoint запускает новую пару CI через `[ci]`. Работа снова приостановлена, продолжение только по новому поручению.
+
+
 Владелец явно принял прежние решения и разрешил 10–15 минут на продолжение. Main повторно d515161, open PR нет. Safety Debug39201447117 и Release39201447163 на c918ed9, push attempt1 — **оба success**.
 
 В UI выполнены whole-dialog `.md`/`.txt` из меню выбранного чата, snapshot history+active в одной SQLite transaction, UTF-8 snapshot→SAF и очистка по cancel/nullURI/ошибке запуска/потере lifecycle. Export не переключает видимый чат и не затрагивает draft. Formatter включает только user/assistant raw text и разрешённые безопасные metadata, не сериализует prompts/reasoning/raw arguments/tool output/credentials. Неизвестный статус остаётся неизвестным; active marker и same-request partial/terminal dedupe покрыты отдельными тестами.
@@ -11,6 +14,15 @@ Footer теперь 👍/👎/Копировать/Повторить; single-me
 Новые исходники тестов: DialogConversationExporterTest9, MainActivityConversationExportTest2, SessionPresentationTest7. Это ещё не утверждение PASS: общий Gradle testDebug/lintDebug/assembleDebug/AndroidTest compile/testRelease/lintRelease выполняется. На06:04UTC static verify_handoff/v4/implementation PASS, v4 mutation18negative+positive и implementation7negative+positive PASS. Старые33/49PASS не заменяют новую интеграционную проверку. Финальный результат записывается при остановке.
 
 Промежуточный51cb852 push запустил Debug39207589120 и Release39207589053 (attempt1, ещё in_progress); после последних code-уточнений им потребуется новая пара на финальном head. Main/PR creation/Ready/merge-to-main/release/sign/device/live API не выполнялись. Ниже сохранён прежний отчёт, его незавершённые #32/#33 пункты относятся к старому checkpoint.
+
+## Результат ограниченного продолжения (сохранение перед 06:12 UTC)
+
+- Реализация #32/#33 и интеграция сохранены: b7201f7 → merge51cb852 → уточнения5b6a7ad. Safety-ветка не переписана; main без изменений. Новые runtime-требования остаются в AGENT_TASKS до финального acceptance, не удалены как будто полностью приняты CI.
+- Integrated51cb852: Release push [39207589053](https://github.com/luoecrt-pixel/000Chat/actions/runs/39207589053), attempt1 — **success**. Workflow реально содержит `test lintRelease assembleRelease bundleRelease`; это проверка основной реализации, не доказательство последующих code-уточнений. Debug [39207589120](https://github.com/luoecrt-pixel/000Chat/actions/runs/39207589120) ещё выполнялся при последнем просмотре.
+- Первый локальный общий run остановлен после нового baseline-red `activeWithoutANewChunkStillMarksTheStoredPartialAsUnfinished`: он использовал production, скомпилированный до уточнения активной пометки, и новый test. Не считать этот run final green или полным выполненным набором. На текущем5b6a7ad исправление есть; повторный run вынесен в `/workspace/scratch/000chat-integrated-final-debug.log`.
+- Production Debug compile на finalcode5b6a7ad завершён; full local Debug unit/lint/assemble/AndroidTest compile на06:10UTC ещё выполняются. Полного финального Debug/Release acceptance пока нет. Проверка новой semantic boundary по точному последнему head требует новой пары CI; финальный checkpoint push содержит `[ci]`.
+- Verifiers и mutation18+7 PASS описаны выше; два независимых read-only delta review не нашли подтверждённых blockers. Никакого live API/платного inference, main merge, PR создания/Ready, production signing, физического телефона или релиза не было. Стандартные debug/release сборки CI — проверочные артефакты, не публикация.
+- После сохранения приостановиться по границе окна. Следующее продолжение: сначала exact-final-head CI и локальные результаты, затем только исправления доказанных failures/приёмка. Больше не переносить старые «#32/#33 не реализованы» из отчёта ниже на нынешний код; **реализованы, финальная проверка ещё не закончена**.
 
 ---
 
