@@ -68,15 +68,22 @@ object AppThemeViews {
     fun dialog(context: Context, theme: ThemeColors): AlertDialog.Builder = object : AlertDialog.Builder(
         ContextThemeWrapper(context, if (theme.isLight) android.R.style.Theme_Material_Light_Dialog_Alert
             else android.R.style.Theme_Material_Dialog_Alert)) {
+        override fun show(): AlertDialog = super.show().also { applyChrome(it, context, theme) }
         override fun create(): AlertDialog = super.create().also { dialog ->
             val decor = dialog.window!!.decorView
             decor.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) {
-                    dialog.window?.setBackgroundDrawable(surface(context, theme.cardBg, theme.divider, 18))
-                    content(v, theme)
+                    applyChrome(dialog, context, theme)
                 }
                 override fun onViewDetachedFromWindow(v: View) = Unit
             })
+        }
+    }
+
+    private fun applyChrome(dialog: AlertDialog, context: Context, theme: ThemeColors) {
+        dialog.window?.apply {
+            setBackgroundDrawable(surface(context, theme.cardBg, theme.divider, 18))
+            content(decorView, theme)
         }
     }
 

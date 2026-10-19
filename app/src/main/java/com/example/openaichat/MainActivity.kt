@@ -19,6 +19,7 @@ import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
@@ -651,7 +652,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (::headerLayout.isInitialized) headerLayout.setBackgroundColor(theme.headerBg)
         if (::headerDividerView.isInitialized) headerDividerView.setBackgroundColor(theme.divider)
         if (::drawerLayout.isInitialized) drawerLayout.setBackgroundColor(theme.rootBg)
-        if (::drawerPanelLayout.isInitialized) drawerPanelLayout.setBackgroundColor(theme.drawerBg)
+        if (::drawerPanelLayout.isInitialized) {
+            drawerPanelLayout.setBackgroundColor(theme.drawerBg)
+            AppThemeViews.buttons(drawerPanelLayout, theme)
+        }
         if (::drawerTitleView.isInitialized) drawerTitleView.setTextColor(theme.textPrimary)
         if (::drawerNewChatBtn.isInitialized) {
             drawerNewChatBtn.setTextColor(theme.accent)
@@ -942,6 +946,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         root.addView(scrollContainer, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
+            visibility = View.GONE
+            doAfterTextChanged { visibility = if (it.isNullOrBlank()) View.GONE else View.VISIBLE }
             textSize = 12f
             setTextColor(currentTheme().accent)
             setPadding(dp(12), 0, dp(12), dp(4))
@@ -3159,6 +3165,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             provider = provider, requestedModel = model,
             credentialSource = if (provider == "openrouter") "openrouter_api_key" else "openai_api_key"
         )
+        renderRequestTelemetry()
         setBusy(true)
         status.text=if(preflightWarning.isNullOrBlank()) "Модель отвечает…" else "⚠ $preflightWarning\nМодель отвечает…"
         toolStates.clear()

@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Parcelable
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
@@ -58,13 +59,16 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         private set
     private val configuration = ViewConfiguration.get(context)
     private val slop = configuration.scaledTouchSlop
-    private val density = context.resources.displayMetrics.density.coerceAtLeast(1f)
+    private val density = context.resources.displayMetrics.density.takeIf { it > 0f } ?: 1f
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
     private var lastX = 0f
     private var lastDeltaX = 0f
     private var startFraction = 0f
+    private var gesturePanelWidth = 1
+    private var gestureContainerWidth = 0
+    private var gestureOpeningDirection = 1f
     private var eligible = false
     private var dragging = false
     private var outside = false
@@ -74,9 +78,15 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
     private var velocityTracker: VelocityTracker? = null
     private var animator: ValueAnimator? = null
     private var settleTarget = 0f
+    private var accessibilityContent: View? = null
+    private var previousContentAccessibility = IMPORTANT_FOR_ACCESSIBILITY_AUTO
     private val scrim = Paint().apply { color = Color.BLACK }
     private val panel get() = if (childCount > 1) getChildAt(1) else null
     private val panelWidth get() = panel?.let { if (it.width > 0) it.width else it.layoutParams.width }?.coerceAtLeast(1) ?: 1
+    private val openingDirection: Float get() {
+        val gravity = (panel?.layoutParams as? LayoutParams)?.gravity ?: Gravity.LEFT
+        return if (Gravity.getAbsoluteGravity(gravity, layoutDirection) and Gravity.HORIZONTAL_GRAVITY_MASK == Gravity.RIGHT) -1f else 1f
+    }
 
     init { clipChildren = true }
 
@@ -97,20 +107,36 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         visibleFraction = fraction.coerceIn(0f, 1f)
         panel?.apply {
             visibility = if (visibleFraction == 0f) INVISIBLE else VISIBLE
-            translationX = -panelWidth * (1f - visibleFraction)
+            translationX = -openingDirection * panelWidth * (1f - visibleFraction)
         }
-        if (childCount > 0) getChildAt(0).importantForAccessibility = if (visibleFraction == 1f)
-            IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        val content = if (childCount > 0) getChildAt(0) else null
+        if (content != null && visibleFraction > 0f) {
+            if (accessibilityContent !== content) {
+                restoreContentAccessibility()
+                previousContentAccessibility = content.importantForAccessibility
+                accessibilityContent = content
+            }
+            content.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        } else restoreContentAccessibility()
         invalidate()
     }
 
+    private fun restoreContentAccessibility() {
+        accessibilityContent?.importantForAccessibility = previousContentAccessibility
+        accessibilityContent = null
+    }
+
+    private fun restingTarget(): Float = interruptedTarget ?: animator?.let { settleTarget }
+        ?: if (visibleFraction >= 0.5f) 1f else 0f
+
     private fun settle(target: Float, animate: Boolean = true, velocityXdpPerSec: Float = 0f) {
         animator?.cancel()
+        animator = null
         settleTarget = target
         val distance = abs(target - visibleFraction)
         if (!animate || distance < 0.001f) { move(target); return }
         val speedBoost = (abs(velocityXdpPerSec) / 2200f).coerceIn(0f, 0.35f)
-        animator = ValueAnimator.ofFloat(visibleFraction, target).apply {
+        val next = ValueAnimator.ofFloat(visibleFraction, target).apply {
             duration = (260f * distance * (1f - speedBoost)).toLong().coerceIn(110L, 260L)
             interpolator = SETTLE_INTERPOLATOR
             addUpdateListener { move(it.animatedValue as Float) }
@@ -119,12 +145,21 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
                     if (animator === animation) animator = null
                 }
             })
-            start()
         }
+        // Register before start(): disabled system animations may finish synchronously.
+        animator = next
+        next.start()
     }
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
+        if (velocityTracker != null && (eligible || dragging || outside || interruptedTarget != null) &&
+            (gesturePanelWidth != panelWidth || gestureContainerWidth != width || gestureOpeningDirection != openingDirection)) {
+            val target = restingTarget()
+            eligible = false; dragging = false; outside = false; aborted = true; interruptedTarget = null
+            settle(target)
+            parent?.requestDisallowInterceptTouchEvent(false)
+        }
         move(visibleFraction)
     }
 
@@ -145,10 +180,17 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
     }
 
     private fun beginGesture(event: MotionEvent) {
+        // A new DOWN can replace a stream whose UP/CANCEL was lost. Preserve its pending
+        // settle before resetting ownership, rather than leaving a paused panel between states.
+        val previousTarget = if (velocityTracker != null) restingTarget() else null
         resetGesture()
         downX = event.x; downY = event.y; lastX = event.x; downTime = event.eventTime
         startFraction = visibleFraction
-        outside = visibleFraction > 0f && event.x > panelWidth * visibleFraction
+        gesturePanelWidth = panelWidth; gestureContainerWidth = width; gestureOpeningDirection = openingDirection
+        outside = visibleFraction > 0f && panel?.let {
+            event.x < it.left + it.translationX || event.x >= it.right + it.translationX ||
+                event.y < it.top + it.translationY || event.y >= it.bottom + it.translationY
+        } == true
         val surface = swipeSurface
         eligible = visibleFraction > 0f || (surface != null && surface.isShown &&
             surface.width > 0 && surface.height > 0 && run {
@@ -169,8 +211,10 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         }
         if (touchedText?.hasSelection() == true) eligible = false
         if (eligible || outside) {
-            interruptedTarget = animator?.let { settleTarget }
+            interruptedTarget = animator?.let { settleTarget } ?: previousTarget
             animator?.cancel()
+        } else if (animator == null && previousTarget != null) {
+            settle(previousTarget)
         }
         velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
     }
@@ -197,7 +241,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
     private fun computeVelocityDpPerSec(): Float {
         val tracker = velocityTracker ?: return 0f
         tracker.computeCurrentVelocity(1000, configuration.scaledMaximumFlingVelocity.toFloat())
-        return tracker.xVelocity / density
+        return tracker.xVelocity / density * gestureOpeningDirection
     }
 
     private fun resetGesture() {
@@ -215,7 +259,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
             eligible = false
             return false
         }
-        val dx = event.x - downX
+        val dx = (event.x - downX) * gestureOpeningDirection
         val dy = event.y - downY
         if (abs(dy) > slop && abs(dy) >= abs(dx)) { eligible = false; return false }
         return abs(dx) > slop && abs(dx) > abs(dy) * 1.8f && (startFraction > 0f || dx > 0f)
@@ -226,7 +270,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         if (event.actionMasked == MotionEvent.ACTION_MOVE && canCapture(event)) {
             dragging = true
             interruptedTarget = null
-            move(startFraction + (event.x - downX) / panelWidth)
+            move(startFraction + (event.x - downX) * gestureOpeningDirection / gesturePanelWidth)
             parent?.requestDisallowInterceptTouchEvent(true)
         }
         return dragging
@@ -252,14 +296,14 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 if (!dragging && canCapture(event)) { dragging = true; interruptedTarget = null }
-                if (dragging) move(startFraction + (event.x - downX) / panelWidth)
+                if (dragging) move(startFraction + (event.x - downX) * gestureOpeningDirection / gesturePanelWidth)
             }
             MotionEvent.ACTION_UP -> {
-                if (dragging) move(startFraction + (event.x - downX) / panelWidth)
+                if (dragging) move(startFraction + (event.x - downX) * gestureOpeningDirection / gesturePanelWidth)
                 if (dragging || outside) {
                     val vx = computeVelocityDpPerSec()
                     val target = if (outside && !dragging) 0f
-                    else decideSettleTarget(startFraction, visibleFraction, vx, lastDeltaX)
+                    else decideSettleTarget(startFraction, visibleFraction, vx, lastDeltaX * gestureOpeningDirection)
                     interruptedTarget = null
                     settle(target, true, vx)
                 }
@@ -270,7 +314,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
 
     override fun onSaveInstanceState(): Parcelable {
         val parentState = super.onSaveInstanceState()
-        return Bundle().apply { putParcelable("parent", parentState); putBoolean("open", visibleFraction >= 0.5f) }
+        return Bundle().apply { putParcelable("parent", parentState); putBoolean("open", restingTarget() == 1f) }
     }
 
     @Suppress("DEPRECATION")
@@ -282,9 +326,11 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
+        val target = restingTarget()
         animator?.cancel()
+        animator = null
         resetGesture()
-        move(if (visibleFraction >= 0.5f) 1f else 0f)
+        move(target)
         super.onDetachedFromWindow()
     }
 }

@@ -281,6 +281,47 @@ class OpenAiRequestSnapshotAndUploadTest {
         assertEquals("Observing completion must never send another request", 1, server.requestCount)
     }
 
+    @Test fun actualSendShowsCapturedModelProgressBeforeAnyResponseAndThenAccounting() {
+        val releaseResponse = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method != "POST" || request.path != "/v1/responses")
+                    return MockResponse().setResponseCode(400)
+                if (!releaseResponse.await(20, TimeUnit.SECONDS)) return MockResponse().setResponseCode(504)
+                return completedResponse(1)
+            }
+        }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var chatId = ""
+            try {
+                scenario.onActivity { activity ->
+                    chatId = initialize(activity)
+                    send(activity, "Check the request preview")
+                }
+                assertNotNull("Send must reach the private mock", server.takeRequest(10, TimeUnit.SECONDS))
+                scenario.onActivity { activity ->
+                    val preview = field(activity, "requestTelemetrySummary") as TextView
+                    assertTrue("Progress must be visible before receiving even the first SSE event",
+                        preview.text.contains("Модель работает"))
+                    prefs.edit().putString("model", "gpt-6.1-sol").commit()
+                    invoke(activity, "renderRequestTelemetry")
+                    assertTrue("Progress must use the captured request model",
+                        preview.text.contains("gpt-6-astra", ignoreCase = true) || preview.text.contains("GPT-6 Astra"))
+                    assertFalse(preview.text.contains("6.1"))
+                }
+            } finally {
+                releaseResponse.countDown()
+            }
+            awaitCompleted(chatId, 1)
+            scenario.onActivity { activity ->
+                val preview = (field(activity, "requestTelemetrySummary") as TextView).text.toString()
+                assertFalse("Terminal accounting must replace progress", preview.contains("Модель работает"))
+                assertTrue("Terminal usage must include the mock's input count", preview.contains("10"))
+            }
+        }
+        assertEquals("Preview updates must not send a second inference request", 1, server.requestCount)
+    }
+
     @Test fun disabledPaidSettingsCannotBeEnabledByPreferenceChangesDuringActualOpenAiPreparation() =
         assertSnapshot(initiallyEnabled = false)
 

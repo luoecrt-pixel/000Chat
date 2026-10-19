@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -120,5 +121,24 @@ class ChatMessageLayoutManagerTest {
         assertTrue(f.target.requestFocus())
         f.layout()
         assertNotEquals("Keyboard navigation must still reveal focused text", top, f.bubbleTop())
+    }
+
+    @Test fun accessibilityFocusAndShowOnScreenRetainTheirRealScrollPaths() {
+        Fixture(safe = true).use { f ->
+            val top = f.bubbleTop()
+            assertTrue(f.target.isInTouchMode)
+            assertTrue(f.target.performAccessibilityAction(AccessibilityNodeInfo.ACTION_FOCUS, null))
+            f.layout()
+            assertFalse("Android accessibility focus leaves touch mode", f.target.isInTouchMode)
+            assertTrue(f.target.hasFocus())
+            assertNotEquals("Accessibility focus still reveals its target", top, f.bubbleTop())
+        }
+        Fixture(safe = true).use { f ->
+            val top = f.bubbleTop()
+            assertTrue(f.target.performAccessibilityAction(
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id, null))
+            f.layout()
+            assertNotEquals("Accessibility show-on-screen requests retain their rectangle scroll", top, f.bubbleTop())
+        }
     }
 }

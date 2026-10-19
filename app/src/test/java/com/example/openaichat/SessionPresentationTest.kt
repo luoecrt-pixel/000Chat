@@ -77,8 +77,14 @@ class SessionPresentationTest {
             assertTrue(preview().text.contains("Расход неизвестен"))
             assertFalse(preview().text.contains("0.0000"))
             event(db, "old", "completed", .01)
+            // A terminal event alone cannot manufacture a confirmed charge. Follow
+            // the runtime round-ledger/finalizer path before asserting final cost.
+            val usage = JSONObject().put("prompt_tokens", 123).put("completion_tokens", 45).put("cost", .02)
+            assertTrue(db.observeOpenRouterRound(chatId, "r", 0, "gen-r", usage))
+            assertTrue(db.finalizeCurrentChatIfActiveRequest(chatId, "", null, null,
+                listOf(JSONObject().put("role", "assistant").put("provider", "openrouter")
+                    .put("request_id", "r").put("status", "completed").put("text", "done").put("usage", usage)), "r"))
             event(db, "r", "completed", .02)
-            db.clearActiveResponse(chatId, expectedRequestId = "r")
             call("renderRequestTelemetry")
             val terminalSummary = preview().text.toString().removeSuffix("  ▾")
             assertTrue(terminalSummary.contains("Расход $0.0200"))
@@ -129,6 +135,7 @@ class SessionPresentationTest {
     }
 
     @Test fun footerCopiesNewestRawAdapterSourceAndDialogPreservesSpinnerSelection() {
+        controller!!.start().resume().visible()
         val id = activity.addBubble("Ассистент", "старый текст", false)
         shadowOf(Looper.getMainLooper()).idle()
         val adapter = field("messageAdapter") as ChatMessageAdapter
@@ -147,7 +154,8 @@ class SessionPresentationTest {
         val dialog = ShadowAlertDialog.getLatestAlertDialog()!!
         val spinner = views(dialog.window!!.decorView).filterIsInstance<Spinner>().single()
         assertEquals(1, spinner.selectedItemPosition)
-        assertEquals(AppThemePalette.LIGHT.textPrimary, dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).currentTextColor)
+        assertEquals("Builder.show must synchronously theme the installed native controls",
+            AppThemePalette.LIGHT.textPrimary, dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).currentTextColor)
         val dropdown = spinner.adapter.getDropDownView(1, null, spinner) as TextView
         assertEquals(AppThemePalette.LIGHT.textPrimary, dropdown.currentTextColor)
     }
@@ -163,5 +171,25 @@ class SessionPresentationTest {
         assertNull(notification.vibrate)
         assertFalse(notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString().contains("размыш"))
         assertNull(notification.extras.getCharSequence(Notification.EXTRA_TEXT))
+    }
+
+    @Test fun themeSwitchAlsoRethemesTheDrawerCloseControl() {
+        val close = views(field("drawerPanelLayout") as View).filterIsInstance<Button>().single { it.text == "×" }
+        for (id in listOf("light", "gray", "dark")) {
+            prefs.edit().putString("app_theme", id).commit()
+            call("applyTheme")
+            val theme = AppThemePalette.byId(id)
+            assertEquals(theme.textPrimary, close.currentTextColor)
+            assertEquals(theme.buttonBg, ((close.background as RippleDrawable).getDrawable(0) as GradientDrawable).color!!.defaultColor)
+        }
+    }
+
+    @Test fun emptyToolLabelDoesNotConsumeSpaceButWarningsRemainVisible() {
+        val label = field("toolLabel") as TextView
+        assertEquals(View.GONE, label.visibility)
+        label.text = "Предупреждение инструмента"
+        assertEquals(View.VISIBLE, label.visibility)
+        label.text = ""
+        assertEquals(View.GONE, label.visibility)
     }
 }

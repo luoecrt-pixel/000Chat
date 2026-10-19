@@ -1,3 +1,19 @@
+# 19.10.2026 05:00 UTC — углублённая проверка сохранена, владелец снова приостановил работу
+
+Последнее поручение: «Сохранись и приостановись». Новую реализацию/проверки не начинать без нового поручения. Текущий подробный результат — [DEEP_REVIEW_2026-10-19.md](DEEP_REVIEW_2026-10-19.md), он приоритетнее старых промежуточных статусов ниже. Raw вложения не переносились в публичный репозиторий.
+
+- Safety `/workspace/000Chat-stability`, `fix/request-and-attachment-safety`: code `c918ed996b31af460c882bb9a5b0a6f845580eb6` уже сохранён и отправлен. 49/49 targeted PASS (attachments18, paid POST5, checkpoints4, protocol15, accounting2, classifier5), verifiers и mutations PASS. Исправлена смена credential между захватом historical download и исполнением очереди; 307/308 не повторяют inference POST. Пять прежних падений разобраны; подробности в отчёте.
+- UI `/workspace/000Chat`, `fix/interaction-telemetry-design`: новые drawer lifecycle/geometry/RTL/density/a11y fixes, drawer× theme, empty toolLabel, immediate OpenAI progress render, native dialog chrome и regression tests сохраняются текущим WIP commit. Final targeted **33/33 PASS**: drawer23/layout4/presentation6. Static verifiers PASS; v4 mutations10+positive, implementation7+positive PASS. Независимый read-only delta review blockers не выявил.
+- Предварительный full Debug:707tests/1failure (потом исправлен detached-dialog fixture/helper); **финальный** full Debug/Release/lint+Android test compile был остановлен по просьбе владельца во время testDebugUnitTest. Локальные Gradle daemon/worker завершены, command exit1 от TERM; новые instrumentation tests пока не объявлять compile/runtime-green. Логи `/workspace/scratch/000chat-deep-*.log`.
+- Safety remote Release push run39201447163, attempt1, exact c918ed9 — success. Debug run39201447117, attempt1, exact c918ed9: последняя проверенная стадия build/lint/JVM success, Android lifecycle instrumentation выполнялся. После остановки новый remote status не проверялся; существующий GitHub run может завершиться самостоятельно. UI WIP сохранение не запускает новые Android workflows (`[skip ci]`), поэтому для него ещё нужна exact-SHA пара Debug/Release после нового разрешения продолжить.
+- Ветки всё ещё **не интегрированы**; отдельные зелёные проверки не доказывают общий MainActivity/ChatDatabase diff. Main/PR/merge/release/sign/физический телефон не изменялись.
+- Подтверждены official reasoning preservation/optional signature и engine-specific URL rules; исходный400 и конкретные age/cache/noise причины по-прежнему не доказаны. Signed replay не удалялся. Legacy historical fileId→original account binding остаётся отдельной границей.
+- Последние footer/export требования #33/#32 **не завершены**: нынешний UI всё ещё Copy/Save TXT; требуется 👍/👎/Копировать/Повторить без message TXT, whole-dialog export в drawer, request-aware historical Retry. Физическая плавность/selection handles/TalkBack/narrow/font-scale/live billing не приняты.
+
+После нового поручения: сначала сверить current GitHub/CI/ветки и этот checkpoint; выполнить final UI compile/full/CI, проверить совместное состояние веток в отдельном WIP без main merge. Не пересобирать заново присланные full-file replacements и не возвращать старые saved-state строки ради snapshot verifier.
+
+---
+
 # Дополнение 19.10.2026 — ограниченная проверка присланных решений
 
 Актуальный отчёт — [PROPOSED_FIX_REVIEW_2026-10-19.md](PROPOSED_FIX_REVIEW_2026-10-19.md). Он приоритетнее старых статусов ниже. Входные файлы проверены по SHA256; два узких source review и isolated JVM counterexamples показали, что full-file replacements применять нельзя. Новые пожелания сохранены в AGENT_TASKS #33/#32.
