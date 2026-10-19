@@ -53,7 +53,7 @@ assert 'showPendingLocalPreview' in main
 assert 'addCompactTextPreview' in main
 assert 'addCompactImagePreview' in main
 assert 'addCompactPdfPreview' in main
-assert 'updateMessageFileLocalState' in main
+assert 'updateMessageFileLocalState' not in main, 'historical downloads must not mutate captured message/index state'
 assert 'updateUserFileLocalPath' in db
 assert 'updateUserImageLocalPath' in db
 assert 'import okio.buffer' in main
@@ -276,6 +276,39 @@ def find_matching_kotlin_brace(src: str, open_index: int) -> int:
                 return i
         i += 1
     raise AssertionError("unterminated Kotlin brace block")
+
+
+def kotlin_method(src: str, name: str) -> str:
+    match = re.search(r'\bfun\s+' + re.escape(name) + r'\s*\(', src)
+    assert match, f'missing method: {name}'
+    opening = src.index('{', match.end())
+    return src[match.start():find_matching_kotlin_brace(src, opening) + 1]
+
+
+# Historical downloads bind one immutable source to an atomic SQLite CAS. A chat
+# switch may keep the valid durable copy, but must never apply its posted UI work.
+for suffix in ('File', 'Image'):
+    download = kotlin_method(main, f'downloadUser{suffix}Copy')
+    persist = kotlin_method(db, f'updateUser{suffix}LocalPath')
+    assert 'HistoricalAttachmentDownloadTarget.' + suffix.lower() + '(' in download
+    assert 'val fileId=target.fileId' in download
+    assert download.index('val credential=readCredential()') < download.index('executor.execute{')
+    assert 'if(credential!=readCredential())throw IOException(' in download
+    assert '.addHeader("Authorization","Bearer $credential")' in download
+    assert 'File.createTempFile(' in download, 'downloads need their own disposable destination'
+    assert 'retained=chatDb.updateUser' + suffix + 'LocalPath(target,' in download
+    assert 'if(!retained)return@execute' in download
+    assert 'if(!retained)destination?.delete()' in download, 'failed source CAS must release downloaded bytes'
+    assert download.count('isRequestCurrent(chatId,generation)') == 4
+    assert download.count('chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)') == 2
+    assert download.count('chatDb.isHistoricalAttachmentDownloadCurrent(target)') == 2
+    assert 'writableDatabase.transaction { db ->' in persist
+    assert 'historicalDownloadMessage(db, target) ?: return@transaction' in persist
+    assert 'if (!target.matches(current)) return@transaction' in persist
+    assert 'arrayOf(current.getLong("_db_message_id").toString())' in persist
+historical_read = kotlin_method(db, 'historicalDownloadMessage')
+assert 'SqliteLargeTextQuery.query(db, MESSAGE_TABLE,' in historical_read
+assert 'chat_id=? AND role=\'user\' AND $identity' in historical_read
 
 
 # Vector Store list rendering must be UI-thread-safe even when called from an Executor callback.

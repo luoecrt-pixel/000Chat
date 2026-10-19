@@ -25,8 +25,10 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /** The production Activity HTTP completion races the real attachment mutation and SQLite writers. */
 @RunWith(RobolectricTestRunner::class)
@@ -142,20 +144,39 @@ class HistoricalAttachmentDownloadTest {
         assertEquals("Изображение доступно: missing.png", status(activity).text.toString())
     }
 
-    @Test fun completionAfterEditOrDeleteCannotRestoreRemovedMessage() {
-        for (delete in listOf(false, true)) {
-            val activity = launch(files())
-            val gate = download(activity)
-            if (delete) activity.deleteChat(chatId)
-            else invoke(activity, "editMessage", 0)
-            gate.release.countDown(); awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
-            ChatDatabase(context).use { db ->
-                val rows = db.getChat(chatId)?.getJSONArray("messages")
-                assertTrue(rows == null || rows.length() == 0)
-            }
-            assertTrue(downloadedFiles().isEmpty()); assertEquals("KEEP ORIGINAL", original.readText())
-            controller!!.pause().stop().destroy(); controller = null
+    @Test fun completionAfterEditCannotRestoreRemovedMessageOrDeleteComposerOriginal() {
+        val activity = launch(files())
+        val gate = download(activity)
+        invoke(activity, "editMessage", 0)
+        gate.release.countDown(); awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
+        assertRemovedMessageAndNoDownload()
+        // Edit moves the original attachment into the composer, which still owns its bytes.
+        assertEquals("KEEP ORIGINAL", original.readText())
+    }
+
+    @Test fun completionAfterDeleteCannotRestoreRemovedMessageAndReleasesLastOwnedOriginal() {
+        val activity = launch(files())
+        val gate = download(activity)
+        activity.deleteChat(chatId)
+        gate.release.countDown(); awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
+        assertRemovedMessageAndNoDownload()
+        // This chat was the only owner. Deleting its original is intentional cleanup.
+        assertFalse(original.exists())
+    }
+
+    @Test fun completionAfterDeletePreservesOriginalStillOwnedByAnotherChat() {
+        val activity = launch(files())
+        ChatDatabase(context).use { db ->
+            db.upsertCurrentChat("shared-owner", "Shared", null, null, listOf(
+                JSONObject().put("role", "user").put("text", "Shared original")
+                    .put("file_paths", JSONArray().put(original.path))
+            ))
         }
+        val gate = download(activity)
+        activity.deleteChat(chatId)
+        gate.release.countDown(); awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
+        assertRemovedMessageAndNoDownload()
+        assertEquals("KEEP ORIGINAL", original.readText())
     }
 
     @Test fun switchedChatKeepsValidDurableDownloadWithoutApplyingItsUiCallback() {
@@ -195,6 +216,93 @@ class HistoricalAttachmentDownloadTest {
         assertEquals("DOWNLOADED ORIGINAL", File(persisted().getJSONArray("file_paths").getString(0)).readText())
     }
 
+    @Test fun queuedFileDownloadCannotUseCredentialSelectedAfterItsSourceWasCaptured() = queuedCredentialRotation(image = false)
+
+    @Test fun queuedImageDownloadCannotUseCredentialSelectedAfterItsSourceWasCaptured() = queuedCredentialRotation(image = true)
+
+    private fun queuedCredentialRotation(image: Boolean) {
+        val activity = launch(if (image) image() else files())
+        awaitIdle(activity)
+        val selected = AtomicReference("sk-synthetic-download-account-a")
+        activity.historicalAttachmentCredentialProvider = selected::get
+        val previousExecutor = field<ThreadPoolExecutor>(activity, "executor")
+        val queuedExecutor = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue())
+        MainActivity::class.java.getDeclaredField("executor").apply { isAccessible = true }.set(activity, queuedExecutor)
+        previousExecutor.shutdown()
+        val workerEntered = CountDownLatch(1)
+        val workerRelease = CountDownLatch(1)
+        queuedExecutor.execute {
+            workerEntered.countDown()
+            check(workerRelease.await(10, TimeUnit.SECONDS)) { "Queue gate timed out" }
+        }
+        assertTrue(workerEntered.await(5, TimeUnit.SECONDS))
+        try {
+            val before = persisted().toString()
+            val gate = download(activity, image, awaitHttp = false)
+            selected.set("sk-synthetic-download-account-b")
+            workerRelease.countDown()
+            awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("Rotation before HTTP must not request either account", 1L, gate.entered.count)
+            assertEquals(before, persisted().toString())
+            assertTrue(downloadedFiles().isEmpty())
+            assertTrue(status(activity).text.toString().contains("Ключ API изменился"))
+        } finally {
+            workerRelease.countDown()
+        }
+    }
+
+    @Test fun credentialRotationAfterHttpStartedKeepsTheCapturedCredentialAndOwnedSource() {
+        val activity = launch(files())
+        val selected = AtomicReference("sk-synthetic-download-account-a")
+        activity.historicalAttachmentCredentialProvider = selected::get
+        val gate = download(activity)
+        selected.set("sk-synthetic-download-account-b")
+        gate.release.countDown(); awaitIdle(activity); shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("Bearer sk-synthetic-download-account-a", gate.authorization)
+        assertEquals("DOWNLOADED ORIGINAL", File(persisted().getJSONArray("file_paths").getString(0)).readText())
+        assertEquals("KEEP ORIGINAL", original.readText())
+    }
+
+    @Test fun sourceCasReadsLargeMetadataAndPreservesConcurrentTextAndSiblingAttachment() {
+        val longName = "Файл😀\u0000科学".repeat(180000)
+        val fullText = "Полный текст😀\u0000\n".repeat(180000)
+        ChatDatabase(context).use { db ->
+            val source = files().put("text", fullText)
+                .put("file_names", JSONArray().put("missing.txt").put(longName))
+            db.upsertCurrentChat(chatId, "Large source", null, null, listOf(source))
+            val captured = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+            val target = HistoricalAttachmentDownloadTarget.file(chatId, captured, 0)!!
+            val changed = JsonProtocol.objectCopy(captured).put("text", "$fullText\nupdated")
+            val tail = JSONObject().put("role", "assistant").put("text", "Concurrent tail")
+            db.upsertCurrentChat(chatId, "Large source", null, null, listOf(changed, tail))
+            assertTrue(db.updateUserFileLocalPath(target, "/downloaded-original.txt", "text/plain", 19L))
+        }
+        ChatDatabase(context).use { db ->
+            val rows = db.getChat(chatId)!!.getJSONArray("messages")
+            val restored = rows.getJSONObject(0)
+            assertEquals("$fullText\nupdated", restored.getString("text"))
+            assertEquals(longName, restored.getJSONArray("file_names").getString(1))
+            assertEquals(original.path, restored.getJSONArray("file_paths").getString(1))
+            assertEquals("/downloaded-original.txt", restored.getJSONArray("file_paths").getString(0))
+            assertEquals("Concurrent tail", rows.getJSONObject(1).getString("text"))
+        }
+    }
+
+    @Test fun oldTargetCannotRepopulateMessageRecreatedWithTheSameRequestAndFileIds() {
+        ChatDatabase(context).use { db ->
+            db.upsertCurrentChat(chatId, "Original", null, null, listOf(files()))
+            val captured = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+            val target = HistoricalAttachmentDownloadTarget.file(chatId, captured, 0)!!
+            db.upsertCurrentChat(chatId, "Edited", null, null, emptyList())
+            db.upsertCurrentChat(chatId, "Reattached", null, null, listOf(files()))
+            val replacement = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+            assertNotEquals(captured.getLong("_db_message_id"), replacement.getLong("_db_message_id"))
+            assertFalse(db.updateUserFileLocalPath(target, "/stale-original.txt", "text/plain", 19L))
+            assertEquals("", db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0)
+                .getJSONArray("file_paths").getString(0))
+        }
+    }
+
     private fun files() = JSONObject().put("role", "user").put("text", "Question").put("request_id", "request")
         .put("file_ids", JSONArray().put("file_missing").put("file_keep"))
         .put("file_names", JSONArray().put("missing.txt").put("keep.txt"))
@@ -216,12 +324,14 @@ class HistoricalAttachmentDownloadTest {
     private class Gate(val message: JSONObject) {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
+        @Volatile var authorization: String? = null
     }
 
-    private fun download(activity: MainActivity, image: Boolean = false): Gate {
+    private fun download(activity: MainActivity, image: Boolean = false, awaitHttp: Boolean = true): Gate {
         val gate = Gate(persisted()).also(gates::add)
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             assertTrue(chain.request().url.toString().startsWith("https://api.openai.com/v1/files/file_"))
+            gate.authorization = chain.request().header("Authorization")
             gate.entered.countDown()
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
             while (gate.release.count > 0L) {
@@ -234,7 +344,7 @@ class HistoricalAttachmentDownloadTest {
         MainActivity::class.java.getDeclaredField("client").apply { isAccessible = true }.set(activity, client)
         if (image) invoke(activity, "downloadUserImageCopy", gate.message, LinearLayout(activity), false)
         else invoke(activity, "downloadUserFileCopy", gate.message, 0, LinearLayout(activity), false)
-        assertTrue("The production download must reach HTTP", gate.entered.await(5, TimeUnit.SECONDS))
+        if (awaitHttp) assertTrue("The production download must reach HTTP", gate.entered.await(5, TimeUnit.SECONDS))
         return gate
     }
 
@@ -249,9 +359,19 @@ class HistoricalAttachmentDownloadTest {
     }
 
     private fun persisted(): JSONObject = ChatDatabase(context).use { it.getChat(chatId)!!.getJSONArray("messages").getJSONObject(0) }
+    private fun assertRemovedMessageAndNoDownload() {
+        ChatDatabase(context).use { db ->
+            val rows = db.getChat(chatId)?.getJSONArray("messages")
+            assertTrue(rows == null || rows.length() == 0)
+        }
+        assertTrue(downloadedFiles().isEmpty())
+    }
     private fun downloadedFiles() = File(context.filesDir, "attachments").listFiles().orEmpty().toList()
     private fun status(activity: MainActivity) = field<TextView>(activity, "status")
-    private fun awaitIdle(activity: MainActivity) = awaitCondition(pumpUi = false) { field<ThreadPoolExecutor>(activity, "executor").activeCount == 0 }
+    private fun awaitIdle(activity: MainActivity) = awaitCondition(pumpUi = false) {
+        val executor = field<ThreadPoolExecutor>(activity, "executor")
+        executor.activeCount == 0 && executor.queue.isEmpty() && executor.completedTaskCount == executor.taskCount
+    }
     private fun awaitCondition(pumpUi: Boolean = true, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (!condition()) {

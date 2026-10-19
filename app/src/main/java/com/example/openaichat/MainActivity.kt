@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private data class HistoricalAttachmentTarget(val chatId: String, val expected: JSONObject,
         val manifestIndex: Int? = null, val fileIndex: Int? = null, val image: Boolean = false)
     private var pendingAttachmentRestore: HistoricalAttachmentTarget? = null
+    @VisibleForTesting internal var historicalAttachmentCredentialProvider: (() -> String)? = null
     private val pendingAttachmentChange = AtomicReference<String?>(null)
     private val historicalFilePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = pendingAttachmentRestore
@@ -7682,14 +7683,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val requestId=target.requestId.orEmpty()
         val filename=safeDisplayName(JsonProtocol.string(names, index).ifBlank{"attachment_${index+1}"})
         val mimeHint=userFileMime(message,index,filename)
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $filename…"
         executor.execute{
             var destination:File?=null
             var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder().url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
+                    .addHeader("Authorization","Bearer $credential").get().build()
                 destination=File.createTempFile("user_","_"+safeFileName(filename),File(filesDir,"attachments").apply{mkdirs()})
                 client.newCall(req).execute().use{resp->
                     if(!resp.isSuccessful)throw FileDownloadException(resp.code)
@@ -7749,15 +7752,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val requestId=target.requestId.orEmpty()
         val name=safeDisplayName(JsonProtocol.string(message, "image_name").ifBlank{"image.png"})
         val mimeHint=JsonProtocol.string(message, "image_mime").ifBlank{mimeForFilename(name)}
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $name…"
         executor.execute{
             var destination:File?=null
             var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder()
                     .url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
+                    .addHeader("Authorization","Bearer $credential").get().build()
                 val dir=File(filesDir,"attachments").apply{mkdirs()}
                 destination=File.createTempFile("user_image_","_"+safeFileName(name),dir)
                 var mime=mimeHint

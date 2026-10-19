@@ -54,6 +54,29 @@ class OpenRouterPaidPostSafetyTest {
         assertPostIsNotRepeated(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
     }
 
+    @Test fun bodyPreservingRedirectCannotReplayInferencePost() {
+        for (code in listOf(307, 308)) {
+            val server = MockWebServer()
+            server.start()
+            val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+            try {
+                server.enqueue(MockResponse().setResponseCode(code)
+                    .setHeader("Location", server.url("/redirected/chat/completions")))
+                server.enqueue(stream("""{"choices":[{"delta":{"content":"Unwanted redirected inference"},"finish_reason":"stop"}]}"""))
+                assertThrows(IOException::class.java) { complete(client) }
+                val original = server.takeRequest(2, TimeUnit.SECONDS)!!
+                assertEquals("POST", original.method)
+                assertEquals("/api/v1/chat/completions", original.path)
+                assertNull("HTTP $code must not replay the paid request at its Location",
+                    server.takeRequest(250, TimeUnit.MILLISECONDS))
+                assertEquals(1, server.requestCount)
+            } finally {
+                client.close()
+                server.shutdown()
+            }
+        }
+    }
+
     @Test fun successfulToolRoundStillStartsOneExplicitContinuationWithOriginalResult() {
         val server = MockWebServer()
         server.start()
