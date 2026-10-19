@@ -152,14 +152,15 @@ class SessionPresentationTest {
         assertEquals(AppThemePalette.LIGHT.textPrimary, dropdown.currentTextColor)
     }
 
-    @Test fun backgroundIndicatorIsSilentDeferredAndHasNoThinkingOrPrivateChatText() {
+    @Test fun backgroundIndicatorIsSilentAndHasNoThinkingOrPrivateChatText() {
         val notification = ResponseNotifications.running(context, "private-chat")
         val channel = context.getSystemService(NotificationManager::class.java).getNotificationChannel(notification.channelId)
         assertEquals(NotificationManager.IMPORTANCE_MIN, channel.importance)
         assertNull(channel.sound)
         assertFalse(channel.shouldVibrate())
         assertFalse(channel.canShowBadge())
-        assertEquals(Notification.FOREGROUND_SERVICE_DEFERRED, notification.foregroundServiceBehavior)
+        assertNull(notification.sound)
+        assertNull(notification.vibrate)
         assertFalse(notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString().contains("размыш"))
         assertNull(notification.extras.getCharSequence(Notification.EXTRA_TEXT))
     }
