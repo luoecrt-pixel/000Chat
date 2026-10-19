@@ -22,6 +22,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
 import kotlin.math.abs
 
 /** Ordinary message swipes open the drawer; scrolling and text selection keep their gesture. */
@@ -74,6 +75,9 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
     private var outside = false
     private var aborted = false
     private var touchedText: TextView? = null
+    private var settlingRecycler: RecyclerView? = null
+    private var recyclerFlingClaim = false
+    private var dispatchingDown = false
     private var interruptedTarget: Float? = null
     private var velocityTracker: VelocityTracker? = null
     private var animator: ValueAnimator? = null
@@ -100,6 +104,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         // A button, Back or chat switch also ends any gesture currently owning the panel.
         if (velocityTracker != null) aborted = true
         eligible = false; dragging = false; outside = false; interruptedTarget = null
+        recyclerFlingClaim = false; settlingRecycler = null
         settle(target, animate)
     }
 
@@ -153,10 +158,11 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        if (velocityTracker != null && (eligible || dragging || outside || interruptedTarget != null) &&
+        if (velocityTracker != null && (eligible || dragging || outside || recyclerFlingClaim || interruptedTarget != null) &&
             (gesturePanelWidth != panelWidth || gestureContainerWidth != width || gestureOpeningDirection != openingDirection)) {
             val target = restingTarget()
             eligible = false; dragging = false; outside = false; aborted = true; interruptedTarget = null
+            recyclerFlingClaim = false; settlingRecycler = null
             settle(target)
             parent?.requestDisallowInterceptTouchEvent(false)
         }
@@ -210,6 +216,10 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
             current = current.parent as? View
         }
         if (touchedText?.hasSelection() == true) eligible = false
+        // RecyclerView claims a DOWN that stops its previous fling before marking
+        // itself DRAGGING. Keep taps with it, but arbitrate a new horizontal drag.
+        if (eligible && startFraction == 0f && surface is RecyclerView &&
+            surface.scrollState == RecyclerView.SCROLL_STATE_SETTLING) settlingRecycler = surface
         if (eligible || outside) {
             interruptedTarget = animator?.let { settleTarget } ?: previousTarget
             animator?.cancel()
@@ -227,9 +237,34 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
             val step = event.x - lastX
             if (abs(step) > 0.5f) lastDeltaX = step
             lastX = event.x
-            if (event.pointerCount != 1) eligible = false
+            if (event.pointerCount != 1) { eligible = false; recyclerFlingClaim = false }
         }
-        val handled = super.dispatchTouchEvent(event)
+        if (event.actionMasked == MotionEvent.ACTION_MOVE && recyclerFlingClaim) {
+            eligible = true
+            if (canCapture(event)) {
+                recyclerFlingClaim = false
+                // This clears only the previous-fling claim. Current child requests
+                // cancel the candidate in requestDisallowInterceptTouchEvent below.
+                super.requestDisallowInterceptTouchEvent(false)
+            } else {
+                if (!eligible || aborted) recyclerFlingClaim = false
+                eligible = false
+                // RV is already DRAGGING after stopping its fling. Delivering tiny
+                // jitter now would scroll a pixel and renew its claim before either
+                // direction reaches touchSlop. Leave the tap/next deliberate move
+                // with its native target; all samples still reach our velocity tracker.
+                if (recyclerFlingClaim && abs(event.x - downX) <= slop &&
+                    abs(event.y - downY) <= slop) return true
+            }
+        }
+        dispatchingDown = event.actionMasked == MotionEvent.ACTION_DOWN
+        val handled = try { super.dispatchTouchEvent(event) } finally { dispatchingDown = false }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && recyclerFlingClaim) {
+            // Keep ownership in our pending policy, not cached ViewGroup flags:
+            // otherwise an intermediate parent can swallow a later real child
+            // requestDisallow(true) as a duplicate before we ever observe it.
+            settlingRecycler?.parent?.requestDisallowInterceptTouchEvent(false)
+        }
         if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
             // A child may own the whole sequence, including an interrupted animation's tap.
             interruptedTarget?.let { settle(it) }
@@ -248,6 +283,7 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
         velocityTracker?.recycle(); velocityTracker = null
         eligible = false; dragging = false; outside = false; aborted = false
         lastDeltaX = 0f; touchedText = null; interruptedTarget = null
+        settlingRecycler = null; recyclerFlingClaim = false
         super.requestDisallowInterceptTouchEvent(false)
     }
 
@@ -278,7 +314,11 @@ class FingerDrawerLayout(context: Context) : FrameLayout(context) {
 
     override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
         // Selection handles, long press and nested scroll are real owners of their stream.
-        if (disallowIntercept && !dragging) eligible = false
+        if (disallowIntercept && !dragging) {
+            recyclerFlingClaim = dispatchingDown && eligible &&
+                settlingRecycler?.scrollState == RecyclerView.SCROLL_STATE_SETTLING
+            eligible = false
+        }
         super.requestDisallowInterceptTouchEvent(disallowIntercept)
     }
 

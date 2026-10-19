@@ -2251,6 +2251,7 @@ class MainActivityLifecycleTest {
             val touched = state("touchedText") as? android.widget.TextView
             val line = "$stage fraction=${drawer.visibleFraction} eligible=${state("eligible")}" +
                 " dragging=${state("dragging")} aborted=${state("aborted")}" +
+                " flingClaim=${state("recyclerFlingClaim")}" +
                 " panelWidth=${(drawer.getChildAt(1)).width} width=${drawer.width}" +
                 " capturedPanelWidth=${state("gesturePanelWidth")} capturedWidth=${state("gestureContainerWidth")}" +
                 " startFraction=${state("startFraction")} down=(${state("downX")},${state("downY")})" +
