@@ -15,7 +15,7 @@ class OpenRouterResponseService : Service() {
         val id = intent?.getStringExtra(EXTRA_REQUEST_ID).orEmpty()
         val chat = OpenRouterResponseRuntime.chatFor(id).orEmpty()
         try {
-            ServiceCompat.startForeground(this, 41063, ResponseNotifications.running(this, chat, OpenRouterResponseRuntime.count()),
+            ServiceCompat.startForeground(this, 41063, ResponseNotifications.running(this, chat),
                 if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0)
         } catch (e: Exception) {
             if (!OpenRouterUiBridge.viewing(chat)) {

@@ -19,6 +19,7 @@ import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import android.content.res.ColorStateList
@@ -69,6 +70,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private data class HistoricalAttachmentTarget(val chatId: String, val expected: JSONObject,
         val manifestIndex: Int? = null, val fileIndex: Int? = null, val image: Boolean = false)
     private var pendingAttachmentRestore: HistoricalAttachmentTarget? = null
+    @VisibleForTesting internal var historicalAttachmentCredentialProvider: (() -> String)? = null
     private val pendingAttachmentChange = AtomicReference<String?>(null)
     private val historicalFilePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = pendingAttachmentRestore
@@ -235,6 +237,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private lateinit var attachScroll: HorizontalScrollView
     private lateinit var effortBadge: TextView
     private lateinit var modelBadge: TextView
+    private lateinit var responseSettingsBtn: Button
     private lateinit var rootLayout: LinearLayout
     private lateinit var headerLayout: LinearLayout
     private lateinit var headerDividerView: View
@@ -320,6 +323,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
     private var pendingExportPath: String? = null
+    private val exportSnapshots by lazy { ConversationExportSnapshots(File(filesDir, "exports")) }
+    private val conversationExportPreparing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var pendingPickerChatId: String? = null
     private var pendingPickerProvider: String? = null
     private var pendingSaveSourcePath: String? = null
@@ -333,7 +338,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         pendingCameraPath = savedInstanceState?.getString("pending_camera_path")
         pendingCameraChatId = savedInstanceState?.getString("pending_camera_chat_id")
         pendingCameraProvider = savedInstanceState?.getString("pending_camera_provider")
-        pendingExportPath = savedInstanceState?.getString("pending_export_path")
+        pendingExportPath = exportSnapshots.retain(savedInstanceState?.getString("pending_export_path"))
         pendingSaveSourcePath = savedInstanceState?.getString("pending_save_path")
         pendingSaveFilename = savedInstanceState?.getString("pending_save_name")
         pendingSaveMime = savedInstanceState?.getString("pending_save_mime")
@@ -390,6 +395,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         OpenRouterUiBridge.attach(this)
         openNotificationChat(intent)
         executor.execute { cleanupOrphanOpenRouterAttachments() }
+        executor.execute { exportSnapshots.cleanup() }
         diagnostics.log("app_started", mapOf("version" to BuildConfig.VERSION_NAME, "git_sha" to BuildConfig.BUILD_GIT_SHA, "model" to (prefs.getString("model", "gpt-6-astra") ?: "gpt-6-astra")))
     }
 
@@ -643,11 +649,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun applyTheme() {
         val theme = currentTheme()
-        if (::rootLayout.isInitialized) rootLayout.setBackgroundColor(theme.rootBg)
+        if (::rootLayout.isInitialized) {
+            rootLayout.setBackgroundColor(theme.rootBg)
+            AppThemeViews.buttons(rootLayout, theme)
+        }
         if (::headerLayout.isInitialized) headerLayout.setBackgroundColor(theme.headerBg)
         if (::headerDividerView.isInitialized) headerDividerView.setBackgroundColor(theme.divider)
         if (::drawerLayout.isInitialized) drawerLayout.setBackgroundColor(theme.rootBg)
-        if (::drawerPanelLayout.isInitialized) drawerPanelLayout.setBackgroundColor(theme.drawerBg)
+        if (::drawerPanelLayout.isInitialized) {
+            drawerPanelLayout.setBackgroundColor(theme.drawerBg)
+            AppThemeViews.buttons(drawerPanelLayout, theme)
+        }
         if (::drawerTitleView.isInitialized) drawerTitleView.setTextColor(theme.textPrimary)
         if (::drawerNewChatBtn.isInitialized) {
             drawerNewChatBtn.setTextColor(theme.accent)
@@ -656,7 +668,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (::title.isInitialized) title.setTextColor(theme.textPrimary)
         if (::status.isInitialized) status.setTextColor(theme.textSecondary)
         if (::toolLabel.isInitialized) toolLabel.setTextColor(theme.accent)
-        if (::modelBadge.isInitialized) modelBadge.setTextColor(theme.textPrimary)
+        if (::modelBadge.isInitialized) AppThemeViews.button(modelBadge, theme)
         if (::effortBadge.isInitialized) {
             effortBadge.setTextColor(theme.accent)
             effortBadge.background = rippleRounded(theme.buttonBg, 8)
@@ -683,6 +695,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
         }
         if (::drawerList.isInitialized) refreshChatDrawer()
+        if (::requestTelemetrySummary.isInitialized) renderRequestTelemetry()
         if (::messageAdapter.isInitialized) {
             val chatId = currentChatId()
             if (::scroll.isInitialized && scroll.height > 0 &&
@@ -702,7 +715,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(17,18,21))
+            setBackgroundColor(currentTheme().rootBg)
         }
         rootLayout = root
 
@@ -710,7 +723,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(3), dp(8), dp(3))
-            setBackgroundColor(Color.rgb(22,23,27))
+            setBackgroundColor(currentTheme().headerBg)
         }
         headerLayout = header
 
@@ -722,7 +735,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         title = TextView(this).apply {
             text = currentChatTitle()
             textSize = 17f
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
             setTypeface(null, Typeface.BOLD)
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
@@ -746,13 +759,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin=dp(4) })
         root.addView(header)
         updateModelBadge()
-        headerDividerView = View(this).apply{ setBackgroundColor(Color.rgb(34,36,42)) }
+        headerDividerView = View(this).apply{ setBackgroundColor(currentTheme().buttonBg) }
         root.addView(headerDividerView, LinearLayout.LayoutParams(-1,dp(1)))
 
         status = TextView(this).apply {
             text = "Готово"
             textSize = 12f
-            setTextColor(Color.rgb(165,170,180))
+            setTextColor(currentTheme().textSecondary)
             setPadding(dp(14), 0, dp(14), dp(4))
         }
         root.addView(status)
@@ -773,7 +786,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         )
         scroll = RecyclerView(this).apply {
             id = R.id.chat_messages_recycler
-            layoutManager = object : LinearLayoutManager(this@MainActivity) {
+            layoutManager = object : ChatMessageLayoutManager(this@MainActivity) {
                 init {
                     stackFromEnd = true
                 }
@@ -937,8 +950,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         root.addView(scrollContainer, LinearLayout.LayoutParams(-1, 0, 1f))
 
         toolLabel = TextView(this).apply {
+            visibility = View.GONE
+            doAfterTextChanged { visibility = if (it.isNullOrBlank()) View.GONE else View.VISIBLE }
             textSize = 12f
-            setTextColor(Color.rgb(145,190,245))
+            setTextColor(currentTheme().accent)
             setPadding(dp(12), 0, dp(12), dp(4))
             maxLines = 4
             ellipsize = TextUtils.TruncateAt.END
@@ -965,23 +980,26 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         effortBadge = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.rgb(138,180,248))
+            setTextColor(currentTheme().accent)
             setPadding(dp(9), dp(5), dp(9), dp(5))
-            background = rippleRounded(Color.rgb(31,32,38), 8)
+            background = rippleRounded(currentTheme().buttonBg, 8)
             contentDescription = "Усилие мышления"
             setOnClickListener { showQuickEffortPicker() }
         }
         modelBadge.setPadding(dp(8), dp(6), dp(8), dp(6))
+        modelBadge.gravity = Gravity.CENTER_VERTICAL
+        AppThemeViews.button(modelBadge, currentTheme())
         modelBadge.setTextColor(Color.rgb(190, 200, 220))
         modelBadge.textSize = 12f
-        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, -2, 1f))
+        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, dp(40), 1f))
         composerOptions.addView(effortBadge)
-        composerOptions.addView(button("⚙") { showResponseSettings() }.apply {
+        responseSettingsBtn = button("⚙") { showResponseSettings() }.apply {
             contentDescription = "Дополнительные настройки мышления и ответа"
             textSize = 16f
             minWidth = 0
             minimumWidth = 0
-        }, LinearLayout.LayoutParams(dp(42), dp(40)).apply { leftMargin = dp(4) })
+        }
+        composerOptions.addView(responseSettingsBtn, LinearLayout.LayoutParams(dp(42), dp(40)).apply { leftMargin = dp(4) })
         root.addView(composerOptions)
         updateEffortBadge()
 
@@ -992,8 +1010,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         input = EditText(this).apply {
             hint = "Сообщение…"
-            setHintTextColor(Color.rgb(120,125,135))
-            setTextColor(Color.WHITE)
+            setHintTextColor(currentTheme().hintText)
+            setTextColor(currentTheme().textPrimary)
             textSize = 16f
             setPadding(dp(14),dp(11),dp(14),dp(11))
             background = rounded(Color.rgb(30,31,36),20)
@@ -1016,7 +1034,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             text = "➤"
             minWidth=0; minimumWidth=0
             setTextColor(Color.rgb(18,20,24))
-            background = rounded(Color.rgb(138,180,248),20)
+            background = rounded(currentTheme().accent,20)
             setOnClickListener { sendMessage(false) }
         }
         composer.addView(send, LinearLayout.LayoutParams(dp(52),-2).apply{leftMargin=dp(6)})
@@ -1024,7 +1042,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         stop = Button(this).apply {
             text = "■"
             minWidth=0; minimumWidth=0
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
             background = rounded(Color.rgb(120,60,60),20)
             visibility = View.GONE
             setOnClickListener { stopCurrentResponse() }
@@ -1049,7 +1067,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
         drawerLayout = FingerDrawerLayout(this).apply {
             swipeSurface = scroll
-            setBackgroundColor(Color.rgb(17,18,21))
+            setBackgroundColor(currentTheme().rootBg)
         }
         drawerLayout.addView(root, FrameLayout.LayoutParams(-1, -1))
         val sessionsPanel = buildChatDrawer()
@@ -1096,7 +1114,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun buildChatDrawer(): LinearLayout {
         val drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(24,25,30))
+            setBackgroundColor(currentTheme().drawerBg)
             setPadding(dp(12), dp(10), dp(12), dp(10))
         }
         drawerPanelLayout = drawer
@@ -1108,7 +1126,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         drawerTitleView = TextView(this).apply {
             text = "Чаты"
             textSize = 20f
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
             setTypeface(null, Typeface.BOLD)
         }
         header.addView(drawerTitleView, LinearLayout.LayoutParams(0, -2, 1f))
@@ -1186,14 +1204,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun buildRequestTelemetryCard(): LinearLayout {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(7), dp(12), dp(7))
+            setPadding(0, dp(2), 0, 0)
             background = null
         }
         requestTelemetrySummary = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.rgb(170,175,185))
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-            setTextIsSelectable(true)
+            setTextColor(currentTheme().textSecondary)
+            tag = "request-log-preview"
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             setOnClickListener {
                 requestTelemetryExpanded = !requestTelemetryExpanded
                 renderRequestTelemetry()
@@ -1233,18 +1251,23 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             catch (_: Exception) { emptyList() }).map { event ->
             RequestStopEventPolicy.enrich(event, accounts[event.optString("request_id")])
         }
+        val active = chatDb.getActiveResponse(currentChatId())
+        val activeAccount = active?.let { accounts[it.optString("request_id")] }
+        val theme = currentTheme()
+        requestTelemetrySummary.background = RippleDrawable(ColorStateList.valueOf(theme.divider),
+            AppThemeViews.surface(this, theme.logBg, theme.surfaceBorder), null)
         requestTelemetryHistory.removeAllViews()
-        if (events.isEmpty()) {
+        if (events.isEmpty() && active == null) {
             requestTelemetrySummary.text = "● Нет запросов для этой сессии"
-            requestTelemetrySummary.setTextColor(Color.rgb(130,135,145))
+            requestTelemetrySummary.setTextColor(currentTheme().hintText)
             requestTelemetryHistory.visibility = View.GONE
             requestTelemetryScroll.visibility = View.GONE
             return
         }
-        val latest = events.first()
-        requestTelemetrySummary.text = RequestEventFormatter.summary(latest)
-        requestTelemetrySummary.setTextColor(requestEventColor(RequestEventFormatter.match(latest)))
-        requestTelemetrySummary.background = rippleRounded(Color.TRANSPARENT, 9)
+        requestTelemetrySummary.text = if (requestTelemetryExpanded) "Журнал запросов · ${events.size} событий  ▴"
+            else if (active != null) RequestEventFormatter.progress(active, activeAccount) + "  ▾"
+            else RequestEventFormatter.summary(events.first()) + "  ▾"
+        requestTelemetrySummary.setTextColor(theme.logText)
         requestTelemetryHistory.visibility = if (requestTelemetryExpanded) View.VISIBLE else View.GONE
         requestTelemetryScroll.visibility = if (requestTelemetryExpanded) View.VISIBLE else View.GONE
         if (!requestTelemetryExpanded) return
@@ -1256,29 +1279,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         actions.addView(TextView(this).apply {
             text = "Последние " + events.size + " событий"
             textSize = 11.5f
-            setTextColor(Color.rgb(145,150,160))
+            setTextColor(currentTheme().textSecondary)
         }, LinearLayout.LayoutParams(0, -2, 1f))
         actions.addView(TextView(this).apply {
             text = "Копировать всё"
             textSize = 11.5f
-            setTextColor(Color.rgb(150,195,245))
+            setTextColor(currentTheme().accent)
             setPadding(dp(8), dp(4), dp(4), dp(4))
-            setOnClickListener { copyText("История запросов", events.joinToString("\n\n") { RequestEventFormatter.details(it) }) }
-        })
-        actions.addView(TextView(this).apply {
-            text = "Закрыть"
-            textSize = 11.5f
-            setTextColor(Color.rgb(150,195,245))
-            setPadding(dp(12), dp(4), dp(4), dp(4))
-            setOnClickListener {
-                requestTelemetryExpanded = false
-                renderRequestTelemetry()
-            }
+            setOnClickListener { copyText("История запросов", events.asReversed().joinToString("\n\n") { RequestEventFormatter.details(it) }) }
         })
         requestTelemetryHistory.addView(actions)
-        events.forEach { event ->
-            requestTelemetryHistory.addView(buildRequestEventView(event), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
+        events.asReversed().forEach { event ->
+            requestTelemetryHistory.addView(buildRequestEventView(event), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
         }
+        requestTelemetryScroll.post { if (requestTelemetryExpanded) requestTelemetryScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
     private fun buildRequestEventView(event: JSONObject): View {
@@ -1286,8 +1300,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val eventGeneration = activeResponseState.state.generation
         val wrapper = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            tag = "request-log-event"
             setPadding(dp(10), dp(7), dp(10), dp(7))
-            background = null
+            background = AppThemeViews.surface(this@MainActivity, currentTheme().logBg, currentTheme().divider)
         }
         var details: TextView? = null
         val summary = TextView(this).apply {
@@ -1301,7 +1316,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         details = TextView(this).apply {
             text = RequestEventFormatter.details(event)
             textSize = 11f
-            setTextColor(Color.rgb(190,194,202))
+            setTextColor(currentTheme().textSecondary)
             setPadding(0, dp(6), 0, 0)
             setTextIsSelectable(true)
             setTypeface(Typeface.MONOSPACE)
@@ -1311,7 +1326,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         wrapper.addView(TextView(this).apply {
             text = "Копировать"
             textSize = 11f
-            setTextColor(Color.rgb(150,195,245))
+            setTextColor(currentTheme().accent)
             setPadding(dp(2), dp(5), dp(2), 0)
             setOnClickListener { copyText("Событие запроса", RequestEventFormatter.details(event)) }
         })
@@ -1328,7 +1343,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         setPadding(dp(14), dp(12), dp(14), dp(12))
                     }
                     renderAnnotations(sources, content, sourceMessage, eventChatId, eventGeneration)
-                    AlertDialog.Builder(this).setTitle("Полученные данные ответа")
+                    AppThemeViews.dialog(this, currentTheme()).setTitle("Полученные данные ответа")
                         .setView(ScrollView(this).apply { addView(content) })
                         .setPositiveButton("Закрыть", null).show()
                 })
@@ -1342,9 +1357,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun requestEventColor(match: ModelCatalog.Match): Int = when (match) {
-        ModelCatalog.Match.EXACT -> Color.rgb(126,205,150)
-        ModelCatalog.Match.MISMATCH -> Color.rgb(235,108,108)
-        ModelCatalog.Match.UNKNOWN -> Color.rgb(239,195,102)
+        ModelCatalog.Match.MISMATCH -> currentTheme().errorText
+        else -> currentTheme().logText
     }
 
     private fun copyText(label: String, value: String) {
@@ -1356,7 +1370,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun manageChats(all: List<JSONObject>) {
         val names = all.map { it.optString("title","Новый чат") }
         if (names.isEmpty()) return
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Управление чатами")
             .setItems(names.toTypedArray()) { _, which ->
                 showChatActions(all[which])
@@ -1364,14 +1378,69 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun showChatActions(c: JSONObject) {
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle(c.optString("title","Чат"))
-            .setItems(arrayOf("Переименовать","Удалить")) { _, which ->
+            .setItems(arrayOf("Переименовать","Экспорт диалога","Удалить")) { _, which ->
                 when (which) {
                     0 -> renameChat(c.optString("id"))
-                    1 -> deleteChat(c.optString("id"))
+                    1 -> showConversationExport(c.optString("id"))
+                    2 -> deleteChat(c.optString("id"))
                 }
             }.show()
+    }
+
+    private fun showConversationExport(sourceChatId: String) {
+        val formats = DialogConversationExporter.Format.values()
+        AppThemeViews.dialog(this, currentTheme()).setTitle("Экспорт диалога")
+            .setItems(formats.map { it.label }.toTypedArray()) { _, index ->
+                exportConversation(sourceChatId, formats[index])
+            }.show()
+    }
+
+    private fun exportConversation(sourceChatId: String, format: DialogConversationExporter.Format) {
+        if (pendingExportPath != null || !conversationExportPreparing.compareAndSet(false, true)) {
+            status.text = "Сначала завершите текущий экспорт"
+            return
+        }
+        executor.execute {
+            var snapshot: File? = null
+            try {
+                // History and active partial must belong to the same SQLite snapshot.
+                val db = chatDb.readableDatabase
+                val source: JSONObject
+                val active: JSONObject?
+                db.beginTransactionNonExclusive()
+                try {
+                    source = chatDb.getChat(sourceChatId) ?: throw IOException("Чат удалён")
+                    active = chatDb.getActiveResponse(sourceChatId)
+                    db.setTransactionSuccessful()
+                } finally { db.endTransaction() }
+                exportSnapshots.cleanup()
+                val file = exportSnapshots.create(format)
+                snapshot = file
+                file.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    DialogConversationExporter.writeTo(writer, source.optString("title"),
+                        source.optJSONArray("messages") ?: JSONArray(), active, format)
+                }
+                runOnUiThread {
+                    conversationExportPreparing.set(false)
+                    if (!activityVisible || isFinishing || isDestroyed) {
+                        exportSnapshots.delete(file.path)
+                        return@runOnUiThread
+                    }
+                    pendingExportPath = file.absolutePath
+                    launchActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = format.mimeType
+                        putExtra(Intent.EXTRA_TITLE, "integral_dialog_${System.currentTimeMillis()}.${format.extension}")
+                    }, pickExportTxt)
+                }
+            } catch (_: Exception) {
+                exportSnapshots.delete(snapshot?.path)
+                conversationExportPreparing.set(false)
+                runOnUiThread { if (activityVisible && !isDestroyed) status.text = "Не удалось подготовить экспорт диалога" }
+            }
+        }
     }
 
     private fun renameChat(id: String) {
@@ -1379,9 +1448,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val found = chats.firstOrNull { it.optString("id")==id } ?: return
         val edit = EditText(this).apply {
             setText(found.optString("title"))
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
         }
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Название")
             .setView(edit)
             .setNegativeButton("Отмена",null)
@@ -1539,19 +1608,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         box.addView(TextView(this).apply {
             text = "Источник API"
             textSize = 12f
-            setTextColor(Color.rgb(150,155,165))
+            setTextColor(currentTheme().textSecondary)
             setPadding(0, dp(4), 0, dp(4))
         })
         box.addView(provider)
         box.addView(TextView(this).apply {
             text = "Модель"
             textSize = 12f
-            setTextColor(Color.rgb(150,155,165))
+            setTextColor(currentTheme().textSecondary)
             setPadding(0, dp(14), 0, dp(4))
         })
         box.addView(model)
 
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Источник и модель")
             .setView(box)
             .setNegativeButton("Отмена", null)
@@ -1565,7 +1634,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     .putString("model", selectedModel)
                     .apply()
                 updateModelBadge()
-                status.text = "${source.label} · ${ModelCatalog.displayName(source.id, selectedModel)}"
+                status.text = "Модель для следующего запроса выбрана"
             }
             .show()
     }
@@ -1575,7 +1644,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     fun showQuickEffortPicker() {
         val efforts = arrayOf("auto", "low", "medium", "high", "xhigh", "max")
         val current = prefs.getString("reasoning", "high") ?: "high"
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("⚡ Усилие мышления")
             .setSingleChoiceItems(efforts, efforts.indexOf(current).coerceAtLeast(0)) { dialog, position ->
                 prefs.edit().putString("reasoning", efforts[position]).apply()
@@ -1588,31 +1657,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun applyDialogControlTheme(root: ViewGroup, theme: ThemeColors) {
-        for (i in 0 until root.childCount) {
-            when (val child = root.getChildAt(i)) {
-                is EditText -> {
-                    child.setTextColor(theme.textPrimary)
-                    child.setHintTextColor(theme.hintText)
-                    child.background = rounded(theme.inputBg)
-                    child.setPadding(dp(12), dp(10), dp(12), dp(10))
-                }
-                is CheckBox -> {
-                    child.setTextColor(theme.textPrimary)
-                }
-                is Button -> {
-                    child.setTextColor(theme.accent)
-                    child.background = rounded(theme.buttonBg)
-                }
-                is TextView -> {
-                    if (child.currentTextColor == Color.WHITE || child.currentTextColor == Color.LTGRAY) {
-                        child.setTextColor(theme.textPrimary)
-                    } else if (child.currentTextColor == Color.rgb(170, 180, 195) || child.currentTextColor == Color.rgb(150, 155, 165)) {
-                        child.setTextColor(theme.textSecondary)
-                    }
-                }
-                is ViewGroup -> applyDialogControlTheme(child, theme)
-            }
-        }
+        AppThemeViews.content(root, theme)
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -1787,7 +1832,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         box.addView(developerInstructionsInput)
 
         applyDialogControlTheme(box, theme)
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Настройки модели и ответа")
             .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Отмена", null)
@@ -1839,14 +1884,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val buildLabel = TextView(this).apply {
             text = "Версия " + BuildConfig.VERSION_NAME + " · Git " + BuildConfig.BUILD_GIT_SHA
-            setTextColor(Color.rgb(180,190,205))
+            setTextColor(currentTheme().textSecondary)
             textSize = 12f
             setTextIsSelectable(true)
         }
         container.addView(buildLabel)
         val events = TextView(this).apply {
             text = "Загрузка последних событий…"
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
             textSize = 13f
             setTextIsSelectable(true)
             setPadding(dp(4), dp(10), dp(4), dp(10))
@@ -1875,7 +1920,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         container.addView(actions)
         applyDialogControlTheme(container, currentTheme())
-        val diagnosticsDialog = AlertDialog.Builder(this)
+        val diagnosticsDialog = AppThemeViews.dialog(this, currentTheme())
             .setTitle("Диагностика запросов")
             .setView(container)
             .setNegativeButton("Закрыть", null)
@@ -2015,7 +2060,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             Toast.makeText(this, "Локальные ссылки сброшены. Исходники сохранены.", Toast.LENGTH_LONG).show()
         })
         spaced(button("Поддерживаемые файлы и способ обработки") {
-            AlertDialog.Builder(this).setTitle("Форматы файлов").setMessage(
+            AppThemeViews.dialog(this, currentTheme()).setTitle("Форматы файлов").setMessage(
                 "OpenRouter, текстовые/научные файлы через инструменты приложения:\n" + TextFileFormatPolicy.extensions.sorted().joinToString(", ") +
                 "\n\nOffice, извлечение текста: docx, pptx, odt, odp, ods. XLSX: все сохранённые строки и ячейки; формулы не пересчитываются. Встроенные графики и изображения из Office не извлекаются.\n\nИзображения: JPEG, PNG, WebP, GIF. PDF: native для моделей с прямым файловым вводом; auto/OCR может подготовить текст. ZIP: распаковка поддерживаемых файлов.")
                 .setPositiveButton("Закрыть", null).show()
@@ -2024,7 +2069,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setTextColor(accent); background=rounded(buttonBg)
         })
         spaced(button("📈 Статистика auto-эффорта") {
-            AlertDialog.Builder(this)
+            AppThemeViews.dialog(this, currentTheme())
                 .setTitle("Auto-эффорт")
                 .setMessage(chatDb.effortStats())
                 .setPositiveButton("OK", null)
@@ -2038,7 +2083,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         })
 
         applyDialogControlTheme(box, theme)
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Настройки приложения")
             .setView(ScrollView(this).apply{addView(box)})
             .setNegativeButton("Отмена",null)
@@ -2297,6 +2342,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             itemId = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
         )
         requestAnswerNotificationPermission()
+        renderRequestTelemetry()
         OpenRouterResponseRuntime.start(applicationContext, OpenRouterRuntimeRequest(
             chatId, requestId, model, preparedMessages.messages, preparedMessages.attachments,
             effort, verbosity, maxOut, githubEnabled, githubRepo,
@@ -2341,7 +2387,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             persistComposerStateNow()
             restoreCurrentChat()
             status.text = when (terminal.optString("status")) {
-                "completed" -> "Готово · OpenRouter"
+                "completed" -> "Готово"
                 "incomplete" -> "Ответ не завершён · ${OpenRouterFinishPolicy.description(JsonProtocol.text(terminal, "finish_reason"))}"
                 else -> "Ошибка OpenRouter — частичный ответ сохранён"
             }
@@ -2418,7 +2464,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 completePendingGitHubConfirmation(decision, false)
                 return@runOnUiThread
             }
-            val dialog = AlertDialog.Builder(this)
+            val dialog = AppThemeViews.dialog(this, currentTheme())
                 .setTitle("GitHub: подтверждение")
                 .setMessage(githubConfirmationText(name, arguments))
                 .setNegativeButton("Отмена") { _, _ ->
@@ -2888,7 +2934,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             // No network or chat write has started. The older DB stored only
             // visible words, not signed reasoning or tool output. Explicit
             // consent is mandatory to continue with an honestly limited replay.
-            val dialog = android.app.AlertDialog.Builder(this)
+            val dialog = AppThemeViews.dialog(this, currentTheme())
                 .setTitle("Старые ответы OpenAI — неполный контекст")
                 .setMessage("В истории $legacyMissingCount завершённых ответов OpenAI без " +
                     "сохранённого Responses output. Их reasoning и результаты инструментов " +
@@ -3178,6 +3224,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             provider = provider, requestedModel = model,
             credentialSource = if (provider == "openrouter") "openrouter_api_key" else "openai_api_key"
         )
+        renderRequestTelemetry()
         setBusy(true)
         status.text=if(preflightWarning.isNullOrBlank()) "Модель отвечает…" else "⚠ $preflightWarning\nМодель отвечает…"
         toolStates.clear()
@@ -3780,13 +3827,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         activeAssistantItemId = finalItemId
                         scrollToLatest()
                         status.text = when (completionState) {
-                            "completed" -> if (usageObj != null)
-                                "Готово · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out · Расход неизвестен"
-                                else "Готово · Расход неизвестен"
-                            "incomplete" -> "Ответ завершён не полностью · Расход неизвестен"
-                            "cancelled" -> "Ответ отменён · Расход неизвестен"
-                            "failed" -> "Ошибка ответа · Расход неизвестен"
-                            else -> "Соединение прервалось — ответ неполный · Расход неизвестен"
+                            "completed" -> "Готово"
+                            "incomplete" -> "Ответ завершён не полностью"
+                            "cancelled" -> "Ответ отменён"
+                            "failed" -> "Ошибка ответа"
+                            else -> "Соединение прервалось — ответ неполный"
                         }
                         if(toolItems.isNotEmpty()) toolLabel.text=toolItems.distinct().joinToString("  ")
                         renderRequestTelemetry()
@@ -4970,7 +5015,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 restoreCurrentChat()
                 setBusy(false)
                 status.text=when{
-                    state=="completed" && usage!=null -> "Готово · ${fmtTokens(inTok)} in · ${fmtTokens(outTok)} out · Расход неизвестен"
+                    state=="completed" -> "Готово"
                     state=="incomplete" -> "Ответ завершён не полностью"
                     state=="cancelled" -> "Ответ отменён"
                     else -> "Ошибка фонового ответа"
@@ -4987,13 +5032,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
          val toggle=TextView(this).apply{
              text=if(summary.isBlank())"🧠 Модель размышляет…" else if(initiallyExpanded)"🧠 Скрыть ход рассуждений ▲" else "🧠 Показать ход рассуждений ▼"
              textSize=12.5f
-             setTextColor(Color.rgb(165,195,240))
+             setTextColor(currentTheme().accent)
              setPadding(0,dp(2),0,dp(4))
          }
          val body=TextView(this).apply{
              text=summary
              textSize=13f
-             setTextColor(Color.rgb(205,210,220))
+             setTextColor(currentTheme().textPrimary)
              setPadding(0,dp(2),0,dp(3))
              visibility=if(initiallyExpanded && summary.isNotBlank())View.VISIBLE else View.GONE
          }
@@ -5104,7 +5149,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 text="Источники"
                 textSize=12f
                 setTypeface(null,Typeface.BOLD)
-                setTextColor(Color.rgb(180,185,198))
+                setTextColor(currentTheme().textSecondary)
                 setPadding(0,dp(9),0,dp(2))
             }
             card.addView(header)
@@ -5115,7 +5160,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val sourceTitle=raw.optString("title").ifBlank{url}
                 card.addView(TextView(this).apply{
                     text="🔗 $sourceTitle"
-                    setTextColor(Color.rgb(138,180,248)); textSize=12.5f
+                    setTextColor(currentTheme().accent); textSize=12.5f
                     isSingleLine=true; ellipsize=TextUtils.TruncateAt.END
                     setPadding(0,dp(2),0,dp(2))
                     setOnClickListener{
@@ -5176,7 +5221,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val box=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL
                 setPadding(dp(10),dp(8),dp(10),dp(8))
-                background=rounded(Color.rgb(38,40,46),10)
+                background=rounded(currentTheme().cardBg,10)
             }
             parent.addView(box,LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
             populateReadyFileCard(box,annotation,filename,path)
@@ -5186,7 +5231,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val box=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
             setPadding(dp(10),dp(8),dp(10),dp(8))
-            background=rounded(Color.rgb(38,40,46),10)
+            background=rounded(currentTheme().cardBg,10)
         }
         parent.addView(box,LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
         renderFileCardState(box,annotation,message,chatId,generation,filename)
@@ -5225,7 +5270,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val titleRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL}
         val titleView=TextView(this).apply{
             text="$icon $filename"
-            textSize=14f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD)
+            textSize=14f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD)
         }
         titleRow.addView(titleView,LinearLayout.LayoutParams(0,-2,1f))
         box.addView(titleRow)
@@ -5237,7 +5282,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 "PENDING" -> if(annotation.optString("type") == "file_citation") "Файл найден в хранилище · нажмите «Скачать»" else "Подготовка…"
                 else -> "Скачивание…"
             }
-            textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(3),0,dp(4))
+            textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(3),0,dp(4))
         }
         box.addView(details)
     }
@@ -5249,13 +5294,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(annotation.optBoolean("received_source", false)) {
             box.addView(TextView(this).apply {
                 text="Полученные исходные данные ответа. Файл может содержать только часть ответа; его можно сохранить без новой генерации."
-                textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
+                textSize=12.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(4),0,dp(5))
             })
         }else if(mime.startsWith("image/")){
             val preview=ImageView(this).apply{
                 adjustViewBounds=true
                 scaleType=ImageView.ScaleType.FIT_CENTER
-                background=rounded(Color.rgb(24,26,30),8)
+                background=rounded(currentTheme().cardBg,8)
                 setOnClickListener{showImagePreviewFromFile(path,filename)}
             }
             loadThumbnailAsync(preview,path,900)
@@ -5263,19 +5308,19 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }else if(isTextLikeMime(mime,filename)){
             box.addView(TextView(this).apply{
                 text="📄 Текстовый файл — нажмите «Просмотр», чтобы прочитать"
-                textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
+                textSize=12.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(4),0,dp(5))
             })
         }else if(mime.equals("application/pdf",true)){
             box.addView(TextView(this).apply{
                 text="📕 PDF — можно открыть первый лист в приложении"
-                textSize=12.5f;setTextColor(Color.rgb(180,185,198));setPadding(0,dp(4),0,dp(5))
+                textSize=12.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(4),0,dp(5))
             })
         }
         box.addView(TextView(this).apply{
-            text="✅ $filename";textSize=14f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD)
+            text="✅ $filename";textSize=14f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD)
         })
         box.addView(TextView(this).apply{
-            text="$mime · ${formatBytes(size)}";textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(3),0,dp(6))
+            text="$mime · ${formatBytes(size)}";textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(3),0,dp(6))
         })
         val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
         when{
@@ -5302,8 +5347,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
 
     private fun fileActionButton(label:String,onClick:()->Unit)=TextView(this).apply{
-        text=label;textSize=12.5f;setTextColor(Color.rgb(138,180,248))
-        setPadding(dp(6),dp(6),dp(12),dp(6))
+        text=label;textSize=12.5f;setTextColor(currentTheme().accent)
+        minHeight = dp(40)
+        gravity = Gravity.CENTER
+        background = rippleRounded(currentTheme().buttonBg, 10)
+        setPadding(dp(10),dp(6),dp(10),dp(6))
         setOnClickListener{onClick()}
     }
 
@@ -5420,7 +5468,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val box=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL
                 setPadding(dp(10),dp(8),dp(10),dp(8))
-                background=rounded(Color.rgb(38,40,46),10)
+                background=rounded(currentTheme().cardBg,10)
             }
             parent.addView(box,LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(6)})
             box.addView(ImageView(this).apply{
@@ -5432,7 +5480,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             },LinearLayout.LayoutParams(-1,dp(280)))
             box.addView(TextView(this).apply{
                 text="🎨 $filename · ${formatBytes(File(path).length())}"
-                textSize=12f;setTextColor(Color.rgb(165,170,180))
+                textSize=12f;setTextColor(currentTheme().textSecondary)
             })
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             row.addView(fileActionButton("Просмотр"){showImagePreviewFromFile(path,filename)})
@@ -5504,7 +5552,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun showToolDetails() {
         if(toolLabel.text.isNullOrBlank()) return
-        AlertDialog.Builder(this)
+        AppThemeViews.dialog(this, currentTheme())
             .setTitle("Инструменты")
             .setMessage(toolLabel.text)
             .setPositiveButton("OK",null).show()
@@ -5539,7 +5587,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             "$label: подтверждено $known, неизвестно $unknown, сумма подтверждённых $shown"
                         }
                 runOnUiThread{
-                    AlertDialog.Builder(this)
+                    AppThemeViews.dialog(this, currentTheme())
                         .setTitle("Расход и токены")
                         .setMessage(message)
                         .setPositiveButton("OK",null)
@@ -5597,12 +5645,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         }
                         val name=TextView(this).apply{
                             text=(if(f.optString("kind")=="image")"🖼 " else "📄 ")+safeDisplayName(JsonProtocol.string(f, "filename"))
-                            textSize=14f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD)
+                            textSize=14f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD)
                         }
                         row.addView(name)
                         row.addView(TextView(this).apply{
                             text="${f.optString("chat_title","Чат")} · ${formatBytes(f.optLong("size_bytes",0L))}"
-                            textSize=11.5f;setTextColor(Color.rgb(165,170,180))
+                            textSize=11.5f;setTextColor(currentTheme().textSecondary)
                         })
                         val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
                         val path=JsonProtocol.string(f, "path"); val fn=safeDisplayName(JsonProtocol.string(f, "filename")); val mime=f.optString("mime_type").ifBlank{mimeForFilename(fn)}
@@ -5615,7 +5663,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         actions.addView(fileActionButton("Сохранить"){requestSaveLocalFile(path,fn,mime)})
                         actions.addView(fileActionButton("Поделиться"){shareLocalFile(path,fn,mime)})
                         actions.addView(fileActionButton("Удалить"){
-                            AlertDialog.Builder(this)
+                            AppThemeViews.dialog(this, currentTheme())
                                 .setTitle("Удалить локальную копию?")
                                 .setMessage(fn)
                                 .setNegativeButton("Отмена",null)
@@ -5632,10 +5680,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         })
                         row.addView(actions)
                         box.addView(row)
-                        box.addView(View(this).apply{setBackgroundColor(Color.rgb(52,54,60));layoutParams=LinearLayout.LayoutParams(-1,dp(1))})
+                        box.addView(View(this).apply{setBackgroundColor(currentTheme().buttonBg);layoutParams=LinearLayout.LayoutParams(-1,dp(1))})
                     }
                 }
-                AlertDialog.Builder(this)
+                AppThemeViews.dialog(this, currentTheme())
                     .setTitle("Локальные файлы")
                     .setView(ScrollView(this).apply{addView(box)})
                     .setNegativeButton("Закрыть",null)
@@ -5652,7 +5700,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(18), dp(14), dp(30))
             background = GradientDrawable().apply {
-                setColor(Color.rgb(24, 25, 30))
+                setColor(currentTheme().drawerBg)
                 val r = dp(25).toFloat()
                 cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
             }
@@ -5663,7 +5711,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         heading.addView(TextView(this).apply {
             text = "Добавить в чат"
-            setTextColor(Color.WHITE)
+            setTextColor(currentTheme().textPrimary)
             setTypeface(null, android.graphics.Typeface.BOLD)
             textSize = 18f
             setPadding(dp(10), dp(6), 0, dp(12))
@@ -5673,7 +5721,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             contentDescription = "Закрыть меню вложений"
             gravity = Gravity.CENTER
             textSize = 21f
-            setTextColor(Color.rgb(205, 208, 215))
+            setTextColor(currentTheme().textPrimary)
             setOnClickListener { dialog.dismiss() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
         panel.addView(heading)
@@ -5683,7 +5731,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val tile = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                background = rippleRounded(Color.rgb(39, 41, 49), 17)
+                background = rippleRounded(currentTheme().cardBg, 17)
                 contentDescription = action.title
                 isClickable = true
                 isFocusable = true
@@ -5705,7 +5753,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 text = action.title
                 textSize = 14f
                 gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
+                setTextColor(currentTheme().textPrimary)
                 setPadding(0, dp(10), 0, 0)
             })
             actions.addView(tile, LinearLayout.LayoutParams(0, dp(120), 1f).apply {
@@ -5906,7 +5954,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         container.addView(listArea)
         vsListArea = listArea
         vsStatusLine = statusLine
-        val dialog = AlertDialog.Builder(this)
+        val dialog = AppThemeViews.dialog(this, currentTheme())
             .setTitle("Файлы Vector Store")
             .setView(ScrollView(this).apply { addView(container) })
             .setPositiveButton("+ Добавить файл", null)
@@ -5982,10 +6030,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                 setPadding(0, dp(6), 0, dp(6))
                             }
                             row.addView(TextView(this).apply {
-                                text = name; textSize = 14f; setTextColor(Color.WHITE)
+                                text = name; textSize = 14f; setTextColor(currentTheme().textPrimary)
                             }, LinearLayout.LayoutParams(0, -2, 1f))
                             row.addView(TextView(this).apply {
-                                text = "✕"; setTextColor(Color.rgb(210, 120, 120))
+                                text = "✕"; setTextColor(currentTheme().errorText)
                                 setPadding(dp(12), dp(6), dp(6), dp(6))
                                 setOnClickListener {
                                     executor.execute {
@@ -6208,27 +6256,30 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(c!=RESULT_OK || d==null) {
             if (r == pickVectorStoreFile) pendingVectorStorePickerId = null
             if (r == pickExportTxt) {
-                pendingExportPath?.let { path -> try { File(path).delete() } catch (_: Exception) {} }
+                exportSnapshots.delete(pendingExportPath)
                 pendingExportPath = null
             }
             return
         }
         if(r==pickExportTxt){
-            val uri=d.data ?: return
+            val uri=d.data ?: run {
+                exportSnapshots.delete(pendingExportPath)
+                pendingExportPath=null
+                return
+            }
             val source=pendingExportPath
             pendingExportPath=null
             if(source.isNullOrBlank()){ status.text="Экспорт больше недоступен"; return }
             executor.execute {
                 try {
-                    val snapshot=File(source)
-                    if(!snapshot.isFile) throw IOException("Снимок экспорта не найден")
+                    val snapshot=exportSnapshots.requireFile(source)
                     val out=contentResolver.openOutputStream(uri)
                         ?: throw IOException("Не удалось открыть файл для записи")
                     snapshot.inputStream().use { input -> out.use { output -> input.copyTo(output, 64*1024) } }
-                    runOnUiThread { status.text="Экспорт сохранён" }
+                    runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Экспорт сохранён" }
                 } catch(e:Exception) {
-                    runOnUiThread { status.text="Ошибка экспорта: ${e.message}" }
-                } finally { try { File(source).delete() } catch (_: Exception) {} }
+                    runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Не удалось сохранить экспорт" }
+                } finally { exportSnapshots.delete(source) }
             }
             return
         }
@@ -6326,6 +6377,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingActivityResultCode = null
             pendingPickerChatId = null
             pendingPickerProvider = null
+            if (requestCode == pickExportTxt) {
+                exportSnapshots.delete(pendingExportPath)
+                pendingExportPath = null
+            }
             status.text = "Операция недоступна: ${e.message}"
         }
     }
@@ -7309,7 +7364,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun addAssetSectionHeader(parent:LinearLayout){
         parent.addView(View(this).apply{
-            setBackgroundColor(Color.rgb(52,54,60))
+            setBackgroundColor(currentTheme().buttonBg)
             layoutParams=LinearLayout.LayoutParams(-1,dp(1)).apply{topMargin=dp(8);bottomMargin=dp(2)}
         })
     }
@@ -7325,10 +7380,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         return false
     }
 
-    private fun cardBackground() = rounded(Color.rgb(38,40,46),10)
+    private fun cardBackground() = rounded(currentTheme().cardBg,10)
 
     private fun addCardDivider(parent:LinearLayout){
-        parent.addView(View(this).apply{setBackgroundColor(Color.rgb(52,54,60));layoutParams=LinearLayout.LayoutParams(-1,dp(1))})
+        parent.addView(View(this).apply{setBackgroundColor(currentTheme().buttonBg);layoutParams=LinearLayout.LayoutParams(-1,dp(1))})
     }
 
     private fun createAttachmentCard():LinearLayout = LinearLayout(this).apply{
@@ -7373,12 +7428,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun showImagePreviewFromFile(path:String,name:String){
+    private fun showImagePreviewFromFile(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             val key=thumbnailCacheKey(path,1800)
             val bmp=thumbnailCache.get(key) ?: decodeThumbnailFromFile(path,1800)?.also{thumbnailCache.put(key,it)}
             runOnUiThread{
-                if(isFinishing)return@runOnUiThread
+                if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                 if(bmp==null){status.text="Не удалось прочитать изображение";return@runOnUiThread}
                 showImagePreviewFromBitmap(bmp,name)
             }
@@ -7389,7 +7444,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if(bitmap!=null)setImageBitmap(bitmap) else setImageResource(android.R.drawable.ic_menu_gallery)
         scaleType=ImageView.ScaleType.CENTER_CROP
         adjustViewBounds=true
-        background=rounded(Color.rgb(24,26,30),8)
+        background=rounded(currentTheme().cardBg,8)
         setPadding(0,0,0,0)
     }
 
@@ -7437,7 +7492,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (target != null && !attachmentRepairAvailable(target)) return
         if (pendingOpenAiPreparation.get() != null || pendingOpenRouterPreparation.get() != null) { status.text = "Дождитесь подготовки запроса"; return }
         val encodings = TextFileFormatPolicy.selectableEncodings
-        AlertDialog.Builder(this).setTitle("Кодировка исходного файла")
+        AppThemeViews.dialog(this, currentTheme()).setTitle("Кодировка исходного файла")
             .setItems(encodings.toTypedArray()) { _, selected ->
                 executor.execute {
                     try {
@@ -7475,7 +7530,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
         })
         row.addView(fileActionButton("Убрать из контекста") {
-            if (attachmentRepairAvailable(target)) AlertDialog.Builder(this)
+            if (attachmentRepairAvailable(target)) AppThemeViews.dialog(this, currentTheme())
                 .setMessage("Убрать это вложение из следующих запросов? Остальные сообщения и файлы сохранятся.")
                 .setNegativeButton("Отмена", null).setPositiveButton("Убрать") { _, _ ->
                     applyHistoricalAttachmentChange(target, AttachmentMessageState.remove(target.expected, target.manifestIndex, target.fileIndex, target.image))
@@ -7553,12 +7608,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 box.addView(TextView(this).apply {
                     text = "📎 " + safeDisplayName(attachment.name)
                     textSize = 13.5f
-                    setTextColor(Color.WHITE)
+                    setTextColor(currentTheme().textPrimary)
                     setTypeface(null, Typeface.BOLD)
                 })
                 box.addView(TextView(this).apply {
                     text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size) + encodingNotice(attachment)
-                    setTextColor(Color.rgb(165,170,180))
+                    setTextColor(currentTheme().textSecondary)
                     textSize = 11.5f
                 })
                 if (File(attachment.path).isFile) {
@@ -7585,7 +7640,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 card.addView(TextView(this).apply {
                     text = "Вложения OpenRouter"
                     textSize = 11.5f
-                    setTextColor(Color.rgb(145,150,160))
+                    setTextColor(currentTheme().textSecondary)
                 }, 2)
             }
         }
@@ -7610,14 +7665,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 box.addView(TextView(this).apply{
                     text="🖼\nИзображение пока не скачано"
                     gravity=Gravity.CENTER
-                    textSize=13f; setTextColor(Color.rgb(165,170,180))
-                    background=rounded(Color.rgb(24,26,30),8)
+                    textSize=13f; setTextColor(currentTheme().textSecondary)
+                    background=rounded(currentTheme().cardBg,8)
                     setPadding(0,dp(22),0,dp(22))
                 },LinearLayout.LayoutParams(-1,dp(130)))
             }
-            box.addView(TextView(this).apply{ text="🖼 $name"; textSize=13.5f; setTextColor(Color.WHITE); setTypeface(null,Typeface.BOLD); setPadding(0,dp(6),0,dp(2)) })
+            box.addView(TextView(this).apply{ text="🖼 $name"; textSize=13.5f; setTextColor(currentTheme().textPrimary); setTypeface(null,Typeface.BOLD); setPadding(0,dp(6),0,dp(2)) })
             val size=message.optLong("image_size",imagePath?.let{File(it).length()} ?: 0L)
-            box.addView(TextView(this).apply{ text=formatAttachmentDetails(mime,size); textSize=11.5f; setTextColor(Color.rgb(165,170,180)) })
+            box.addView(TextView(this).apply{ text=formatAttachmentDetails(mime,size); textSize=11.5f; setTextColor(currentTheme().textSecondary) })
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             if(imagePath!=null){
                 row.addView(fileActionButton("Просмотр"){showImagePreviewFromFile(imagePath,name)})
@@ -7646,12 +7701,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 localPath!=null && mime.equals("application/pdf",true) -> addCompactPdfPreview(box,localPath,name)
                 else -> box.addView(TextView(this).apply{
                     text=when{mime.equals("application/pdf",true)->"📕";isTextLikeMime(mime,name)->"📄";mime.startsWith("image/")->"🖼";else->"📎"}
-                    gravity=Gravity.CENTER;textSize=26f;setTextColor(Color.rgb(180,185,198))
-                    background=rounded(Color.rgb(24,26,30),8);setPadding(0,dp(12),0,dp(12))
+                    gravity=Gravity.CENTER;textSize=26f;setTextColor(currentTheme().textSecondary)
+                    background=rounded(currentTheme().cardBg,8);setPadding(0,dp(12),0,dp(12))
                 },LinearLayout.LayoutParams(-1,dp(74)).apply{bottomMargin=dp(6)})
             }
-            box.addView(TextView(this).apply{ text="📄 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD) })
-            box.addView(TextView(this).apply{ text=formatAttachmentDetails(mime,if(size>0)size else localPath?.let{File(it).length()} ?: 0L);textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(3),0,dp(4)) })
+            box.addView(TextView(this).apply{ text="📄 $name";textSize=13.5f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD) })
+            box.addView(TextView(this).apply{ text=formatAttachmentDetails(mime,if(size>0)size else localPath?.let{File(it).length()} ?: 0L);textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(3),0,dp(4)) })
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             if(localPath!=null){
                 if(isTextLikeMime(mime,name)) row.addView(fileActionButton("Просмотр"){showTextPreview(localPath,name)})
@@ -7669,27 +7724,30 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             shown++
         }
         if(shown>0){
-            card.addView(TextView(this).apply{ text="Вложения"; textSize=11.5f; setTextColor(Color.rgb(145,150,160)); setPadding(0,dp(7),0,dp(0)) },2)
+            card.addView(TextView(this).apply{ text="Вложения"; textSize=11.5f; setTextColor(currentTheme().textSecondary); setPadding(0,dp(7),0,dp(0)) },2)
         }
     }
 
     private fun downloadUserFileCopy(message:JSONObject,index:Int,card:LinearLayout,openAfter:Boolean=false){
-        val ids=message.optJSONArray("file_ids") ?: return
         val names=message.optJSONArray("file_names") ?: return
-        val fileId=JsonProtocol.string(ids, index).trim()
-        if(fileId.isBlank())return
-        val filename=safeDisplayName(JsonProtocol.string(names, index).ifBlank{"attachment_${index+1}"})
         val chatId=message.optString("chat_id").ifBlank{currentChatId()}
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"}.orEmpty()
+        val target=HistoricalAttachmentDownloadTarget.file(chatId,message,index) ?: return
+        val generation=activeResponseState.state.generation
+        val fileId=target.fileId
+        val requestId=target.requestId.orEmpty()
+        val filename=safeDisplayName(JsonProtocol.string(names, index).ifBlank{"attachment_${index+1}"})
         val mimeHint=userFileMime(message,index,filename)
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $filename…"
         executor.execute{
             var destination:File?=null
+            var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder().url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
-                destination=File(File(filesDir,"attachments").apply{mkdirs()},"user_${System.currentTimeMillis()}_${safeFileName(filename)}")
+                    .addHeader("Authorization","Bearer $credential").get().build()
+                destination=File.createTempFile("user_","_"+safeFileName(filename),File(filesDir,"attachments").apply{mkdirs()})
                 client.newCall(req).execute().use{resp->
                     if(!resp.isSuccessful)throw FileDownloadException(resp.code)
                     val body=resp.body ?: throw IOException("Пустой ответ")
@@ -7700,7 +7758,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         while(true){
                             val n=input.read(buffer);if(n<0)break
                             total+=n
-                            if(total>maxBytes){destination!!.delete();throw IOException("Файл слишком большой для мобильного клиента")}
+                            if(total>maxBytes)throw IOException("Файл слишком большой для мобильного клиента")
                             output.write(buffer,0,n)
                         }
                     }}
@@ -7708,71 +7766,60 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val mime=if(mimeHint.isBlank())mimeForFilename(filename) else mimeHint
                 val finalPath=destination!!.absolutePath
                 val finalSize=destination!!.length()
-                updateMessageFileLocalState(message,index,finalPath,mime,finalSize,chatId,requestId)
+                retained=chatDb.updateUserFileLocalPath(target,finalPath,mime,finalSize)
+                if(!retained)return@execute
                 diagnostics.log("user_file_cache_restored",mapOf("chat_id" to chatId,"request_id" to requestId,"file_id" to fileId,"filename" to filename,"bytes" to finalSize))
                 runOnUiThread{
-                    if(currentChatId()==chatId){
-                        persistCurrentChatFor(chatId)
-                        status.text="Файл доступен: $filename"
-                        if(openAfter)openPreviewForLocalFile(finalPath,filename,mime) else restoreCurrentChat()
+                    if(!isRequestCurrent(chatId,generation) || !chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath))return@runOnUiThread
+                    persistComposerStateNow()
+                    restoreCurrentChat()
+                    status.text="Файл доступен: $filename"
+                    if(openAfter)openPreviewForLocalFile(finalPath,filename,mime) {
+                        isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)
                     }
                 }
             }catch(e:FileDownloadException){
-                destination?.delete()
-                runOnUiThread{status.text=if(e.code==404||e.code==410)"Исходный файл больше недоступен" else "Не удалось скачать $filename: HTTP ${e.code}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text=if(e.code==404||e.code==410)"Исходный файл больше недоступен" else "Не удалось скачать $filename: HTTP ${e.code}"
+                }
             }catch(e:Exception){
-                destination?.delete()
-                runOnUiThread{status.text="Не удалось скачать $filename: ${e.message}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text="Не удалось скачать $filename: ${e.message}"
+                }
+            }finally{
+                if(!retained)destination?.delete()
             }
         }
     }
 
-    private fun updateMessageFileLocalState(
-        message:JSONObject,
-        index:Int,
-        localPath:String,
-        mime:String,
-        size:Long,
-        chatId:String,
-        requestId:String
-    ){
-        val ids=message.optJSONArray("file_ids") ?: JSONArray()
-        val paths=message.optJSONArray("file_paths") ?: JSONArray()
-        val mimes=message.optJSONArray("file_mimes") ?: JSONArray()
-        val sizes=message.optJSONArray("file_sizes") ?: JSONArray()
-        val targetLength=maxOf(index+1,ids.length(),paths.length(),mimes.length(),sizes.length())
-        while(paths.length()<targetLength)paths.put("")
-        while(mimes.length()<targetLength)mimes.put("")
-        while(sizes.length()<targetLength)sizes.put(0L)
-        paths.put(index,localPath)
-        mimes.put(index,mime)
-        sizes.put(index,size)
-        message.put("file_paths",paths).put("file_mimes",mimes).put("file_sizes",sizes)
-        if(requestId.isNotBlank()){
-            chatDb.updateUserFileLocalPath(chatId,requestId,index,localPath,mime,size)
-        }
-    }
-
     private fun downloadUserImageCopy(message:JSONObject,card:LinearLayout,openAfter:Boolean=false){
-        val fileId=JsonProtocol.string(message, "image_file_id").trim()
-        if(fileId.isBlank()){
+        val chatId=message.optString("chat_id").ifBlank{currentChatId()}
+        val target=HistoricalAttachmentDownloadTarget.image(chatId,message)
+        if(target==null){
             status.text="Исходное изображение больше недоступно"
             return
         }
-        val chatId=message.optString("chat_id").ifBlank{currentChatId()}
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"}.orEmpty()
+        val generation=activeResponseState.state.generation
+        val fileId=target.fileId
+        val requestId=target.requestId.orEmpty()
         val name=safeDisplayName(JsonProtocol.string(message, "image_name").ifBlank{"image.png"})
+        val mimeHint=JsonProtocol.string(message, "image_mime").ifBlank{mimeForFilename(name)}
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $name…"
         executor.execute{
             var destination:File?=null
+            var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder()
                     .url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
+                    .addHeader("Authorization","Bearer $credential").get().build()
                 val dir=File(filesDir,"attachments").apply{mkdirs()}
-                destination=File(dir,"user_image_${System.currentTimeMillis()}_${safeFileName(name)}")
-                var mime=JsonProtocol.string(message, "image_mime").ifBlank{mimeForFilename(name)}
+                destination=File.createTempFile("user_image_","_"+safeFileName(name),dir)
+                var mime=mimeHint
                 client.newCall(req).execute().use{resp->
                     if(!resp.isSuccessful)throw FileDownloadException(resp.code)
                     val body=resp.body ?: throw IOException("Пустой ответ")
@@ -7784,29 +7831,37 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         while(true){
                             val n=input.read(buffer);if(n<0)break
                             total+=n
-                            if(total>maxBytes){destination!!.delete();throw IOException("Файл слишком большой для мобильного клиента")}
+                            if(total>maxBytes)throw IOException("Файл слишком большой для мобильного клиента")
                             output.write(buffer,0,n)
                         }
                     }}
                 }
                 val finalPath=destination!!.absolutePath
                 val finalSize=destination!!.length()
-                message.put("image_path",finalPath).put("image_mime",mime).put("image_size",finalSize)
-                if(requestId.isNotBlank())chatDb.updateUserImageLocalPath(chatId,requestId,finalPath,mime,finalSize)
+                retained=chatDb.updateUserImageLocalPath(target,finalPath,mime,finalSize)
+                if(!retained)return@execute
                 diagnostics.log("user_image_cache_restored",mapOf("chat_id" to chatId,"request_id" to requestId,"file_id" to fileId,"bytes" to finalSize))
                 runOnUiThread{
-                    if(currentChatId()==chatId){
-                        persistCurrentChatFor(chatId)
-                        status.text="Изображение доступно: $name"
-                        if(openAfter)showImagePreviewFromFile(finalPath,name) else restoreCurrentChat()
+                    if(!isRequestCurrent(chatId,generation) || !chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath))return@runOnUiThread
+                    persistComposerStateNow()
+                    restoreCurrentChat()
+                    status.text="Изображение доступно: $name"
+                    if(openAfter)showImagePreviewFromFile(finalPath,name) {
+                        isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)
                     }
                 }
             }catch(e:FileDownloadException){
-                destination?.delete()
-                runOnUiThread{status.text=if(e.code==404||e.code==410)"Исходное изображение больше недоступно" else "Не удалось скачать $name: HTTP ${e.code}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text=if(e.code==404||e.code==410)"Исходное изображение больше недоступно" else "Не удалось скачать $name: HTTP ${e.code}"
+                }
             }catch(e:Exception){
-                destination?.delete()
-                runOnUiThread{status.text="Не удалось скачать $name: ${e.message}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text="Не удалось скачать $name: ${e.message}"
+                }
+            }finally{
+                if(!retained)destination?.delete()
             }
         }
     }
@@ -7815,17 +7870,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val image=ImageView(this).apply{
             setImageBitmap(bitmap)
             scaleType=ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.rgb(16,17,20))
+            setBackgroundColor(currentTheme().cardBg)
         }
-        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(8),dp(8),dp(8),dp(8));background=rounded(Color.rgb(16,17,20),12)}
+        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(8),dp(8),dp(8),dp(8));background=rounded(currentTheme().cardBg,12)}
         box.addView(image,LinearLayout.LayoutParams(-1,0,1f))
         if(name.isNotBlank()) box.addView(TextView(this).apply{ text=name;textSize=12f;setTextColor(Color.LTGRAY);setPadding(dp(4),dp(4),dp(4),dp(2));gravity=Gravity.CENTER })
-        val dialog=AlertDialog.Builder(this).setView(box).setPositiveButton("Закрыть",null).create()
+        val dialog=AppThemeViews.dialog(this, currentTheme()).setView(box).setPositiveButton("Закрыть",null).create()
         dialog.setOnShowListener{ dialog.window?.setLayout(-1,-1) }
         dialog.show()
     }
 
-    private fun showTextPreview(path:String,name:String){
+    private fun showTextPreview(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             try{
                 val maxPreview=2L*1024L*1024L
@@ -7846,19 +7901,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
                 val truncated=file.length()>maxPreview
                 runOnUiThread{
+                    if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                     val tv=TextView(this).apply{
                         this.text=if(truncated)"$text\n\n… Показана первая часть файла (${formatBytes(maxPreview)}). Полный файл можно открыть/сохранить."
                         else text
-                        textSize=13f;setTextColor(Color.WHITE);typeface=Typeface.MONOSPACE;setPadding(dp(12),dp(10),dp(12),dp(10));setTextIsSelectable(true)
+                        textSize=13f;setTextColor(currentTheme().textPrimary);typeface=Typeface.MONOSPACE;setPadding(dp(12),dp(10),dp(12),dp(10));setTextIsSelectable(true)
                     }
                     val box=ScrollView(this).apply{addView(tv)}
-                    AlertDialog.Builder(this).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть файл"){_,_->openLocalFile(path,name,mimeForFilename(name))}.show()
+                    AppThemeViews.dialog(this, currentTheme()).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть файл"){_,_->openLocalFile(path,name,mimeForFilename(name))}.show()
                 }
-            }catch(e:Exception){runOnUiThread{status.text="Не удалось прочитать $name: ${e.message}"}}
+            }catch(e:Exception){runOnUiThread{
+                if(!isFinishing && !isDestroyed && uiOwner())status.text="Не удалось прочитать $name: ${e.message}"
+            }}
         }
     }
 
-    private fun showPdfPreview(path:String,name:String){
+    private fun showPdfPreview(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             try{
                 val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
@@ -7870,14 +7928,17 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         bmp.eraseColor(Color.WHITE)
                         page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         runOnUiThread{
+                            if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                             val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(6),dp(6),dp(6),dp(6))}
                             box.addView(ImageView(this).apply{setImageBitmap(bmp);scaleType=ImageView.ScaleType.FIT_CENTER;adjustViewBounds=true},LinearLayout.LayoutParams(-1,dp(540)))
-                            AlertDialog.Builder(this).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть полностью"){_,_->openLocalFile(path,name,"application/pdf")}.show()
+                            AppThemeViews.dialog(this, currentTheme()).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть полностью"){_,_->openLocalFile(path,name,"application/pdf")}.show()
                         }
                     }
                 }
                 pfd.close()
-            }catch(e:Exception){runOnUiThread{status.text="Не удалось показать PDF: ${e.message}"}}
+            }catch(e:Exception){runOnUiThread{
+                if(!isFinishing && !isDestroyed && uiOwner())status.text="Не удалось показать PDF: ${e.message}"
+            }}
         }
     }
 
@@ -7891,18 +7952,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             preview.tag="attachment_local_preview"
             card.addView(preview,LinearLayout.LayoutParams(dp(112),dp(52)))
         }
-        val nameView=TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=if(kind=="zip")"🗜 $name" else if(kind=="image")"🖼 $name" else "📄 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))}
+        val nameView=TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=if(kind=="zip")"🗜 $name" else if(kind=="image")"🖼 $name" else "📄 $name";textSize=13.5f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))}
         val details=TextView(this).apply{
             text=if(kind=="zip")"Архив будет распакован только при отправке" else {
                 val base=formatAttachmentDetails(mime,querySize(uri))
                 val pct=uploadProgress[key]?.second ?: 0
                 if(pct>0)"$base · подготовка $pct%" else "$base · подготовка…"
             }
-            textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(2),0,dp(4))
+            textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(2),0,dp(4))
         }
         val progressBar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;progress=uploadProgress[key]?.second ?: 0}
         val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        val action=TextView(this).apply{text="✕ Удалить";textSize=12.5f;setTextColor(Color.rgb(220,125,125));setPadding(0,dp(5),dp(10),dp(2));setOnClickListener{cancelPendingUpload(uri,kind)}}
+        val action=TextView(this).apply{text="✕ Удалить";textSize=12.5f;setTextColor(currentTheme().errorText);setPadding(0,dp(5),dp(10),dp(2));setOnClickListener{cancelPendingUpload(uri,kind)}}
         actions.addView(action)
         card.addView(nameView);card.addView(details);card.addView(progressBar);card.addView(actions)
         attachRow.addView(card,LinearLayout.LayoutParams(dp(240),-2).apply{rightMargin=dp(6)})
@@ -7920,10 +7981,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             tag="attachment_local_preview"
             text="Читаю файл…"
             textSize=11.5f
-            setTextColor(Color.rgb(205,210,220))
+            setTextColor(currentTheme().textPrimary)
             typeface=Typeface.MONOSPACE
             setPadding(dp(10),dp(8),dp(10),dp(8))
-            setBackgroundColor(Color.rgb(24,26,30))
+            setBackgroundColor(currentTheme().cardBg)
             maxLines=9
             ellipsize=TextUtils.TruncateAt.END
             setOnClickListener{showTextPreview(path,name)}
@@ -7971,7 +8032,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             tag="attachment_local_preview"
             scaleType=ImageView.ScaleType.CENTER_CROP
             adjustViewBounds=true
-            background=rounded(Color.rgb(24,26,30),8)
+            background=rounded(currentTheme().cardBg,8)
             setOnClickListener{showImagePreviewFromFile(path,name)}
         }
         loadThumbnailAsync(preview,path,720)
@@ -7982,7 +8043,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val preview=ImageView(this).apply{
             tag="attachment_local_preview"
             scaleType=ImageView.ScaleType.FIT_CENTER
-            background=rounded(Color.rgb(24,26,30),8)
+            background=rounded(currentTheme().cardBg,8)
             setOnClickListener{showPdfPreview(path,name)}
         }
         parent.addView(preview,LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
@@ -8007,12 +8068,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun openPreviewForLocalFile(path:String,name:String,mime:String){
+    private fun openPreviewForLocalFile(path:String,name:String,mime:String,uiOwner:()->Boolean={true}){
         when{
-            mime.startsWith("image/") -> showImagePreviewFromFile(path,name)
-            isTextLikeMime(mime,name) -> showTextPreview(path,name)
-            mime.equals("application/pdf",true) -> showPdfPreview(path,name)
-            else -> openLocalFile(path,name,mime)
+            mime.startsWith("image/") -> showImagePreviewFromFile(path,name,uiOwner)
+            isTextLikeMime(mime,name) -> showTextPreview(path,name,uiOwner)
+            mime.equals("application/pdf",true) -> showPdfPreview(path,name,uiOwner)
+            else -> if(uiOwner())openLocalFile(path,name,mime)
         }
     }
 
@@ -8026,7 +8087,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             tag="attachment_local_preview"
                             scaleType=ImageView.ScaleType.CENTER_CROP
                             adjustViewBounds=true
-                            background=rounded(Color.rgb(24,26,30),8)
+                            background=rounded(currentTheme().cardBg,8)
                             setOnClickListener{showImagePreviewFromFile(path,name)}
                         }
                         v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(52)).apply{bottomMargin=dp(6)})
@@ -8035,8 +8096,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         val view=TextView(this).apply{
                             tag="attachment_local_preview"
                             text="Читаю файл…"
-                            textSize=11.5f;setTextColor(Color.rgb(205,210,220));typeface=Typeface.MONOSPACE
-                            setPadding(dp(10),dp(8),dp(10),dp(8));setBackgroundColor(Color.rgb(24,26,30));maxLines=2
+                            textSize=11.5f;setTextColor(currentTheme().textPrimary);typeface=Typeface.MONOSPACE
+                            setPadding(dp(10),dp(8),dp(10),dp(8));setBackgroundColor(currentTheme().cardBg);maxLines=2
                             ellipsize=TextUtils.TruncateAt.END;setOnClickListener{showTextPreview(path,name)}
                         }
                         v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(118)).apply{bottomMargin=dp(6)})
@@ -8057,7 +8118,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         val view=ImageView(this).apply{
                             tag="attachment_local_preview"
                             scaleType=ImageView.ScaleType.FIT_CENTER
-                            background=rounded(Color.rgb(24,26,30),8)
+                            background=rounded(currentTheme().cardBg,8)
                             setOnClickListener{showPdfPreview(path,name)}
                         }
                         v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(52)).apply{bottomMargin=dp(6)})
@@ -8173,8 +8234,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             loadThumbnailAsync(preview,path,640)
             preview.setOnClickListener{showImagePreviewFromFile(path,name)}
             card.addView(preview,LinearLayout.LayoutParams(dp(112),dp(52)))
-            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text="🖼 $name";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))})
-            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=formatAttachmentDetails(mime,pendingImageSize.coerceAtLeast(File(path).length()));textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(2),0,dp(4))})
+            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text="🖼 $name";textSize=13.5f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD);setPadding(0,dp(6),0,dp(2))})
+            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=formatAttachmentDetails(mime,pendingImageSize.coerceAtLeast(File(path).length()));textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(2),0,dp(4))})
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             row.addView(fileActionButton("Просмотр"){showImagePreviewFromFile(path,name)})
             row.addView(fileActionButton("Удалить"){pendingImagePath=null;pendingImageFileId=null;pendingImageName=null;pendingImageMime=null;pendingImageSize=0L;refreshAttachChips();persistComposerStateNow()})
@@ -8198,14 +8259,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                 text = "📎 " + safeDisplayName(attachment.name)
                 textSize = 13.5f
-                setTextColor(Color.WHITE)
+                setTextColor(currentTheme().textPrimary)
                 setTypeface(null, Typeface.BOLD)
             })
             card.addView(TextView(this).apply {
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                 text = attachment.kind + " · " + formatAttachmentDetails(attachment.mime, attachment.size) + encodingNotice(attachment)
                 textSize = 11.5f
-                setTextColor(Color.rgb(165,170,180))
+                setTextColor(currentTheme().textSecondary)
                 setPadding(0,dp(3),0,dp(4))
             })
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -8236,9 +8297,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val mime=attachedFileMimes.getOrNull(i).orEmpty().ifBlank{mimeForFilename(name)}
             val size=attachedFileSizes.getOrNull(i) ?: path?.let{File(it).length()} ?: 0L
             val card=createAttachmentCard()
-            val title=TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text="📄 ${safeDisplayName(name)}";textSize=13.5f;setTextColor(Color.WHITE);setTypeface(null,Typeface.BOLD)}
+            val title=TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text="📄 ${safeDisplayName(name)}";textSize=13.5f;setTextColor(currentTheme().textPrimary);setTypeface(null,Typeface.BOLD)}
             card.addView(title)
-            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=formatAttachmentDetails(mime,size);textSize=11.5f;setTextColor(Color.rgb(165,170,180));setPadding(0,dp(3),0,dp(4))})
+            card.addView(TextView(this).apply{maxLines=1;ellipsize=TextUtils.TruncateAt.END;text=formatAttachmentDetails(mime,size);textSize=11.5f;setTextColor(currentTheme().textSecondary);setPadding(0,dp(3),0,dp(4))})
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             if(path!=null){
                 if(isTextLikeMime(mime,name)) {
@@ -8795,14 +8856,41 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     currentChatId(),
                     requestGeneration
                 )
-                addFeedbackRow(card,message,currentChatId())
             }
         }
 
+        val boundChatId = currentChatId()
+        fun latestSource(): String = messageAdapter.indexOfId(item.id).takeIf { it >= 0 }
+            ?.let { messageAdapter.itemAt(it)?.text } ?: item.text
+        if (!item.user) {
+            val actions = LinearLayout(this).apply {
+                tag = "assistant-actions"
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            addFeedbackRow(actions, message, boundChatId)
+            actions.addView(fileActionButton("Копировать") {
+                if (activityVisible && !isFinishing && !isDestroyed && currentChatId() == boundChatId &&
+                    messageAdapter.indexOfId(item.id) >= 0) copyText("Ответ", latestSource())
+            })
+            actions.addView(fileActionButton("Повторить") {
+                repeatAssistantResponse(boundChatId, item)
+            })
+            card.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(actions)
+            })
+        }
+
         val longPress=View.OnLongClickListener{
-            val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
-            else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
-            AlertDialog.Builder(this).setItems(menu){_,which->
+            if (!activityVisible || isFinishing || isDestroyed || currentChatId() != boundChatId ||
+                messageAdapter.indexOfId(item.id) < 0) return@OnLongClickListener true
+            val menu=if(item.user)arrayOf("Копировать","Редактировать")
+            else arrayOf("Копировать","Повторить")
+            AppThemeViews.dialog(this, currentTheme()).setItems(menu){_,which->
+                if (!activityVisible || isFinishing || isDestroyed || currentChatId() != boundChatId ||
+                    messageAdapter.indexOfId(item.id) < 0) return@setItems
                 // Read the newest adapter snapshot, not the transformed TextView or stale binding.
                 val currentSource = messageAdapter.indexOfId(item.id).takeIf { it >= 0 }
                     ?.let { messageAdapter.itemAt(it)?.text } ?: item.text
@@ -8812,31 +8900,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         cm.setPrimaryClip(ClipData.newPlainText("Сообщение",currentSource))
                         status.text="Скопировано"
                     }
-                    1->{
-                        val snapshotText = currentSource
-                        executor.execute {
-                            try {
-                                val directory = File(filesDir, "exports").apply { mkdirs() }
-                                val file = File(directory, "message_${UUID.randomUUID()}.txt")
-                                file.writeText(snapshotText, Charsets.UTF_8)
-                                runOnUiThread {
-                                    pendingExportPath = file.absolutePath
-                                    val i=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
-                                        addCategory(Intent.CATEGORY_OPENABLE)
-                                        type="text/plain"
-                                        putExtra(Intent.EXTRA_TITLE,"astra_message_${System.currentTimeMillis()}.txt")
-                                    }
-                                    launchActivityForResult(i, pickExportTxt)
-                                }
-                            } catch (e: Exception) {
-                                runOnUiThread { status.text="Экспорт недоступен: ${e.message}" }
-                            }
-                        }
-                    }
-                    2->if(item.user){
-                        item.chatIndex?.let(::editMessage)
+                    1->if(item.user){
+                        resolveBoundMessageIndex(item)?.let(::editMessage)
                     }else{
-                        sendMessage(true)
+                        repeatAssistantResponse(boundChatId, item)
                     }
                 }
             }.show()
@@ -8846,6 +8913,63 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         body.setOnLongClickListener(longPress)
         who.setOnLongClickListener(longPress)
         return body
+    }
+
+    /** Resolve the current row by durable identity, never by the index captured by a card. */
+    private fun resolveBoundMessageIndex(bound: ChatBubbleItem): Int? {
+        val fresh = messageAdapter.itemAt(messageAdapter.indexOfId(bound.id)) ?: return null
+        if (fresh.user != bound.user) return null
+        val expected = bound.message ?: return null
+        val source = fresh.message ?: return null
+        val row = expected.optLong("_db_message_id", 0L)
+        val request = JsonProtocol.nonBlank(expected, "request_id")
+        if (row > 0L && source.optLong("_db_message_id", 0L) != row) return null
+        if (JsonProtocol.nonBlank(source, "request_id") != request) return null
+        if (row <= 0L && request == null) return null
+        val matches = chat.indices.filter { index ->
+            val candidate = chat[index]
+            candidate.optString("role") == (if (bound.user) "user" else "assistant") &&
+                JsonProtocol.nonBlank(candidate, "request_id") == request &&
+                (if (row > 0L) candidate.optLong("_db_message_id", 0L) == row
+                 else JsonProtocol.nonBlank(candidate, "request_id") == request)
+        }
+        return matches.singleOrNull()
+    }
+
+    private fun repeatAssistantResponse(sourceChatId: String, bound: ChatBubbleItem) {
+        if (!activityVisible || isFinishing || isDestroyed || currentChatId() != sourceChatId) return
+        val assistantIndex = resolveBoundMessageIndex(bound)
+        val request = assistantIndex?.let { JsonProtocol.nonBlank(chat[it], "request_id") }
+        val userIndex = assistantIndex?.let { position ->
+            (position - 1 downTo 0).firstOrNull { chat[it].optString("role") == "user" }
+        }
+        val latestUser = chat.indexOfLast { it.optString("role") == "user" }
+        val durable = chatDb.getChat(sourceChatId)?.optJSONArray("messages")
+        val durableRows = (0 until (durable?.length() ?: 0)).mapNotNull { durable?.optJSONObject(it) }
+        val latestDurable = durableRows.lastOrNull { it.optString("role") == "user" }
+        val user = userIndex?.let(chat::get)
+        val assistantRow = assistantIndex?.let { chat[it].optLong("_db_message_id", 0L) } ?: 0L
+        val ownsDurableAssistant = durableRows.any { it.optString("role") == "assistant" &&
+            JsonProtocol.nonBlank(it,"request_id") == request &&
+            (assistantRow <= 0L || it.optLong("_db_message_id",0L) == assistantRow) }
+        val sameLatestUser = user != null && latestDurable != null &&
+            JsonProtocol.nonBlank(user, "request_id") == request &&
+            JsonProtocol.nonBlank(latestDurable, "request_id") == request &&
+            (user.optLong("_db_message_id", 0L) <= 0L ||
+                user.optLong("_db_message_id", 0L) == latestDurable.optLong("_db_message_id", 0L))
+        if (bound.user || request == null || userIndex != latestUser || !sameLatestUser || !ownsDurableAssistant) {
+            AppThemeViews.dialog(this, currentTheme()).setTitle("Повторить исторический ответ")
+                .setMessage("Автоматически можно повторить только ответ на последний запрос этого чата. Для исторического ответа скопируйте нужный запрос в новый чат; текущий черновик сохранён.")
+                .setPositiveButton("Понятно", null).show()
+            return
+        }
+        if (input.text.toString().isNotBlank() || attachedOpenRouterAttachments.isNotEmpty() ||
+            attachedFileIds.isNotEmpty() || attachedFilePaths.isNotEmpty() || pendingImagePath != null ||
+            pendingUploadUris.isNotEmpty()) {
+            status.text = "Сначала сохраните или отправьте текущий черновик"
+            return
+        }
+        sendMessage(true)
     }
 
     private fun saveTaggedResponseFile(chatId: String, item: ChatBubbleItem, block: ResponseBlockParser.Block.File) {
@@ -8915,18 +9039,23 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         return id
     }
 
-    private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
+    private fun addFeedbackRow(card:LinearLayout, message:JSONObject?, chatId:String){
+        val requestId=message?.let { JsonProtocol.nonBlank(it,"request_id") }
         val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,0)}
-        val current=message.optInt("feedback",0)
+        val current=message?.optInt("feedback",0) ?: 0
         fun feedbackButton(label:String,value:Int)=TextView(this).apply{
             text=if(current==value) "$label ✓" else label
             textSize=12f
-            setTextColor(Color.rgb(150,155,165))
+            setTextColor(currentTheme().textSecondary)
             setPadding(dp(6),dp(3),dp(10),dp(3))
-            isEnabled=current==0
+            isEnabled=current==0 && requestId != null
             setOnClickListener{
-                if(message.optInt("feedback",0)!=0)return@setOnClickListener
+                if (!activityVisible || isFinishing || isDestroyed || currentChatId() != chatId ||
+                    requestId == null || message == null || message.optInt("feedback",0)!=0)return@setOnClickListener
+                val owner = chat.lastOrNull { it.optString("role") == "assistant" &&
+                    JsonProtocol.nonBlank(it,"request_id") == requestId } ?: return@setOnClickListener
+                if (owner.optInt("feedback",0) != 0) return@setOnClickListener
+                owner.put("feedback",value)
                 message.put("feedback",value)
                 chatDb.recordFeedback(chatId,requestId,value)
                 diagnostics.log("effort_feedback",mapOf("chat_id" to chatId,"request_id" to requestId,"value" to value))
@@ -8949,8 +9078,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun button(t:String,a:()->Unit)=Button(this).apply{
         text=t;textSize=16f;minWidth=0;minimumWidth=0
         setPadding(dp(10),dp(6),dp(10),dp(6))
-        setTextColor(Color.rgb(210,214,222))
-        background=rippleRounded(Color.rgb(34,36,42),10)
+        AppThemeViews.button(this, currentTheme())
         setOnClickListener{a()}
     }
     private fun rippleRounded(fill:Int, radiusDp:Int=10): RippleDrawable =

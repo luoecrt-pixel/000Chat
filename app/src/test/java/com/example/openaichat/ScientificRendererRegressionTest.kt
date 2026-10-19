@@ -80,6 +80,28 @@ class ScientificRendererRegressionTest {
         assertFalse(document.contains("addJavascriptInterface"))
     }
 
+    @Test fun themingChangesOnlyOwnedStylesAndKeepsModelStringsAndSecurityPoliciesIntact() {
+        val source = "color:#fff;background:#1c1d22 theme:'dark' color:#ffb4ab /*integral-theme:start*/ exact source 😀 /*integral-theme:end*/"
+        val documents = listOf(
+            ScientificRendererDocument.math(listOf(MathDelimiterScanner.Formula(0, source.length, source, source, true))),
+            ScientificRendererDocument.mermaid("flowchart TD\nA[\"$source\"] --> B")
+        )
+        for (original in documents) for (id in AppThemePalette.themes) {
+            val theme = AppThemePalette.byId(id)
+            val themed = ScientificRendererDocument.themed(original, theme)
+            assertEquals(original.substringAfter("</style>"), themed.substringAfter("</style>"))
+            assertEquals(original.substringBefore("<style>"), themed.substringBefore("<style>"))
+            assertTrue(themed.contains("--math-bg:#%06x".format(theme.mathBg and 0xFFFFFF)))
+            assertTrue(themed.contains("--diagram-text:#%06x".format(theme.diagramText and 0xFFFFFF)))
+            assertTrue(themed.contains("border-radius:18px 10px 18px 10px"))
+            assertTrue(themed.contains("connect-src 'none'"))
+            assertFalse(themed.contains("addJavascriptInterface"))
+            assertEquals(themed, ScientificRendererDocument.themed(themed, theme))
+        }
+        val foreign = "<html><body>$source</body></html>"
+        assertEquals(foreign, ScientificRendererDocument.themed(foreign, AppThemePalette.LIGHT))
+    }
+
     @Test fun allFourDelimitersAreRecognizedWithoutTreatingMoneyOrCodeAsMath() {
         val source = "Цена ${'$'}5 и ${'$'}10; \\${'$'}20. ` ${'$'}code${'$'} `\n" +
             "${'$'}x^2${'$'} и \\(a+b\\), ${'$'}${'$'}x=1\ny=2${'$'}${'$'} и \\[z=3\\]."

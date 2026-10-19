@@ -4,6 +4,13 @@ import org.json.JSONObject
 import java.util.Locale
 
 object RequestEventFormatter {
+    fun progress(active: JSONObject, account: JSONObject?): String {
+        val provider = JsonProtocol.nonBlank(account ?: JSONObject(), "provider") ?: "unknown"
+        val model = JsonProtocol.nonBlank(account ?: JSONObject(), "requested_model")
+        val phase = if (active.optString("status") == "queued") "Ожидает в очереди" else "Модель работает…"
+        return "$phase · ${ModelCatalog.displayName(provider, model)} · ${RequestCostFormatter.text(account)} · токены ожидаются"
+    }
+
     fun match(event: JSONObject): ModelCatalog.Match = when (JsonProtocol.string(event, "model_match").lowercase(Locale.US)) {
         "exact" -> ModelCatalog.Match.EXACT
         "mismatch" -> ModelCatalog.Match.MISMATCH
@@ -40,7 +47,14 @@ object RequestEventFormatter {
             return "● Остановлено · " + ModelCatalog.displayName(provider, requested) + " · " + cost + telemetrySuffix
         }
         val latency = event.optLong("latency_ms", 0L)
-        return "● $modelText · ${tokens(event.optLong("input_tokens"))} in · " +
+        val state = when (JsonProtocol.string(event, "status")) {
+            "failed", "error" -> "Ошибка · "
+            "incomplete" -> "Неполный ответ · "
+            "cancelled" -> "Отменено · "
+            "disconnected" -> "Связь прервана · "
+            else -> ""
+        }
+        return "$state$modelText · ${tokens(event.optLong("input_tokens"))} in · " +
             "${tokens(event.optLong("output_tokens"))} out · " +
             "${tokens(event.optLong("reasoning_tokens"))} reasoning · " +
             "cache ${tokens(event.optLong("cached_tokens"))} · " +

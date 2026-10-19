@@ -32,7 +32,6 @@ class BackgroundResponseWorker(
         const val KEY_RESPONSE_ID = "response_id"
         const val KEY_REQUEST_ID = "request_id"
 
-        private const val CHANNEL_ID = "astra_response_recovery"
         private const val NOTIFICATION_ID = 41062
         // One-response recovery window; this is not a session-wide chat limit.
     }
@@ -76,7 +75,7 @@ class BackgroundResponseWorker(
                 .takeIf { it.isNotBlank() }
             db.startRequestAccounting(chatId, requestId, "openai", requestedModel, "openai_api_key")
 
-            setForeground(createForegroundInfo(db.getChatTitle(chatId).orEmpty().ifBlank { "Чат" }))
+            setForeground(createForegroundInfo())
             // started_at was persisted at original Send; a new Worker must not restart the clock.
             val requestStartedAt = activeAtStart.optLong("started_at", -1L)
             var retryDelayMs = 1_500L
@@ -489,19 +488,8 @@ class BackgroundResponseWorker(
                 "error" to failure.message.orEmpty().take(300), "index" to index))
         }
 
-    private fun createForegroundInfo(title: String): ForegroundInfo {
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Фоновые ответы", NotificationManager.IMPORTANCE_LOW))
-        }
-        val notification: Notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.sym_def_app_icon)
-            .setContentTitle("Продолжается генерация")
-            .setContentText(title.take(80))
-            .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+    private fun createForegroundInfo(): ForegroundInfo {
+        val notification = ResponseNotifications.running(applicationContext, inputData.getString(KEY_CHAT_ID).orEmpty())
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(NOTIFICATION_ID, notification)
     }
 }

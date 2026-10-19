@@ -17,23 +17,31 @@ import org.json.JSONObject
 object ResponseNotifications {
     const val EXTRA_CHAT_ID = "notification_chat_id"
     private const val COMPLETE_CHANNEL = "astra_finished_answers"
-    private const val RUNNING_CHANNEL = "astra_running_answers"
+    private const val RUNNING_CHANNEL = "integral_background_connection_v2"
     private fun channels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(COMPLETE_CHANNEL, "Готовые ответы", NotificationManager.IMPORTANCE_DEFAULT))
-        manager.createNotificationChannel(NotificationChannel(RUNNING_CHANNEL, "Выполнение ответа", NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(RUNNING_CHANNEL, "Фоновое соединение", NotificationManager.IMPORTANCE_MIN).apply {
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+        })
     }
     private fun intent(context: Context, chatId: String, id: Int): PendingIntent = PendingIntent.getActivity(
         context, id, Intent(context, MainActivity::class.java).putExtra(EXTRA_CHAT_ID, chatId)
             .setData(android.net.Uri.parse("astra-answer://chat/" + android.net.Uri.encode(chatId)))
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    fun running(context: Context, chatId: String, count: Int): Notification {
+    fun running(context: Context, chatId: String): Notification {
         channels(context)
         return NotificationCompat.Builder(context, RUNNING_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Integral LLM выполняет ответ")
-            .setContentText(if (count > 1) "Активных ответов: $count" else "Можно перейти в другое приложение")
-            .setContentIntent(intent(context, chatId, 41063)).setOngoing(true).setOnlyAlertOnce(true).build()
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Integral LLM · фоновое соединение")
+            // Android requires this indicator for a long-running foreground service.
+            // It carries no thinking/progress alerts or private chat text.
+            .setContentIntent(intent(context, chatId, 41063)).setOngoing(true).setOnlyAlertOnce(true)
+            .setSilent(true).setShowWhen(false).setPriority(NotificationCompat.PRIORITY_MIN)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET).build()
     }
     /** Only a winning SQLite finalizer calls this; never include answer text on the lock screen. */
     fun finished(context: Context, chatId: String, requestId: String, completed: Boolean) {

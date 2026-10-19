@@ -8,4 +8,4 @@ class MermaidDiagramView(context: Context, source: String) : ScientificMathText(
     TextView(context).apply {
         text = source; setTextIsSelectable(true)
         setTextColor(AppThemePalette.byId(context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")).textPrimary)
-    }, autoPreview = true, document = { ScientificRendererDocument.mermaid(source) })
+    }, autoPreview = true, surface = ScientificSurface.DIAGRAM, document = { ScientificRendererDocument.mermaid(source) })

@@ -68,6 +68,7 @@ object OpenRouterErrorClassifier {
             resetsAt = resetsAt,
             retryAfterSec = retryAfterSec,
             rawMessage = rawMessage,
+            providerDetail = rawDetail,
             provider = provider
         )
 
@@ -128,10 +129,14 @@ object OpenRouterErrorClassifier {
         resetsAt: String?,
         retryAfterSec: Long?,
         rawMessage: String,
+        providerDetail: String?,
         provider: String?
     ): String? {
         val normalizedType = errorType?.lowercase().orEmpty()
         val lowerMsg = rawMessage.lowercase()
+        val immutableThinking = (lowerMsg + " " + providerDetail.orEmpty().lowercase()).let {
+            "thinking" in it && "blocks" in it && "cannot be modified" in it
+        }
         val retryHint = buildList {
             retryAfterSec?.let { add("Retry-After: ${it} с") }
             resetsAt?.let { add("сброс лимита: $it") }
@@ -139,6 +144,10 @@ object OpenRouterErrorClassifier {
 
         return when (status) {
             400 -> when {
+                immutableThinking ->
+                    "Провайдер отклонил повторное использование подписанных блоков мышления Claude. " +
+                        "Верните исходные модель и маршрут либо начните новый чат с нужным контекстом. " +
+                        "История сохранена; автоматический повтор не выполнялся"
                 normalizedType == "image_too_large" || "image_too_large" in lowerMsg ->
                     "Изображение превышает допустимый размер провайдера (можно включить совместимую копию JPEG или маршрут Прямой Anthropic)"
                 normalizedType == "invalid_image" || "invalid_image" in lowerMsg ->

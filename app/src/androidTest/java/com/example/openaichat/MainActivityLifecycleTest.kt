@@ -2238,6 +2238,31 @@ class MainActivityLifecycleTest {
     fun deliberateHorizontalGestureOpensAndClosesChatDrawer() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        // Geometry/ownership only: never include message, composer or model text in diagnostics.
+        val gestureTrace = ArrayList<String>()
+
+        fun trace(activity: MainActivity, stage: String) {
+            val drawer = privateField(activity, "drawerLayout") as FingerDrawerLayout
+            val surface = privateField(activity, "scroll") as androidx.recyclerview.widget.RecyclerView
+            val bounds = android.graphics.Rect()
+            surface.getGlobalVisibleRect(bounds)
+            fun state(name: String) = FingerDrawerLayout::class.java.getDeclaredField(name)
+                .apply { isAccessible = true }.get(drawer)
+            val touched = state("touchedText") as? android.widget.TextView
+            val line = "$stage fraction=${drawer.visibleFraction} eligible=${state("eligible")}" +
+                " dragging=${state("dragging")} aborted=${state("aborted")}" +
+                " flingClaim=${state("recyclerFlingClaim")}" +
+                " panelWidth=${(drawer.getChildAt(1)).width} width=${drawer.width}" +
+                " capturedPanelWidth=${state("gesturePanelWidth")} capturedWidth=${state("gestureContainerWidth")}" +
+                " startFraction=${state("startFraction")} down=(${state("downX")},${state("downY")})" +
+                " surface=$bounds laidOut=${surface.isLaidOut} layoutRequested=${surface.isLayoutRequested}" +
+                " items=${surface.adapter?.itemCount} pendingUpdates=${surface.hasPendingAdapterUpdates()}" +
+                " scrollState=${surface.scrollState} touched=${touched?.javaClass?.simpleName}" +
+                " selection=${touched?.hasSelection()} focus=${activity.currentFocus?.javaClass?.simpleName}" +
+                " ime=${androidx.core.view.ViewCompat.getRootWindowInsets(surface)?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime())}"
+            gestureTrace.add(line)
+            android.util.Log.i("DrawerGestureTest", line)
+        }
 
         fun visibleWindowBounds(view: android.view.View): android.graphics.Rect {
             val bounds = android.graphics.Rect()
@@ -2268,7 +2293,8 @@ class MainActivityLifecycleTest {
                 ).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
                 scenario.onActivity { activity ->
                     try {
-                        activity.dispatchTouchEvent(event)
+                        val handled = activity.dispatchTouchEvent(event)
+                        trace(activity, "action=$action x=${event.x} y=${event.y} t=${event.eventTime - down} handled=$handled")
                     } finally {
                         event.recycle()
                     }
@@ -2289,8 +2315,9 @@ class MainActivityLifecycleTest {
                 }
                 if (!settled) SystemClock.sleep(20L)
             }
-            assertTrue(if (open) "Swipe right must open drawer"
-                else "Swipe left must fully close drawer", settled)
+            scenario.onActivity { activity -> trace(activity, "settledExpectedOpen=$open actual=$settled") }
+            assertTrue((if (open) "Swipe right must open drawer"
+                else "Swipe left must fully close drawer") + "\n" + gestureTrace.joinToString("\n"), settled)
         }
 
         try {
@@ -2303,6 +2330,7 @@ class MainActivityLifecycleTest {
                 val scroll = privateField(activity, "scroll") as android.view.View
                 chatBounds = visibleWindowBounds(scroll)
                 assertTrue("Chat surface must be laid out", chatBounds.width() > 200)
+                trace(activity, "measuredWindowBounds=$chatBounds")
             }
             // A vertical gesture must keep the drawer closed.
             swipe(chatBounds.exactCenterX(), chatBounds.top + chatBounds.height() * 0.25f,

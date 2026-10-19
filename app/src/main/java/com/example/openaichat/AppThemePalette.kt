@@ -24,7 +24,33 @@ data class ThemeColors(
     val divider: Int,
     val tableHeaderBg: Int,
     val tableRowBg: Int
-)
+) {
+    // Content has its own quiet colour families, rather than borrowing a button
+    // accent or flattening every scientific/card surface into the chat bubble.
+    private fun semantic(dark: Long, light: Long, gray: Long): Int = when (id) {
+        "light" -> light.toInt()
+        "gray" -> gray.toInt()
+        else -> dark.toInt()
+    }
+    val codeBg: Int get() = semantic(0xFF292536, 0xFFF1EDF8, 0xFFDCD8E5)
+    val codeText: Int get() = semantic(0xFFE0D4F7, 0xFF503B78, 0xFF49385F)
+    val codeBorder: Int get() = semantic(0xFF655578, 0xFFC3B5D8, 0xFFADA0BF)
+    val mathBg: Int get() = semantic(0xFF302A21, 0xFFFFF5E2, 0xFFE9E1D0)
+    val mathText: Int get() = semantic(0xFFF2D8AA, 0xFF755018, 0xFF694B24)
+    val mathBorder: Int get() = semantic(0xFF7A6542, 0xFFD7BD8C, 0xFFB9A780)
+    val diagramBg: Int get() = semantic(0xFF203136, 0xFFE9F5F5, 0xFFD1E1DF)
+    val diagramText: Int get() = semantic(0xFFB8E0DF, 0xFF285D63, 0xFF244D53)
+    val diagramBorder: Int get() = semantic(0xFF416A71, 0xFF9FC5C7, 0xFF8EAEB0)
+    val toolBg: Int get() = semantic(0xFF242D3C, 0xFFEDF2FA, 0xFFD4DEE8)
+    val toolText: Int get() = semantic(0xFFC3D6F5, 0xFF36567F, 0xFF314B6C)
+    val fileBg: Int get() = semantic(0xFF302A35, 0xFFF7EEF5, 0xFFE4D9E3)
+    val fileText: Int get() = semantic(0xFFE3C9E0, 0xFF744668, 0xFF65405C)
+    val logBg: Int get() = semantic(0xFF282D37, 0xFFF0F3F8, 0xFFD5DEE3)
+    val logText: Int get() = semantic(0xFFCCD5E6, 0xFF425572, 0xFF364D5D)
+    val surfaceBorder: Int get() = semantic(0xFF505969, 0xFFC2CDDC, 0xFF9DAFB9)
+    val errorBg: Int get() = semantic(0xFF3A2529, 0xFFFFEEEB, 0xFFECD8D4)
+    val errorText: Int get() = semantic(0xFFFFC1B9, 0xFF963F37, 0xFF873D36)
+}
 
 object AppThemePalette {
     val themes = listOf("dark", "light", "gray")

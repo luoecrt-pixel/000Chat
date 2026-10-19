@@ -671,10 +671,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
 
     fun renameChat(id: String, title: String) {
+        val normalizedTitle = title.ifBlank { "Чат" }
         writableDatabase.update(CHAT_TABLE, ContentValues().apply {
-            put("title", title.ifBlank { "Чат" })
+            put("title", normalizedTitle)
             put("updated_at", System.currentTimeMillis())
-        }, "id=?", arrayOf(id))
+        }, "id=? AND title!=?", arrayOf(id, normalizedTitle))
     }
 
     fun deleteChat(id: String) {
@@ -706,9 +707,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         writableDatabase.transaction { db ->
             // UI snapshots can be older than Worker/async metadata, even when they have
             // the same number of messages. Never rewrite existing rows here.
-            val exists = db.query(CHAT_TABLE, arrayOf("id"), "id=?",
-                arrayOf(id), null, null, null, "1").use { it.moveToFirst() }
-            if (!exists) return@transaction
+            val storedTitle = SqliteLargeTextQuery.query(db, CHAT_TABLE, arrayOf("title"), "id=?",
+                arrayOf(id), null, null, null, "1").use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            if (storedTitle == null) return@transaction
             val known = mutableSetOf<String>()
             val stoppedRequests = mutableSetOf<String>()
             db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("local_request_id"),
@@ -738,6 +739,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             // A Worker may have inserted an assistant at position N while the UI
             // produced another user at position N. Append by request identity,
             // not by the count or stale positional alignment.
+            var appended = false
             messages.forEach { snapshot ->
                 val role = snapshot.optString("role")
                 val requestId = snapshot.optString("request_id")
@@ -749,14 +751,19 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     db.insertOrThrow(MESSAGE_TABLE, null,
                         messageContentValues(id, nextPosition++, copy,
                             ChatMessageFingerprint.of(copy)))
+                    appended = true
                 }
             }
-            val values = ContentValues().apply {
-                if (title.isNotBlank()) put("title", title)
-                // Response/effort metadata is owned by terminal writer, not stale UI.
-                put("updated_at", System.currentTimeMillis())
+            val titleChanged = title.isNotBlank() && title != storedTitle
+            if (appended || titleChanged) {
+                val values = ContentValues().apply {
+                    if (titleChanged) put("title", title)
+                    // Opening/leaving a chat and saving settings are not content changes.
+                    // Response/effort metadata is owned by terminal writer, not stale UI.
+                    put("updated_at", System.currentTimeMillis())
+                }
+                db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
             }
-            db.update(CHAT_TABLE, values, "id=?", arrayOf(id))
             committed = true
         }
         return committed
@@ -2140,65 +2147,81 @@ data class ExistingMessageRow(
     }
 
     fun updateUserFileLocalPath(
-        chatId: String,
-        requestId: String,
-        index: Int,
+        target: HistoricalAttachmentDownloadTarget,
         localPath: String,
         mimeType: String? = null,
         sizeBytes: Long? = null
-    ) {
-        if (chatId.isBlank() || requestId.isBlank() || index < 0 || localPath.isBlank()) return
+    ): Boolean {
+        val index = target.index ?: return false
+        if (localPath.isBlank()) return false
+        var changed = false
         writableDatabase.transaction { db ->
-            SqliteLargeTextQuery.query(db, MESSAGE_TABLE,
-                arrayOf("id", "file_ids", "file_names", "file_sizes", "file_paths", "file_mimes"),
-                "chat_id=? AND request_id=? AND role='user'",
-                arrayOf(chatId, requestId), null, null, "position DESC", "1"
-            ).use { c ->
-                if (!c.moveToFirst()) return@transaction
-                val id = c.getLong(c.getColumnIndexOrThrow("id"))
-                val ids = parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_ids"))) ?: JSONArray()
-                val sizes = parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_sizes"))) ?: JSONArray()
-                val paths = parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_paths"))) ?: JSONArray()
-                val mimes = parseArrayColumn(c.getString(c.getColumnIndexOrThrow("file_mimes"))) ?: JSONArray()
-                val targetLength = maxOf(index + 1, ids.length(), paths.length(), mimes.length(), sizes.length())
-                while (paths.length() < targetLength) paths.put("")
-                while (mimes.length() < targetLength) mimes.put("")
-                while (sizes.length() < targetLength) sizes.put(0L)
-                paths.put(index, localPath)
-                if (!mimeType.isNullOrBlank()) mimes.put(index, mimeType)
-                if (sizeBytes != null && sizeBytes >= 0L) sizes.put(index, sizeBytes)
-                val values = ContentValues().apply {
-                    put("file_paths", paths.toString())
-                    put("file_mimes", mimes.toString())
-                    put("file_sizes", sizes.toString())
-                    putNull("content_hash")
-                }
-                db.update(MESSAGE_TABLE, values, "id=?", arrayOf(id.toString()))
+            val current = historicalDownloadMessage(db, target) ?: return@transaction
+            if (!target.matches(current)) return@transaction
+            val ids = current.optJSONArray("file_ids") ?: JSONArray()
+            val sizes = current.optJSONArray("file_sizes") ?: JSONArray()
+            val paths = current.optJSONArray("file_paths") ?: JSONArray()
+            val mimes = current.optJSONArray("file_mimes") ?: JSONArray()
+            val targetLength = maxOf(index + 1, ids.length(), paths.length(), mimes.length(), sizes.length())
+            while (paths.length() < targetLength) paths.put("")
+            while (mimes.length() < targetLength) mimes.put("")
+            while (sizes.length() < targetLength) sizes.put(0L)
+            paths.put(index, localPath)
+            if (!mimeType.isNullOrBlank()) mimes.put(index, mimeType)
+            if (sizeBytes != null && sizeBytes >= 0L) sizes.put(index, sizeBytes)
+            val values = ContentValues().apply {
+                put("file_paths", paths.toString())
+                put("file_mimes", mimes.toString())
+                put("file_sizes", sizes.toString())
+                putNull("content_hash")
             }
+            changed = db.update(MESSAGE_TABLE, values, "id=?", arrayOf(current.getLong("_db_message_id").toString())) == 1
         }
+        return changed
     }
 
     fun updateUserImageLocalPath(
-        chatId: String,
-        requestId: String,
+        target: HistoricalAttachmentDownloadTarget,
         localPath: String,
         mimeType: String? = null,
         sizeBytes: Long? = null
-    ) {
-        if (chatId.isBlank() || requestId.isBlank() || localPath.isBlank()) return
+    ): Boolean {
+        if (!target.image || localPath.isBlank()) return false
+        var changed = false
         writableDatabase.transaction { db ->
-            db.query(MESSAGE_TABLE, arrayOf("id"),
-                "chat_id=? AND request_id=? AND role='user'",
-                arrayOf(chatId, requestId), null, null, "position DESC", "1"
-            ).use { c ->
-                if (!c.moveToFirst()) return@transaction
-                val values = ContentValues().apply {
-                    put("image_path", localPath)
-                    if (!mimeType.isNullOrBlank()) put("image_mime", mimeType)
-                    if (sizeBytes != null && sizeBytes >= 0L) put("image_size", sizeBytes)
-                    putNull("content_hash")
+            val current = historicalDownloadMessage(db, target) ?: return@transaction
+            if (!target.matches(current)) return@transaction
+            val values = ContentValues().apply {
+                put("image_path", localPath)
+                if (!mimeType.isNullOrBlank()) put("image_mime", mimeType)
+                if (sizeBytes != null && sizeBytes >= 0L) put("image_size", sizeBytes)
+                putNull("content_hash")
+            }
+            changed = db.update(MESSAGE_TABLE, values, "id=?", arrayOf(current.getLong("_db_message_id").toString())) == 1
+        }
+        return changed
+    }
+
+
+    /** Recheck on the UI thread: a repair can commit after HTTP/SQLite, before the posted callback. */
+    fun isHistoricalAttachmentDownloadCurrent(target: HistoricalAttachmentDownloadTarget, downloadedPath: String? = null): Boolean =
+        historicalDownloadMessage(readableDatabase, target)?.let { target.matches(it, downloadedPath) } == true
+
+    private fun historicalDownloadMessage(db: SQLiteDatabase, target: HistoricalAttachmentDownloadTarget): JSONObject? {
+        val identity = if (target.messageId > 0L) "id=?" else "request_id=?"
+        val args = arrayOf(target.chatId, if (target.messageId > 0L) target.messageId.toString() else target.requestId!!)
+        return SqliteLargeTextQuery.query(db, MESSAGE_TABLE,
+            (listOf("id", "request_id") + AttachmentMessageState.columns.filter { it != "attachments" }).toTypedArray(),
+            "chat_id=? AND role='user' AND $identity", args, null, null, "position DESC", "1").use { c ->
+            if (!c.moveToFirst()) return@use null
+            JSONObject().apply {
+                put("_db_message_id", c.getLong(c.getColumnIndexOrThrow("id")))
+                c.getString(c.getColumnIndexOrThrow("request_id"))?.let { put("request_id", it) }
+                AttachmentMessageState.arrays.filter { it != "attachments" }.forEach { key ->
+                    parseArrayColumn(c.getString(c.getColumnIndexOrThrow(key)))?.let { put(key, it) }
                 }
-                db.update(MESSAGE_TABLE, values, "id=?", arrayOf(c.getLong(0).toString()))
+                AttachmentMessageState.strings.forEach { key -> c.getString(c.getColumnIndexOrThrow(key))?.let { put(key, it) } }
+                put("image_size", c.getLong(c.getColumnIndexOrThrow("image_size")))
             }
         }
     }
@@ -2336,6 +2359,35 @@ data class ExistingMessageRow(
             put("updated_at", System.currentTimeMillis())
         }
         writableDatabase.update(CHAT_TABLE, values, "id=?", arrayOf(chatId))
+    }
+
+    /**
+     * OpenRouter's sole runtime writer assigns a local monotonic snapshot cursor.
+     * It has no OpenAI server sequence, so it must not use that stream's stricter
+     * unsequenced-write policy. Ownership, running accounting and the cursor are
+     * checked in the same UPDATE as the text; Stop/replacement cannot revive it.
+     */
+    fun checkpointOpenRouterResponse(
+        chatId: String,
+        expectedRequestId: String,
+        text: String,
+        localSequence: Long
+    ): Boolean {
+        if (chatId.isBlank() || expectedRequestId.isBlank() || localSequence < 0L) return false
+        val values = ContentValues().apply {
+            put("active_text", text)
+            put("active_status", "in_progress")
+            put("active_last_sequence_number", localSequence)
+            put("updated_at", System.currentTimeMillis())
+        }
+        return writableDatabase.update(CHAT_TABLE, values,
+            """id=? AND active_request_id=? AND active_status IN ('starting','in_progress')
+                AND active_last_sequence_number < ? AND active_response_id IS NULL
+                AND active_indexed_checkpoint IS NULL
+                AND EXISTS (SELECT 1 FROM $REQUEST_ACCOUNTING_TABLE a
+                    WHERE a.chat_id=$CHAT_TABLE.id AND a.local_request_id=$CHAT_TABLE.active_request_id
+                    AND a.provider='openrouter' AND a.local_status='running')""".trimIndent(),
+            arrayOf(chatId, expectedRequestId, localSequence.toString())) == 1
     }
 
     fun updateActiveResponse(
