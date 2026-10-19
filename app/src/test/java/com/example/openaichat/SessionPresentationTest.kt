@@ -7,6 +7,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
@@ -27,6 +29,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowAlertDialog
 
@@ -194,6 +197,58 @@ class SessionPresentationTest {
         assertEquals(View.VISIBLE, label.visibility)
         label.text = ""
         assertEquals(View.GONE, label.visibility)
+    }
+
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun shownSettingsInputsHaveSemanticFillAndKeepNativeEditingStateAcrossRetheming() {
+        controller!!.start().resume().visible()
+        for (themeId in listOf("light", "gray", "dark")) {
+            prefs.edit().putString("app_theme", themeId).commit()
+            val theme = AppThemePalette.byId(themeId)
+            for (method in listOf("showSettings", "showResponseSettings")) {
+                call(method)
+                val dialog = ShadowAlertDialog.getLatestAlertDialog()!!
+                val edits = views(dialog.window!!.decorView).filterIsInstance<EditText>()
+                assertTrue(edits.isNotEmpty())
+                edits.forEach { edit ->
+                    assertTrue("$method must replace native input chrome", edit.background is GradientDrawable)
+                    assertEquals(theme.inputBg, (edit.background as GradientDrawable).color!!.defaultColor)
+                    assertNull("An accent tint must not recolor the input fill", edit.backgroundTintList)
+                }
+                val edit = edits.first()
+                edit.setText("ab😀cd")
+                edit.setSelection(1, 4)
+                edit.setPaddingRelative(11, 12, 13, 14)
+                val inputType = edit.inputType
+                val hint = edit.hint.toString()
+                val focusListener = View.OnFocusChangeListener { _, _ -> }
+                edit.onFocusChangeListener = focusListener
+                AppThemeViews.content(dialog.window!!.decorView, theme)
+                assertEquals("ab😀cd", edit.text.toString())
+                assertEquals(1, edit.selectionStart)
+                assertEquals(4, edit.selectionEnd)
+                assertEquals(inputType, edit.inputType)
+                assertEquals(hint, edit.hint.toString())
+                assertEquals(listOf(11, 12, 13, 14), listOf(edit.paddingStart, edit.paddingTop, edit.paddingEnd, edit.paddingBottom))
+                assertSame(focusListener, edit.onFocusChangeListener)
+                assertTrue("The real native input still accepts focus", edit.requestFocus())
+                val background = edit.background as GradientDrawable
+                assertTrue(background.isStateful)
+                val pixels = Bitmap.createBitmap(120, 60, Bitmap.Config.ARGB_8888)
+                try {
+                    background.setBounds(0, 0, 120, 60)
+                    background.draw(Canvas(pixels))
+                    assertEquals("Focus must preserve the input fill", theme.inputBg, pixels.getPixel(60, 30))
+                    assertEquals("Focus uses an accent border", theme.accent, pixels.getPixel(0, 30))
+                    edit.isEnabled = false
+                    assertEquals(theme.textSecondary, edit.currentTextColor)
+                    pixels.eraseColor(android.graphics.Color.TRANSPARENT)
+                    background.draw(Canvas(pixels))
+                    assertEquals("Disabled input uses the default border", theme.divider, pixels.getPixel(0, 30))
+                } finally { pixels.recycle() }
+                dialog.dismiss()
+            }
+        }
     }
 
     private fun bind(item: ChatBubbleItem) = LinearLayout(activity).also { card ->

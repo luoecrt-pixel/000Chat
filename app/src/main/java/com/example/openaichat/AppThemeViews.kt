@@ -39,9 +39,24 @@ object AppThemeViews {
     fun content(root: View, theme: ThemeColors) {
         when (root) {
             is EditText -> {
-                root.setTextColor(theme.textPrimary)
-                root.setHintTextColor(theme.hintText)
-                root.backgroundTintList = ColorStateList.valueOf(theme.accent)
+                val left = root.paddingLeft; val top = root.paddingTop
+                val right = root.paddingRight; val bottom = root.paddingBottom
+                val start = root.paddingStart; val end = root.paddingEnd
+                val relativePadding = root.isPaddingRelative
+                root.setTextColor(states(theme.textPrimary, theme.textSecondary))
+                root.setHintTextColor(states(theme.hintText, theme.textSecondary))
+                // A native dark underline or a background tint also recolors the input fill.
+                // Keep a real EditText and let the drawable handle focus without replacing
+                // focus listeners, its cursor, selection or IME/input configuration.
+                root.backgroundTintList = null
+                root.background = surface(root.context, theme.inputBg, theme.divider).apply {
+                    val stroke = (root.resources.displayMetrics.density + .5f).toInt().coerceAtLeast(1)
+                    setStroke(stroke, ColorStateList(
+                        arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf(android.R.attr.state_focused), intArrayOf()),
+                        intArrayOf(theme.divider, theme.accent, theme.divider)))
+                }
+                if (relativePadding) root.setPaddingRelative(start, top, end, bottom)
+                else root.setPadding(left, top, right, bottom)
             }
             is CompoundButton -> {
                 root.setTextColor(states(theme.textPrimary, theme.textSecondary))

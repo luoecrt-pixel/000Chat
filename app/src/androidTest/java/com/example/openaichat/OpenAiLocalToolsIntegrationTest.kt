@@ -429,6 +429,7 @@ class OpenAiLocalToolsIntegrationTest {
                 edits.forEach { edit ->
                     assertEquals("$title EditText text in ${theme.id}", theme.textPrimary, edit.currentTextColor)
                     assertEquals("$title EditText hint in ${theme.id}", theme.hintText, edit.currentHintTextColor)
+                    assertNull("$title input fill must not be recolored by an accent tint", edit.backgroundTintList)
                     assertEquals("$title EditText background in ${theme.id}", theme.inputBg,
                         (edit.background as GradientDrawable).color!!.defaultColor)
                 }
