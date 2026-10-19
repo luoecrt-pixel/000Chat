@@ -1,3 +1,16 @@
+# Возобновление диагностики шторки — 19.10.2026, 11:39 UTC
+
+Владелец написал «Чекай» и снял паузу. Actual PR #177 остаётся Draft; main d51516151d560687b00d5e349fb6bcabfc5c314d, head до этого test-only delta52b9519. Новых успешных Android runs нет: skipped build/release на docs52b9519 не заменяют failure Debug39227507450 на runtime3cb348f. Предыдущее разрешение merge действует только после принятых проверок; текущий failure его блокирует.
+
+- Runtime-код **не изменялся**. Точная причина device отказа по-прежнему не доказана; IME/layout/async-diff/child-disallow не объявляются диагнозом. Без эмулятора/KVM локально Android failing scenario не исполнялся.
+- Новый DrawerActivityGestureRegressionTest проверяет реальный MainActivity→Window→FingerDrawerLayout: empty newChat, vertical negative, horizontal fully open и fully closed. Локально **1/1 PASS** на Robolectric API35 с явно заданной геометрией; это не доказательство отсутствия device race.
+- Соседи: FingerDrawerLayoutTest23/23 и ChatMessageLayoutManagerTest4/4. Итого **28/28 PASS**,0failures/errors/skips. compileDebugAndroidTestKotlin PASS. Одна Gradle команда BUILD SUCCESSFUL2m42s; лог /workspace/scratch/000chat-drawer-activity-probe.log. Полный JVM/lint/build в этом ходе не повторялся.
+- В исходный Android deliberateHorizontalGestureOpensAndClosesChatDrawer добавлена безопасная диагностика каждого touch и конечного состояния: coords/time/handled, fraction/eligible/dragging/aborted, captured/current dimensions, surface bounds/layout/items/scroll, touched/focus View class, selection bool и IME. Все event dispatch/timing и assertions сохранены. Тексты сообщений/composer/model/keys не логируются.
+- Независимый read-only reviewer просмотрел delta и не нашёл ослабления acceptance или утечки private content; Gradle сам не запускал. Production gestures/selection/scroll/renderer/network/SQLite/notifications не менялись.
+- Новый [ci] commit запускает диагностическую пару Debug/Release. Это новый тестовый probe с данными для диагноза, не слепой rerun прежнего кода и не объявленное исправление device сбоя. Ожидание CI по поручению оставляется владельцу. Merge пока не выполнять; при повторном отказе изучить DrawerGestureTest trace в XML/logcat, при успехе независимо сверить exact head/весь обязательный CI и остаточный риск прежнего отказа.
+
+---
+
 # Пауза по прямой команде владельца — 19.10.2026, 09:29 UTC
 
 Работа приостановлена. Продолжение диагностики, rerun, Ready и merge без нового сообщения владельца не выполнять. Runtime code остаётся **3cb348ff209d413c2ccc2915e80528c085fc2c9b**, main **d51516151d560687b00d5e349fb6bcabfc5c314d**, PR **#177 Draft**, mergeable/unstable при последней проверке. Ни runtime, ни tests в этом ходе не менялись; текущий checkpoint — docs-only.
