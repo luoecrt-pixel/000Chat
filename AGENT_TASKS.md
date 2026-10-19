@@ -18,12 +18,6 @@
 
 Присланные full-file replacements проверять относительно актуального кода; не откатывать bounded saved state, renderer lifecycle и ownership ради старых verifier snapshots. Это связка с #5/#12/#16/#31/#32, без автоматического расширения transport/миграций.
 
-### Контрольный рубеж: отдельный полный аудит — **следующий**
-
-Сопоставить прежние находки с текущим кодом и оставшимися задачами, уточнить scope, зафиксировать один baseline `main` SHA и таблицу открытых работ. Два новых независимых агента отдельно проверяют Android/lifecycle/SQLite/files и GPT/Claude protocols/security/accounting в этом scope; P0/P1 перепроверяются перекрёстно, результат — один отчёт без дублей.
-
-Крупные новые transports, миграции и #30 — после этого аудита. Условия старта: релевантные CI/регрессии подтверждены для baseline, нет незакрытого подтверждённого неотложного P0/P1. Некритичный backlog не должен бесконечно откладывать аудит. Известные остатки не выдавать за новые находки. Сверка плана и обычные PR-review не заменяют этот аудит; его не автозапускают после каждого PR.
-
 ### 12. [C · P1/P2, остаток] Claude route/cache и сохранение сброса signed reasoning
 
 - Wire matrix `AUTO/ANTHROPIC × 1h/5m/off × tools/system/history`; согласовать top-level automatic cache с реально поддерживаемым маршрутом Auto, не смешивать несовместимые nested 5m/top-level 1h. Сохранить explicit breakpoints, историю и route/fallback policy.
@@ -89,7 +83,7 @@
 
 ### 30. [L · P2, отдельное расширение] GitHub read-only tools для OpenAI
 
-После стабилизации bridge и контрольного аудита подключить `get_file`, `get_file_range`, `list_directory`, `get_pull_request`, `list_pull_requests`, `list_issues`, `get_workflow_runs`, `get_workflow_run_jobs` поверх текущего GitHub executor/каталога; сначала сверить фактические имена/схемы. Write-каталог в GPT не копировать.
+После стабилизации bridge подключить `get_file`, `get_file_range`, `list_directory`, `get_pull_request`, `list_pull_requests`, `list_issues`, `get_workflow_runs`, `get_workflow_run_jobs` поверх текущего GitHub executor/каталога; сначала сверить фактические имена/схемы. Write-каталог в GPT не копировать.
 
 Разделить registry/dispatch локальных файлов и GitHub: GitHub-only запрос не требует вложения. Явный opt-in, PAT только локально, repo/ref allow-list, безопасные paths, bounded results/pagination/ranges/Stop. Activity/Worker используют один configuration snapshot; привязать durable запрос к исходному OpenAI credential, GitHub credential identity и allow-policy через безопасный hash/version. Текущий executor читает актуальный PAT при каждом вызове; одной OpenAI fingerprint проверки недостаточно. После rotation/revoke/смены прав продолжение не получает иной аккаунт/расширенные права молча; raw PAT не попадает в checkpoint/model/log.
 
@@ -180,7 +174,7 @@ STT audio/transcriptions, TTS audio/speech, затем Realtime WebRTC с кра
 Выборочно ComposeView после стабилизации: settings/themes/cards, затем лента по прототипу. Без зависимости от iOS/KMP.
 
 ### 23. [P3, отложено] KMP-ready ядро и опциональный iOS
-Постепенно чистая бизнес-логика/типизированные модели/repository/view-model без Android; commonMain/iOS — отдельные решения после стабилизации и контрольного аудита.
+Постепенно чистая бизнес-логика/типизированные модели/repository/view-model без Android; commonMain/iOS — отдельные решения после стабилизации.
 
 ## Карта визуальных референсов
 
