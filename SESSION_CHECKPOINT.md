@@ -1,3 +1,16 @@
+# Пауза по прямой команде владельца — 19.10.2026, 09:29 UTC
+
+Работа приостановлена. Продолжение диагностики, rerun, Ready и merge без нового сообщения владельца не выполнять. Runtime code остаётся **3cb348ff209d413c2ccc2915e80528c085fc2c9b**, main **d51516151d560687b00d5e349fb6bcabfc5c314d**, PR **#177 Draft**, mergeable/unstable при последней проверке. Ни runtime, ни tests в этом ходе не менялись; текущий checkpoint — docs-only.
+
+- Exact push Release **39227507370**, attempt1: **success**. Job117977278788: test/lintRelease/assembleRelease/bundleRelease success, BUILD SUCCESSFUL6m33s.
+- Exact push Debug **39227507450**, attempt1: **failure**. Job117977279561: static/mutations/JVM/lint/build success (BUILD SUCCESSFUL5m26s), isolated Android10PASS; полный Android XML149cases =145PASS +1failure +3ожидаемых fixture skips. Единственный отказ: MainActivityLifecycleTest.deliberateHorizontalGestureOpensAndClosesChatDrawer, assertion **Swipe right must open drawer**, awaitDrawer line2292 / call2318. Host-driven process-recovery шаг после failed suite **не выполнен**. Verify handoff39227512733 success на code SHA.
+- Экспортные изменения не меняли FingerDrawerLayout или этот Android test относительно baseline1dacac9; это само по себе не доказывает flaky/infrastructure. Конкретная причина отказа **не установлена**. Гипотезы layout/IME/async adapter/disallow не подтверждены, никакой эвристической runtime-правки или ослабления assertion не внесено. Автоматического rerun/Ready/merge не было.
+- Прежние локальные763/763 +lintDebug/assembleDebug остаются подтверждёнными, но не заменяют красный Android acceptance. Предыдущий review5569216120 подтверждал code delta с ожиданием CI; теперь merge blocked конкретным failed Android test.
+- Диагностический artifact12176417573 скачан byte ZIP в /workspace/scratch/pr177-android-evidence.zip и распакован в /workspace/scratch/pr177-android-evidence. XML и dedicated logcat сохранены локально; raw artifact/logs/temporary URLs в публичный Git не добавлять. Локально emulator и /dev/kvm отсутствуют. JVM, Android или live API в этом ходе заново не запускались.
+- Следующий шаг после возобновления: воспроизвести и диагностировать реальную Activity→Window→drawer gesture path/geometry/child interception, отличить production defect от fixture; исправление обосновать positive/negative runtime tests, затем новая требуемая пара CI на изменённом коде. До этого main не трогать. Матрица и фактический CI-статус в PR body обновляются при сохранении; старые разделы ниже — история.
+
+---
+
 # SESSION_CHECKPOINT — актуальное состояние 19.10.2026
 
 19.10.2026 владелец прямо разрешил merge PR #177 при успешной проверке. Новое P2-замечание о временных экспортах подтверждено и исправляется в этом же PR. Новые runtime/test изменения требуют новой успешной пары Debug/Release: прежний green1dacac9 их не доказывает. По прежнему поручению ожидание CI остаётся владельцу; до новых green не переводить в Ready и не сливать. Release/production signing/физический телефон не поручались. Исторические checkpoints сохранены в Git; подробные разборы — DEEP_REVIEW_2026-10-19.md и PROPOSED_FIX_REVIEW_2026-10-19.md.
