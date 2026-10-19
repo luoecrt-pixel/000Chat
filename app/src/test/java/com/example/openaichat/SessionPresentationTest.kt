@@ -148,7 +148,10 @@ class SessionPresentationTest {
         views(card).filterIsInstance<TextView>().single { it.text == "Копировать" }.performClick()
         assertEquals(raw, (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             .primaryClip!!.getItemAt(0).text.toString())
-        assertTrue(views(card).filterIsInstance<TextView>().any { it.text == "Сохранить TXT" })
+        val footer = views(card).filter { it.tag == "assistant-actions" }.single()
+        assertEquals(listOf("👍", "👎", "Копировать", "Повторить"),
+            views(footer).filterIsInstance<TextView>().map { it.text.toString() })
+        assertFalse(views(card).filterIsInstance<TextView>().any { it.text.toString().contains("TXT") })
         prefs.edit().putString("app_theme", "light").commit()
         call("showSettings")
         val dialog = ShadowAlertDialog.getLatestAlertDialog()!!
@@ -191,5 +194,63 @@ class SessionPresentationTest {
         assertEquals(View.VISIBLE, label.visibility)
         label.text = ""
         assertEquals(View.GONE, label.visibility)
+    }
+
+    private fun bind(item: ChatBubbleItem) = LinearLayout(activity).also { card ->
+        MainActivity::class.java.getDeclaredMethod("bindChatBubbleCard", LinearLayout::class.java, ChatBubbleItem::class.java)
+            .apply { isAccessible = true }.invoke(activity, card, item)
+    }
+
+    @Test fun historicalRetryDoesNotSendLatestPromptOrChangeDraftAndLongPressHasNoTxt() {
+        controller!!.start().resume().visible()
+        val sourceChat = chatId
+        ChatDatabase(context).use { db ->
+            db.upsertCurrentChat(sourceChat, "Retry ownership", null, null, listOf(
+                JSONObject().put("role","user").put("request_id","old").put("text","Первый запрос"),
+                JSONObject().put("role","assistant").put("request_id","old").put("text","Первый ответ"),
+                JSONObject().put("role","user").put("request_id","latest").put("text","Последний запрос"),
+                JSONObject().put("role","assistant").put("request_id","latest").put("text","Последний ответ")))
+        }
+        call("restoreCurrentChat")
+        val adapter = field("messageAdapter") as ChatMessageAdapter
+        val historical = adapter.snapshot().first { !it.user }.copy(chatIndex = 999)
+        val latest = adapter.snapshot().last()
+        val oldCard = bind(historical)
+        val draft = field("input") as EditText
+        val latestCard = bind(latest.copy(chatIndex = 999))
+        views(latestCard).filterIsInstance<TextView>().single { it.text == "Повторить" }.performClick()
+        val sendPreflight = ShadowAlertDialog.getLatestAlertDialog()!!
+        assertTrue("The genuine latest request reaches sendMessage's missing-key preflight",
+            views(sendPreflight.window!!.decorView).filterIsInstance<EditText>().any { it.hint == "OpenAI API key" })
+        sendPreflight.dismiss()
+        views(latestCard).filterIsInstance<TextView>().single { it.text == "👍" }.performClick()
+        assertEquals(1, ChatDatabase(context).use { it.getChat(sourceChat)!!.getJSONArray("messages").getJSONObject(3).getInt("feedback") })
+        draft.setText("Новый черновик 😀")
+        val before = ChatDatabase(context).use { it.getChat(sourceChat)!!.getJSONArray("messages").toString() }
+        views(oldCard).filterIsInstance<TextView>().single { it.text == "Повторить" }.performClick()
+        val explanation = ShadowAlertDialog.getLatestAlertDialog()!!
+        assertTrue(views(explanation.window!!.decorView).filterIsInstance<TextView>()
+            .any { it.text.contains("только ответ на последний запрос") })
+        explanation.dismiss()
+        assertEquals("Новый черновик 😀", draft.text.toString())
+        assertEquals(before, ChatDatabase(context).use { it.getChat(sourceChat)!!.getJSONArray("messages").toString() })
+        views(bind(latest)).filterIsInstance<TextView>().single { it.text == "Повторить" }.performClick()
+        assertEquals("Сначала сохраните или отправьте текущий черновик", (field("status") as TextView).text.toString())
+        assertEquals("Новый черновик 😀", draft.text.toString())
+        oldCard.performLongClick()
+        var menu = ShadowAlertDialog.getLatestAlertDialog()!!
+        assertEquals(listOf("Копировать","Повторить"), (0 until menu.listView.adapter.count).map { menu.listView.adapter.getItem(it).toString() })
+        menu.dismiss()
+        bind(adapter.snapshot().first { it.user }).performLongClick()
+        menu = ShadowAlertDialog.getLatestAlertDialog()!!
+        assertEquals(listOf("Копировать","Редактировать"), (0 until menu.listView.adapter.count).map { menu.listView.adapter.getItem(it).toString() })
+        menu.dismiss()
+        activity.newChat()
+        draft.setText("Черновик другого чата")
+        val otherChat = chatId
+        views(oldCard).filterIsInstance<TextView>().single { it.text == "Повторить" }.performClick()
+        assertEquals(otherChat, chatId)
+        assertEquals("Черновик другого чата", draft.text.toString())
+        assertEquals(before, ChatDatabase(context).use { it.getChat(sourceChat)!!.getJSONArray("messages").toString() })
     }
 }

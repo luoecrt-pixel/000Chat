@@ -322,6 +322,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val pickExportTxt = 5104
     private val pickSaveGenerated = 5105
     private var pendingExportPath: String? = null
+    private val conversationExportPreparing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var pendingPickerChatId: String? = null
     private var pendingPickerProvider: String? = null
     private var pendingSaveSourcePath: String? = null
@@ -1376,12 +1377,66 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun showChatActions(c: JSONObject) {
         AppThemeViews.dialog(this, currentTheme())
             .setTitle(c.optString("title","Чат"))
-            .setItems(arrayOf("Переименовать","Удалить")) { _, which ->
+            .setItems(arrayOf("Переименовать","Экспорт диалога","Удалить")) { _, which ->
                 when (which) {
                     0 -> renameChat(c.optString("id"))
-                    1 -> deleteChat(c.optString("id"))
+                    1 -> showConversationExport(c.optString("id"))
+                    2 -> deleteChat(c.optString("id"))
                 }
             }.show()
+    }
+
+    private fun showConversationExport(sourceChatId: String) {
+        val formats = DialogConversationExporter.Format.values()
+        AppThemeViews.dialog(this, currentTheme()).setTitle("Экспорт диалога")
+            .setItems(formats.map { it.label }.toTypedArray()) { _, index ->
+                exportConversation(sourceChatId, formats[index])
+            }.show()
+    }
+
+    private fun exportConversation(sourceChatId: String, format: DialogConversationExporter.Format) {
+        if (pendingExportPath != null || !conversationExportPreparing.compareAndSet(false, true)) {
+            status.text = "Сначала завершите текущий экспорт"
+            return
+        }
+        executor.execute {
+            var snapshot: File? = null
+            try {
+                // History and active partial must belong to the same SQLite snapshot.
+                val db = chatDb.readableDatabase
+                val source: JSONObject
+                val active: JSONObject?
+                db.beginTransactionNonExclusive()
+                try {
+                    source = chatDb.getChat(sourceChatId) ?: throw IOException("Чат удалён")
+                    active = chatDb.getActiveResponse(sourceChatId)
+                    db.setTransactionSuccessful()
+                } finally { db.endTransaction() }
+                val text = DialogConversationExporter.export(source.optString("title"),
+                    source.optJSONArray("messages") ?: JSONArray(), active, format)
+                val directory = File(filesDir, "exports").apply { mkdirs() }
+                val file = File(directory, "dialog_${UUID.randomUUID()}.${format.extension}")
+                snapshot = file
+                file.writeText(text, Charsets.UTF_8)
+                runOnUiThread {
+                    conversationExportPreparing.set(false)
+                    if (!activityVisible || isFinishing || isDestroyed) {
+                        file.delete()
+                        return@runOnUiThread
+                    }
+                    pendingExportPath = file.absolutePath
+                    launchActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = format.mimeType
+                        putExtra(Intent.EXTRA_TITLE, "integral_dialog_${System.currentTimeMillis()}.${format.extension}")
+                    }, pickExportTxt)
+                }
+            } catch (_: Exception) {
+                snapshot?.delete()
+                conversationExportPreparing.set(false)
+                runOnUiThread { if (activityVisible && !isDestroyed) status.text = "Не удалось подготовить экспорт диалога" }
+            }
+        }
     }
 
     private fun renameChat(id: String) {
@@ -6203,7 +6258,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             return
         }
         if(r==pickExportTxt){
-            val uri=d.data ?: return
+            val uri=d.data ?: run {
+                pendingExportPath?.let { File(it).delete() }
+                pendingExportPath=null
+                return
+            }
             val source=pendingExportPath
             pendingExportPath=null
             if(source.isNullOrBlank()){ status.text="Экспорт больше недоступен"; return }
@@ -6315,6 +6374,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             pendingActivityResultCode = null
             pendingPickerChatId = null
             pendingPickerProvider = null
+            if (requestCode == pickExportTxt) {
+                pendingExportPath?.let { File(it).delete() }
+                pendingExportPath = null
+            }
             status.text = "Операция недоступна: ${e.message}"
         }
     }
@@ -8784,7 +8847,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     currentChatId(),
                     requestGeneration
                 )
-                addFeedbackRow(card,message,currentChatId())
             }
         }
 
@@ -8798,11 +8860,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(8), 0, 0)
             }
+            addFeedbackRow(actions, message, boundChatId)
             actions.addView(fileActionButton("Копировать") {
-                if (currentChatId() == boundChatId) copyText("Ответ", latestSource())
+                if (activityVisible && !isFinishing && !isDestroyed && currentChatId() == boundChatId &&
+                    messageAdapter.indexOfId(item.id) >= 0) copyText("Ответ", latestSource())
             })
-            actions.addView(fileActionButton("Сохранить TXT") {
-                if (currentChatId() == boundChatId) exportMessageText(latestSource(), boundChatId)
+            actions.addView(fileActionButton("Повторить") {
+                repeatAssistantResponse(boundChatId, item)
             })
             card.addView(HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
@@ -8811,9 +8875,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
 
         val longPress=View.OnLongClickListener{
-            val menu=if(item.user)arrayOf("Копировать","Экспорт в TXT","Редактировать")
-            else arrayOf("Копировать","Экспорт в TXT","Повторить последний запрос")
+            if (!activityVisible || isFinishing || isDestroyed || currentChatId() != boundChatId ||
+                messageAdapter.indexOfId(item.id) < 0) return@OnLongClickListener true
+            val menu=if(item.user)arrayOf("Копировать","Редактировать")
+            else arrayOf("Копировать","Повторить")
             AppThemeViews.dialog(this, currentTheme()).setItems(menu){_,which->
+                if (!activityVisible || isFinishing || isDestroyed || currentChatId() != boundChatId ||
+                    messageAdapter.indexOfId(item.id) < 0) return@setItems
                 // Read the newest adapter snapshot, not the transformed TextView or stale binding.
                 val currentSource = messageAdapter.indexOfId(item.id).takeIf { it >= 0 }
                     ?.let { messageAdapter.itemAt(it)?.text } ?: item.text
@@ -8823,11 +8891,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         cm.setPrimaryClip(ClipData.newPlainText("Сообщение",currentSource))
                         status.text="Скопировано"
                     }
-                    1->exportMessageText(currentSource, boundChatId)
-                    2->if(item.user){
-                        item.chatIndex?.let(::editMessage)
+                    1->if(item.user){
+                        resolveBoundMessageIndex(item)?.let(::editMessage)
                     }else{
-                        sendMessage(true)
+                        repeatAssistantResponse(boundChatId, item)
                     }
                 }
             }.show()
@@ -8839,25 +8906,60 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         return body
     }
 
-    private fun exportMessageText(source: String, sourceChatId: String) {
-        executor.execute {
-            try {
-                val directory = File(filesDir, "exports").apply { mkdirs() }
-                val file = File(directory, "message_${UUID.randomUUID()}.txt")
-                file.writeText(source, Charsets.UTF_8)
-                runOnUiThread {
-                    if (isFinishing || isDestroyed || currentChatId() != sourceChatId) return@runOnUiThread
-                    pendingExportPath = file.absolutePath
-                    launchActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TITLE, "integral_message_${System.currentTimeMillis()}.txt")
-                    }, pickExportTxt)
-                }
-            } catch (e: Exception) {
-                runOnUiThread { if (!isDestroyed && currentChatId() == sourceChatId) status.text = "Экспорт недоступен: ${e.message}" }
-            }
+    /** Resolve the current row by durable identity, never by the index captured by a card. */
+    private fun resolveBoundMessageIndex(bound: ChatBubbleItem): Int? {
+        val fresh = messageAdapter.itemAt(messageAdapter.indexOfId(bound.id)) ?: return null
+        if (fresh.user != bound.user) return null
+        val expected = bound.message ?: return null
+        val source = fresh.message ?: return null
+        val row = expected.optLong("_db_message_id", 0L)
+        val request = JsonProtocol.nonBlank(expected, "request_id")
+        if (row > 0L && source.optLong("_db_message_id", 0L) != row) return null
+        if (JsonProtocol.nonBlank(source, "request_id") != request) return null
+        if (row <= 0L && request == null) return null
+        val matches = chat.indices.filter { index ->
+            val candidate = chat[index]
+            candidate.optString("role") == (if (bound.user) "user" else "assistant") &&
+                (if (row > 0L) candidate.optLong("_db_message_id", 0L) == row
+                 else JsonProtocol.nonBlank(candidate, "request_id") == request)
         }
+        return matches.singleOrNull()
+    }
+
+    private fun repeatAssistantResponse(sourceChatId: String, bound: ChatBubbleItem) {
+        if (!activityVisible || isFinishing || isDestroyed || currentChatId() != sourceChatId) return
+        val assistantIndex = resolveBoundMessageIndex(bound)
+        val request = assistantIndex?.let { JsonProtocol.nonBlank(chat[it], "request_id") }
+        val userIndex = assistantIndex?.let { position ->
+            (position - 1 downTo 0).firstOrNull { chat[it].optString("role") == "user" }
+        }
+        val latestUser = chat.indexOfLast { it.optString("role") == "user" }
+        val durable = chatDb.getChat(sourceChatId)?.optJSONArray("messages")
+        val durableRows = (0 until (durable?.length() ?: 0)).mapNotNull { durable?.optJSONObject(it) }
+        val latestDurable = durableRows.lastOrNull { it.optString("role") == "user" }
+        val user = userIndex?.let(chat::get)
+        val assistantRow = assistantIndex?.let { chat[it].optLong("_db_message_id", 0L) } ?: 0L
+        val ownsDurableAssistant = durableRows.any { it.optString("role") == "assistant" &&
+            JsonProtocol.nonBlank(it,"request_id") == request &&
+            (assistantRow <= 0L || it.optLong("_db_message_id",0L) == assistantRow) }
+        val sameLatestUser = user != null && latestDurable != null &&
+            JsonProtocol.nonBlank(user, "request_id") == request &&
+            JsonProtocol.nonBlank(latestDurable, "request_id") == request &&
+            (user.optLong("_db_message_id", 0L) <= 0L ||
+                user.optLong("_db_message_id", 0L) == latestDurable.optLong("_db_message_id", 0L))
+        if (bound.user || request == null || userIndex != latestUser || !sameLatestUser || !ownsDurableAssistant) {
+            AppThemeViews.dialog(this, currentTheme()).setTitle("Повторить исторический ответ")
+                .setMessage("Автоматически можно повторить только ответ на последний запрос этого чата. Для исторического ответа скопируйте нужный запрос в новый чат; текущий черновик сохранён.")
+                .setPositiveButton("Понятно", null).show()
+            return
+        }
+        if (input.text.toString().isNotBlank() || attachedOpenRouterAttachments.isNotEmpty() ||
+            attachedFileIds.isNotEmpty() || attachedFilePaths.isNotEmpty() || pendingImagePath != null ||
+            pendingUploadUris.isNotEmpty()) {
+            status.text = "Сначала сохраните или отправьте текущий черновик"
+            return
+        }
+        sendMessage(true)
     }
 
     private fun saveTaggedResponseFile(chatId: String, item: ChatBubbleItem, block: ResponseBlockParser.Block.File) {
@@ -8927,18 +9029,23 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         return id
     }
 
-    private fun addFeedbackRow(card:LinearLayout, message:JSONObject, chatId:String){
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"} ?: return
+    private fun addFeedbackRow(card:LinearLayout, message:JSONObject?, chatId:String){
+        val requestId=message?.let { JsonProtocol.nonBlank(it,"request_id") }
         val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(6),0,0)}
-        val current=message.optInt("feedback",0)
+        val current=message?.optInt("feedback",0) ?: 0
         fun feedbackButton(label:String,value:Int)=TextView(this).apply{
             text=if(current==value) "$label ✓" else label
             textSize=12f
             setTextColor(currentTheme().textSecondary)
             setPadding(dp(6),dp(3),dp(10),dp(3))
-            isEnabled=current==0
+            isEnabled=current==0 && requestId != null
             setOnClickListener{
-                if(message.optInt("feedback",0)!=0)return@setOnClickListener
+                if (!activityVisible || isFinishing || isDestroyed || currentChatId() != chatId ||
+                    requestId == null || message == null || message.optInt("feedback",0)!=0)return@setOnClickListener
+                val owner = chat.lastOrNull { it.optString("role") == "assistant" &&
+                    JsonProtocol.nonBlank(it,"request_id") == requestId } ?: return@setOnClickListener
+                if (owner.optInt("feedback",0) != 0) return@setOnClickListener
+                owner.put("feedback",value)
                 message.put("feedback",value)
                 chatDb.recordFeedback(chatId,requestId,value)
                 diagnostics.log("effort_feedback",mapOf("chat_id" to chatId,"request_id" to requestId,"value" to value))
