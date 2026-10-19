@@ -1,3 +1,13 @@
+# Продолжение 19.10.2026 — завершение acceptance после9e6fbb9
+
+Remote9e6fbb9 Release [39208525990](https://github.com/luoecrt-pixel/000Chat/actions/runs/39208525990), push attempt1 — **success**. Debug [39208526375](https://github.com/luoecrt-pixel/000Chat/actions/runs/39208526375), push attempt1 — JVM/lint/build success, isolated10PASS, Android152cases/1failure/3expected fixture skips. Новые DialogThemeDeviceTest и actualSend progress проверки не падали; единственное падение в OpenAiLocalToolsIntegrationTest:433 — native InsetDrawable при ожидании semantic input surface. Полный workflow red, последующий process-recovery harness не выполнен.
+
+Это выявило production пробел AppThemeViews: EditText менял только текст/hint и tint, не получая inputBg поверхности. Response Settings сохранял native Material background; accent tint мог красить и custom fill. Code64c202f задаёт явную inputBg surface со stateful focus/default/disabled border, без tint; native editing/padding/selection/type/listener сохранены. Исходная device-проверка сохранена и дополнена no-tint assertion. Новый regression использует native Canvas во всех3 темах.
+
+Реально выполнено на64c202f: SessionPresentation8/8PASS и **полный Debug755/755PASS**,0errors/skips,113 XML suites; static verify_handoff/v4/implementation PASS. Финальная локальная команда `testDebugUnitTest lintDebug assembleDebug compileDebugAndroidTestKotlin` **BUILD SUCCESSFUL за7m55s**: все755 JVM tests, lint, APK и Android Kotlin test compile завершены. Нового локального full Release не запускали; его вместе с Debug выполняет новая пара CI. Новая code-граница требует новой пары CI: прежний Release не объявляется её доказательством. По прямому поручению владельца ожидание Debug/Release CI оставлено ему; агент не ожидает conclusion и не запускает rerun. Новая пара стартует финальным `[ci]` push. Активный snapshot checkpoint упрощён до текущих фактов; прежние записи не потеряны — Git и нижняя историческая часть этого отчёта сохранены.
+
+---
+
 # Дополнение 19.10.2026 — #32/#33 и интеграция, окно 05:57–06:12 UTC
 
 **Фактическая остановка06:11UTC:** final production Debug и Debug unit-test compile PASS; полный testDebugUnitTest и lintAnalyzeDebug были запущены, но не завершились до лимита. Локальные Gradle daemon/worker остановлены; exit1 от принудительной остановки не считать установленной новой регрессией. Полного final Debug green, завершённых lintDebug/assembleDebug/AndroidTest compile и local Release на последнем code нет. Последний runtime/test code —5b6a7ad; этот финальный docs checkpoint запускает новую пару CI через `[ci]`. Работа снова приостановлена, продолжение только по новому поручению.
