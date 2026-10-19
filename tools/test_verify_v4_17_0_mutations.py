@@ -29,6 +29,14 @@ MUTATIONS = [
     "disable_stream_terminal_break",
     "drop_foreground_received_typed_output",
     "replace_local_assistant_request_id_with_http_id",
+    "download_db_remove_source_cas",
+    "download_db_read_outside_transaction",
+    "download_db_use_cursorwindow_for_source",
+    "download_remove_posted_ui_source_guard",
+    "download_remove_preview_source_guard",
+    "download_remove_failed_cas_cleanup",
+    "download_restore_unsafe_message_helper",
+    "download_remove_queued_credential_guard",
 ]
 
 STREAM_MUTATIONS = {
@@ -47,6 +55,24 @@ def render_method(source: str):
 
 
 def mutate(source: str, name: str) -> str:
+    if name == "download_remove_queued_credential_guard":
+        old = 'if(credential!=readCredential())throw IOException('
+        assert source.count(old) == 2
+        return source.replace(old, 'if(false)throw IOException(', 1)
+    if name == "download_remove_posted_ui_source_guard":
+        old = ' || !chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)'
+        assert source.count(old) == 2
+        return source.replace(old, '', 1)
+    if name == "download_remove_preview_source_guard":
+        old = ' && chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)'
+        assert source.count(old) == 2
+        return source.replace(old, '', 1)
+    if name == "download_remove_failed_cas_cleanup":
+        old = 'if(!retained)destination?.delete()'
+        assert source.count(old) == 2
+        return source.replace(old, '', 1)
+    if name == "download_restore_unsafe_message_helper":
+        return source + '\n// updateMessageFileLocalState: unsafe captured message helper\n'
     if name == "drop_foreground_received_typed_output":
         old = "OpenAiEffectiveResponse.assemble(completedResponse, responseState)"
         assert old in source
@@ -80,6 +106,18 @@ def mutate(source: str, name: str) -> str:
 
 
 def mutate_db(source: str, name: str) -> str:
+    if name == "download_db_remove_source_cas":
+        old = 'if (!target.matches(current)) return@transaction'
+        assert source.count(old) == 2
+        return source.replace(old, 'if (false) return@transaction', 1)
+    if name == "download_db_read_outside_transaction":
+        old = 'val current = historicalDownloadMessage(db, target) ?: return@transaction'
+        assert source.count(old) == 2
+        return source.replace(old, 'val current = historicalDownloadMessage(readableDatabase, target) ?: return@transaction', 1)
+    if name == "download_db_use_cursorwindow_for_source":
+        old = 'return SqliteLargeTextQuery.query(db, MESSAGE_TABLE,'
+        assert old in source
+        return source.replace(old, 'return db.query(MESSAGE_TABLE,', 1)
     if name == "remove_v18_table_creation_before_upgrade":
         old = "            ensureRequestEventsTable(db)\n            val columns"
         assert old in source
@@ -142,7 +180,7 @@ def main() -> int:
         temp_stream = temp_root / "app/src/main/java/com/example/openaichat/BoundedResponseDecoder.kt"
 
         for case_name, mutation, expected_pass in cases:
-            db_case = mutation and mutation.startswith(("remove_v18_",))
+            db_case = mutation and mutation.startswith(("remove_v18_", "download_db_"))
             stream_case = mutation in STREAM_MUTATIONS
             mutated_source = source if mutation is None or db_case or stream_case else mutate(source, mutation)
             temp_main.write_text(mutate_stream(mutated_source, mutation, "main") if stream_case else mutated_source)

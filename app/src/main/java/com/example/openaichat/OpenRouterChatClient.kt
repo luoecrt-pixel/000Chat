@@ -218,7 +218,9 @@ class OpenRouterChatClient(
                 it.isNotBlank() && OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
             }?.let { body.put("verbosity", it) }
 
-            val wireBody = StreamingJsonRequestBody(body)
+            // An inference POST must never be replayed by OkHttp's 408/503 follow-up.
+            // Each explicit tool continuation below constructs its own new body.
+            val wireBody = StreamingJsonRequestBody(body, oneShot = true)
             OpenRouterAttachmentPreflight.validateRequestBytes(model, wireBody.contentLength(), claudeRoute)
             ensureActive()
             val roundIndex = nextRoundIndex++

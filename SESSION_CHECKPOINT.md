@@ -1,3 +1,14 @@
+# 19.10.2026 06:01 UTC — новое разрешение на 10–15 минут, экспорт/футер и интеграция
+
+Владелец разрешил продолжить #32/#33 и интеграцию на 10–15 минут (старт05:57:04UTC, абсолютная граница06:12UTC). Это новое поручение приоритетнее паузы ниже. Main d515161 и отсутствие open PR повторно проверены. Safety c918ed9 Debug39201447117 и Release39201447163 — оба push attempt1 success, включая Android instrumentation.
+
+- UI pre-integration commit b7201f7: whole-dialog .md/.txt из меню чата, source chat snapshot+active в одной SQLite transaction, immutable UTF-8 file→SAF с cleanup; footer👍/👎/Копировать/Повторить, no messageTXT long-press. Retry проверяет свежие row/request ownership и latest user в UI/SQLite, исторический ответ не отправляет чужой запрос, draft не затирается.
+- Экспортёр — отдельный allowlist formatter, не полная замена присланных файлов: user/assistant only, rawtext без regex/trim, OR trace и normalized OA function outputs, unknown status остаётся unknown, hidden prompts/reasoning/arguments/output payload/credential fields не сериализуются. Явный active marker; same-request partial dedupe, terminal snapshot предпочитается stale active.
+- Safety объединяется в UI через merge (main не затронут); MainActivity/ChatDatabase auto-merge без conflict, единственный конфликт SESSION_CHECKPOINT сохранён с актуальной UI версией и этой записью. Обе исходные ветки/история сохраняются.
+- Новые tests: exporter8, SAF/selected-chat2 и расширенный presentation с request-aware retry. Пока это **исходники**, а не выполненный green; финальная общая Gradle/static проверка запускается. Не считать старые33/49PASS доказательством нового integratedcode. Результат и точный SHA/CI дописать перед остановкой.
+
+---
+
 # 19.10.2026 05:00 UTC — углублённая проверка сохранена, владелец снова приостановил работу
 
 Последнее поручение: «Сохранись и приостановись». Новую реализацию/проверки не начинать без нового поручения. Текущий подробный результат — [DEEP_REVIEW_2026-10-19.md](DEEP_REVIEW_2026-10-19.md), он приоритетнее старых промежуточных статусов ниже. Raw вложения не переносились в публичный репозиторий.

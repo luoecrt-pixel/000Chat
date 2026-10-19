@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private data class HistoricalAttachmentTarget(val chatId: String, val expected: JSONObject,
         val manifestIndex: Int? = null, val fileIndex: Int? = null, val image: Boolean = false)
     private var pendingAttachmentRestore: HistoricalAttachmentTarget? = null
+    @VisibleForTesting internal var historicalAttachmentCredentialProvider: (() -> String)? = null
     private val pendingAttachmentChange = AtomicReference<String?>(null)
     private val historicalFilePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = pendingAttachmentRestore
@@ -7425,12 +7426,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun showImagePreviewFromFile(path:String,name:String){
+    private fun showImagePreviewFromFile(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             val key=thumbnailCacheKey(path,1800)
             val bmp=thumbnailCache.get(key) ?: decodeThumbnailFromFile(path,1800)?.also{thumbnailCache.put(key,it)}
             runOnUiThread{
-                if(isFinishing)return@runOnUiThread
+                if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                 if(bmp==null){status.text="Не удалось прочитать изображение";return@runOnUiThread}
                 showImagePreviewFromBitmap(bmp,name)
             }
@@ -7726,22 +7727,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     private fun downloadUserFileCopy(message:JSONObject,index:Int,card:LinearLayout,openAfter:Boolean=false){
-        val ids=message.optJSONArray("file_ids") ?: return
         val names=message.optJSONArray("file_names") ?: return
-        val fileId=JsonProtocol.string(ids, index).trim()
-        if(fileId.isBlank())return
-        val filename=safeDisplayName(JsonProtocol.string(names, index).ifBlank{"attachment_${index+1}"})
         val chatId=message.optString("chat_id").ifBlank{currentChatId()}
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"}.orEmpty()
+        val target=HistoricalAttachmentDownloadTarget.file(chatId,message,index) ?: return
+        val generation=activeResponseState.state.generation
+        val fileId=target.fileId
+        val requestId=target.requestId.orEmpty()
+        val filename=safeDisplayName(JsonProtocol.string(names, index).ifBlank{"attachment_${index+1}"})
         val mimeHint=userFileMime(message,index,filename)
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $filename…"
         executor.execute{
             var destination:File?=null
+            var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder().url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
-                destination=File(File(filesDir,"attachments").apply{mkdirs()},"user_${System.currentTimeMillis()}_${safeFileName(filename)}")
+                    .addHeader("Authorization","Bearer $credential").get().build()
+                destination=File.createTempFile("user_","_"+safeFileName(filename),File(filesDir,"attachments").apply{mkdirs()})
                 client.newCall(req).execute().use{resp->
                     if(!resp.isSuccessful)throw FileDownloadException(resp.code)
                     val body=resp.body ?: throw IOException("Пустой ответ")
@@ -7752,7 +7756,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         while(true){
                             val n=input.read(buffer);if(n<0)break
                             total+=n
-                            if(total>maxBytes){destination!!.delete();throw IOException("Файл слишком большой для мобильного клиента")}
+                            if(total>maxBytes)throw IOException("Файл слишком большой для мобильного клиента")
                             output.write(buffer,0,n)
                         }
                     }}
@@ -7760,71 +7764,60 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val mime=if(mimeHint.isBlank())mimeForFilename(filename) else mimeHint
                 val finalPath=destination!!.absolutePath
                 val finalSize=destination!!.length()
-                updateMessageFileLocalState(message,index,finalPath,mime,finalSize,chatId,requestId)
+                retained=chatDb.updateUserFileLocalPath(target,finalPath,mime,finalSize)
+                if(!retained)return@execute
                 diagnostics.log("user_file_cache_restored",mapOf("chat_id" to chatId,"request_id" to requestId,"file_id" to fileId,"filename" to filename,"bytes" to finalSize))
                 runOnUiThread{
-                    if(currentChatId()==chatId){
-                        persistCurrentChatFor(chatId)
-                        status.text="Файл доступен: $filename"
-                        if(openAfter)openPreviewForLocalFile(finalPath,filename,mime) else restoreCurrentChat()
+                    if(!isRequestCurrent(chatId,generation) || !chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath))return@runOnUiThread
+                    persistComposerStateNow()
+                    restoreCurrentChat()
+                    status.text="Файл доступен: $filename"
+                    if(openAfter)openPreviewForLocalFile(finalPath,filename,mime) {
+                        isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)
                     }
                 }
             }catch(e:FileDownloadException){
-                destination?.delete()
-                runOnUiThread{status.text=if(e.code==404||e.code==410)"Исходный файл больше недоступен" else "Не удалось скачать $filename: HTTP ${e.code}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text=if(e.code==404||e.code==410)"Исходный файл больше недоступен" else "Не удалось скачать $filename: HTTP ${e.code}"
+                }
             }catch(e:Exception){
-                destination?.delete()
-                runOnUiThread{status.text="Не удалось скачать $filename: ${e.message}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text="Не удалось скачать $filename: ${e.message}"
+                }
+            }finally{
+                if(!retained)destination?.delete()
             }
         }
     }
 
-    private fun updateMessageFileLocalState(
-        message:JSONObject,
-        index:Int,
-        localPath:String,
-        mime:String,
-        size:Long,
-        chatId:String,
-        requestId:String
-    ){
-        val ids=message.optJSONArray("file_ids") ?: JSONArray()
-        val paths=message.optJSONArray("file_paths") ?: JSONArray()
-        val mimes=message.optJSONArray("file_mimes") ?: JSONArray()
-        val sizes=message.optJSONArray("file_sizes") ?: JSONArray()
-        val targetLength=maxOf(index+1,ids.length(),paths.length(),mimes.length(),sizes.length())
-        while(paths.length()<targetLength)paths.put("")
-        while(mimes.length()<targetLength)mimes.put("")
-        while(sizes.length()<targetLength)sizes.put(0L)
-        paths.put(index,localPath)
-        mimes.put(index,mime)
-        sizes.put(index,size)
-        message.put("file_paths",paths).put("file_mimes",mimes).put("file_sizes",sizes)
-        if(requestId.isNotBlank()){
-            chatDb.updateUserFileLocalPath(chatId,requestId,index,localPath,mime,size)
-        }
-    }
-
     private fun downloadUserImageCopy(message:JSONObject,card:LinearLayout,openAfter:Boolean=false){
-        val fileId=JsonProtocol.string(message, "image_file_id").trim()
-        if(fileId.isBlank()){
+        val chatId=message.optString("chat_id").ifBlank{currentChatId()}
+        val target=HistoricalAttachmentDownloadTarget.image(chatId,message)
+        if(target==null){
             status.text="Исходное изображение больше недоступно"
             return
         }
-        val chatId=message.optString("chat_id").ifBlank{currentChatId()}
-        val requestId=message.optString("request_id").takeIf{it.isNotBlank() && it!="null"}.orEmpty()
+        val generation=activeResponseState.state.generation
+        val fileId=target.fileId
+        val requestId=target.requestId.orEmpty()
         val name=safeDisplayName(JsonProtocol.string(message, "image_name").ifBlank{"image.png"})
+        val mimeHint=JsonProtocol.string(message, "image_mime").ifBlank{mimeForFilename(name)}
+        val readCredential=historicalAttachmentCredentialProvider ?: secure::getApiKey
+        val credential=readCredential()
         status.text="Скачиваю $name…"
         executor.execute{
             var destination:File?=null
+            var retained=false
             try{
-                val key=secure.getApiKey()
+                if(credential!=readCredential())throw IOException("Ключ API изменился. Повторите скачивание с выбранным аккаунтом")
                 val req=Request.Builder()
                     .url("https://api.openai.com/v1/files/$fileId/content")
-                    .addHeader("Authorization","Bearer $key").get().build()
+                    .addHeader("Authorization","Bearer $credential").get().build()
                 val dir=File(filesDir,"attachments").apply{mkdirs()}
-                destination=File(dir,"user_image_${System.currentTimeMillis()}_${safeFileName(name)}")
-                var mime=JsonProtocol.string(message, "image_mime").ifBlank{mimeForFilename(name)}
+                destination=File.createTempFile("user_image_","_"+safeFileName(name),dir)
+                var mime=mimeHint
                 client.newCall(req).execute().use{resp->
                     if(!resp.isSuccessful)throw FileDownloadException(resp.code)
                     val body=resp.body ?: throw IOException("Пустой ответ")
@@ -7836,29 +7829,37 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         while(true){
                             val n=input.read(buffer);if(n<0)break
                             total+=n
-                            if(total>maxBytes){destination!!.delete();throw IOException("Файл слишком большой для мобильного клиента")}
+                            if(total>maxBytes)throw IOException("Файл слишком большой для мобильного клиента")
                             output.write(buffer,0,n)
                         }
                     }}
                 }
                 val finalPath=destination!!.absolutePath
                 val finalSize=destination!!.length()
-                message.put("image_path",finalPath).put("image_mime",mime).put("image_size",finalSize)
-                if(requestId.isNotBlank())chatDb.updateUserImageLocalPath(chatId,requestId,finalPath,mime,finalSize)
+                retained=chatDb.updateUserImageLocalPath(target,finalPath,mime,finalSize)
+                if(!retained)return@execute
                 diagnostics.log("user_image_cache_restored",mapOf("chat_id" to chatId,"request_id" to requestId,"file_id" to fileId,"bytes" to finalSize))
                 runOnUiThread{
-                    if(currentChatId()==chatId){
-                        persistCurrentChatFor(chatId)
-                        status.text="Изображение доступно: $name"
-                        if(openAfter)showImagePreviewFromFile(finalPath,name) else restoreCurrentChat()
+                    if(!isRequestCurrent(chatId,generation) || !chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath))return@runOnUiThread
+                    persistComposerStateNow()
+                    restoreCurrentChat()
+                    status.text="Изображение доступно: $name"
+                    if(openAfter)showImagePreviewFromFile(finalPath,name) {
+                        isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target,finalPath)
                     }
                 }
             }catch(e:FileDownloadException){
-                destination?.delete()
-                runOnUiThread{status.text=if(e.code==404||e.code==410)"Исходное изображение больше недоступно" else "Не удалось скачать $name: HTTP ${e.code}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text=if(e.code==404||e.code==410)"Исходное изображение больше недоступно" else "Не удалось скачать $name: HTTP ${e.code}"
+                }
             }catch(e:Exception){
-                destination?.delete()
-                runOnUiThread{status.text="Не удалось скачать $name: ${e.message}"}
+                runOnUiThread{
+                    if(isRequestCurrent(chatId,generation) && chatDb.isHistoricalAttachmentDownloadCurrent(target))
+                        status.text="Не удалось скачать $name: ${e.message}"
+                }
+            }finally{
+                if(!retained)destination?.delete()
             }
         }
     }
@@ -7877,7 +7878,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         dialog.show()
     }
 
-    private fun showTextPreview(path:String,name:String){
+    private fun showTextPreview(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             try{
                 val maxPreview=2L*1024L*1024L
@@ -7898,6 +7899,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
                 val truncated=file.length()>maxPreview
                 runOnUiThread{
+                    if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                     val tv=TextView(this).apply{
                         this.text=if(truncated)"$text\n\n… Показана первая часть файла (${formatBytes(maxPreview)}). Полный файл можно открыть/сохранить."
                         else text
@@ -7906,11 +7908,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val box=ScrollView(this).apply{addView(tv)}
                     AppThemeViews.dialog(this, currentTheme()).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть файл"){_,_->openLocalFile(path,name,mimeForFilename(name))}.show()
                 }
-            }catch(e:Exception){runOnUiThread{status.text="Не удалось прочитать $name: ${e.message}"}}
+            }catch(e:Exception){runOnUiThread{
+                if(!isFinishing && !isDestroyed && uiOwner())status.text="Не удалось прочитать $name: ${e.message}"
+            }}
         }
     }
 
-    private fun showPdfPreview(path:String,name:String){
+    private fun showPdfPreview(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             try{
                 val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
@@ -7922,6 +7926,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         bmp.eraseColor(Color.WHITE)
                         page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         runOnUiThread{
+                            if(isFinishing || isDestroyed || !uiOwner())return@runOnUiThread
                             val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(6),dp(6),dp(6),dp(6))}
                             box.addView(ImageView(this).apply{setImageBitmap(bmp);scaleType=ImageView.ScaleType.FIT_CENTER;adjustViewBounds=true},LinearLayout.LayoutParams(-1,dp(540)))
                             AppThemeViews.dialog(this, currentTheme()).setTitle(name).setView(box).setPositiveButton("Закрыть",null).setNeutralButton("Открыть полностью"){_,_->openLocalFile(path,name,"application/pdf")}.show()
@@ -7929,7 +7934,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 }
                 pfd.close()
-            }catch(e:Exception){runOnUiThread{status.text="Не удалось показать PDF: ${e.message}"}}
+            }catch(e:Exception){runOnUiThread{
+                if(!isFinishing && !isDestroyed && uiOwner())status.text="Не удалось показать PDF: ${e.message}"
+            }}
         }
     }
 
@@ -8059,12 +8066,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun openPreviewForLocalFile(path:String,name:String,mime:String){
+    private fun openPreviewForLocalFile(path:String,name:String,mime:String,uiOwner:()->Boolean={true}){
         when{
-            mime.startsWith("image/") -> showImagePreviewFromFile(path,name)
-            isTextLikeMime(mime,name) -> showTextPreview(path,name)
-            mime.equals("application/pdf",true) -> showPdfPreview(path,name)
-            else -> openLocalFile(path,name,mime)
+            mime.startsWith("image/") -> showImagePreviewFromFile(path,name,uiOwner)
+            isTextLikeMime(mime,name) -> showTextPreview(path,name,uiOwner)
+            mime.equals("application/pdf",true) -> showPdfPreview(path,name,uiOwner)
+            else -> if(uiOwner())openLocalFile(path,name,mime)
         }
     }
 
