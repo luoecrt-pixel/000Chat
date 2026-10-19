@@ -1,3 +1,13 @@
+# Финальная проверка перед PR — 19.10.2026
+
+Проверенный runtime `1dacac9f693a9c4ad437d768c4ed267726a900b0`, base main `d51516151d560687b00d5e349fb6bcabfc5c314d`. Root повторно сверил actual refs, clean tree, diff/check, verifiers и реальные CI metadata/job logs. [Debug39213376233](https://github.com/luoecrt-pixel/000Chat/actions/runs/39213376233) и [Release39213376235](https://github.com/luoecrt-pixel/000Chat/actions/runs/39213376235) — оба push attempt1 **success** на exact runtime SHA. Debug выполнил оба JVM variants, lintDebug/assembleDebug, isolated Android10, основной Android152cases без failures (3 служебных fixtures ожидаемо пропущены) и отдельные5 реальных process-kill/new-process WorkManager сценариев: terminal/expired_partial/stopped_pre_id/replaced/background_created — всеPASS. Release выполнил test/lintRelease/assembleRelease/bundleRelease. Локальный полный Debug755/755 и build/lint/Android test compile описаны ниже.
+
+Два новых независимых bounded final-diff review (safety и UI/export, не новый аудит всей codebase) не нашли подтверждённых blockers/new regressions. Просмотрены ownership/CAS/oneShot, retry/export/SAF, selection/drawer, theme/editor и renderer source/lifecycle. **Граница доказательств:** download tests используют openAfter=false; отдельная задержанная гонка второго async preview не исполнялась, хотя guards просмотрены в коде. Physical selection handles/TalkBack/font scale/плавность, live provider/billing, legacy original-account file binding и причины исходных signed400/age остаются вне доказанной приёмки.
+
+По прямому поручению владельца пакет оформляется Draft PR с матрицей contract→runtime path→positive/negative tests→harness→SHA/CI. Main/Ready/merge не выполняются. Финальный commit после1dacac9 меняет только этот report и SESSION_CHECKPOINT, runtime/tests/build byte-identical; docs-only exception не требует нового Android rebuild, Verify handoff нужен на PR head. Это заключение не обещает абсолютного отсутствия ошибок.
+
+---
+
 # Продолжение 19.10.2026 — завершение acceptance после9e6fbb9
 
 Remote9e6fbb9 Release [39208525990](https://github.com/luoecrt-pixel/000Chat/actions/runs/39208525990), push attempt1 — **success**. Debug [39208526375](https://github.com/luoecrt-pixel/000Chat/actions/runs/39208526375), push attempt1 — JVM/lint/build success, isolated10PASS, Android152cases/1failure/3expected fixture skips. Новые DialogThemeDeviceTest и actualSend progress проверки не падали; единственное падение в OpenAiLocalToolsIntegrationTest:433 — native InsetDrawable при ожидании semantic input surface. Полный workflow red, последующий process-recovery harness не выполнен.
