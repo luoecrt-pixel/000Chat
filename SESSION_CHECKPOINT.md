@@ -2,7 +2,7 @@
 
 Актуальный отчёт — [PROPOSED_FIX_REVIEW_2026-10-19.md](PROPOSED_FIX_REVIEW_2026-10-19.md). Он приоритетнее старых статусов ниже. Входные файлы проверены по SHA256; два узких source review и isolated JVM counterexamples показали, что full-file replacements применять нельзя. Новые пожелания сохранены в AGENT_TASKS #33/#32.
 
-Safety ветка получила code commit `3f82418`: oneShot=true. Реально выполнено 24 targeted tests:23PASS/1attachment failure; retry4/4, checkpoint4/4, classifier5/5. Отдельно два counterexample probe присланных классов ожидаемо падают, existing accumulator test проходит. Safety verifier_v4 всё ещё требует старое имя helper — pending адаптация с mutation tests. UI targeted run ещё идёт; его итог смотреть в отчёте. UI и safety по-прежнему НЕ интегрированы.
+Safety ветка получила code commit `3f82418`: oneShot=true. Реально выполнено 24 targeted tests:23PASS/1attachment failure; retry4/4, checkpoint4/4, classifier5/5. Отдельно два counterexample probe присланных классов ожидаемо падают, existing accumulator test проходит. Safety verifier_v4 всё ещё требует старое имя helper — pending адаптация с mutation tests. UI targeted run завершён на cd9326e:26tests/22PASS/4failures, compile PASS после исправления тестового API. DB ordering6/6 и narrow focus3/3 PASS; drawer2fail и presentation2fail требуют разбора. Подробные test names в отчёте; все сборки завершены, работа снова приостановлена. UI и safety по-прежнему НЕ интегрированы.
 
 После завершения этого короткого окна снова остановиться. Продолжение — только по новому поручению; не принимать старое «исправление oneShot ещё не внесено» ниже за текущее состояние. Никаких main/merge/release/device действий.
 
