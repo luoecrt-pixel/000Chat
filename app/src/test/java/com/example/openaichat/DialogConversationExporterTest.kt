@@ -98,6 +98,15 @@ class DialogConversationExporterTest {
         assertFalse(final.contains("незавершённый активный ответ"))
     }
 
+    @Test fun activeWithoutANewChunkStillMarksTheStoredPartialAsUnfinished() {
+        val stored = message("assistant", "Saved partial").put("request_id", "r").put("status", "in_progress")
+        val active = JSONObject().put("request_id", "r").put("text", "").put("status", "in_progress")
+        val exported = DialogConversationExporter.export("Title", listOf(stored), active)
+        assertTrue(exported.contains("незавершённый активный ответ"))
+        assertTrue(exported.contains("Saved partial"))
+        assertEquals(1, Regex("## Ассистент").findAll(exported).count())
+    }
+
     @Test fun activeOtherRequestIsAppendedAndHiddenActiveRoleIsRejected() {
         val stored = message("assistant", "Earlier").put("request_id", "a")
         val active = JSONObject().put("request_id", "b").put("text", "Current")

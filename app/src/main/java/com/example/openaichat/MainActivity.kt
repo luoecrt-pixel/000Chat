@@ -6274,9 +6274,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     val out=contentResolver.openOutputStream(uri)
                         ?: throw IOException("Не удалось открыть файл для записи")
                     snapshot.inputStream().use { input -> out.use { output -> input.copyTo(output, 64*1024) } }
-                    runOnUiThread { status.text="Экспорт сохранён" }
+                    runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Экспорт сохранён" }
                 } catch(e:Exception) {
-                    runOnUiThread { status.text="Ошибка экспорта: ${e.message}" }
+                    runOnUiThread { if (activityVisible && !isFinishing && !isDestroyed) status.text="Не удалось сохранить экспорт" }
                 } finally { try { File(source).delete() } catch (_: Exception) {} }
             }
             return
@@ -8927,6 +8927,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val matches = chat.indices.filter { index ->
             val candidate = chat[index]
             candidate.optString("role") == (if (bound.user) "user" else "assistant") &&
+                JsonProtocol.nonBlank(candidate, "request_id") == request &&
                 (if (row > 0L) candidate.optLong("_db_message_id", 0L) == row
                  else JsonProtocol.nonBlank(candidate, "request_id") == request)
         }

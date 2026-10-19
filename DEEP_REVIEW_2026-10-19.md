@@ -1,3 +1,19 @@
+# Дополнение 19.10.2026 — #32/#33 и интеграция, окно 05:57–06:12 UTC
+
+Владелец явно принял прежние решения и разрешил 10–15 минут на продолжение. Main повторно d515161, open PR нет. Safety Debug39201447117 и Release39201447163 на c918ed9, push attempt1 — **оба success**.
+
+В UI выполнены whole-dialog `.md`/`.txt` из меню выбранного чата, snapshot history+active в одной SQLite transaction, UTF-8 snapshot→SAF и очистка по cancel/nullURI/ошибке запуска/потере lifecycle. Export не переключает видимый чат и не затрагивает draft. Formatter включает только user/assistant raw text и разрешённые безопасные metadata, не сериализует prompts/reasoning/raw arguments/tool output/credentials. Неизвестный статус остаётся неизвестным; active marker и same-request partial/terminal dedupe покрыты отдельными тестами.
+
+Footer теперь 👍/👎/Копировать/Повторить; single-message TXT удалён из footer/обоих long-press. Retry проверяет актуальный adapter, row/request identity в UI и SQLite, latest user turn и draft; historical показывает объяснение без Send. Latest positive test достигает реального sendMessage missing-key preflight, без платного API. Copy читает свежий source.
+
+Интеграция: UI b7201f7 объединён с safety c918ed9 коммитом51cb852. Main/DB auto-merge, конфликт только checkpoint разрешён сохранением актуальной записи. Независимый read-only review подтвердил сохранение safety download/preview методов и CAS; новых подтверждённых blockers не нашёл. После просмотра укреплено совпадение request_id и lifecycle сообщений о результате экспорта. Дополнительно active без нового chunk не теряет явную незавершённую пометку.
+
+Новые исходники тестов: DialogConversationExporterTest9, MainActivityConversationExportTest2, SessionPresentationTest7. Это ещё не утверждение PASS: общий Gradle testDebug/lintDebug/assembleDebug/AndroidTest compile/testRelease/lintRelease выполняется. На06:04UTC static verify_handoff/v4/implementation PASS, v4 mutation18negative+positive и implementation7negative+positive PASS. Старые33/49PASS не заменяют новую интеграционную проверку. Финальный результат записывается при остановке.
+
+Промежуточный51cb852 push запустил Debug39207589120 и Release39207589053 (attempt1, ещё in_progress); после последних code-уточнений им потребуется новая пара на финальном head. Main/PR creation/Ready/merge-to-main/release/sign/device/live API не выполнялись. Ниже сохранён прежний отчёт, его незавершённые #32/#33 пункты относятся к старому checkpoint.
+
+---
+
 # Углублённая проверка — 19.10.2026
 
 Продолжение по новому поручению владельца «Сделай более глубокую проверку, чтобы сразу выявить потенциальные проблемы». Проверка начата 04:40 UTC; прежняя ограниченная проверка и её красные результаты сохранены в [PROPOSED_FIX_REVIEW_2026-10-19.md](PROPOSED_FIX_REVIEW_2026-10-19.md). Этот документ уточняет их, а не выдаёт прежние падения за зелёные. Входные решения остались вне исходников; full-file replacements не применялись. Main и PR повторно сверены до работы: main `d51516151d560687b00d5e349fb6bcabfc5c314d`, открытых PR не было.

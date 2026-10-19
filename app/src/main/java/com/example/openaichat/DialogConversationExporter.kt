@@ -38,9 +38,9 @@ object DialogConversationExporter {
                 val stored = visible[index]
                 val oldText = text(stored, "text")
                 val newText = text(active, "text")
-                if (text(stored, "status") !in terminal && newText.isNotEmpty() &&
-                    (oldText.isEmpty() || newText.startsWith(oldText))) {
-                    visible[index] = JsonProtocol.objectCopy(stored).put("text", newText).put(ACTIVE_MARKER, true).apply {
+                if (text(stored, "status") !in terminal) {
+                    visible[index] = JsonProtocol.objectCopy(stored).put(ACTIVE_MARKER, true).apply {
+                        if (newText.isNotEmpty() && (oldText.isEmpty() || newText.startsWith(oldText))) put("text", newText)
                         if (active.has("status")) put("status", active.opt("status"))
                     }
                 }
