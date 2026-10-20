@@ -442,7 +442,7 @@ class RichResponsePanel(
             })
             if (block.closed && autoScientificPreview && block.language.lowercase() in setOf("latex", "tex", "math", "mermaid", "svg")) {
                 val visual = when (block.language.lowercase()) {
-                    "mermaid" -> if (ScientificRendererDocument.mermaidProblem(block.content) == null) MermaidDiagramView(context, block.content) else null
+                    "mermaid" -> if (ScientificRendererDocument.mermaidProblem(block.content) == null) MermaidDiagramView(context, block.content, embedded = true) else null
                     "svg" -> if (block.content.length <= 200_000) safeSvg(block.content) else null
                     else -> if (block.content.length <= ScientificRendererDocument.MAX_MATH_CHARACTERS) ScientificMathView(context, block.content) else null
                 }

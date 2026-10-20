@@ -4,8 +4,8 @@ import android.content.Context
 import android.widget.TextView
 
 /** Model diagram text is data for the pinned renderer, never executable JavaScript. */
-class MermaidDiagramView(context: Context, source: String) : ScientificMathText(context,
+class MermaidDiagramView(context: Context, source: String, embedded: Boolean = false) : ScientificMathText(context,
     TextView(context).apply {
         text = source; setTextIsSelectable(true)
         setTextColor(AppThemePalette.byId(context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")).textPrimary)
-    }, autoPreview = true, surface = ScientificSurface.DIAGRAM, document = { ScientificRendererDocument.mermaid(source) })
+    }, autoPreview = true, surface = ScientificSurface.DIAGRAM, document = { ScientificRendererDocument.mermaid(source, embedded) })

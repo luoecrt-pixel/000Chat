@@ -130,9 +130,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
     @Volatile private var openRouterClientFactory: () -> OpenRouterChatClient = { OpenRouterChatClient() }
     private val openRouterClient by lazy { openRouterClientFactory() }
-    private val openRouterActiveCall = AtomicReference<Call?>()
-    private val openRouterCallOwnerToken = AtomicReference<String?>()
-    private val openRouterCallLock = Any()
     private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
@@ -166,36 +163,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     @Volatile private var openAiAccumulatorLimitForTests: Long = Long.MAX_VALUE
     @Volatile private var openAiEffortMetricHook: (() -> Unit)? = null
     private val preIdCreateWatches = ConcurrentHashMap<String, Any>()
-    private val githubToolExecutor by lazy {
-        GitHubToolExecutor(
-            secureStore = secure,
-            allowedRepository = {
-                prefs.getString("github_repo", "luoecrt-pixel/OpenAIApiChat")?.trim().orEmpty()
-            },
-            allowedBranches = {
-                prefs.getString("github_branches", "main")
-                    .orEmpty()
-                    .split(",")
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                    .toSet()
-                    .ifEmpty { setOf("main") }
-            },
-            confirmWrite = ::confirmGitHubWrite,
-            auditWrite = { toolName, arguments ->
-                diagnostics.log("github_write", mapOf(
-                    "tool" to toolName,
-                    "arguments" to arguments.toString()
-                ))
-            },
-            cacheDirectory = File(cacheDir, "github_text_pages"),
-            canExecute = {
-                currentGitHubToolOwner.get()?.let { (chatId, generation) ->
-                    isRequestCurrent(chatId, generation)
-                } == true
-            }
-        )
-    }
     private val activeResumeCalls = ConcurrentHashMap<String, Call>()
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -530,13 +497,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             activeResponseState.state.isCurrent(generation, activityVisible, isFinishing)
 
 
-    private fun beginOpenRouterRequestOwnership(requestId: String) {
-        synchronized(openRouterCallLock) {
-            openRouterCallOwnerToken.set(requestId)
-            openRouterActiveCall.getAndSet(null)?.cancel()
-        }
-    }
-
     /** Billing-only reconciliation; never posts to UI or reopens an active chat. */
     private fun reconcileOpenRouterGenerations(chatId: String, localRequestId: String) {
         executor.execute {
@@ -576,36 +536,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun cancelOpenRouterRequest() {
         pendingOpenRouterPreparation.set(null)
-        synchronized(openRouterCallLock) {
-            openRouterCallOwnerToken.set(null)
-            openRouterActiveCall.getAndSet(null)?.cancel()
-        }
-    }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    fun registerOpenRouterCallIfOwned(
-        requestId: String,
-        chatId: String,
-        generation: Long,
-        call: Call
-    ): Boolean {
-        synchronized(openRouterCallLock) {
-            if (openRouterCallOwnerToken.get() != requestId || !isRequestCurrent(chatId, generation)) {
-                call.cancel()
-                return false
-            }
-            openRouterActiveCall.getAndSet(call)?.cancel()
-            return true
-        }
-    }
-
-    private fun clearOpenRouterActiveCallIfOwned(requestId: String): Boolean {
-        synchronized(openRouterCallLock) {
-            if (openRouterCallOwnerToken.get() != requestId) return false
-            openRouterCallOwnerToken.set(null)
-            openRouterActiveCall.getAndSet(null)?.cancel()
-            return true
-        }
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -666,12 +596,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             drawerNewChatBtn.background = rippleRounded(theme.drawerNewChatBg, 10)
         }
         if (::title.isInitialized) title.setTextColor(theme.textPrimary)
-        if (::status.isInitialized) status.setTextColor(theme.textSecondary)
+        if (::status.isInitialized) {
+            status.setTextColor(theme.textSecondary)
+            status.background = AppThemeViews.surface(this, theme.cardBg, theme.surfaceBorder, 8)
+        }
         if (::toolLabel.isInitialized) toolLabel.setTextColor(theme.accent)
         if (::modelBadge.isInitialized) AppThemeViews.button(modelBadge, theme)
         if (::effortBadge.isInitialized) {
+            AppThemeViews.button(effortBadge, theme)
             effortBadge.setTextColor(theme.accent)
-            effortBadge.background = rippleRounded(theme.buttonBg, 8)
         }
         if (::input.isInitialized) {
             input.setTextColor(theme.textPrimary)
@@ -763,12 +696,23 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         root.addView(headerDividerView, LinearLayout.LayoutParams(-1,dp(1)))
 
         status = TextView(this).apply {
-            text = "Готово"
             textSize = 12f
             setTextColor(currentTheme().textSecondary)
-            setPadding(dp(14), 0, dp(14), dp(4))
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = AppThemeViews.surface(this@MainActivity, currentTheme().cardBg, currentTheme().surfaceBorder, 8)
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            doAfterTextChanged {
+                val message = it?.toString().orEmpty()
+                visibility = if (message.isBlank() || message in setOf(
+                    "Готово", "Новый чат", "Модель отвечает…", "Модель в очереди…",
+                    "Продолжается генерация…", "Ответ ещё не завершён",
+                    "Готовлю файлы и контекст…", "Проверяю локальные файлы и готовлю контекст OpenAI…"
+                )) View.GONE else View.VISIBLE
+            }
+            text = "Готово"
         }
-        root.addView(status)
 
         requestTelemetryCard = buildRequestTelemetryCard()
         root.addView(requestTelemetryCard)
@@ -941,6 +885,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val scrollContainer = FrameLayout(this).apply {
             addView(scroll, FrameLayout.LayoutParams(-1, -1))
+            // Transient notices overlay the lower reading area; they never move
+            // the log, composer or current reading anchor.
+            addView(status, FrameLayout.LayoutParams(-2, -2).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                leftMargin = dp(12)
+                rightMargin = dp(62)
+                bottomMargin = dp(6)
+            })
             addView(jumpToBottomBtn, FrameLayout.LayoutParams(dp(38), dp(38)).apply {
                 gravity = Gravity.BOTTOM or Gravity.END
                 rightMargin = dp(14)
@@ -980,26 +932,33 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         effortBadge = TextView(this).apply {
             textSize = 12f
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            AppThemeViews.button(this, currentTheme())
             setTextColor(currentTheme().accent)
             setPadding(dp(9), dp(5), dp(9), dp(5))
-            background = rippleRounded(currentTheme().buttonBg, 8)
             contentDescription = "Усилие мышления"
             setOnClickListener { showQuickEffortPicker() }
         }
-        modelBadge.setPadding(dp(8), dp(6), dp(8), dp(6))
+        modelBadge.setPadding(dp(9), dp(5), dp(9), dp(5))
+        modelBadge.includeFontPadding = false
         modelBadge.gravity = Gravity.CENTER_VERTICAL
         AppThemeViews.button(modelBadge, currentTheme())
-        modelBadge.setTextColor(Color.rgb(190, 200, 220))
         modelBadge.textSize = 12f
-        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, dp(40), 1f))
+        composerOptions.addView(modelBadge, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(8) })
         composerOptions.addView(effortBadge)
         responseSettingsBtn = button("⚙") { showResponseSettings() }.apply {
             contentDescription = "Дополнительные настройки мышления и ответа"
-            textSize = 16f
+            textSize = effortBadge.textSize / resources.displayMetrics.scaledDensity
+            typeface = effortBadge.typeface
+            includeFontPadding = false
             minWidth = 0
             minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(9), dp(5), dp(9), dp(5))
         }
-        composerOptions.addView(responseSettingsBtn, LinearLayout.LayoutParams(dp(42), dp(40)).apply { leftMargin = dp(4) })
+        composerOptions.addView(responseSettingsBtn, LinearLayout.LayoutParams(dp(36), -2).apply { leftMargin = dp(4) })
         root.addView(composerOptions)
         updateEffortBadge()
 
@@ -3186,7 +3145,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             previousResponseId = currentResponseId
         )
         val fileAnalysisEnabled = openAiOptions.fileAnalysis
-        val capturedFileHistory = chat.map { JSONObject(it.toString()) } + JSONObject(sentUserMessage.toString())
+        val capturedFileHistory = chat.map { JsonProtocol.objectCopy(it) } + JsonProtocol.objectCopy(sentUserMessage)
         fun commitPreparedOpenAi(typedInput: JSONArray?, containerFiles: Map<String, String> = emptyMap(), toolFiles: List<OpenRouterLocalAttachment> = emptyList()) {
         // Repeat creates a new user request under current settings without touching a newer draft.
         val shouldConsumeDraft = !regenerate &&
@@ -4043,7 +4002,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // input, not just text-only prior messages. The encoder checks original
         // attachment bytes and fails explicitly rather than silently dropping them.
         val chatOwnedLocalArtifacts = try {
-            chatDb.listLocalFiles().filter { JsonProtocol.string(it, "chat_id") == requestChatId }
+            chatDb.listLocalFiles(requestChatId)
         } catch (_: Exception) {
             emptyList()
         }
@@ -4072,8 +4031,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             }
         }
         if (typedHistoryNeeded || (fileAnalysisEnabled && hasFilesForAnalysis)) {
-            val historySnapshot = chat.map { JSONObject(it.toString()) } +
-                JSONObject(sentUserMessage.toString())
+            val historySnapshot = capturedFileHistory
             pendingOpenAiPreparation.set(localRequestId)
             setBusy(true)
             status.text = "Проверяю локальные файлы и готовлю контекст OpenAI…"
@@ -5174,16 +5132,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 })
             }
         }
-    }
-
-    private fun findLegacyGeneratedCache(filename:String):String?{
-        val target=safeFileName(filename)
-        val dir=File(filesDir,"generated")
-        if(!dir.isDirectory)return null
-        return dir.listFiles()?.asSequence()
-            ?.filter{it.isFile && (it.name==target || it.name.endsWith("_$target"))}
-            ?.maxByOrNull{it.lastModified()}
-            ?.absolutePath
     }
 
     private fun addGeneratedFileCard(
@@ -6624,27 +6572,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private class ZipSafetyException(val reason:String):IOException(reason)
 
-    private fun uploadTempFile(temp:File,name:String,mime:String):Triple<String,String,Long>{
-        val key=secure.getApiKey()
-        val body=MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("purpose","user_data")
-            .addFormDataPart("file",name,temp.asRequestBody(mime.toMediaType()))
-            .build()
-        val req=Request.Builder().url("https://api.openai.com/v1/files").addHeader("Authorization","Bearer $key").post(body).build()
-        client.newCall(req).execute().use{resp->
-            val raw=if(resp.isSuccessful) BoundedResponseDecoder.readBody(resp.body)
-                else BoundedResponseDecoder.readErrorBody(resp.body)
-            if(!resp.isSuccessful)throw IOException("HTTP ${resp.code}: $raw")
-            return Triple(JSONObject(raw).getString("id"), name, temp.length())
-        }
-    }
-
-    private fun uploadFileBytes(bytes:ByteArray, name:String):Triple<String,String,Long>{
-        val temp=File(cacheDir,"upload_${System.nanoTime()}")
-        temp.writeBytes(bytes)
-        try{return uploadTempFile(temp,name,mimeForFilename(name))}finally{temp.delete()}
-    }
-
     private fun uploadImageFile(path:String,name:String,key:String?=null,credential:String?=null,mimeOverride:String?=null,
                                 active:()->Boolean={true},onProgress:(Long,Long)->Unit={_,_->}):String{
         val apiKey=credential ?: secure.getApiKey()
@@ -7092,24 +7019,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         chatDb.ensureChat(id,titleText)
     }
     private fun loadAllChats():List<JSONObject> = chatDb.listChatSummaries()
-    private fun saveAllChats(list:List<JSONObject>){
-        // Compatibility helper for callers that still hand us a full list.
-        list.forEach { c ->
-            chatDb.upsertCurrentChat(
-                c.optString("id"),
-                c.optString("title","Новый чат"),
-                c.optString("response_id").takeIf{it.isNotBlank() && it!="null"},
-                c.optString("baseline_effort").takeIf{it.isNotBlank() && it!="null"},
-                jsonArrayToList(c.optJSONArray("messages"))
-            )
-        }
-    }
-    private fun jsonArrayToList(arr:JSONArray?):List<JSONObject>{
-         if(arr==null)return emptyList()
-         val out=mutableListOf<JSONObject>()
-         for(i in 0 until arr.length()) arr.optJSONObject(i)?.let{out.add(it)}
-         return out
-     }
     private fun jsonArrayToMutableList(arr:JSONArray?):MutableList<JSONObject>{
          val out=mutableListOf<JSONObject>()
          if(arr==null)return out
@@ -7919,7 +7828,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun showPdfPreview(path:String,name:String,uiOwner:()->Boolean={true}){
         executor.execute{
             try{
-                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY).use{pfd->
                 PdfRenderer(pfd).use{renderer->
                     if(renderer.pageCount<=0)throw IOException("PDF не содержит страниц")
                     renderer.openPage(0).use{page->
@@ -7935,7 +7844,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         }
                     }
                 }
-                pfd.close()
+                }
             }catch(e:Exception){runOnUiThread{
                 if(!isFinishing && !isDestroyed && uiOwner())status.text="Не удалось показать PDF: ${e.message}"
             }}
@@ -8049,7 +7958,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         parent.addView(preview,LinearLayout.LayoutParams(-1,dp(180)).apply{bottomMargin=dp(6)})
         executor.execute{
             try{
-                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY).use{pfd->
                 PdfRenderer(pfd).use{renderer->
                     if(renderer.pageCount>0){
                         renderer.openPage(0).use{page->
@@ -8063,7 +7972,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         }
                     }
                 }
-                pfd.close()
+                }
             }catch(_:Exception){ }
         }
     }
@@ -8124,7 +8033,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         v.root.addView(view,v.root.indexOfChild(v.name),LinearLayout.LayoutParams(-1,dp(52)).apply{bottomMargin=dp(6)})
                         executor.execute{
                             try{
-                                val pfd=ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY)
+                                ParcelFileDescriptor.open(File(path),ParcelFileDescriptor.MODE_READ_ONLY).use{pfd->
                                 PdfRenderer(pfd).use{renderer->
                                     if(renderer.pageCount>0){
                                         renderer.openPage(0).use{page->
@@ -8136,7 +8045,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                                         }
                                     }
                                 }
-                                pfd.close()
+                                }
                             }catch(_:Exception){}
                         }
                     }
@@ -9067,10 +8976,6 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         row.addView(feedbackButton("👍",1))
         row.addView(feedbackButton("👎",-1))
         card.addView(row)
-    }
-
-    private fun findMessageForAnnotations(annotations:JSONArray):JSONObject?{
-        return chat.lastOrNull{it.optString("role")=="assistant" && it.optJSONArray("annotations")?.toString()==annotations.toString()}
     }
 
     private fun markdown(s:String, annotations:JSONArray?=null):CharSequence = RichTextRenderer.render(s,annotations,currentTheme())

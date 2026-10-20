@@ -39,6 +39,19 @@ class ResponsePresentationRegressionTest {
         assertEquals(listOf(-1, 1), table.align)
         assertEquals(listOf("`a|b`", "x\\|y<br>z"), table.rows.single())
     }
+    @Test fun detailsKeepDifferentFenceKindsAndLongerClosersWithoutClosingOnCodeText() {
+        val body = "````kt\n" + "</details>\n```\n".repeat(1500) + "`````\n" +
+            "~~~text\n</details>\n~~~\n" + "<details>\n<summary>Nested</summary>\ninner\n</details>\n"
+        val source = "<details>\n<summary>Outer</summary>\n" + body + "</details>\n"
+        val block = ResponseBlockParser.parse(source).single() as ResponseBlockParser.Block.Details
+        assertTrue(block.closed)
+        assertEquals(body, block.content)
+        assertEquals(source, block.raw)
+        val unfinished = ResponseBlockParser.parse(source.removeSuffix("</details>\n")).single() as ResponseBlockParser.Block.Details
+        assertFalse(unfinished.closed)
+        assertEquals(body, unfinished.content)
+    }
+
     @Test fun filenamesAndLinksFailClosedWithoutFabricatingBinaryFiles() {
         for (name in listOf("../x.txt", "a/b.txt", "a\\b.txt", "..", "x\u0000.txt", "fake.pdf", "fake.xlsx"))
             assertFalse(name, ResponseRenderSafety.textFilename(name))

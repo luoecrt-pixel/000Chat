@@ -41,6 +41,20 @@ class RichTextRendererTest {
         assertFalse(result.contains("\\_literal"))
     }
 
+    @Test fun manyBareLinksRetainPunctuationAndDoNotDuplicateExplicitLinkSpans() {
+        val source = "[named](https://example.org/named), " +
+            (1..80).joinToString(" ") { "https://example.org/file_$it)." }
+        val rendered = RichTextRenderer.render(source) as Spanned
+        val links = rendered.getSpans(0, rendered.length, URLSpan::class.java)
+        assertEquals(81, links.size)
+        assertEquals(1, links.count { it.url == "https://example.org/named" })
+        for (index in 1..80) {
+            val link = links.single { it.url == "https://example.org/file_$index" }
+            assertEquals(link.url, rendered.subSequence(rendered.getSpanStart(link), rendered.getSpanEnd(link)).toString())
+            assertEquals(").", rendered.subSequence(rendered.getSpanEnd(link), rendered.getSpanEnd(link) + 2).toString())
+        }
+    }
+
     @Test fun markdownLinksKeepExactDestination() {
         val result = RichTextRenderer.render("[source](https://example.org/path_with_underscores)")
         val spans = (result as Spanned).getSpans(0, result.length, URLSpan::class.java)

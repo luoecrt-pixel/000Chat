@@ -169,10 +169,11 @@ object RichTextRenderer {
         }
 
         // Make bare URLs clickable too, while respecting explicit Markdown links.
-        val matcher = plainUrlPattern.matcher(out.toString())
+        val plainText = out.toString()
+        val matcher = plainUrlPattern.matcher(plainText)
         while (matcher.find()) {
             val start = matcher.start()
-            val end = trimUrlPunctuation(out.toString(), matcher.end())
+            val end = trimUrlPunctuation(plainText, matcher.end())
             if (end <= start) continue
             if (out.getSpans(start, end, URLSpan::class.java).isEmpty()) {
                 val url = out.subSequence(start, end).toString()

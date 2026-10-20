@@ -866,209 +866,181 @@ class MainActivityLifecycleTest {
         scenario.close()
     }
 
-    @Test
-    fun stopCancelsOpenRouterCallAndPendingGitHubConfirmation() {
+    /** Actual Activity Send -> app-owned runtime -> local HTTPS, never the removed Activity call slot. */
+    private inner class RunningOpenRouterRequest : AutoCloseable {
+        private val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        private val savedKey = SecureStore(context).getOpenRouterApiKey()
+        private val preferences = context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+        private val settings = listOf("provider", "model", "reasoning", "background_responses", "github_tools",
+            "openrouter_web_search", "openrouter_web_fetch", "openrouter_text_format")
+            .associateWith { preferences.all[it] }
+        private val endpointAndClient = createHttpsMockServer()
+        val server = endpointAndClient.first
+        private val calls = java.util.concurrent.LinkedBlockingQueue<Call>()
+        private val http = endpointAndClient.second.newBuilder().eventListener(object : okhttp3.EventListener() {
+            override fun callStart(call: Call) { calls.offer(call) }
+        }).build()
+        private val endpoint = server.url("/api/v1").toString()
         val scenario = ActivityScenario.launch(MainActivity::class.java)
-        val callCancelled = AtomicReference(false)
-        val confirmationDone = CountDownLatch(1)
-        val confirmationResult = AtomicReference<Boolean?>(null)
+        var chatId = ""
+            private set
+        val requestIds = mutableListOf<String>()
+        lateinit var call: Call
+            private set
+        val requestId: String get() = requestIds.first()
 
-        scenario.onActivity { activity ->
-            val fakeCall = Proxy.newProxyInstance(
-                Call::class.java.classLoader,
-                arrayOf(Call::class.java)
-            ) { _, method, _ ->
-                when (method.name) {
-                    "cancel" -> {
-                        callCancelled.set(true)
-                        null
-                    }
-                    "isCanceled" -> callCancelled.get()
-                    "isExecuted" -> true
-                    else -> null
-                }
-            } as Call
-            @Suppress("UNCHECKED_CAST")
-            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
-            activeCall.set(fakeCall)
-
-            val owner = currentChatId(activity) to activeGeneration(activity)
-            @Suppress("UNCHECKED_CAST")
-            val ownerSlot = privateField(activity, "currentGitHubToolOwner")
-                as ThreadLocal<Pair<String, Long>>
-            Thread {
-                ownerSlot.set(owner)
-                try {
-                    confirmationResult.set(
-                        invoke(
-                            activity,
-                            "confirmGitHubWrite",
-                            String::class.java,
-                            JSONObject::class.java,
-                            "create_issue_comment",
-                            JSONObject().put("issue_number", 1)
-                        ) as Boolean
-                    )
-                } finally {
-                    ownerSlot.remove()
-                    confirmationDone.countDown()
-                }
-            }.start()
-        }
-
-        var dialogSeen = false
-        repeat(100) {
+        init {
             scenario.onActivity { activity ->
-                @Suppress("UNCHECKED_CAST")
-                val dialogRef = privateField(activity, "pendingGitHubConfirmationDialog") as AtomicReference<android.app.AlertDialog?>
-                dialogSeen = dialogRef.get()?.isShowing == true
+                activity.newChat()
+                chatId = currentChatId(activity)
+                activity.prefs.edit().putString("provider", "openrouter").putString("model", "test/model")
+                    .putString("reasoning", "high").putBoolean("background_responses", false)
+                    .putBoolean("github_tools", false).putBoolean("openrouter_web_search", false)
+                    .putBoolean("openrouter_web_fetch", false).putString("openrouter_text_format", "text").apply()
+                SecureStore(activity).setOpenRouterApiKey("test-key")
+                setPrivateField(activity, "openRouterClientFactory",
+                    { OpenRouterChatClient(endpoint, http, reconcileGenerations = false) })
             }
-            if (!dialogSeen) SystemClock.sleep(10L)
+            server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
+            send("first request")
+            call = awaitWireCall()
+            ChatDatabase(context).use { db ->
+                val id = db.getActiveResponse(chatId)!!.getString("request_id")
+                requestIds += id
+                assertTrue("Real HTTPS call must belong to the runtime", OpenRouterResponseRuntime.contains(id))
+            }
         }
-        assertTrue("GitHub confirmation dialog was not shown", dialogSeen)
 
-        scenario.onActivity { activity ->
-            invoke(activity, "stopCurrentResponse")
-        }
-
-        assertTrue("confirmation thread did not finish", confirmationDone.await(2, TimeUnit.SECONDS))
-        assertEquals(false, confirmationResult.get())
-        assertTrue("OpenRouter active Call was not cancelled", callCancelled.get())
-        scenario.close()
-    }
-
-    @Test
-    fun newOpenRouterMessageCancelsPreviousActiveCall() {
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
-        val callCancelled = AtomicReference(false)
-
-        scenario.onActivity { activity ->
-            val fakeCall = Proxy.newProxyInstance(
-                Call::class.java.classLoader,
-                arrayOf(Call::class.java)
-            ) { _, method, _ ->
-                when (method.name) {
-                    "cancel" -> {
-                        callCancelled.set(true)
-                        null
-                    }
-                    "isCanceled" -> callCancelled.get()
-                    "isExecuted" -> true
-                    else -> null
-                }
-            } as Call
-            val prefs = activity.prefs
-            prefs.edit().putString("provider", "openrouter").apply()
-            @Suppress("UNCHECKED_CAST")
-            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
-            activeCall.set(fakeCall)
-
+        fun send(text: String) = scenario.onActivity { activity ->
+            (privateField(activity, "input") as android.widget.EditText).setText(text)
             invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
         }
 
-        assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
-        scenario.close()
+        fun awaitWireCall(): Call {
+            assertTrue("Production Send did not reach HTTPS", server.takeRequest(20, TimeUnit.SECONDS) != null)
+            return calls.poll(2, TimeUnit.SECONDS) ?: error("Real OkHttp call was not observed")
+        }
+
+        fun awaitGone(id: String = requestId) {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (OpenRouterResponseRuntime.contains(id) && System.nanoTime() < deadline) SystemClock.sleep(10)
+            assertFalse("Cancelled runtime still owns request $id", OpenRouterResponseRuntime.contains(id))
+        }
+
+        override fun close() {
+            try {
+                scenario.onActivity { activity -> invoke(activity, "stopCurrentResponse") }
+                requestIds.forEach(::awaitGone)
+            } finally {
+                scenario.close()
+                SecureStore(context).setOpenRouterApiKey(savedKey)
+                val edit = preferences.edit()
+                settings.forEach { (key, value) -> when (value) {
+                    is String -> edit.putString(key, value)
+                    is Boolean -> edit.putBoolean(key, value)
+                    else -> edit.remove(key)
+                } }
+                edit.commit()
+                ChatDatabase(context).use { it.deleteChat(chatId) }
+                server.shutdown()
+                http.connectionPool.evictAll()
+                http.dispatcher.executorService.shutdownNow()
+            }
+        }
     }
 
     @Test
-    fun newOpenRouterMessageCancelsPreviousActiveCallAndAdvancesGeneration() {
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
-        val callCancelled = AtomicReference(false)
-        var generationBefore = -1L
-        var generationAfter = -1L
-
-        scenario.onActivity { activity ->
-            val fakeCall = Proxy.newProxyInstance(
-                Call::class.java.classLoader,
-                arrayOf(Call::class.java)
-            ) { _, method, _ ->
-                when (method.name) {
-                    "cancel" -> {
-                        callCancelled.set(true)
-                        null
-                    }
-                    "isCanceled" -> callCancelled.get()
-                    "isExecuted" -> true
-                    else -> null
+    fun stopCancelsRealOpenRouterRuntimeCallAndPendingGitHubConfirmation() {
+        RunningOpenRouterRequest().use { running ->
+            val confirmationDone = CountDownLatch(1)
+            val confirmationResult = AtomicReference<Boolean?>(null)
+            running.scenario.onActivity { activity ->
+                val owner = running.chatId to activeGeneration(activity)
+                @Suppress("UNCHECKED_CAST")
+                val ownerSlot = privateField(activity, "currentGitHubToolOwner") as ThreadLocal<Pair<String, Long>>
+                Thread {
+                    ownerSlot.set(owner)
+                    try {
+                        confirmationResult.set(invoke(activity, "confirmGitHubWrite", String::class.java,
+                            JSONObject::class.java, "create_issue_comment", JSONObject().put("issue_number", 1)) as Boolean)
+                    } finally { ownerSlot.remove(); confirmationDone.countDown() }
+                }.start()
+            }
+            var dialogSeen = false
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (!dialogSeen && System.nanoTime() < deadline) {
+                running.scenario.onActivity { activity ->
+                    @Suppress("UNCHECKED_CAST")
+                    val ref = privateField(activity, "pendingGitHubConfirmationDialog") as AtomicReference<AlertDialog?>
+                    dialogSeen = ref.get()?.isShowing == true
                 }
-            } as Call
-            val prefs = activity.prefs
-            prefs.edit().putString("provider", "openrouter").apply()
-            val secureStore = SecureStore(activity)
-            secureStore.setOpenRouterApiKey("test-key")
-            val input = privateField(activity, "input") as android.widget.EditText
-            input.setText("hello")
-            generationBefore = activeGeneration(activity)
-
-            @Suppress("UNCHECKED_CAST")
-            val activeCall = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
-            activeCall.set(fakeCall)
-
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-            generationAfter = activeGeneration(activity)
-
-            assertTrue("sendMessage did not reach nextGeneration()", generationAfter > generationBefore)
-            assertTrue("new OpenRouter message did not cancel previous active Call", callCancelled.get())
-
-            invoke(activity, "stopCurrentResponse")
-            secureStore.setOpenRouterApiKey("")
+                if (!dialogSeen) SystemClock.sleep(10)
+            }
+            assertTrue("GitHub confirmation dialog was not shown", dialogSeen)
+            running.scenario.onActivity { invoke(it, "stopCurrentResponse") }
+            assertTrue("Confirmation must resolve on Stop", confirmationDone.await(2, TimeUnit.SECONDS))
+            assertEquals(false, confirmationResult.get())
+            assertTrue("Stop must cancel the actual runtime HTTPS call", running.call.isCanceled())
+            running.awaitGone()
         }
-
-        scenario.close()
     }
 
     @Test
-    fun staleOpenRouterCallCreatedAfterGenerationChangeIsCancelledAndNotStored() {
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
-        val staleCancelled = AtomicReference(false)
-
-        scenario.onActivity { activity ->
-            val secureStore = SecureStore(activity)
-            secureStore.setOpenRouterApiKey("test-key")
-            val prefs = activity.prefs
-            prefs.edit().putString("provider", "openrouter").apply()
-            val input = privateField(activity, "input") as android.widget.EditText
-            input.setText("hello")
-            val oldGeneration = activeGeneration(activity)
-
-            invoke(activity, "sendMessage", Boolean::class.javaPrimitiveType!!, false)
-            assertTrue("sendMessage did not advance generation", activeGeneration(activity) > oldGeneration)
-
-            val staleCall = Proxy.newProxyInstance(
-                Call::class.java.classLoader,
-                arrayOf(Call::class.java)
-            ) { _, method, _ ->
-                when (method.name) {
-                    "cancel" -> {
-                        staleCancelled.set(true)
-                        null
-                    }
-                    "isCanceled" -> staleCancelled.get()
-                    "isExecuted" -> true
-                    else -> null
-                }
-            } as Call
-
-            val accepted = invoke(
-                activity,
-                "registerOpenRouterCallIfOwned",
-                String::class.java,
-                String::class.java,
-                Long::class.javaPrimitiveType!!,
-                Call::class.java,
-                "stale-token",
-                currentChatId(activity),
-                oldGeneration,
-                staleCall
-            ) as Boolean
-
-            assertFalse("stale Call was incorrectly claimed by OpenRouter owner", accepted)
-            assertTrue("stale Call was not cancelled", staleCancelled.get())
-
-            invoke(activity, "stopCurrentResponse")
-            secureStore.setOpenRouterApiKey("")
+    fun newSendWhileRuntimeIsBusyKeepsExistingCallAndGeneration() {
+        RunningOpenRouterRequest().use { running ->
+            var before = -1L
+            running.scenario.onActivity { before = activeGeneration(it) }
+            running.send("must remain a draft")
+            running.scenario.onActivity { activity ->
+                assertEquals(before, activeGeneration(activity))
+                assertEquals("must remain a draft", (privateField(activity, "input") as android.widget.EditText).text.toString())
+            }
+            assertFalse("Rejected Send must not cancel another request", running.call.isCanceled())
+            assertTrue(OpenRouterResponseRuntime.contains(running.requestId))
+            assertEquals("Busy Send must not submit another inference", 1, running.server.requestCount)
         }
-        scenario.close()
+    }
+
+    @Test
+    fun stopThenNewSendAdvancesGenerationAndOldCancellationCannotCancelReplacement() {
+        RunningOpenRouterRequest().use { running ->
+            var before = -1L
+            running.scenario.onActivity { activity ->
+                before = activeGeneration(activity)
+                invoke(activity, "stopCurrentResponse")
+            }
+            assertTrue(running.call.isCanceled())
+            running.awaitGone()
+            running.server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
+            running.send("replacement request")
+            val replacementCall = running.awaitWireCall()
+            val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+            val replacementId = ChatDatabase(context).use { it.getActiveResponse(running.chatId)!!.getString("request_id") }
+            running.requestIds += replacementId
+            running.scenario.onActivity { assertTrue(activeGeneration(it) > before) }
+            assertFalse("Replacement must have its own request identity", replacementId == running.requestId)
+            OpenRouterResponseRuntime.cancel(running.requestId, "late cancellation of old request")
+            assertFalse("Old request cancellation must not cancel replacement HTTPS", replacementCall.isCanceled())
+            assertTrue(OpenRouterResponseRuntime.contains(replacementId))
+            ChatDatabase(context).use { assertTrue(it.isActiveRequest(running.chatId, replacementId)) }
+        }
+    }
+
+    @Test
+    fun stoppedRuntimeCannotRecreateDeletedUserOrAssistantAfterLateTransportFailure() {
+        RunningOpenRouterRequest().use { running ->
+            running.scenario.onActivity { invoke(it, "stopCurrentResponse") }
+            running.awaitGone()
+            assertTrue(running.call.isCanceled())
+            val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+            ChatDatabase(context).use { db ->
+                assertFalse(db.isActiveRequest(running.chatId, running.requestId))
+                val messages = db.getChat(running.chatId)!!.getJSONArray("messages")
+                assertFalse((0 until messages.length()).any { messages.getJSONObject(it).optString("request_id") == running.requestId })
+                assertEquals("stopped", db.listRequestAccounting(running.chatId)
+                    .single { it.optString("local_request_id") == running.requestId }.getString("local_status"))
+            }
+        }
     }
 
 
@@ -1434,11 +1406,11 @@ class MainActivityLifecycleTest {
                         @Suppress("UNCHECKED_CAST")
                         val pending = privateField(activity, "pendingOpenRouterPreparation")
                             as AtomicReference<String?>
-                        @Suppress("UNCHECKED_CAST")
-                        val callOwner = privateField(activity, "openRouterCallOwnerToken")
-                            as AtomicReference<String?>
+                        val runtimeOwner = ChatDatabase(activity).use { db ->
+                            db.getActiveResponse(currentChatId(activity))?.optString("request_id")
+                        }
                         diagnostic = "status=" + status.text + "; pending=" + pending.get() +
-                            "; callOwner=" + callOwner.get() +
+                            "; runtimeOwner=" + runtimeOwner?.let(OpenRouterResponseRuntime::contains) +
                             "; visible=" + (privateField(activity, "activityVisible") as Boolean)
                     }
                     throw AssertionError("Production Send never reached local MockWebServer: $diagnostic")
@@ -1626,9 +1598,8 @@ class MainActivityLifecycleTest {
                     @Suppress("UNCHECKED_CAST")
                     val history = privateField(activity, "chat") as MutableList<JSONObject>
                     assertEquals("Failed send was committed to history", beforeSize + 1, history.size)
-                    @Suppress("UNCHECKED_CAST")
-                    val call = privateField(activity, "openRouterActiveCall") as AtomicReference<Call?>
-                    assertEquals("HTTP call started despite missing file", null, call.get())
+                    val activeRequest = ChatDatabase(activity).use { it.getActiveResponse(currentChatId(activity)) }
+                    assertEquals("Failed preparation must not claim a runtime request", null, activeRequest)
                     history.removeAt(history.lastIndex)
                     SecureStore(activity).setOpenRouterApiKey("")
                 }

@@ -9,6 +9,38 @@ import java.security.MessageDigest
 import java.util.Base64
 
 class OpenAiLocalContextEncoderTest {
+    @Test fun legacyContainerManifestUsesExactDigestAndInterruptedPreparationCannotPublishIt() {
+        val dir = createTempDir()
+        val source = File(dir, "archive.zip").apply { writeBytes(byteArrayOf(80, 75, 3, 4, 1, 2, 3)) }
+        fun message() = JSONObject().put("role", "user").put("text", "Read the archive")
+            .put("file_paths", JSONArray().put(source.path))
+            .put("file_names", JSONArray().put(source.name))
+            .put("file_mimes", JSONArray().put("application/zip"))
+        try {
+            val prepared = message()
+            OpenAiLocalContextEncoder.materialize(listOf(prepared), allowContainer = true) { _, _ -> }
+            val manifest = prepared.getJSONArray("attachments").getJSONObject(0)
+            val expected = digest(source.readBytes())
+            assertEquals(expected, manifest.getString("sha256"))
+            assertEquals("container_" + expected, manifest.getString("id"))
+            assertEquals(source.path, manifest.getString("path"))
+
+            val interrupted = message()
+            var published = false
+            try {
+                Thread.currentThread().interrupt()
+                val error = assertThrows(java.io.IOException::class.java) {
+                    OpenAiLocalContextEncoder.materialize(listOf(interrupted), allowContainer = true) { _, _ -> published = true }
+                }
+                assertTrue(error.message.orEmpty().contains("отменена"))
+                assertTrue(Thread.currentThread().isInterrupted)
+            } finally { Thread.interrupted() }
+            assertFalse(published)
+            assertFalse(interrupted.has("attachments"))
+            assertEquals(expected, digest(source.readBytes()))
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun twoImagesAndLegacySingleImageRemainReadableInOneTypedMessage() {
         val dir = kotlin.io.path.createTempDirectory("openai-images").toFile()
         try {

@@ -60,7 +60,8 @@ object OpenAiLocalFileToolBridge {
                             mime.isNotBlank() -> OpenRouterAttachmentStore.classifyLocalFile(file, name, mime)
                             else -> OpenRouterAttachmentStore.classifyLocalFile(file, name)
                         }
-                    } catch (_: Exception) {
+                    } catch (error: Exception) {
+                        if (Thread.currentThread().isInterrupted || error is CancellationException) throw error
                         null
                     }
                 }
@@ -93,7 +94,10 @@ object OpenAiLocalFileToolBridge {
     fun finish(context: Context, db: ChatDatabase, chatId: String, requestId: String, initial: JSONObject,
         client: OkHttpClient, active: () -> Boolean = { true }, onCall: (Call) -> Unit = {},
         onStatus: (String) -> Unit = {},
-        credential: () -> String = { SecureStore(context).getApiKey() }): JSONObject {
+        credential: () -> String = { SecureStore(context).getApiKey() },
+        localToolsFactory: (List<OpenRouterLocalAttachment>, () -> Boolean) -> LocalFileTools = { files, running ->
+            LocalFileTools(files, running)
+        }): JSONObject {
         val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId) ?: return initial
         if (checkpoint.optInt("version") != 1) throw UnrecoverableResponsesStreamException("Неизвестная версия файлового checkpoint OpenAI")
         val runtimeLease = PreparedAttachmentFiles.lease(context)
@@ -198,6 +202,15 @@ object OpenAiLocalFileToolBridge {
                 observeResponse(response)
                 if (checkpoint.toString() != persisted) persist()
             }
+            // Keep the sparse text-page index for the lifetime of this continuation.
+            // The allow-list is still revalidated before every batch, and rebuilt
+            // derivatives replace this instance rather than retaining stale pages.
+            var localTools: LocalFileTools? = null
+            var localToolsFiles: List<OpenRouterLocalAttachment>? = null
+            val startedAt = db.getActiveResponse(chatId)?.optLong("started_at", 0L) ?: 0L
+            fun toolsActive() = active() && db.isActiveRequest(chatId, requestId) &&
+                !Thread.currentThread().isInterrupted &&
+                ResponseDeadlinePolicy.remainingMillis(startedAt, System.currentTimeMillis()) > 0L
             while (true) {
                 ensureActive()
                 when (checkpoint.getString("phase")) {
@@ -289,11 +302,11 @@ object OpenAiLocalFileToolBridge {
                 val nextRound = checkpoint.getInt("round") + 1
                 val toolLabels = calls.mapNotNull { it.optString("name").takeIf(String::isNotBlank) }.distinct().joinToString(", ")
                 onStatus("🔧 Локальные файлы ($nextRound): $toolLabels")
-                val startedAt = db.getActiveResponse(chatId)?.optLong("started_at", 0L) ?: 0L
-                val local = LocalFileTools(files) {
-                    active() && db.isActiveRequest(chatId, requestId) && !Thread.currentThread().isInterrupted &&
-                        ResponseDeadlinePolicy.remainingMillis(startedAt, System.currentTimeMillis()) > 0L
+                if (localTools == null || rebuiltAny || localToolsFiles != files) {
+                    localTools = localToolsFactory(files, ::toolsActive)
+                    localToolsFiles = files
                 }
+                val local = checkNotNull(localTools)
                 val results = JSONArray()
                 for ((id, name, args) in validated) {
                     ensureActive()

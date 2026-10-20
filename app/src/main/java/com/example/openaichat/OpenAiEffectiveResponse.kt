@@ -28,11 +28,20 @@ object OpenAiEffectiveResponse {
                     ?.let(canonicalIds::add)
             }
         }
+        var nextIndex = (items.keys.lastOrNull() ?: -1) + 1
+        val canonicalIndexes = items.keys.toSet()
+        val receivedIds = canonicalIds.toMutableSet()
         state.typedOutputItems.toSortedMap().forEach { (index, item) ->
             val id = JsonProtocol.nonBlank(item, "id")
-            // Canonical output wins both its index and its ID, including when
-            // the terminal envelope moved that ID to a different array index.
-            if (index !in items && (id == null || id !in canonicalIds)) items[index] = item
+            // Canonical output wins by ID. Its compacted indexes must not discard
+            // a distinct paid item received earlier at the same stream index.
+            if (id != null) {
+                if (receivedIds.add(id)) items[nextIndex++] = item
+            } else if (index !in canonicalIndexes) {
+                // An item without an ID can only be matched by its original
+                // index; retain it when no canonical item claimed that slot.
+                items[nextIndex++] = item
+            }
         }
         if (items.isNotEmpty() || terminalResponse?.has("output") == true) {
             effective.put("output", JSONArray().apply { items.values.forEach { put(it) } })
