@@ -26,6 +26,7 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayInputStream
 import java.util.UUID
@@ -48,7 +49,11 @@ class InteractiveSandboxView(
         text = source; typeface = Typeface.MONOSPACE; setTextColor(theme.textPrimary)
         textSize = 14f; setTextIsSelectable(true); setHorizontallyScrolling(true)
     }
-    private val originalScroll = HorizontalScrollView(context).apply { addView(original); visibility = GONE }
+    private val originalScroll = ScrollView(context).apply {
+        addView(HorizontalScrollView(context).apply { addView(original, LayoutParams(-2, -2)) },
+            LayoutParams(-1, -2))
+        visibility = GONE
+    }
     private val loadTimeout = Runnable { if (!closed && renderer != null) fail("Песочница не загрузилась. Исходник сохранён полностью.") }
 
     init {

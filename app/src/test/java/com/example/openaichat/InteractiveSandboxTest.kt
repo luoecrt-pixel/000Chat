@@ -4,8 +4,12 @@ import android.app.Activity
 import android.net.Uri
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.widget.HorizontalScrollView
+import android.widget.ScrollView
 import android.widget.TextView
 import org.junit.Assert.*
 import org.junit.Test
@@ -67,7 +71,9 @@ class InteractiveSandboxTest {
             val url = requireNotNull(Shadows.shadowOf(web).lastLoadedUrl)
             val client = web.webViewClient!!
             assertEquals(200, client.shouldInterceptRequest(web, request(url, true))!!.statusCode)
-            listOf("https://tracker.invalid/pixel", "file:///data/private", "content://private/file", url + "?x=1").forEach {
+            listOf("https://tracker.invalid/pixel", "file:///data/private", "content://private/file",
+                "intent://private/file", "data:text/html,private", "blob:https://interactive-sandbox.invalid/private",
+                "about:blank", url + "?x=1", url + "#fragment").forEach {
                 assertEquals(403, client.shouldInterceptRequest(web, request(it, true))!!.statusCode)
                 assertTrue(client.shouldOverrideUrlLoading(web, request(it, true)))
             }
@@ -81,6 +87,37 @@ class InteractiveSandboxTest {
             assertEquals(403, client.shouldInterceptRequest(web, request(url, true))!!.statusCode)
             sandbox.start()
             assertTrue(descendants(sandbox).none { it is WebView })
+        } finally { controller.pause().stop().destroy() }
+    }
+
+    @Test fun permissionsWindowsAndRendererCrashKeepTheSandboxFailClosed() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val activity = controller.get()
+            val source = "<canvas>original</canvas>"
+            val sandbox = InteractiveSandboxView(activity, source)
+            activity.setContentView(sandbox); sandbox.start()
+            val web = descendants(sandbox).filterIsInstance<WebView>().single()
+            var denied = false
+            web.webChromeClient!!.onPermissionRequest(object : PermissionRequest() {
+                override fun getOrigin() = Uri.parse(InteractiveSandboxDocument.ORIGIN)
+                override fun getResources() = arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+                override fun grant(resources: Array<out String>) { fail("Permission must never be granted") }
+                override fun deny() { denied = true }
+            })
+            assertTrue(denied)
+            assertFalse(web.webChromeClient!!.onCreateWindow(web, false, true, null))
+            var locationDenied = false
+            web.webChromeClient!!.onGeolocationPermissionsShowPrompt(InteractiveSandboxDocument.ORIGIN) { _, allow, remember ->
+                assertFalse(allow); assertFalse(remember); locationDenied = true
+            }
+            assertTrue(locationDenied)
+            assertTrue(web.webViewClient!!.onRenderProcessGone(web, object : RenderProcessGoneDetail() {
+                override fun didCrash() = true
+                override fun rendererPriorityAtExit() = 0
+            }))
+            assertTrue(descendants(sandbox).none { it is WebView })
+            assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
         } finally { controller.pause().stop().destroy() }
     }
 
@@ -105,6 +142,31 @@ class InteractiveSandboxTest {
             activity.setContentView(View(activity))
             assertTrue(descendants(sandbox).none { it is WebView })
             assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
+        } finally { controller.pause().stop().destroy() }
+    }
+
+    @Test fun longFallbackSourceCanScrollVerticallyAndHorizontallyWithoutLosingText() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val activity = controller.get()
+            val source = (1..200).joinToString("\n") { "line $it " + "long_column_".repeat(40) }
+            val sandbox = InteractiveSandboxView(activity, source)
+            activity.setContentView(sandbox)
+            sandbox.close()
+            sandbox.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(500, View.MeasureSpec.EXACTLY))
+            sandbox.layout(0, 0, 360, 500)
+            val vertical = descendants(sandbox).filterIsInstance<ScrollView>().single()
+            val horizontal = descendants(vertical).filterIsInstance<HorizontalScrollView>().single()
+            val original = descendants(vertical).filterIsInstance<TextView>().single()
+            assertEquals(source, original.text.toString())
+            assertTrue(original.isTextSelectable)
+            assertTrue("Source must have a vertical scroll range", vertical.getChildAt(0).height > vertical.height)
+            vertical.scrollTo(0, vertical.getChildAt(0).height)
+            horizontal.scrollTo(original.width, 0)
+            assertTrue(vertical.scrollY > 0)
+            assertTrue(horizontal.scrollX > 0)
+            assertEquals(source, original.text.toString())
         } finally { controller.pause().stop().destroy() }
     }
 
