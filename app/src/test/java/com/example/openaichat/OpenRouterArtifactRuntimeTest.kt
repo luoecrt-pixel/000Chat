@@ -102,6 +102,66 @@ class OpenRouterArtifactRuntimeTest {
         ChatDatabase(context).use { assertNull("Request did not reach DB terminal state", it.getActiveResponse(chat)) }
     }
 
+    @Test fun actualRuntimeCanPatchRevertedAndNoOpVersionsByTheirReturnedExactIds() {
+        val original = LocalArtifactToolExecutor(context).createTextFile(JSONObject()
+            .put("filename", "reverted-runtime.txt").put("content", "a"))
+        ChatDatabase(context).use { db ->
+            db.ensureChat(chat, "Version identities")
+            assertTrue(db.registerLocalArtifact(chat, requestId, original))
+            db.setActiveResponse(chat, null, requestId, "", "in_progress", System.currentTimeMillis(),
+                "high", "high", false, 0, 0, false)
+            assertTrue(db.startRequestAccounting(chat, requestId, "openrouter", "test-model", "openrouter_api_key"))
+        }
+        val failure = AtomicReference<Throwable?>()
+        val phase = AtomicInteger()
+        val ids = mutableListOf(original.getString("file_id"))
+        val replacements = listOf("a" to "b", "b" to "a", "a" to "a", "a" to "c")
+        try {
+            MockWebServer().use { server ->
+                server.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = try {
+                        val step = phase.getAndIncrement()
+                        if (step in 1..4) {
+                            val descriptor = toolResult(request.body.readUtf8(), "version-${step - 1}")
+                            assertTrue(descriptor.toString(), descriptor.getBoolean("ok"))
+                            val id = descriptor.getString("file_id")
+                            assertFalse("Every retained version has its own exact ID", id in ids)
+                            ids.add(id)
+                        }
+                        if (step < replacements.size) {
+                            val (search, replacement) = replacements[step]
+                            toolRound("gen-version-$step", toolCall(0, "version-$step", "patch_local_file",
+                                JSONObject().put("file_id", ids.last()).put("patches", JSONArray()
+                                    .put(JSONObject().put("search", search).put("replace", replacement)))))
+                        } else if (step == 4) {
+                            toolRound("gen-version-read", toolCall(0, "read-final-version", "file_read_range",
+                                JSONObject().put("file_id", ids.last())))
+                        } else {
+                            val result = toolResult(request.body.readUtf8(), "read-final-version")
+                            assertTrue(result.getBoolean("ok")); assertEquals("c", result.getString("content"))
+                            finalRound()
+                        }
+                    } catch (error: Throwable) { failure.compareAndSet(null, error); finalRound() }
+                }
+                val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+                OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
+                awaitRuntimeAndCleanup()
+                failure.get()?.let { throw AssertionError("Version identity runtime failed", it) }
+                assertEquals(6, server.requestCount)
+                ChatDatabase(context).use { db ->
+                    val versions = db.listLocalFiles(chat).associateBy { it.getString("file_id") }
+                    assertEquals(5, versions.size)
+                    assertEquals(listOf("a", "b", "a", "a", "c"), ids.map { File(versions.getValue(it).getString("path")).readText() })
+                }
+            }
+        } finally {
+            ChatDatabase(context).use { db -> db.listLocalFiles(chat).forEach { value ->
+                File(value.getString("path")).delete()
+                JsonProtocol.nonBlank(value, "patch_diff_path")?.let { File(it).delete() }
+            } }
+        }
+    }
+
     @Test fun actualRuntimeCreatesPatchesAndReadsNewVersionThenReopenedNextTurnReadsTheSameBytes() {
         val originalText = "alpha\nbefore\nomega\n"
         val updatedText = "alpha\nafter\nomega\n"

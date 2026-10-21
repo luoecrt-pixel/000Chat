@@ -164,7 +164,12 @@ class LocalArtifactToolExecutor(private val context: Context) {
     private fun withAttachment(metadata: JSONObject, sha: String): JSONObject {
         val path = metadata.getString("path")
         val name = metadata.getString("filename")
-        val id = "local_" + sha + "_" + StreamingJsonRequestBody.sha256(name).take(12)
+        // Bytes may return to an older value (or a patch may be a no-op). The
+        // published filename carries the immutable version token, so retained
+        // versions stay addressable while a retry of the same target keeps its ID.
+        // Persisted manifests retain their original IDs; only new versions use v2.
+        val id = "local_v2_" + StreamingJsonRequestBody.sha256(JSONObject()
+            .put("version_token", File(path).name).put("sha256", sha).put("filename", name))
         val attachment = OpenRouterLocalAttachment(id, name, "text", path, metadata.getString("mime_type"),
             metadata.getLong("size_bytes"), sha, textPath = path, textEncoding = "UTF-8")
         return metadata.put("sha256", sha).put("file_id", id).put("attachment", attachment.toJson())

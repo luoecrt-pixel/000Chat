@@ -91,6 +91,7 @@ class LocalArtifactAttachmentResolverTest {
                     .put("attachment_manifest", manifest.toJson())))
                 val migrated = LocalArtifactAttachmentResolver.resolve(context, db, "legacy", db.listLocalFiles("legacy").single())
                 assertNotEquals(legacy.path, migrated.textPath)
+                assertEquals("legacy", migrated.id)
                 assertEquals(source.readText(), File(migrated.textPath!!).readText())
                 val wireBound = migrated.copy(wirePath = wire.path, wireSha256 = OpenRouterAttachmentStore.sha256(wire))
                 assertTrue(db.persistLocalArtifactAttachment("legacy", source.path, source.length(), wireBound.sha256, wireBound))

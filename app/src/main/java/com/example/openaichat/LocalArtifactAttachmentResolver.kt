@@ -9,6 +9,11 @@ import java.io.IOException
 object LocalArtifactAttachmentResolver {
     private val sha256Format = Regex("[0-9a-f]{64}")
 
+    /** Checkpoint/history tools retain their captured ID while repairing only verified originals. */
+    fun resolveForTools(context: Context, attachment: OpenRouterLocalAttachment): OpenRouterLocalAttachment =
+        resolve(context, null, "", JSONObject().put("path", attachment.path).put("filename", attachment.name)
+            .put("mime_type", attachment.mime).put("attachment_manifest", attachment.toJson()))
+
     fun resolve(context: Context?, db: ChatDatabase?, chatId: String, metadata: JSONObject): OpenRouterLocalAttachment {
         if (Thread.currentThread().isInterrupted) throw IOException("Подготовка файла отменена")
         JsonProtocol.nonBlank(metadata, "chat_id")?.let { if (it != chatId) throw IOException("Файл принадлежит другому чату") }
@@ -55,6 +60,9 @@ object LocalArtifactAttachmentResolver {
         }
         OpenRouterAttachmentPreflight.verifySources(listOf(rebuilt))
         rebuilt = rebuilt.copy(
+            id = previous?.id ?: rebuilt.id,
+            encodingGuessed = if (previous?.kind == "text" && !previous.encodingGuessed && previous.textEncoding != null)
+                false else rebuilt.encodingGuessed,
             textSha256 = rebuilt.textSha256 ?: rebuilt.textPath?.let { OpenRouterAttachmentStore.sha256(File(it)) },
             wireSha256 = rebuilt.wireSha256 ?: rebuilt.wirePath?.let { OpenRouterAttachmentStore.sha256(File(it)) }
         )

@@ -134,8 +134,14 @@ object OpenRouterResponseRuntime {
             if (OpenRouterClaudeRoute.isClaude(r.model)) diagnostics.log("openrouter_route", mapOf(
                 "request_id" to r.requestId, "model" to r.model, "route" to r.claudeRoute.preference,
                 "image_base64_limit" to r.claudeRoute.imageBase64Limit, "request_byte_limit" to r.claudeRoute.requestByteLimit))
-            val fileTools = LocalFileTools(r.attachments, ::active)
-            val existingCanonicalPaths = r.attachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
+            val verifiedAttachments = r.attachments.map { attachment ->
+                if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
+                if (attachment.kind in setOf("text", "document", "table"))
+                    LocalArtifactAttachmentResolver.resolveForTools(item.context, attachment) else attachment
+            }
+            verifiedAttachments.filter { it !in item.runtimeAttachments }.forEach(item.runtimeAttachments::add)
+            val fileTools = LocalFileTools(verifiedAttachments, ::active)
+            val existingCanonicalPaths = verifiedAttachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
             db.listLocalFiles(r.chatId).forEach { a ->
                 if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
                 val rawPath = JsonProtocol.nonBlank(a, "path") ?: return@forEach
