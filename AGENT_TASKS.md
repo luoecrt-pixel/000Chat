@@ -4,18 +4,6 @@
 
 ## Текущие задачи
 
-### 34. [P1/P2, поручение владельца 20.10.2026] Новые функции после пакета оптимизаций
-
-Общий пакет поручения — **не более трёх PR**, включая первый PR с исправлениями. Оставшиеся два PR:
-
-- `patch_local_file`: chat-scoped file ID/однозначное имя, optional expected SHA-256, все search однозначны в исходном UTF-8; атомарная новая версия, старый файл сохранён. Durable idempotency по chat/request/tool-call, регистрация только действующим владельцем, следующему инструменту доступна новая версия. Раскрываемый тематический Diff + Просмотр/Сохранить/Поделиться; полные файлы не переносить в tool output. GitHub tools OpenAI остаются read-only.
-- Локальная проверка чтения/цитат: сохранять безопасные range/eof/total metadata новых OpenRouter tool_trace; старый trace не доказывает процент прочитанного. Для OpenAI связывать function_call/output по call_id. Процент только при известном denominator; учитывать объединение диапазонов и фактический scope table stats. Точный локальный поиск цитат, переход к смещению; missing/unreadable означает unknown. Источники привязаны к исходному chatId; без сети/токенов/изменения оригиналов.
-- Индикатор контекста справа в карточке лога + Context Inspector: тот же captured model/tools/route/chain policy, что Send; OpenAI canReuse учитывает локальные manifests. OpenRouter binding и prefix readiness различать, проверка не изменяет signed history. Actual cache read/write из nullable usage/accounting, unknown не равен нулю; время ответа из terminal event. Не обещать server cache hit и не запускать upload/materialize при открытии inspector.
-- Отдельная интерактивная offline sandbox по явной кнопке у HTML/sandbox/chart: существующий статический preview сохраняется. Model JS только внутри iframe sandbox=allow-scripts без same-origin, строгая CSP; сеть/file/content/storage/Android bridge запрещены. WebView создаётся по нажатию и уничтожается при закрытии/detach; блокировать навигацию, окна, permissions/download/file chooser. Изоляция доступа не является гарантией ограничения CPU/памяти.
-- Устранить повторную нормализацию локальных артефактов через durable attachment_manifest, проверку original SHA/derived bytes и owner/path CAS; без global/path-only cache. Retention сохраняет manifest originals/derivatives, diff и предыдущие версии.
-
-Приёмка: positive/negative реальные runtime/SQLite/HTTP/UI пути обоих providers; исправления, полные Debug/Release CI и точные SHA для каждого PR. Не объявлять функции готовыми до реализации и проверки.
-
 ### 33. [P1/P2] Замечания владельца и проверка присланных решений
 
 - Закрыть подтверждённые runtime gaps: запрет скрытого повторного inference POST OpenRouter при 408/503; durable промежуточный текст до terminal; identity-aware completion исторической загрузки после Remove/Reorder/Replace/Edit/Delete/switch/recreate. Сохранить originals, drafts, accounting, request ownership и OpenAI sequence CAS. Нужны positive/negative actual-client/SQLite/Activity tests и соответствующий Debug/Release CI.
