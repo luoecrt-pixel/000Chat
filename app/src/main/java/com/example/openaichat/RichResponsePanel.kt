@@ -471,6 +471,13 @@ class RichResponsePanel(
                     formulaPreview(listOf(MathDelimiterScanner.Formula(0, block.content.length, block.content, block.content, true)))
                 })
             }
+            if (block.closed && block.language.lowercase() in setOf("html", "sandbox", "chart"))
+                addView(button("▶ Запустить в песочнице") {
+                    try {
+                        val dialog = InteractiveSandboxDialog.create(context, block.content) { dialogs.remove(it) }
+                        dialogs.add(dialog); dialog.show()
+                    } catch (_: Exception) { previewNotice("Не удалось открыть песочницу. Исходник сохранён полностью.") }
+                })
             if (block.closed && block.language.lowercase() in setOf("html", "svg"))
                 addView(button(if (block.language.equals("svg", true)) "Превью SVG" else "Код / Превью") { preview(block) })
             if (block.content.length > 100_000) {

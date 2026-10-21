@@ -215,6 +215,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private lateinit var drawerList: LinearLayout
     private lateinit var requestTelemetryCard: LinearLayout
     private lateinit var requestTelemetrySummary: TextView
+    private lateinit var requestContextBadge: TextView
     private lateinit var requestTelemetryHistory: LinearLayout
     private lateinit var requestTelemetryScroll: ScrollView
     private var requestTelemetryExpanded = false
@@ -1180,7 +1181,21 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 true
             }
         }
-        card.addView(requestTelemetrySummary)
+        val contextHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        contextHeader.addView(requestTelemetrySummary, LinearLayout.LayoutParams(0, -2, 1f))
+        requestContextBadge = TextView(this).apply {
+            textSize = 10.5f
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            tag = "context-status-badge"
+            contentDescription = "Проверить контекст и фактическое использование кэша"
+            setOnClickListener { showContextInspector() }
+        }
+        contextHeader.addView(requestContextBadge, LinearLayout.LayoutParams(-2, -2))
+        card.addView(contextHeader)
         requestTelemetryHistory = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -1213,6 +1228,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val active = chatDb.getActiveResponse(currentChatId())
         val activeAccount = active?.let { accounts[it.optString("request_id")] }
         val theme = currentTheme()
+        if (::requestContextBadge.isInitialized) {
+            val lastId = chat.lastOrNull { it.optString("role") == "assistant" }?.let { JsonProtocol.nonBlank(it, "request_id") }
+            val previous = lastId?.let(accounts::get)?.takeIf { it.optString("provider") == prefs.getString("provider", "openai") }
+            fun known(key: String) = previous?.opt(key)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }?.toString() ?: "?"
+            requestContextBadge.text = contextBadgeText() + "\nкэш ↓${known("cached_tokens")} ↑${known("cache_write_tokens")}"
+            requestContextBadge.contentDescription = "Контекст следующего запроса; кэш последнего ответа: чтение ${known("cached_tokens")}, запись ${known("cache_write_tokens")}. Нажмите для проверки."
+            requestContextBadge.setTextColor(theme.accent)
+            requestContextBadge.background = RippleDrawable(ColorStateList.valueOf(theme.divider),
+                AppThemeViews.surface(this, theme.logBg, theme.surfaceBorder), null)
+        }
         requestTelemetrySummary.background = RippleDrawable(ColorStateList.valueOf(theme.divider),
             AppThemeViews.surface(this, theme.logBg, theme.surfaceBorder), null)
         requestTelemetryHistory.removeAllViews()
@@ -1252,6 +1277,93 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             requestTelemetryHistory.addView(buildRequestEventView(event), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
         }
         requestTelemetryScroll.post { if (requestTelemetryExpanded) requestTelemetryScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun contextBadgeText(): String {
+        val provider = prefs.getString("provider", "openai") ?: "openai"
+        if (provider != "openai") return "Контекст · " + if (OpenRouterClaudeRoute.isClaude(
+                prefs.getString("model", "anthropic/claude-opus-5.5").orEmpty()))
+            "кэш " + prefs.getString("openrouter_cache_mode", "1h") else "история"
+        val model = OpenAiInstructionChainPolicy.normalizedModel(prefs.getString("model", "gpt-6-astra").orEmpty())
+        val fingerprint = OpenAiInstructionChainPolicy.fingerprint(GenerationInstructions(
+            prefs.getString("system_prompt", ""), prefs.getString("instructions", ""), presentationInstructionsForRequest()),
+            secure.getApiKey(), model)
+        val chain = attachedOpenRouterAttachments.isEmpty() &&
+            OpenAiInstructionChainPolicy.canReuse(currentResponseId, chat, fingerprint)
+        return if (chain) "Контекст · цепочка" else "Контекст · replay"
+    }
+
+    private fun showContextInspector() {
+        // Read the settings once, on this UI turn. No encoder, file upload, protocol
+        // mutation or inference request is allowed merely to open this dialog.
+        val provider = prefs.getString("provider", "openai") ?: "openai"
+        val model = prefs.getString("model", if (provider == "openai") "gpt-6-astra" else "anthropic/claude-opus-5.5").orEmpty().trim()
+        val instructions = GenerationInstructions(prefs.getString("system_prompt", ""),
+            prefs.getString("instructions", ""), presentationInstructionsForRequest())
+        val route = OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null))
+        val localArtifacts = try { chatDb.listLocalFiles(currentChatId()) } catch (_: Exception) { emptyList() }
+        val tools = JSONArray()
+        if (provider == "openrouter") {
+            val catalog = OpenRouterAppToolCatalog.tools()
+            for (i in 0 until catalog.length()) tools.put(catalog.get(i))
+            if (prefs.getBoolean("github_tools", false)) GitHubToolCatalog.tools().let { a ->
+                for (i in 0 until a.length()) tools.put(a.get(i)) }
+            OpenRouterServerToolCatalog.tools(prefs.getBoolean("openrouter_web_search", false),
+                prefs.getBoolean("openrouter_web_fetch", false)).let { a -> for (i in 0 until a.length()) tools.put(a.get(i)) }
+        } else {
+            if (prefs.getBoolean("web", false)) tools.put(JSONObject().put("type", "web_search"))
+            if (prefs.getBoolean("file_search", false) && !prefs.getString("vector_store", "").isNullOrBlank())
+                tools.put(JSONObject().put("type", "file_search"))
+            if (prefs.getBoolean("code_interpreter", false))
+                tools.put(JSONObject().put("type", "code_interpreter"))
+            if (prefs.getBoolean("image_generation", false)) tools.put(JSONObject().put("type", "image_generation"))
+            if (!prefs.getBoolean("file_analysis_tools", false) && (attachedFilePaths.isNotEmpty() ||
+                    attachedOpenRouterAttachments.any { it.kind in setOf("text", "document", "table") } || chat.any { message ->
+                        (message.optJSONArray("file_paths")?.length() ?: 0) > 0 || message.optJSONArray("attachments")?.let { a ->
+                            (0 until a.length()).any { a.optJSONObject(it)?.optString("kind") in setOf("text", "document", "table") }
+                        } == true
+                    } || localArtifacts.any { artifact ->
+                        val filename = JsonProtocol.string(artifact, "filename", JsonProtocol.string(artifact, "path"))
+                        val mime = JsonProtocol.string(artifact, "mime_type")
+                        mime.startsWith("text/") || mime == "application/json" || TextFileFormatPolicy.knownText(filename) ||
+                            TextFileFormatPolicy.extension(filename) in TextFileFormatPolicy.office
+                    })) {
+                OpenAiLocalFileToolBridge.schemas().let { a -> for (i in 0 until a.length()) tools.put(a.get(i)) }
+            }
+        }
+        val names = mutableListOf<String>()
+        chat.forEach { message ->
+            message.optJSONArray("file_names")?.let { a -> for (i in 0 until a.length()) JsonProtocol.text(a, i)?.let(names::add) }
+            JsonProtocol.nonBlank(message, "image_name")?.let(names::add)
+            message.optJSONArray("attachments")?.let { a -> for (i in 0 until a.length())
+                a.optJSONObject(i)?.let { JsonProtocol.nonBlank(it, "name") }?.let(names::add) }
+        }
+        names.addAll(attachedFileNames)
+        names.addAll(attachedOpenRouterAttachments.map { it.name })
+        names.addAll(localArtifacts.mapNotNull { JsonProtocol.nonBlank(it, "filename") })
+        pendingImageName?.takeIf { it.isNotBlank() }?.let(names::add)
+        val lastReply = chat.lastOrNull { it.optString("role") == "assistant" }
+        val lastId = lastReply?.let { JsonProtocol.nonBlank(it, "request_id") }
+        val accounts = try { chatDb.listRequestAccounting(currentChatId(), lastId?.let { setOf(it) }) } catch (_: Exception) { emptyList() }
+        val accounting = accounts.lastOrNull { it.optString("local_request_id") == lastId && it.optString("provider") == provider }
+        val event = try { chatDb.listRequestEvents(currentChatId(), 100).firstOrNull {
+            it.optString("request_id") == lastId && it.optString("event_type") in
+                setOf("request_completed", "request_failed", "request_incomplete", "request_disconnected")
+        } } catch (_: Exception) { null }
+        val key = if (provider == "openai") secure.getApiKey() else secure.getOpenRouterApiKey()
+        val format = if (provider == "openrouter") try { OpenRouterStructuredOutputPolicy.format(
+            prefs.getString("openrouter_text_format", "text") ?: "text", prefs.getString("openrouter_json_schema", "").orEmpty())
+        } catch (_: Exception) { status.text = "Укажите корректный формат ответа перед проверкой контекста"; return } else null
+        val visibleTools = ContextStatusPolicy.toolNames(tools).toMutableList()
+        if (provider == "openai" && prefs.getBoolean("file_analysis_tools", false) && !prefs.getBoolean("code_interpreter", false))
+            visibleTools.add("Code Interpreter — если подготовка найдёт контейнерные файлы")
+        val snapshot = ContextStatusPolicy.build(provider, model, chat, currentResponseId,
+            if (provider == "openai") OpenAiInstructionChainPolicy.fingerprint(instructions, key, model) else "",
+            attachedOpenRouterAttachments.isNotEmpty(),
+            if (provider == "openrouter") OpenRouterProtocolCodec.binding(model, tools, key, format, route) else null,
+            route, prefs.getString("openrouter_cache_mode", "1h") ?: "1h", names,
+            visibleTools, accounting, event?.optLong("created_at", 0), System.currentTimeMillis())
+        ContextInspectorDialog.show(this, currentTheme(), snapshot)
     }
 
     private fun buildRequestEventView(event: JSONObject): View {
@@ -1509,6 +1621,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         modelBadge.text = "${source.label} · ${modelLabel} ▾"
         modelBadge.contentDescription = "Источник API: ${source.label}. Модель: ${modelLabel}. Выбрать модель"
         updateEffortBadge()
+        if (::requestContextBadge.isInitialized) renderRequestTelemetry()
     }
 
     private fun updateEffortBadge(resolvedEffort: String? = null) {
