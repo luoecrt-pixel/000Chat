@@ -138,4 +138,42 @@ class ContextInspectorActivityIntegrationTest {
             preparation.set(activity, null)
         }
     }
+
+    @Test fun settingsChangedDuringBadgeInspectionAreCoalescedIntoFreshSnapshot() {
+        start("data.txt", "text/plain")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val preparation = MainActivity::class.java.getDeclaredField("contextBadgePreparationHook").apply { isAccessible = true }
+        val refresh = MainActivity::class.java.getDeclaredMethod("requestContextSnapshot", Boolean::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        preparation.set(activity, { entered.countDown(); assertTrue(release.await(5, TimeUnit.SECONDS)) })
+        try {
+            refresh.invoke(activity, false)
+            val startedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (entered.count > 0 && System.nanoTime() < startedDeadline) {
+                shadowOf(Looper.getMainLooper()).idle()
+                entered.await(5, TimeUnit.MILLISECONDS)
+            }
+            assertEquals("The original captured snapshot must be blocked", 0L, entered.count)
+            prefs.edit().putString("provider", "openrouter").putString("model", "anthropic/claude-updated")
+                .putString("system_prompt", "updated instructions").commit()
+            refresh.invoke(activity, false)
+            preparation.set(activity, null)
+            release.countDown()
+            val badge = activity.window.decorView.findViewWithTag<TextView>("context-status-badge")
+            val wait = CountDownLatch(1)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!badge.contentDescription.toString().contains("anthropic/claude-updated") && System.nanoTime() < deadline) {
+                shadowOf(Looper.getMainLooper()).idle()
+                wait.await(5, TimeUnit.MILLISECONDS)
+            }
+            assertTrue("A refresh skipped during prior work must eventually use the latest model",
+                badge.contentDescription.toString().contains("anthropic/claude-updated"))
+            assertTrue(badge.contentDescription.toString().contains("OpenRouter"))
+            assertFalse("The previous OpenAI replay mode must not remain", badge.text.toString().contains("replay"))
+        } finally {
+            preparation.set(activity, null)
+            release.countDown()
+        }
+    }
 }

@@ -33,7 +33,9 @@ assert 'buildConfig = true' in gradle
 assert 'container_file_citation' in main
 assert 'file_citation' in main
 assert 'url_citation' in main
-assert 'put("type","web_search")' in main
+tool_schemas = (ROOT / 'app/src/main/java/com/example/openaichat/ContextToolSchemas.kt').read_text()
+assert 'if (web) put(JSONObject().put("type", "web_search"))' in tool_schemas
+assert main.count('ContextToolSchemas.openAi(') >= 2, 'Send and Inspector must use the same tool schema builder'
 assert 'configuration_update' in main
 assert 'autoCompaction = prefs.getBoolean("openai_auto_compaction", false)' in main
 assert 'configUpdateEffort == null && openAiOptions.autoCompaction' in main

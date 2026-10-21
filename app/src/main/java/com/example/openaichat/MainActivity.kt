@@ -248,8 +248,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private var contextInspectionSerial = 0L
     private var contextDialogPending = false
     private var contextBadgeInFlight = false
+    private var contextBadgeDirty = false
     private var contextInspectionCompletedHook: (() -> Unit)? = null
     private var contextInspectionPreparationHook: (() -> Unit)? = null
+    private var contextBadgePreparationHook: (() -> Unit)? = null
     private var contextBadgeMode: String? = null
     private val presentationRendererAvailable by lazy { ScientificRendererPreview.available(this) }
     private lateinit var requestTelemetryHistory: LinearLayout
@@ -1320,8 +1322,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun requestContextSnapshot(openDialog: Boolean) {
         if (!::requestContextBadge.isInitialized || !::input.isInitialized || executor.isShutdown || isFinishing || isDestroyed) return
-        if (!openDialog && (contextDialogPending || contextBadgeInFlight)) return
-        if (openDialog) contextDialogPending = true else contextBadgeInFlight = true
+        if (!openDialog && contextDialogPending) { contextBadgeDirty = true; return }
+        if (!openDialog && contextBadgeInFlight) {
+            contextBadgeDirty = true
+            ++contextInspectionSerial
+            return
+        }
+        if (openDialog) contextDialogPending = true else {
+            contextBadgeInFlight = true
+            contextBadgeDirty = false
+        }
         val serial = ++contextInspectionSerial
         val sourceChat = currentChatId()
         val generation = activeResponseState.state.generation
@@ -1349,7 +1359,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         executor.execute {
             try {
-                if (openDialog) contextInspectionPreparationHook?.invoke()
+                if (openDialog) contextInspectionPreparationHook?.invoke() else contextBadgePreparationHook?.invoke()
                 val localArtifacts = chatDb.listLocalFiles(sourceChat)
                 val accounts = chatDb.listRequestAccounting(sourceChat)
                 val events = chatDb.listRequestEvents(sourceChat, 100)
@@ -1433,6 +1443,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         ContextInspectorDialog.show(this, currentTheme(), snapshot)
                         contextInspectionCompletedHook?.invoke()
                     }
+                    if (contextBadgeDirty) requestContextSnapshot(false)
                 }
             } catch (_: Exception) {
                 runOnUiThread {
@@ -1443,6 +1454,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         if (openDialog) status.text = "Не удалось проверить контекст. Проверьте настройки и доступность файлов."
                         else { contextBadgeMode = null; requestContextBadge.text = "Контекст · проверка недоступна" }
                     }
+                    if (contextBadgeDirty && !isFinishing && !isDestroyed) requestContextSnapshot(false)
                 }
             }
         }
