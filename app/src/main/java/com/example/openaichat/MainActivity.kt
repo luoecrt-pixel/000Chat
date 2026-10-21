@@ -1432,7 +1432,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     if (!openDialog) contextBadgeInFlight = false
                     if (serial != contextInspectionSerial || sourceChat != currentChatId() ||
                         generation != activeResponseState.state.generation || !activityVisible || isFinishing || isDestroyed) {
-                        if (!openDialog && activityVisible && !isFinishing && !isDestroyed) requestContextSnapshot(false)
+                        if ((!openDialog || contextBadgeDirty) && activityVisible && !isFinishing && !isDestroyed) requestContextSnapshot(false)
                         return@runOnUiThread
                     }
                     contextBadgeMode = snapshot.badgeText
