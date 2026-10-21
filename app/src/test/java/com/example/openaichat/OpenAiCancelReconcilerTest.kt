@@ -46,9 +46,108 @@ class OpenAiCancelReconcilerTest {
 
     private fun cancel(server: MockWebServer, db: ChatDatabase, chat: String = "chat",
                        request: String = "local_one", response: String = "resp_one") =
-        OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/")).reconcile(response, "test-secret") {
+        OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"), sleep = { true }).reconcile(response, "test-secret") {
             db.reconcileStoppedOpenAiResponse(chat, request, response, it)
         }
+
+    @Test fun retrievesWaitForProgressAndRespectRetryAfterFromEachSnapshot() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(202).setHeader("Retry-After", "2")
+                .setBody("""{"id":"resp_one","status":"in_progress"}"""))
+            server.enqueue(MockResponse().setHeader("Retry-After", "3")
+                .setBody("""{"id":"resp_one","status":"in_progress"}"""))
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled","usage":{"input_tokens":8,"output_tokens":2}}"""))
+            var now = 0L
+            val waits = mutableListOf<Long>()
+            val seen = mutableListOf<JSONObject>()
+            val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                sleep = { delay ->
+                    assertEquals("A GET must wait before being sent", waits.size + 1, server.requestCount)
+                    waits += delay; now += delay; true
+                }, nowMillis = { now }).reconcile("resp_one", "test-secret", seen::add)
+            assertEquals(listOf(2_000L, 3_000L), waits)
+            assertEquals(2, outcome.retrievals)
+            assertTrue(outcome.hasUsage)
+            assertEquals(3, seen.size)
+            assertEquals(listOf("POST", "GET", "GET"), List(3) { server.takeRequest().method })
+        }
+    }
+
+    @Test fun defaultBackoffAndExpiredBudgetKeepAcceptedSnapshotWithoutAnotherGet() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            var now = 0L
+            val waits = mutableListOf<Long>()
+            val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                sleep = { waits += it; now += it; true }, nowMillis = { now },
+                reconciliationTimeoutMs = 700L).reconcile("resp_one", "test-secret") { }
+            assertEquals(listOf(250L), waits)
+            assertEquals(1, outcome.retrievals)
+            assertEquals(2, outcome.acceptedSnapshots)
+            assertEquals("cancelled", outcome.terminalStatus)
+            assertFalse(outcome.hasUsage)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun retryAfterHttpDateCannotBeShortenedToFitPollingDeadline() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")
+                .setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            val wallNow = java.time.Instant.parse("2015-10-21T07:27:00Z").toEpochMilli()
+            val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                sleep = { error("Retry-After exceeds the available deadline") }, nowMillis = { 0L },
+                wallClockMillis = { wallNow }, reconciliationTimeoutMs = 10_000L)
+                .reconcile("resp_one", "test-secret") { }
+            assertEquals(0, outcome.retrievals)
+            assertEquals(1, outcome.acceptedSnapshots)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun cancelledWaitRetainsPaidSnapshotAndDoesNotRetrieve() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled","usage":{"input_tokens":8}}"""))
+            var waits = 0
+            val seen = mutableListOf<JSONObject>()
+            val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                sleep = { waits++; false }).reconcile("resp_one", "test-secret", seen::add)
+            assertEquals(1, waits)
+            assertEquals(0, outcome.retrievals)
+            assertEquals(8, seen.single().getJSONObject("usage").getInt("input_tokens"))
+            assertEquals("cancelled", outcome.terminalStatus)
+            assertFalse(outcome.hasUsage)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun interruptionDuringWaitIsPreservedWithoutDiscardingSnapshot() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            try {
+                val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                    sleep = { throw InterruptedException("test cancellation") })
+                    .reconcile("resp_one", "test-secret") { }
+                assertTrue(Thread.currentThread().isInterrupted)
+                assertEquals(1, outcome.acceptedSnapshots)
+                assertEquals(0, outcome.retrievals)
+                assertEquals(1, server.requestCount)
+            } finally { Thread.interrupted() }
+        }
+    }
+
+    @Test fun zeroPollingBudgetStillSendsCompensatingCancel() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"id":"resp_one","status":"cancelled"}"""))
+            val outcome = OpenAiCancelReconciler(OkHttpClient(), server.url("/v1/"),
+                sleep = { error("No budget for retrieval") }, reconciliationTimeoutMs = 0L)
+                .reconcile("resp_one", "test-secret") { }
+            assertEquals(0, outcome.retrievals)
+            assertEquals(1, outcome.acceptedSnapshots)
+            assertEquals("/v1/responses/resp_one/cancel", server.takeRequest().path)
+        }
+    }
 
     @Test fun cancelledBodyWithExplicitZeroUsageSurvivesSqliteReopenNoBillingZero() {
         MockWebServer().use { server ->

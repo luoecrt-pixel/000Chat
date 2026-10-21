@@ -132,8 +132,10 @@ object OpenRouterAttachmentStore {
                 val unsafeEntry = isUnsafeZipPath(rawEntryPath)
                 val entryName = rawEntryPath.substringAfterLast('/').trim()
                 if (unsafeEntry) {
-                    drainZipEntry(zin, entryName, report, "Небезопасный путь ZIP пропущен: " + entry.name) { n -> total += n }
-                    if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                    drainZipEntry(zin, entryName, report, "Небезопасный путь ZIP пропущен: " + entry.name) { n ->
+                        total += n
+                        if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                    }
                 } else if (!entry.isDirectory && entryName.isNotBlank()) {
                     val ext = entryName.substringAfterLast('.', "").lowercase()
                     val supported = TextFileFormatPolicy.knownText(entryName) || ext in TextFileFormatPolicy.office || ext in imageExtensions || ext == "pdf"
@@ -161,8 +163,10 @@ object OpenRouterAttachmentStore {
                             } catch (e: Exception) { local.delete(); throw e }
                         }
                     } else {
-                        drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n -> total += n }
-                        if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                        drainZipEntry(zin, entryName, report, if (nested) "Пропущен вложенный архив/бинарник: " + entryName else "Неподдерживаемый файл пропущен: " + entryName) { n ->
+                            total += n
+                            if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
+                        }
                     }
                 }
                 zin.closeEntry()
@@ -206,80 +210,9 @@ object OpenRouterAttachmentStore {
         report: (String) -> Unit = {},
         inputStreamSource: AttachmentInputStreamSource = DefaultAttachmentInputStreamSource
     ): List<OpenRouterLocalAttachment> {
-        val result = mutableListOf<OpenRouterLocalAttachment>()
-        try {
-        var entries = 0
-        var total = 0L
-        inputStreamSource.openInputStream(context, uri)?.use { source -> ZipInputStream(source.buffered()).use { zin ->
-            var entry = zin.nextEntry
-            while (entry != null) {
-                entries++
-                if (entries > MAX_ZIP_ENTRIES) throw IOException("ZIP содержит больше " + MAX_ZIP_ENTRIES + " файлов")
-                val rawEntryPath = entry.name.replace('\\', '/')
-                val unsafeEntry = isUnsafeZipPath(rawEntryPath)
-                val entryName = rawEntryPath.substringAfterLast('/').trim()
-                if (unsafeEntry) {
-                    val buffer = ByteArray(64 * 1024)
-                    var entryBytes = 0L
-                    while (true) {
-                        val n = zin.read(buffer); if (n < 0) break
-                        entryBytes += n; total += n
-                        if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP entry превышает 25 МБ")
-                        if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
-                    }
-                    report("Небезопасный путь ZIP пропущен: " + entry.name)
-                } else if (!entry.isDirectory && entryName.isNotBlank()) {
-                    val ext = entryName.substringAfterLast('.', "").lowercase()
-                    val supported = TextFileFormatPolicy.knownText(entryName) || ext in TextFileFormatPolicy.office || ext in imageExtensions || ext == "pdf"
-                    val nested = ext == "zip" || ext == "apk" || ext == "jar"
-                    if (supported) {
-                        val dir = File(context.filesDir, "attachments").apply { mkdirs() }
-                        val local = File(dir, "zip_" + UUID.randomUUID() + "_" + safeFileName(entryName))
-                        var entryBytes = 0L
-                        try {
-                        local.outputStream().use { out ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                val n = zin.read(buffer); if (n < 0) break
-                                entryBytes += n; total += n
-                                if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP-файл " + entryName + " превышает 25 МБ")
-                                if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
-                                out.write(buffer, 0, n)
-                            }
-                        }
-                        } catch (e: Exception) { local.delete(); throw e }
-                        if (entryBytes == 0L) { local.delete(); report("Пустой файл пропущен: " + entryName) }
-                        else {
-                            try {
-                                result += finalizeFile(context, dir, local, sanitizeDisplayName(entryName), mimeForFilename(entryName))
-                            } catch (e: Exception) { local.delete(); throw e }
-                        }
-                    } else {
-                        val buffer = ByteArray(64 * 1024); var entryBytes = 0L
-                        while (true) {
-                            val n = zin.read(buffer); if (n < 0) break
-                            entryBytes += n; total += n
-                            if (entryBytes > MAX_ZIP_ENTRY_BYTES) throw IOException("ZIP entry превышает 25 МБ")
-                            if (total > MAX_ZIP_TOTAL_BYTES) throw IOException("ZIP распаковывается больше 200 МБ")
-                        }
-                        report(if (nested) "Пропущен вложенный архив/бинарник: " else "Неподдерживаемый файл пропущен: " + entryName)
-                    }
-                }
-                zin.closeEntry(); entry = zin.nextEntry
-            }
-        } } ?: throw IOException("Не удалось открыть ZIP")
-        if (result.isEmpty()) throw IOException("В ZIP не найдено поддерживаемых файлов")
-        report("ZIP " + zipName + ": подготовлено " + result.size + " поддерживаемых файлов")
-        return result
-        } catch (e: Exception) {
-            // Delete only freshly extracted artifacts belonging to this operation.
-            result.forEach { item ->
-                File(item.path).delete()
-                item.textPath?.let { File(it).delete() }
-                item.wirePath?.let { File(it).delete() }
-            }
-            throw e
-        }
+        inputStreamSource.openInputStream(context, uri)?.use { source ->
+            return extractZipStream(context, source, zipName, report)
+        } ?: throw IOException("Не удалось открыть ZIP")
     }
 
     fun toContentBlock(a: OpenRouterLocalAttachment): JSONObject = when (a.kind) {
@@ -529,7 +462,15 @@ object OpenRouterAttachmentStore {
 
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input -> val buffer = ByteArray(64 * 1024); while (true) { val n=input.read(buffer); if (n<0) break; digest.update(buffer,0,n) } }
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                if (Thread.currentThread().isInterrupted) throw IOException("Подготовка файла отменена")
+                val n = input.read(buffer)
+                if (n < 0) break
+                digest.update(buffer, 0, n)
+            }
+        }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 

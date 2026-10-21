@@ -10,6 +10,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OpenRouterAttachmentStoreTest {
+    @Test fun interruptedHashingPreservesOriginalAndCreatesNoDerivative() {
+        val dir = createTempDir()
+        val bytes = "original UTF-8 text".toByteArray(Charsets.UTF_8)
+        val file = File(dir, "original.txt").apply { writeBytes(bytes) }
+        try {
+            Thread.currentThread().interrupt()
+            val error = org.junit.Assert.assertThrows(java.io.IOException::class.java) {
+                OpenRouterAttachmentStore.classifyLocalFile(file, file.name, "text/plain")
+            }
+            assertTrue(error.message.orEmpty().contains("отменена"))
+            assertTrue("Cancellation must remain visible to the request owner", Thread.currentThread().isInterrupted)
+        } finally {
+            Thread.interrupted()
+        }
+        try {
+            assertTrue(bytes.contentEquals(file.readBytes()))
+            assertEquals(listOf(file.name), dir.listFiles()!!.map { it.name })
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun phoneJpegAllowsLargeVendorTrailerButRejectsMissingEoi() {
         val dir = createTempDir()
         val jpeg = realImageBytes("jpeg")

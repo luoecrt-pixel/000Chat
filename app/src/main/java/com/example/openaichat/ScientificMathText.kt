@@ -22,6 +22,7 @@ open class ScientificMathText(context: Context, private val original: TextView, 
     private var web: WebView? = null
     private var formatted = false
     private var retryRequired = false
+    private var pendingLayout: Pair<WebView, View.OnLayoutChangeListener>? = null
     private val theme = AppThemePalette.byId(
         context.getSharedPreferences("app", Context.MODE_PRIVATE).getString("app_theme", "dark")
     )
@@ -52,8 +53,14 @@ open class ScientificMathText(context: Context, private val original: TextView, 
         addView(toggle); addView(notice); addView(original)
         if (autoPreview) typeset()
     }
+    private fun clearLayoutWait() {
+        val (view, listener) = pendingLayout ?: return
+        pendingLayout = null
+        view.removeOnLayoutChangeListener(listener)
+    }
     private fun destroyRenderer() {
         handler.removeCallbacks(timeout)
+        clearLayoutWait()
         val old = web ?: return
         web = null; removeView(old); old.stopLoading(); old.destroy()
     }
@@ -78,6 +85,44 @@ open class ScientificMathText(context: Context, private val original: TextView, 
         toggle.visibility = View.VISIBLE; notice.text = message
         notice.visibility = if (message.isEmpty()) View.GONE else View.VISIBLE
     }
+    private fun measureRenderer(view: WebView) {
+        if (web !== view || !formatted) return
+        if (view.width <= 0) {
+            // The engine can finish before RecyclerView has laid this card out. Keep
+            // the same timeout and renderer, then measure once Android supplies width.
+            if (pendingLayout?.first === view) return
+            clearLayoutWait()
+            val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                if (web === view && formatted && view.width > 0) {
+                    clearLayoutWait()
+                    measureRenderer(view)
+                }
+            }
+            pendingLayout = view to listener
+            view.addOnLayoutChangeListener(listener)
+            return
+        }
+        clearLayoutWait()
+        // Owned numeric expression; no bridge, model code, credentials or file access.
+        view.evaluateJavascript("JSON.stringify([Math.ceil(document.body.scrollHeight),window.innerWidth])") { result ->
+            if (web !== view || !formatted) return@evaluateJavascript
+            // A detach/re-layout can also race the asynchronous JS callback.
+            if (view.width <= 0) { measureRenderer(view); return@evaluateJavascript }
+            try {
+                val decoded = org.json.JSONTokener(result).nextValue() as? String ?: throw IllegalArgumentException("Invalid dimensions")
+                val dimensions = JSONArray(decoded)
+                val height = dimensions.getDouble(0); val width = dimensions.getDouble(1)
+                require(height.isFinite() && width.isFinite() && height > 0 && width > 0)
+                val pixels = height * view.width / width + 8 * resources.displayMetrics.density
+                val limit = resources.displayMetrics.heightPixels.coerceAtLeast(1) * 3L
+                view.layoutParams = LayoutParams(-1, pixels.coerceIn(1.0, limit.toDouble()).toInt())
+                view.visibility = View.VISIBLE; original.visibility = View.GONE
+                notice.text = if (pixels > limit) "Большой блок: прокрутка внутри. Полный исходник сохранён." else ""
+                notice.visibility = if (pixels > limit) View.VISIBLE else View.GONE
+                handler.removeCallbacks(timeout)
+            } catch (_: Exception) { source("Не удалось определить размер блока. Показан исходник.") }
+        }
+    }
     private fun typeset() {
         destroyRenderer()
         retryRequired = false
@@ -87,24 +132,7 @@ open class ScientificMathText(context: Context, private val original: TextView, 
         val renderer = ScientificRendererPreview.webView(context, html, { view, title ->
             if (web === view && formatted) when (title) {
                 "renderer:failed" -> source("Не удалось оформить блок. Показан исходник.")
-                "renderer:ready" -> {
-                    // Owned numeric expression; no bridge, model code, credentials or file access.
-                    view.evaluateJavascript("JSON.stringify([Math.ceil(document.body.scrollHeight),window.innerWidth])") { result ->
-                        if (web === view && formatted) try {
-                            val decoded = org.json.JSONTokener(result).nextValue() as? String ?: throw IllegalArgumentException("Invalid dimensions")
-                            val dimensions = JSONArray(decoded)
-                            val height = dimensions.getDouble(0); val width = dimensions.getDouble(1)
-                            require(height.isFinite() && width.isFinite() && height > 0 && width > 0 && view.width > 0)
-                            val pixels = height * view.width / width + 8 * resources.displayMetrics.density
-                            val limit = resources.displayMetrics.heightPixels.coerceAtLeast(1) * 3L
-                            view.layoutParams = LayoutParams(-1, pixels.coerceIn(1.0, limit.toDouble()).toInt())
-                            view.visibility = View.VISIBLE; original.visibility = View.GONE
-                            notice.text = if (pixels > limit) "Большой блок: прокрутка внутри. Полный исходник сохранён." else ""
-                            notice.visibility = if (pixels > limit) View.VISIBLE else View.GONE
-                            handler.removeCallbacks(timeout)
-                        } catch (_: Exception) { source("Не удалось определить размер блока. Показан исходник.") }
-                    }
-                }
+                "renderer:ready" -> measureRenderer(view)
             }
         }, { view -> if (web === view && formatted) source("Превью остановлено. Исходник доступен полностью.") })
         web = renderer; renderer.visibility = View.INVISIBLE; renderer.setBackgroundColor(surfaceColor)

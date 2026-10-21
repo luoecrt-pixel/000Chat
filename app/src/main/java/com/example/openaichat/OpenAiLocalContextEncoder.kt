@@ -311,9 +311,10 @@ object OpenAiLocalContextEncoder {
             val mime = mimes?.let { JsonProtocol.string(it, idx) } ?: ""
             result += if (containerFiles.containsKey(path) && !mime.startsWith("image/") &&
                 TextFileFormatPolicy.extension(filename) != "pdf") {
-                OpenRouterLocalAttachment("container_" + digest(file), filename,
+                val fileDigest = digest(file)
+                OpenRouterLocalAttachment("container_" + fileDigest, filename,
                     if (TextFileFormatPolicy.extension(filename) in setOf("doc", "docx", "ppt", "pptx")) "container_document" else "container",
-                    path, mime, file.length(), digest(file))
+                    path, mime, file.length(), fileDigest)
             } else if (context != null) {
                 OpenRouterAttachmentStore.classifyLocalFile(context, file, filename, mime)
             } else {
@@ -345,6 +346,7 @@ object OpenAiLocalContextEncoder {
         file.inputStream().buffered().use { source ->
             val buf = ByteArray(64 * 1024)
             while (true) {
+                if (Thread.currentThread().isInterrupted) throw IOException("Подготовка файла отменена")
                 val count = source.read(buf)
                 if (count < 0) break
                 md.update(buf, 0, count)

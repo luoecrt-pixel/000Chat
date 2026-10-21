@@ -24,6 +24,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val DB_VERSION = 25
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
+        private const val LOCAL_FILE_REFERENCE_SELECTION = "file_paths IS NOT NULL OR image_path IS NOT NULL OR attachments IS NOT NULL OR annotations IS NOT NULL OR generated_images IS NOT NULL"
         private const val METRICS_TABLE = "effort_metrics"
         private const val REQUEST_EVENT_TABLE = "request_events"
         private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
@@ -160,9 +161,6 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
-        ensureRequestEventsTable(db)
-        ensureRequestAccountingTable(db)
-        ensureOpenRouterRoundsTable(db)
         ensureLocalArtifactsTable(db)
         ensureTelemetryAndCostColumns(db)
     }
@@ -315,14 +313,20 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_effort_metrics_created ON $METRICS_TABLE(created_at)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_effort_metrics_task ON $METRICS_TABLE(task_class, effective_effort, feedback)")
         db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_effort_metrics_chat_request ON $METRICS_TABLE(chat_id, request_id) WHERE request_id IS NOT NULL")
+        val columnsByTable = mutableMapOf<String, MutableSet<String>>()
         fun column(table: String, name: String, definition: String = "TEXT") {
-            val present = db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
-                val index = cursor.getColumnIndexOrThrow("name")
-                var found = false
-                while (cursor.moveToNext()) if (cursor.getString(index) == name) found = true
-                found
+            val columns = columnsByTable.getOrPut(table) {
+                db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+                    val index = cursor.getColumnIndexOrThrow("name")
+                    mutableSetOf<String>().apply {
+                        while (cursor.moveToNext()) add(cursor.getString(index))
+                    }
+                }
             }
-            if (!present) db.execSQL("ALTER TABLE $table ADD COLUMN $name $definition")
+            if (name !in columns) {
+                db.execSQL("ALTER TABLE $table ADD COLUMN $name $definition")
+                columns.add(name)
+            }
         }
         column(MESSAGE_TABLE, "telemetry_summary")
         column(MESSAGE_TABLE, "openai_usage_ledger")
@@ -2615,6 +2619,7 @@ data class ExistingMessageRow(
             created_at INTEGER NOT NULL, metadata TEXT NOT NULL,
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifacts_chat_created ON local_artifacts(chat_id, created_at DESC)")
     }
 
     fun getOpenAiToolCheckpoint(chatId: String, requestId: String): JSONObject? =
@@ -2715,13 +2720,14 @@ data class ExistingMessageRow(
     }
 
     /** Local copies of assistant-generated/downloaded files and generated images. */
-    fun listLocalFiles(): List<JSONObject> {
+    fun listLocalFiles(chatId: String? = null): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         val seen = mutableSetOf<String>()
         val titles = mutableMapOf<String, String>()
         fun title(chatId: String) = titles.getOrPut(chatId) { getChatTitle(chatId).orEmpty() }
         SqliteLargeTextQuery.query(readableDatabase, "local_artifacts", arrayOf("chat_id", "metadata"),
-            null, null, null, null, "created_at DESC", keyColumns = arrayOf("path")).use { c ->
+            if (chatId == null) null else "chat_id=?", chatId?.let { arrayOf(it) },
+            null, null, "created_at DESC", keyColumns = arrayOf("path")).use { c ->
             while (c.moveToNext()) {
                 val a = JSONObject(c.getString(1))
                 val path = a.getString("path")
@@ -2731,7 +2737,9 @@ data class ExistingMessageRow(
         }
         SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("chat_id", "annotations", "generated_images"),
-            "annotations IS NOT NULL OR generated_images IS NOT NULL", null,
+            if (chatId == null) "annotations IS NOT NULL OR generated_images IS NOT NULL"
+                else "chat_id=? AND (annotations IS NOT NULL OR generated_images IS NOT NULL)",
+            chatId?.let { arrayOf(it) },
             null, null, "id DESC"
         ).use { cur ->
             while (cur.moveToNext()) {
@@ -2799,39 +2807,16 @@ data class ExistingMessageRow(
         if (chatId.isBlank()) return emptyList()
         val out = linkedSetOf<String>()
         readableDatabase.query("local_artifacts", arrayOf("path"), "chat_id=?", arrayOf(chatId), null, null, null).use { c ->
-            while (c.moveToNext()) out.add(c.getString(0))
+            while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotBlank() }?.let(out::add)
         }
         SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
-            "chat_id=?",
+            "chat_id=? AND ($LOCAL_FILE_REFERENCE_SELECTION)",
             arrayOf(chatId),
             null, null, "position ASC"
         ).use { c ->
             while (c.moveToNext()) {
-                val filePaths = try { JSONArray(c.getString(0).orEmpty()) } catch (_: Exception) { JSONArray() }
-                for (i in 0 until filePaths.length()) {
-                    filePaths.optString(i).takeIf { it.isNotBlank() }?.let(out::add)
-                }
-
-                c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
-
-                val attachments = try { JSONArray(c.getString(2).orEmpty()) } catch (_: Exception) { JSONArray() }
-                for (i in 0 until attachments.length()) {
-                    val a = attachments.optJSONObject(i) ?: continue
-                    out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray().put(a)))
-                }
-
-                val annotations = try { JSONArray(c.getString(3).orEmpty()) } catch (_: Exception) { JSONArray() }
-                for (i in 0 until annotations.length()) {
-                    annotations.optJSONObject(i)?.optString("local_path")
-                        ?.takeIf { it.isNotBlank() }?.let(out::add)
-                }
-
-                val generatedImages = try { JSONArray(c.getString(4).orEmpty()) } catch (_: Exception) { JSONArray() }
-                for (i in 0 until generatedImages.length()) {
-                    generatedImages.optJSONObject(i)?.optString("local_path")
-                        ?.takeIf { it.isNotBlank() }?.let(out::add)
-                }
+                collectMessageLocalFilePaths(c, out)
             }
         }
         SqliteLargeTextQuery.query(readableDatabase, "openai_tool_checkpoints", arrayOf("request_checkpoint"),
@@ -2851,22 +2836,32 @@ data class ExistingMessageRow(
     fun listAllLocalFilePaths(): List<String> {
         val out = linkedSetOf<String>()
         readableDatabase.query("local_artifacts", arrayOf("path"), null, null, null, null, null).use { c ->
-            while (c.moveToNext()) out.add(c.getString(0))
+            while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotBlank() }?.let(out::add)
         }
         SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
-            null, null, null, null, "position ASC"
+            LOCAL_FILE_REFERENCE_SELECTION, null, null, null, "position ASC"
         ).use { c ->
             while (c.moveToNext()) {
-                try { JSONArray(c.getString(0).orEmpty()).let { a -> for (i in 0 until a.length()) a.optString(i).takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
-                c.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
-                try { out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray(c.getString(2).orEmpty()))) } catch (_: Exception) {}
-                try { JSONArray(c.getString(3).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
-                try { JSONArray(c.getString(4).orEmpty()).let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.optString("local_path")?.takeIf { it.isNotBlank() }?.let(out::add) } } catch (_:Exception) {}
+                collectMessageLocalFilePaths(c, out)
             }
         }
         out.addAll(recoveryArchivePaths())
         return out.toList()
+    }
+
+    /** Null/empty legacy columns carry no paths and must not enter the JSON parser. */
+    private fun collectMessageLocalFilePaths(cursor: android.database.Cursor, out: MutableSet<String>) {
+        fun array(index: Int) = parseArrayColumn(cursor.getString(index))
+        array(0)?.let { paths ->
+            for (i in 0 until paths.length()) paths.optString(i).takeIf { it.isNotBlank() }?.let(out::add)
+        }
+        cursor.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
+        out.addAll(LocalAttachmentReferences.openRouterPaths(array(2)))
+        for (index in 3..4) array(index)?.let { items ->
+            for (i in 0 until items.length()) items.optJSONObject(i)?.optString("local_path")
+                ?.takeIf { it.isNotBlank() }?.let(out::add)
+        }
     }
 
     fun listActiveOpenAiToolAttachmentPaths(): Set<String> {

@@ -31,9 +31,9 @@ object ScientificRendererDocument {
         val data = JSONArray(formulas.map { JSONObject().put("source", it.source).put("latex", it.latex).put("display", it.display) })
         return document("math", scriptData(data.toString()))
     }
-    fun mermaid(source: String): String {
+    fun mermaid(source: String, embedded: Boolean = false): String {
         require(mermaidProblem(source) == null)
-        return document("mermaid", scriptData(JSONObject.quote(source)))
+        return document("mermaid", scriptData(JSONObject.quote(source)), embedded)
     }
     /** html must come from sanitized native Markdown, never model-supplied HTML. */
     fun mathInText(html: String, prepared: MathTextTokens.Prepared): String {
@@ -70,11 +70,14 @@ object ScientificRendererDocument {
             blockquote{margin:8px 0;border-left:3px solid var(--math-border);border-radius:3px 12px 12px 3px;padding:8px 12px;background:var(--math-bg)}
             pre,code,tt{font-family:monospace;color:${css(theme.codeText)};background:${css(theme.codeBg)};border-radius:6px}
             #result.mermaid{overflow:auto;padding:10px;color:var(--diagram-text);background:var(--diagram-bg);border:1px solid var(--diagram-border);border-radius:18px 10px 18px 10px}
+            #result.mermaid.embedded{border:0;border-radius:0;padding:0}
+            #result.mermaid .edgeLabel rect.background,#result.mermaid .edgeLabel .labelBkg{fill:var(--diagram-bg)!important;opacity:0.95!important}
+            #result.mermaid .edgeLabel text,#result.mermaid .edgeLabel tspan{paint-order:stroke fill;stroke:var(--diagram-bg);stroke-width:6px;stroke-linejoin:round}
             svg{max-width:100%;height:auto}p{margin:6px 0}.katex-display{margin:0.35em 0}
         """.trimIndent()
     }
 
-    private fun document(mode: String, data: String): String {
+    private fun document(mode: String, data: String, embedded: Boolean = false): String {
         val nonce = java.util.UUID.randomUUID().toString().replace("-", "")
         val csp = "default-src 'none'; script-src 'self' 'nonce-$nonce'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
         val engine = if (mode == "math-text") """
@@ -117,7 +120,8 @@ object ScientificRendererDocument {
             const {default:mermaid} = await import('./response-renderer/mermaid/mermaid.esm.min.mjs');
             const colors = getComputedStyle(document.documentElement);
             const color = name => colors.getPropertyValue(name).trim();
-            mermaid.initialize({startOnLoad:false, securityLevel:'strict', htmlLabels:false, flowchart:{htmlLabels:false}, theme:'base',themeVariables:{primaryColor:color('--diagram-bg'),primaryTextColor:color('--diagram-text'),primaryBorderColor:color('--diagram-border'),lineColor:color('--diagram-text'),secondaryColor:color('--math-bg'),secondaryTextColor:color('--math-text'),tertiaryColor:color('--math-bg'),edgeLabelBackground:color('--diagram-bg')}, maxTextSize:50000, maxEdges:500, suppressErrorRendering:true});
+            mermaid.initialize({startOnLoad:false, securityLevel:'strict', htmlLabels:false, flowchart:{htmlLabels:false}, theme:'base',themeVariables:{primaryColor:color('--diagram-bg'),primaryTextColor:color('--diagram-text'),textColor:color('--diagram-text'),primaryBorderColor:color('--diagram-border'),lineColor:color('--diagram-text'),secondaryColor:color('--math-bg'),secondaryTextColor:color('--math-text'),tertiaryColor:color('--math-bg'),edgeLabelBackground:color('--diagram-bg')}, maxTextSize:50000, maxEdges:500, suppressErrorRendering:true});
+            await document.fonts.ready;
             const rendered = await mermaid.render('answerDiagram', source);
             const doc = new DOMParser().parseFromString(rendered.svg, 'image/svg+xml');
             if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'svg') throw new Error('Invalid SVG');
@@ -130,6 +134,6 @@ object ScientificRendererDocument {
             result.appendChild(document.importNode(doc.documentElement, true));
         """
         val katex = if (mode.startsWith("math")) """<link rel="stylesheet" href="./response-renderer/katex/katex.min.css"><script src="./response-renderer/katex/katex.min.js"></script>""" else ""
-        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="$csp">$katex<style>$THEME_START${style(AppThemePalette.DARK)}$THEME_END</style></head><body><div id="result" class="$mode"></div><script type="module" nonce="$nonce">const result=document.getElementById('result');try{$engine await document.fonts.ready;document.title='renderer:ready';}catch(_){result.textContent='Превью недоступно. Исходник доступен в приложении.';document.title='renderer:failed';}</script></body></html>"""
+        return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="$csp">$katex<style>$THEME_START${style(AppThemePalette.DARK)}$THEME_END</style></head><body><div id="result" class="$mode${if (embedded) " embedded" else ""}"></div><script type="module" nonce="$nonce">const result=document.getElementById('result');try{$engine await document.fonts.ready;document.title='renderer:ready';}catch(_){result.textContent='Превью недоступно. Исходник доступен в приложении.';document.title='renderer:failed';}</script></body></html>"""
     }
 }

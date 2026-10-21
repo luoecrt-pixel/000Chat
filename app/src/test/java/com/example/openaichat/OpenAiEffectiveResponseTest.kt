@@ -8,6 +8,60 @@ import org.junit.Test
 class OpenAiEffectiveResponseTest {
     private fun item(type: String, id: String) = JSONObject().put("type", type).put("id", id)
 
+    @Test fun compactedTerminalIndexesKeepDistinctPaidItemsInStreamOrder() {
+        val first = item("reasoning", "item_1").put("encrypted_content", "paid-signed-bytes")
+        val canonical = item("message", "item_2").put("status", "completed")
+        val third = item("web_search_call", "item_3").put("status", "completed")
+        val fourth = item("image_generation_call", "item_4").put("result", "paid-image")
+        val terminal = JSONObject().put("status", "incomplete")
+            .put("output", JSONArray().put(canonical).put(JSONObject.NULL))
+        val state = ResponseEventState(typedOutputItems = mapOf(
+            4 to fourth, 2 to third, 1 to item("message", "item_2"), 0 to first,
+            7 to item("reasoning", "item_1").put("encrypted_content", "duplicate")))
+
+        val output = OpenAiEffectiveResponse.assemble(terminal, state).getJSONArray("output")
+
+        assertEquals(5, output.length())
+        assertSame(canonical, output.getJSONObject(0))
+        assertTrue(output.isNull(1))
+        assertSame(first, output.getJSONObject(2))
+        assertEquals("paid-signed-bytes", output.getJSONObject(2).getString("encrypted_content"))
+        assertSame(third, output.getJSONObject(3))
+        assertSame(fourth, output.getJSONObject(4))
+        assertEquals(2, terminal.getJSONArray("output").length())
+        assertEquals(5, state.typedOutputItems.size)
+    }
+
+    @Test fun idlessItemsOnlyYieldToCanonicalOriginalIndexes() {
+        val anonymousCanonical = JSONObject().put("type", "message").put("content", "canonical")
+        val anonymousReceived = JSONObject().put("type", "message").put("content", "received")
+        val terminal = JSONObject().put("output", JSONArray().put(anonymousCanonical))
+        val output = OpenAiEffectiveResponse.assemble(terminal, ResponseEventState(typedOutputItems = mapOf(
+            0 to item("reasoning", "distinct"), 1 to anonymousReceived))).getJSONArray("output")
+        assertEquals(3, output.length())
+        assertSame(anonymousCanonical, output.getJSONObject(0))
+        assertEquals("distinct", output.getJSONObject(1).getString("id"))
+        assertSame(anonymousReceived, output.getJSONObject(2))
+
+        val collision = OpenAiEffectiveResponse.assemble(terminal,
+            ResponseEventState(typedOutputItems = mapOf(0 to anonymousReceived))).getJSONArray("output")
+        assertEquals(1, collision.length())
+        assertSame(anonymousCanonical, collision.getJSONObject(0))
+    }
+
+    @Test fun terminalNullSlotsDoNotLetAppendedItemsOverwriteLaterCanonicalOutput() {
+        val terminalItem = item("message", "canonical-tail")
+        val terminal = JSONObject().put("output", JSONArray().put(0, item("reasoning", "canonical-head"))
+            .put(2, terminalItem))
+        val received = item("image_generation_call", "paid-image").put("result", "exact-bytes")
+        val output = OpenAiEffectiveResponse.assemble(terminal,
+            ResponseEventState(typedOutputItems = mapOf(0 to received))).getJSONArray("output")
+        assertEquals(4, output.length())
+        assertTrue(output.isNull(1))
+        assertSame(terminalItem, output.getJSONObject(2))
+        assertSame(received, output.getJSONObject(3))
+    }
+
     @Test fun canonicalOutputWinsByIndexAndByIdWithoutDuplicatingReceivedItems() {
         val canonical = item("reasoning", "canonical").put("encrypted_content", "final-signed")
         val moved = item("web_search_call", "moved").put("status", "completed")

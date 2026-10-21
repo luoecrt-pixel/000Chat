@@ -43,7 +43,7 @@ class ScientificRendererDeviceTest {
                         prefs.edit().putString("app_theme", id).putBoolean("response_scientific_preview", true).commit()
                         val panel = RichResponsePanel(activity, {}, {})
                         panel.submit(ChatBubbleItem.create("auto-$id", "Model",
-                            "```math\nx^2\n```\n\n```mermaid\nflowchart TD\nA-->B\n```", false))
+                            "```math\nx^2\n```\n\n```mermaid\nflowchart TD\nA[Идея] -->|да| B[Проверка]\nB -->|нет| A\n```", false))
                         val webs = webViews(panel)
                         assertEquals(2, webs.size)
                         previews.set(webs)
@@ -68,6 +68,15 @@ class ScientificRendererDeviceTest {
                             val surface = if (index == 0) theme.mathBg else theme.diagramBg
                             val expectedSurface = "\"rgb(${android.graphics.Color.red(surface)}, ${android.graphics.Color.green(surface)}, ${android.graphics.Color.blue(surface)})\""
                             assertEquals(expectedSurface, evaluate(scenario, web, "getComputedStyle(document.querySelector('section,#result.mermaid')).backgroundColor"))
+                            if (index == 1) {
+                                assertEquals("\"0px\"", evaluate(scenario, web, "getComputedStyle(document.querySelector('#result.mermaid')).borderTopWidth"))
+                                assertEquals(expectedSurface, evaluate(scenario, web,
+                                    "getComputedStyle(document.querySelector('.edgeLabel text,.edgeLabel tspan')).stroke"))
+                                assertEquals(expectedSurface, evaluate(scenario, web,
+                                    "getComputedStyle(document.querySelector('.edgeLabel rect.background,.edgeLabel .labelBkg')).fill"))
+                                assertEquals("true", evaluate(scenario, web,
+                                    "Array.from(document.querySelectorAll('.edgeLabel text')).some(node=>node.textContent.includes('да')&&node.getBBox().width>0)"))
+                            }
                         }
                     } finally { scenario.onActivity { dialogRef.get().dismiss() } }
                 }

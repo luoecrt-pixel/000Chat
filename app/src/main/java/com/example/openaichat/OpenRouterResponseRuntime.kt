@@ -92,7 +92,7 @@ object OpenRouterResponseRuntime {
         var fatalFailure = false
         var github: GitHubToolExecutor? = null
         var latestFileIoJson: JSONObject? = null
-        fun active() = !item.cancelled.get() && db.isActiveRequest(r.chatId, r.requestId)
+        fun active() = !item.cancelled.get() && !Thread.currentThread().isInterrupted && db.isActiveRequest(r.chatId, r.requestId)
         fun terminal(message: JSONObject, status: String, usage: JSONObject?, responseModel: String?, error: String? = null,
             fileIo: JSONObject? = null, roundsCompleted: Int = 0): Boolean {
             if (artifacts.isNotEmpty()) message.put("annotations", annotations(artifacts))
@@ -132,7 +132,8 @@ object OpenRouterResponseRuntime {
                 "image_base64_limit" to r.claudeRoute.imageBase64Limit, "request_byte_limit" to r.claudeRoute.requestByteLimit))
             val fileTools = LocalFileTools(r.attachments, ::active)
             val existingCanonicalPaths = r.attachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
-            db.listLocalFiles().filter { JsonProtocol.string(it, "chat_id") == r.chatId }.forEach { a ->
+            db.listLocalFiles(r.chatId).forEach { a ->
+                if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
                 val rawPath = JsonProtocol.nonBlank(a, "path") ?: return@forEach
                 val file = File(rawPath)
                 if (!file.isFile) return@forEach
@@ -148,7 +149,8 @@ object OpenRouterResponseRuntime {
                     }
                     item.runtimeAttachments.add(classified)
                     fileTools.register(classified)
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    if (!active() || error is java.util.concurrent.CancellationException) throw error
                     // Unsupported or binary local artifacts are not registered as text tools.
                 }
             }

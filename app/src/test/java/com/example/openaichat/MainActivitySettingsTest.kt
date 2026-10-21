@@ -97,6 +97,50 @@ class MainActivitySettingsTest {
         shadowOf(Looper.getMainLooper()).idle()
     }
 
+    @Test fun routineStatusIsHiddenAndImportantNoticeDoesNotMoveComposerOrLog() {
+        val activity = launch()
+        fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }.get(activity) as View
+        val notice = field("status") as TextView
+        val log = field("requestTelemetryCard")
+        val model = field("modelBadge")
+        layoutWindow(activity)
+        val logTop = log.top
+        val modelTop = model.top
+        listOf("Готово", "Новый чат", "Модель отвечает…", "Продолжается генерация…", "").forEach {
+            notice.text = it
+            assertEquals(View.GONE, notice.visibility)
+        }
+        notice.text = "Не удалось открыть файл"
+        layoutWindow(activity)
+        assertEquals(View.VISIBLE, notice.visibility)
+        assertEquals(logTop, log.top)
+        assertEquals(modelTop, model.top)
+        assertTrue(notice.parent is android.widget.FrameLayout)
+        notice.text = "Скопировано"
+        assertEquals(View.VISIBLE, notice.visibility)
+        notice.text = "Готово"
+        assertEquals(View.GONE, notice.visibility)
+    }
+
+    @Test fun allComposerOptionsHaveEqualCompactHeightAtDifferentFontScales() {
+        listOf(1f, 1.5f).forEach { scale ->
+            RuntimeEnvironment.setFontScale(scale)
+            val activity = launch()
+            fun field(name: String) = MainActivity::class.java.getDeclaredField(name).apply { isAccessible = true }.get(activity) as TextView
+            layoutWindow(activity)
+            val model = field("modelBadge")
+            val effort = field("effortBadge")
+            val settings = field("responseSettingsBtn")
+            assertTrue(effort.height > 0)
+            assertEquals(effort.height, model.height)
+            assertEquals(effort.height, settings.height)
+            assertEquals(0, settings.minimumHeight)
+            assertTrue((model.layoutParams as ViewGroup.MarginLayoutParams).rightMargin > 0)
+            controller!!.destroy()
+            controller = null
+        }
+    }
+
     @Test fun appSettingsContainKeysAppearanceAndDiagnosticsButNoModelControls() {
         val activity = launch()
         val dialog = openAppSettings(activity)

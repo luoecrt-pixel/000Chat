@@ -132,6 +132,82 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals(7, server.requestCount)
     }
 
+    @Test fun repeatedRangeReadsReuseOneRequestLocalPageIndexAcrossRounds() {
+        val source = "0123456789".repeat(1_200)
+        file.writeText(source)
+        attachment = OpenRouterAttachmentStore.classifyLocalFile(context, file)
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        fun range(id: String, callId: String, offset: Int) = call(id, "read_attached_file", callId).apply {
+            getJSONArray("output").getJSONObject(1).put("arguments", JSONObject()
+                .put("file_id", attachment.id).put("offset", offset).put("limit", 10).toString())
+        }
+        server.enqueue(MockResponse().setBody(range("resp_second", "call_2", 4_100).toString()))
+        server.enqueue(MockResponse().setBody(range("resp_third", "call_3", 8_200).toString()))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val created = mutableListOf<LocalFileTools>()
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", range("resp_first", "call_1", 0), http,
+            credential = { "mock-only" }, localToolsFactory = { files, active ->
+                LocalFileTools(files, active).also(created::add)
+            })
+        assertEquals("The sparse index must survive the next tool round", 1, created.size)
+        for (offset in listOf(0, 4_100, 8_200)) {
+            val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+            val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+            assertTrue(result.getBoolean("ok"))
+            assertEquals(source.substring(offset, offset + 10), result.getString("content"))
+            assertEquals(offset.toLong(), result.getLong("offset"))
+            assertFalse(result.getBoolean("eof"))
+        }
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test fun missingDerivativeBetweenRoundsReplacesToolsAndPublishesRebuiltBytes() {
+        attachment = OpenRouterAttachmentStore.classifyLocalFile(context, file)
+        val oldDerivative = File(attachment.textPath!!)
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        var requests = 0
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                return if (++requests == 1) {
+                    check(oldDerivative.delete())
+                    MockResponse().setBody(call("resp_second", "read_attached_file", "call_2").toString())
+                } else MockResponse().setBody(finalResponse().toString())
+            }
+        }
+        val createdPaths = mutableListOf<String>()
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "read_attached_file"), http,
+            credential = { "mock-only" }, localToolsFactory = { files, active ->
+                createdPaths += files.single().textPath!!
+                LocalFileTools(files, active)
+            })
+        assertEquals(2, createdPaths.size)
+        assertEquals(oldDerivative.path, createdPaths[0])
+        assertNotEquals(createdPaths[0], createdPaths[1])
+        repeat(2) {
+            val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+            val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+            assertTrue(result.getBoolean("ok"))
+            assertEquals(file.readText(), result.getString("content"))
+        }
+        assertEquals(createdPaths[1], db.getOpenAiToolCheckpoint("chat", "request")!!
+            .getJSONArray("attachments").getJSONObject(0).getString("text_path"))
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun attachmentClassificationDoesNotSwallowThreadCancellation() {
+        val artifacts = listOf(JSONObject().put("chat_id", "chat").put("path", file.path)
+            .put("filename", file.name).put("mime_type", "text/plain"))
+        try {
+            Thread.currentThread().interrupt()
+            assertThrows(IOException::class.java) {
+                OpenAiLocalFileToolBridge.attachments(emptyList(), artifacts, "chat", context)
+            }
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
+    }
+
     @Test fun aBatchWithTwoToolsCommitsTwoCallsAndOneRoundWithoutTheirArguments() {
         val response = call("resp_first")
         response.getJSONArray("output").put(call("resp_first", "read_attached_file", "call_2").getJSONArray("output").getJSONObject(1))

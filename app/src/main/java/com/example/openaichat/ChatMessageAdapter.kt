@@ -21,7 +21,9 @@ data class ChatBubbleItem(
     val message: JSONObject? = null,
     val chatIndex: Int? = null,
     val reasoningSummary: String? = null,
-    val contentSignature: String
+    val contentSignature: String,
+    // UI-only base for text deltas. Full persisted fingerprints still include protocol metadata.
+    val streamingBaseSignature: String? = null
 ) {
     companion object {
         fun create(
@@ -228,16 +230,21 @@ class ChatMessageAdapter(
     fun updateText(id: String, text: String): Boolean {
         val index = itemIndexById[id] ?: return false
         val current = items[index]
+        if (current.text == text) return true
         val updatedMessage = current.message?.let { JsonProtocol.objectCopy(it).put("text", text) }
-        val updated = ChatBubbleItem.create(
-            id = current.id,
-            label = current.label,
+        val baseSignature = current.streamingBaseSignature ?: current.contentSignature
+        val digest = MessageDigest.getInstance("SHA-256")
+        // Keep the original card's full identity, but never serialize signed history
+        // or tool output again for a text-only payload. A fixed base makes repeated
+        // deltas deterministic rather than forming an ever-changing hash chain.
+        digest.update(baseSignature.toByteArray(Charsets.UTF_8))
+        digest.update(0.toByte())
+        digest.update(text.toByteArray(Charsets.UTF_8))
+        val updated = current.copy(
             text = text,
-            user = current.user,
-            annotations = current.annotations,
             message = updatedMessage,
-            chatIndex = current.chatIndex,
-            reasoningSummary = current.reasoningSummary
+            contentSignature = "stream-text:" + digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) },
+            streamingBaseSignature = baseSignature
         )
         refreshModelItem(index, updated)
         val displayPosition = displayPositionById[id]

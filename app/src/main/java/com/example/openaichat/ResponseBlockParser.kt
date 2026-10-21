@@ -9,6 +9,7 @@ object ResponseBlockParser {
         data class Details(override val raw: String, val summary: String, val content: String, val closed: Boolean, val expanded: Boolean) : Block(raw)
         data class Table(override val raw: String, val header: List<String>, val align: List<Int>, val rows: List<List<String>>) : Block(raw)
     }
+    private val tableSeparator = Regex(":?-{1,}:?")
     private val fence = Regex("^ {0,3}(`{3,}|~{3,})([^\\r\\n]*)$")
     private val file = Regex("^ {0,3}<file name=\"([^\"\\r\\n]+)\">[ \\t]*$")
     private val details = Regex("^ {0,3}<details(?:[ \\t]+open(?:=\"open\")?)?[ \\t]*>[ \\t]*$", RegexOption.IGNORE_CASE)
@@ -82,19 +83,21 @@ object ResponseBlockParser {
                     flush(line.start)
                     var next = index + 2
                     var depth = 1
-                    var inFence: String? = null
+                    var inFenceClosingRegex: Regex? = null
                     var inFile = false
                     while (next < lines.size) {
                         checkpoint()
                         val candidate = lines[next].text
                         if (inFile) {
                             if (candidate.trim() == "</file>") inFile = false
-                        } else if (inFence != null) {
-                            val marker = inFence!!
-                            if (Regex("^ {0,3}${Regex.escape(marker[0].toString())}{${marker.length},}[ \\t]*$").matches(candidate)) inFence = null
+                        } else if (inFenceClosingRegex != null) {
+                            if (inFenceClosingRegex.matches(candidate)) inFenceClosingRegex = null
                         } else {
                             val found = fence.matchEntire(candidate)
-                            if (found != null && !(found.groupValues[1][0] == '`' && '`' in found.groupValues[2])) inFence = found.groupValues[1]
+                            if (found != null && !(found.groupValues[1][0] == '`' && '`' in found.groupValues[2])) {
+                                val marker = found.groupValues[1]
+                                inFenceClosingRegex = Regex("^ {0,3}${Regex.escape(marker[0].toString())}{${marker.length},}[ \\t]*$")
+                            }
                             else if (file.matches(candidate)) inFile = true
                             else if (details.matches(candidate)) depth++
                             else if (candidate.trim().equals("</details>", true)) { depth--; if (depth == 0) break }
@@ -113,7 +116,7 @@ object ResponseBlockParser {
             if (index + 1 < lines.size && '|' in line.text) {
                 val header = cells(line.text, cancelled)
                 val separators = cells(lines[index + 1].text, cancelled)
-                if (header.isNotEmpty() && header.size == separators.size && separators.all { Regex(":?-{1,}:?").matches(it.trim()) }) {
+                if (header.isNotEmpty() && header.size == separators.size && separators.all { tableSeparator.matches(it.trim()) }) {
                     flush(line.start)
                     var next = index + 2
                     val rows = mutableListOf<List<String>>()

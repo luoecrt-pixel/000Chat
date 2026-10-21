@@ -102,6 +102,24 @@ class ScientificRendererRegressionTest {
         assertEquals(foreign, ScientificRendererDocument.themed(foreign, AppThemePalette.LIGHT))
     }
 
+    @Test fun mermaidLabelsUseThemeOpaqueBackingAndEmbeddedCardsKeepOneBorder() {
+        val source = "flowchart TD\nA[Идея] -->|да| B[Проверка]\nB -->|нет| A"
+        val standalone = ScientificRendererDocument.mermaid(source)
+        val embedded = ScientificRendererDocument.mermaid(source, embedded = true)
+        assertTrue(standalone.contains("id=\"result\" class=\"mermaid\""))
+        assertTrue(embedded.contains("id=\"result\" class=\"mermaid embedded\""))
+        assertTrue(embedded.contains("#result.mermaid.embedded{border:0;border-radius:0;padding:0}"))
+        assertTrue(embedded.indexOf("await document.fonts.ready") < embedded.indexOf("await mermaid.render"))
+        for (id in AppThemePalette.themes) {
+            val document = ScientificRendererDocument.themed(embedded, AppThemePalette.byId(id))
+            assertTrue(document.contains("edgeLabelBackground:color('--diagram-bg')"))
+            assertTrue(document.contains("textColor:color('--diagram-text')"))
+            assertTrue(document.contains(".edgeLabel rect.background"))
+            assertTrue(document.contains("fill:var(--diagram-bg)!important;opacity:0.95!important"))
+            assertTrue(document.contains("paint-order:stroke fill;stroke:var(--diagram-bg);stroke-width:6px;stroke-linejoin:round"))
+        }
+    }
+
     @Test fun allFourDelimitersAreRecognizedWithoutTreatingMoneyOrCodeAsMath() {
         val source = "Цена ${'$'}5 и ${'$'}10; \\${'$'}20. ` ${'$'}code${'$'} `\n" +
             "${'$'}x^2${'$'} и \\(a+b\\), ${'$'}${'$'}x=1\ny=2${'$'}${'$'} и \\[z=3\\]."
