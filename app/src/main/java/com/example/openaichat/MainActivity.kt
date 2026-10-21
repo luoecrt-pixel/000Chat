@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
+    @Volatile private var localEvidenceSourcesHookForTests: (() -> List<OpenRouterLocalAttachment>)? = null
     // Preparation finishes in picker order, rather than whichever image decodes first.
     // Reuse the Activity executor so response work stays independent and teardown
     // still owns every attachment task; a failed item does not block later items.
@@ -767,7 +768,16 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 }
             }
         )
-        scroll = RecyclerView(this).apply {
+        scroll = object : RecyclerView(this) {
+            override fun scrollBy(x: Int, y: Int) {
+                // Explicit upward scrolling wins over a delayed automatic follow.
+                // Restores use the layout manager and are not user scroll intent.
+                if (y < 0 && !isComputingLayout && !applyingProgrammaticScroll && pendingScrollRestoreChatId == currentChatId()) {
+                    cancelScrollRestore()
+                }
+                super.scrollBy(x, y)
+            }
+        }.apply {
             id = R.id.chat_messages_recycler
             layoutManager = object : ChatMessageLayoutManager(this@MainActivity) {
                 init {
@@ -842,7 +852,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     } else itemCount - 1
                     val view = findViewByPosition(position) ?: return
                     if (view.height <= 0 || view.isLayoutRequested) return
-                    if (reading && isBubbleAsyncLayoutPending(view)) return
+                    if (reading && isBubbleAsyncLayoutPending(view, anchor)) return
                     val offset = if (reading && anchor != null) {
                         val lineTop = if (anchor.charOffset > 0) findLineTopForCharOffset(view, anchor.charOffset) else null
                         ChatScrollPolicy.resolveTopOffsetPx(anchor, view.height, width, resources.configuration.fontScale, lineTop)
@@ -862,7 +872,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         }
                     }
                     val committed = findViewByPosition(position) ?: return
-                    if (committed.height > 0 && !committed.isLayoutRequested && !isBubbleAsyncLayoutPending(committed)) {
+                    if (committed.height > 0 && !committed.isLayoutRequested &&
+                        !isBubbleAsyncLayoutPending(committed, if (reading) anchor else null)) {
                         completeScrollRestore(chatId, generation,
                             if (reading) ChatScrollMode.READING_LOCKED else ChatScrollMode.FOLLOW_LATEST)
                     }
@@ -8558,8 +8569,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
     }
 
-    private fun isBubbleAsyncLayoutPending(card: View): Boolean =
-        card.findViewWithTag<RichResponsePanel>("rich-response")?.isAsyncParsePending() == true
+    private fun isBubbleAsyncLayoutPending(card: View, readingAnchor: ChatScrollAnchor? = null): Boolean {
+        val panel = card.findViewWithTag<RichResponsePanel>("rich-response") ?: return false
+        if (panel.isBodyLayoutPending()) return true
+        // The footer follows the response text and cannot move an already measured
+        // reading line. At the exact boundary the anchor belongs to the footer.
+        val character = readingAnchor?.charOffset ?: 0
+        if (character > 0 && character < panel.bodyCharacterCount()) return false
+        return panel.isAsyncParsePending()
+    }
 
     private fun beginScrollRestore(chatId: String, anchor: ChatScrollAnchor?): Long {
         pendingScrollRestoreChatId = chatId
@@ -8617,7 +8635,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             lm.scrollToPositionWithOffset(safePos, savedAnchor.topOffsetPx)
             flushScrollLayoutIfReady()
             val view = lm.findViewByPosition(safePos) ?: return false
-            if (view.height <= 0 || view.isLayoutRequested || isBubbleAsyncLayoutPending(view)) return false
+            if (view.height <= 0 || view.isLayoutRequested || isBubbleAsyncLayoutPending(view, savedAnchor)) return false
             val charLineTop = if (savedAnchor.charOffset > 0) findLineTopForCharOffset(view, savedAnchor.charOffset) else null
             val resolvedOffset = ChatScrollPolicy.resolveTopOffsetPx(
                 anchor = savedAnchor,
@@ -8631,7 +8649,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 flushScrollLayoutIfReady()
             }
             val restored = lm.findViewByPosition(safePos) ?: return false
-            return restored.height > 0 && !restored.isLayoutRequested && !isBubbleAsyncLayoutPending(restored)
+            return restored.height > 0 && !restored.isLayoutRequested && !isBubbleAsyncLayoutPending(restored, savedAnchor)
         } finally {
             applyingProgrammaticScroll = false
         }
@@ -8882,7 +8900,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 },
                 onAsyncLayoutCommitted = { onBubbleAsyncLayoutCommitted(sourceChatId, item.id, card) },
-                evidenceSources = { LocalEvidenceSources.forChat(applicationContext, sourceChatId) }))
+                evidenceSources = { localEvidenceSourcesHookForTests?.invoke() ?: LocalEvidenceSources.forChat(applicationContext, sourceChatId) }))
         }
 
         val message=item.message
