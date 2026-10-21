@@ -2719,6 +2719,62 @@ data class ExistingMessageRow(
         return saved
     }
 
+    /** Cheap chat-scoped metadata presence. Availability is checked only by optional evidence work. */
+    fun hasLocalEvidenceCandidates(chatId: String): Boolean {
+        if (chatId.isBlank()) return false
+        fun readable(path: String?, name: String?, mime: String?, kind: String? = null): Boolean {
+            if (path.isNullOrBlank()) return false
+            val filename = name?.takeIf { it.isNotBlank() } ?: path.substringAfterLast('/')
+            val type = mime.orEmpty().lowercase()
+            val extension = TextFileFormatPolicy.extension(filename)
+            if (kind in setOf("image", "pdf", "container", "container_document") || type == "application/pdf" ||
+                type.startsWith("image/") && type != "image/svg+xml" || type.startsWith("audio/") || type.startsWith("video/") ||
+                extension in setOf("pdf", "png", "jpg", "jpeg", "webp", "gif", "zip", "mp3", "mp4")) return false
+            if (kind in setOf("text", "document", "table")) return true
+            if (extension in TextFileFormatPolicy.office + setOf("doc", "xls", "ppt")) return false
+            return TextFileFormatPolicy.knownText(filename) || type.startsWith("text/") ||
+                type in setOf("application/json", "application/xml", "application/javascript") ||
+                type.endsWith("+json") || type.endsWith("+xml")
+        }
+        fun manifest(value: JSONObject): Boolean = readable(JsonProtocol.nonBlank(value, "path"),
+            JsonProtocol.nonBlank(value, "name"), JsonProtocol.nonBlank(value, "mime"), JsonProtocol.nonBlank(value, "kind"))
+        fun metadata(value: JSONObject, fallbackPath: String? = null): Boolean {
+            val attachment = value.optJSONObject("attachment_manifest") ?: value.optJSONObject("attachment")
+            if (attachment != null && manifest(attachment)) return true
+            return readable(JsonProtocol.nonBlank(value, "local_path") ?: JsonProtocol.nonBlank(value, "path") ?: fallbackPath,
+                JsonProtocol.nonBlank(value, "filename"), JsonProtocol.nonBlank(value, "mime_type"))
+        }
+        fun array(raw: String?): JSONArray? = if (raw.isNullOrBlank()) null else try { JSONArray(raw) } catch (_: org.json.JSONException) { null }
+        SqliteLargeTextQuery.query(readableDatabase, "local_artifacts", arrayOf("path", "metadata"),
+            "chat_id=?", arrayOf(chatId), null, null, null, keyColumns = arrayOf("path")).use { c ->
+            while (c.moveToNext()) {
+                val raw = c.getString(1)
+                val item = if (raw.isNullOrBlank()) null else try { JSONObject(raw) } catch (_: org.json.JSONException) { null }
+                if (item != null && metadata(item, c.getString(0))) return true
+            }
+        }
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
+            arrayOf("attachments", "file_paths", "file_names", "file_mimes", "annotations"),
+            "chat_id=? AND (attachments IS NOT NULL OR file_paths IS NOT NULL OR annotations IS NOT NULL)",
+            arrayOf(chatId), null, null, null).use { c ->
+            while (c.moveToNext()) {
+                val attachments = array(c.getString(0))
+                if (attachments != null) for (i in 0 until attachments.length())
+                    if (attachments.optJSONObject(i)?.let(::manifest) == true) return true
+                val paths = array(c.getString(1))
+                if (paths != null && paths.length() > 0) {
+                    val names = array(c.getString(2)); val mimes = array(c.getString(3))
+                    for (i in 0 until paths.length()) if (readable(JsonProtocol.text(paths, i),
+                        names?.let { JsonProtocol.text(it, i) }, mimes?.let { JsonProtocol.text(it, i) })) return true
+                }
+                val annotations = array(c.getString(4))
+                if (annotations != null) for (i in 0 until annotations.length())
+                    if (annotations.optJSONObject(i)?.let { metadata(it) } == true) return true
+            }
+        }
+        return false
+    }
+
     /** A narrow projection for local evidence; never loads protocol history or materializes files. */
     fun localAttachmentManifests(chatId: String): List<OpenRouterLocalAttachment> {
         if (chatId.isBlank()) return emptyList()

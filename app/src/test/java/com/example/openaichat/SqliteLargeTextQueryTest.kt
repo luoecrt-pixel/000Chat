@@ -6,6 +6,7 @@ import android.database.CursorWindow
 import android.database.CursorWrapper
 import android.database.sqlite.SQLiteCursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,6 +16,49 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class SqliteLargeTextQueryTest {
+    @Test fun absentProjectionFailsRatherThanReturningItsQuotedNameOnEmptyAndPopulatedTables() {
+        for (populated in listOf(false, true)) SQLiteDatabase.create(null).use { db ->
+            db.execSQL("CREATE TABLE data(id INTEGER PRIMARY KEY, payload TEXT)")
+            if (populated) db.execSQL("INSERT INTO data VALUES(1,'original')")
+            assertThrows("Missing projection must fail; populated=$populated", SQLiteException::class.java) {
+                SqliteLargeTextQuery.query(db, "data", arrayOf("missing"),
+                    null, null, null, null, null).use { it.moveToFirst() }
+            }
+            assertFalse(db.inTransaction())
+            db.execSQL("INSERT INTO data VALUES(2,'still usable')")
+        }
+    }
+
+    @Test fun absentKeyFailsEvenWithoutLargeTextOnEmptyAndPopulatedTables() {
+        for (populated in listOf(false, true)) SQLiteDatabase.create(null).use { db ->
+            db.execSQL("CREATE TABLE data(id INTEGER PRIMARY KEY, payload TEXT)")
+            if (populated) db.execSQL("INSERT INTO data VALUES(1,'short')")
+            assertThrows("Missing key must fail; populated=$populated", SQLiteException::class.java) {
+                SqliteLargeTextQuery.query(db, "data", arrayOf("payload"),
+                    null, null, null, null, null, keyColumns = arrayOf("missing_key")).use { it.moveToFirst() }
+            }
+            assertFalse(db.inTransaction())
+            db.execSQL("INSERT INTO data VALUES(2,'still usable')")
+        }
+    }
+
+    @Test fun qualifiedRowIdAndSchemaProjectionPreserveLargeTextAndColumnNames() {
+        SQLiteDatabase.create(null).use { db ->
+            db.execSQL("CREATE TABLE data(payload TEXT, note TEXT)")
+            val text = "rowid😀\u0000данные".repeat(10000)
+            db.execSQL("INSERT INTO data VALUES(?,?)", arrayOf(text, "note"))
+            SqliteLargeTextQuery.query(db, "data", null, "rowid=?", arrayOf("1"),
+                null, null, "rowid", keyColumns = arrayOf("rowid")).use { cursor ->
+                assertEquals(listOf("payload", "note"), cursor.columnNames.toList())
+                assertEquals(0, cursor.getColumnIndex("data.payload"))
+                assertTrue(cursor.moveToFirst())
+                assertEquals(text, cursor.getString(0))
+                assertEquals("note", cursor.getString(1))
+            }
+            assertFalse(db.inTransaction())
+        }
+    }
+
     @Test fun completeUnicodeAndNulTextFitsSmallWindowAndKeepsColumnContract() {
         SQLiteDatabase.create(null).use { db ->
             db.execSQL("CREATE TABLE data(id INTEGER PRIMARY KEY, payload TEXT, note TEXT, number INTEGER)")

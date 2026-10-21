@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -51,6 +52,25 @@ class ChatDatabaseLocalFileQueryTest {
     }
 
     private fun paths(items: List<JSONObject>) = items.map { it.getString("path") }.toSet()
+
+    @Test fun missingArtifactPathColumnStopsOwnershipCollectionInsteadOfInventingAPath() {
+        val original = file("schema-corruption-original.txt")
+        seed("a")
+        for (populated in listOf(false, true)) {
+            db.writableDatabase.execSQL("DROP TABLE local_artifacts")
+            db.writableDatabase.execSQL("CREATE TABLE local_artifacts(chat_id TEXT, request_id TEXT, created_at INTEGER, metadata TEXT)")
+            if (populated) db.writableDatabase.execSQL("INSERT INTO local_artifacts VALUES(?,?,?,?)",
+                arrayOf("a", "request-a", 1, JSONObject().put("path", original.path).toString()))
+            assertThrows("Corrupt schema must stop global cleanup; populated=$populated", SQLiteException::class.java) {
+                db.listAllLocalFilePaths()
+            }
+            assertThrows("Corrupt schema must stop scoped cleanup; populated=$populated", SQLiteException::class.java) {
+                db.listLocalFilePaths("a")
+            }
+            assertFalse(db.readableDatabase.inTransaction())
+            assertTrue(original.isFile)
+        }
+    }
 
     @Test fun scopedListingIncludesOnlyItsArtifactsAnnotationsAndImagesWhileGlobalListingIsPreserved() {
         val artifactA = file("artifact-a.txt")
