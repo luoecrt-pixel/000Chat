@@ -2928,7 +2928,16 @@ data class ExistingMessageRow(
                 out.addAll(LocalAttachmentReferences.openRouterPaths(message.optJSONArray("attachments")))
                 for (key in listOf("annotations", "generated_images")) {
                     message.optJSONArray(key)?.let { items -> for (i in 0 until items.length()) {
-                        items.optJSONObject(i)?.let { JsonProtocol.nonBlank(it, "local_path") }?.let(out::add)
+                        items.optJSONObject(i)?.let { item ->
+                            JsonProtocol.nonBlank(item, "local_path")?.let(out::add)
+                            for (manifestKey in listOf("attachment", "attachment_manifest")) {
+                                if (item.has(manifestKey) && !item.isNull(manifestKey)) {
+                                    val manifest = item.optJSONObject(manifestKey) ?: error("Invalid archived artifact manifest")
+                                    out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray().put(manifest)))
+                                }
+                            }
+                            for (pathKey in listOf("source_path", "patch_diff_path")) JsonProtocol.nonBlank(item, pathKey)?.let(out::add)
+                        }
                     } }
                 }
             }

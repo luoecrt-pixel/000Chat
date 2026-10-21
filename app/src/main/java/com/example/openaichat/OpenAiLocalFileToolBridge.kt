@@ -327,9 +327,9 @@ object OpenAiLocalFileToolBridge {
                                     artifactKey = "$chatId\u0000$requestId\u0000$id")
                                     .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", id)
                                 val registered = db.registerLocalArtifactToolResultIfActive(chatId, requestId, id, candidate)
-                                if (registered == null || registered.optString("path") != candidate.optString("path")) {
+                                if (registered == null || JsonProtocol.string(registered, "path") != JsonProtocol.string(candidate, "path")) {
                                     val durable = db.getLocalArtifactToolResult(chatId, requestId, id)
-                                    if (durable?.optString("path") != candidate.optString("path")) {
+                                    if (durable?.let { JsonProtocol.string(it, "path") } != JsonProtocol.string(candidate, "path")) {
                                         java.io.File(candidate.getString("path")).delete()
                                         JsonProtocol.nonBlank(candidate, "patch_diff_path")?.let { java.io.File(it).delete() }
                                     }
@@ -347,7 +347,7 @@ object OpenAiLocalFileToolBridge {
                             }
                             val savedArtifacts = checkpoint.optJSONArray("local_artifacts")
                                 ?: JSONArray().also { checkpoint.put("local_artifacts", it) }
-                            if ((0 until savedArtifacts.length()).none { savedArtifacts.optJSONObject(it)?.optString("path") == artifact.optString("path") })
+                            if ((0 until savedArtifacts.length()).none { savedArtifacts.optJSONObject(it)?.let { value -> JsonProtocol.string(value, "path") } == JsonProtocol.string(artifact, "path") })
                                 savedArtifacts.put(JsonProtocol.objectCopy(artifact))
                             LocalArtifactToolExecutor.toolResult(artifact).toString()
                         } catch (error: IOException) {

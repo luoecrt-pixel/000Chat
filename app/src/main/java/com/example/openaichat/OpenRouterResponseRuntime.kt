@@ -181,9 +181,9 @@ object OpenRouterResponseRuntime {
                                 else artifactTools.createTextFile(args))
                                 .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", callId)
                             val registered = db.registerLocalArtifactToolResultIfActive(r.chatId, r.requestId, callId, a)
-                            if (registered == null || registered.optString("path") != a.optString("path")) {
+                            if (registered == null || JsonProtocol.string(registered, "path") != JsonProtocol.string(a, "path")) {
                                 val durable = db.getLocalArtifactToolResult(r.chatId, r.requestId, callId)
-                                if (durable?.optString("path") != a.optString("path")) {
+                                if (durable?.let { JsonProtocol.string(it, "path") } != JsonProtocol.string(a, "path")) {
                                     File(a.getString("path")).delete()
                                     JsonProtocol.nonBlank(a, "patch_diff_path")?.let { File(it).delete() }
                                 }

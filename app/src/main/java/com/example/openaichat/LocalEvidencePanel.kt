@@ -124,7 +124,7 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
                     reading = false
                     if (token != generation || !dialog.isShowing) return@post
                     page.onSuccess {
-                        text.text = "Смещение $start (UTF-16)\n\n" + it.optString("content")
+                        text.text = "Смещение $start (UTF-16)\n\n" + JsonProtocol.string(it, "content")
                         offset = it.optLong("next_offset", start)
                         dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = !it.optBoolean("eof", true)
                     }.onFailure { text.text = "Исходник недоступен или изменён."; dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false }

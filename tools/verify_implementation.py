@@ -180,7 +180,11 @@ assert 'MathDelimiterScanner.scan(source)' in pages_src and 'crossing.start > st
 local_tools = (ROOT / "app/src/main/java/com/example/openaichat/LocalFileTools.kt").read_text()
 assert 'val carryWindow = SEARCH_LEFT_CONTEXT + query.length - 1' in local_tools, "LocalFileTools.search overlap must include both left snippet context and query length"
 orr_runtime = (ROOT / "app/src/main/java/com/example/openaichat/OpenRouterResponseRuntime.kt").read_text()
-assert 'OpenRouterAttachmentStore.classifyLocalFile(' in orr_runtime, "OpenRouterResponseRuntime must classify local files via OpenRouterAttachmentStore.classifyLocalFile"
+artifact_resolver = (ROOT / "app/src/main/java/com/example/openaichat/LocalArtifactAttachmentResolver.kt").read_text()
+assert 'LocalArtifactAttachmentResolver.resolve(' in orr_runtime, "OpenRouterResponseRuntime must use the identity-aware artifact resolver"
+assert 'OpenRouterAttachmentStore.classifyLocalFile(' in artifact_resolver and \
+    'OpenRouterAttachmentPreflight.verifySources(listOf(previous))' in artifact_resolver and \
+    'persistLocalArtifactAttachment(' in artifact_resolver, "Artifact reuse must retain source verification, fallback classification and durable manifest CAS"
 assert 'textEncoding = "UTF-8".takeIf' not in orr_runtime, "Unconditional UTF-8 local file registration must not remain in OpenRouterResponseRuntime"
 chat_db_src = (ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt").read_text()
 assert 'fun listActiveOpenAiToolAttachmentPaths(' in chat_db_src, "ChatDatabase must expose active OpenAI tool checkpoint attachment paths separately from durable paths"
