@@ -96,7 +96,7 @@ object OpenAiLocalFileToolBridge {
             LocalFileTools(files, running)
         }): JSONObject {
         val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId)
-            ?: return JsonProtocol.objectCopy(initial).apply { remove("app_local_artifacts") }
+            ?: return initial.apply { remove("app_local_artifacts") }
         if (checkpoint.optInt("version") != 1) throw UnrecoverableResponsesStreamException("Неизвестная версия файлового checkpoint OpenAI")
         val runtimeLease = PreparedAttachmentFiles.lease(context)
         val runtimeLeaseScope = runtimeLease.capture()
@@ -279,19 +279,10 @@ object OpenAiLocalFileToolBridge {
                 val rawFiles = attachments(listOf(JSONObject().put("attachments", checkpoint.getJSONArray("attachments"))))
                 var rebuiltAny = false
                 val files = try {
-                    OpenRouterAttachmentPreflight.verifySources(rawFiles)
                     rawFiles.map { item ->
-                        val missingText = item.kind in setOf("text", "document", "table") &&
-                            (item.textPath.isNullOrBlank() || !java.io.File(item.textPath!!).isFile)
-                        if (missingText) {
-                            rebuiltAny = true
-                            val rebuilt = OpenRouterAttachmentStore.classifyLocalFile(context, java.io.File(item.path), item.name, item.mime)
-                            if (item.kind == "text" && !item.encodingGuessed && item.textEncoding != null) {
-                                val selected = OpenRouterAttachmentStore.withTextEncoding(rebuilt, item.textEncoding)
-                                rebuilt.textPath?.let { java.io.File(it).delete() }
-                                selected
-                            } else rebuilt
-                        } else item
+                        val verified = LocalArtifactAttachmentResolver.resolveForTools(context, item)
+                        if (verified != item) rebuiltAny = true
+                        verified
                     }
                 } catch (error: IOException) {
                     if (Thread.currentThread().isInterrupted || !active()) throw CancellationException("Подготовка инструмента остановлена")

@@ -78,6 +78,7 @@ class RichResponsePanel(
     private var parseJob: Future<*>? = null
     private var parseJobVersion: Long? = null
     private var asyncLayoutPending = false
+    private var evidenceLayoutPending = false
     private val parseVersion = AtomicLong()
     private var parserSession = ResponseBlockParser.Session()
     private var detached = false
@@ -171,8 +172,26 @@ class RichResponsePanel(
     }
 
     /** Parsing and committing children both precede the measurable layout used by scroll anchors. */
-    fun isAsyncParsePending(): Boolean = parseJob != null || asyncLayoutPending || evidencePanel?.isLoading() == true ||
+    fun isBodyLayoutPending(): Boolean = parseJob != null || asyncLayoutPending ||
         (scheduled && (latest?.text?.length ?: 0) > 32_000)
+
+    /** Same visible native text traversal as reading anchors, restricted to response blocks. */
+    fun bodyCharacterCount(): Int {
+        var characters = 0L
+        fun walk(view: View) {
+            if (view.visibility != VISIBLE) return
+            if (view is TextView && view !is Button && view.text.isNotEmpty()) {
+                characters += view.text.length
+                return
+            }
+            if (view is ViewGroup) for (index in 0 until view.childCount) walk(view.getChildAt(index))
+        }
+        rendered.forEach { walk(it.second) }
+        return characters.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /** Footer discovery must not hold a reading-line restore on already measured text. */
+    fun isAsyncParsePending(): Boolean = isBodyLayoutPending() || evidencePanel?.isLoading() == true || evidenceLayoutPending
 
     private fun render(item: ChatBubbleItem) {
         if (parseJob != null) return // Finish one snapshot while incoming snapshots are conflated.
@@ -261,18 +280,34 @@ class RichResponsePanel(
         }
     }
 
+    private fun scheduleEvidenceLayoutCommitCheck() {
+        val owner = evidencePanel
+        evidenceLayoutPending = true
+        requestLayout()
+        handler.post {
+            if (detached || evidencePanel !== owner || !evidenceLayoutPending) return@post
+            if (width > 0 && height > 0 && !isLayoutRequested) {
+                evidenceLayoutPending = false
+                onAsyncLayoutCommitted?.invoke()
+            }
+        }
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        if (asyncLayoutPending && parseJob == null && width > 0 && height > 0) {
-            asyncLayoutPending = false
-            onAsyncLayoutCommitted?.invoke()
+        if (width > 0 && height > 0) {
+            val bodyCommitted = asyncLayoutPending && parseJob == null
+            val footerCommitted = evidenceLayoutPending
+            if (bodyCommitted) asyncLayoutPending = false
+            if (footerCommitted) evidenceLayoutPending = false
+            if (bodyCommitted || footerCommitted) onAsyncLayoutCommitted?.invoke()
         }
     }
 
     private fun applyBlocks(item: ChatBubbleItem, blocks: List<ResponseBlockParser.Block>, prefix: Int,
         formulas: Map<Int, List<MathDelimiterScanner.Formula>> = emptyMap()) {
         formulaRanges.clear(); formulaRanges.putAll(formulas)
-        evidencePanel = null
+        evidencePanel = null; evidenceLayoutPending = false
         footer?.let(::removeView); footer = null
         while (rendered.size > prefix) removeView(rendered.removeAt(rendered.lastIndex).second)
         for (index in prefix until blocks.size) {
@@ -318,11 +353,12 @@ class RichResponsePanel(
             extra.addView(button("Продолжить", continueAnswer))
         }
         if (!item.user && item.message?.optString("status") == "completed" && evidenceSources != null) {
-            val evidenceVersion = parseVersion.get()
-            val panel = LocalEvidencePanel(context, item.message, evidenceSources) {
-                if (!detached && parseVersion.get() == evidenceVersion) {
-                    asyncLayoutPending = true
-                    scheduleAsyncLayoutCommitCheck(evidenceVersion)
+            lateinit var panel: LocalEvidencePanel
+            panel = LocalEvidencePanel(context, item.message, evidenceSources) {
+                // A cached card can detach/reattach without a new submit. Identity
+                // survives that transition, while a new footer owns a new panel.
+                if (!detached && evidencePanel === panel) {
+                    scheduleEvidenceLayoutCommitCheck()
                 }
             }
             evidencePanel = panel
@@ -720,10 +756,14 @@ class RichResponsePanel(
         }
         return count
     }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        detached = false
+    }
     override fun onDetachedFromWindow() {
         detached = true; parseVersion.incrementAndGet()
         parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
-        latest = null; evidencePanel = null
+        latest = null; evidenceLayoutPending = false
         handler.removeCallbacks(refresh); scheduled = false
         dialogs.toList().forEach { it.dismiss() }
         super.onDetachedFromWindow()

@@ -199,4 +199,33 @@ class ChatDatabaseLocalFileQueryTest {
         assertFalse(db.persistLocalArtifactAttachment("missing", source.path, source.length(), manifest.sha256, manifest))
     }
 
+    @Test fun legacyOpenAiSourcesStayChatScopedAcrossReopenWithoutNormalizationWrites() {
+        val text = file("legacy-raw.bin").apply { writeText("Точная цитата 😀 из старого вложения", Charsets.UTF_8) }
+        val json = file("legacy-json.bin").apply { writeText("{\"value\":42}") }
+        val pdf = file("legacy-pdf.bin")
+        val badUtf8 = file("legacy-encoding.bin").apply { writeBytes(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0x41)) }
+        val foreign = file("foreign-source.txt")
+        seed("a", listOf(message().put("role", "user")
+            .put("file_paths", JSONArray().put(text.path).put(json.path).put(pdf.path).put(badUtf8.path))
+            .put("file_names", JSONArray().put("Заметки.md").put("payload").put("report.pdf").put("legacy.txt"))
+            .put("file_mimes", JSONArray().put("text/markdown").put("application/json").put("text/plain").put("text/plain"))))
+        seed("b", listOf(message().put("role", "user").put("file_paths", JSONArray().put(foreign.path))
+            .put("file_names", JSONArray().put("foreign.txt")).put("file_mimes", JSONArray().put("text/plain"))))
+        fun diskFiles() = context.filesDir.walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toSet()
+        val before = diskFiles()
+        repeat(2) {
+            val sources = LocalEvidenceSources.forChat(context, "a")
+            assertEquals(setOf(text.path, json.path, badUtf8.path), sources.map { it.path }.toSet())
+            assertEquals("Заметки.md", sources.single { it.path == text.path }.name)
+            assertEquals("application/json", sources.single { it.path == json.path }.mime)
+            assertTrue(sources.all { it.textPath == null })
+            assertTrue(LocalEvidenceSources.forChat(context, "missing").isEmpty())
+            assertEquals(setOf(foreign.path), LocalEvidenceSources.forChat(context, "b").map { it.path }.toSet())
+            assertEquals(0L, LocalEvidenceVerifier.quotes("Точная цитата", sources.filter { it.path == text.path }).matches.single().offset)
+            assertTrue(LocalEvidenceVerifier.quotes("anything", sources.filter { it.path == badUtf8.path }).incomplete)
+            assertEquals(before, diskFiles())
+            if (it == 0) { db.close(); db = ChatDatabase(context) }
+        }
+    }
+
 }

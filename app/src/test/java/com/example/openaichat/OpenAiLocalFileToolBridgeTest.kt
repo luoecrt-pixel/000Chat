@@ -228,6 +228,68 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals(2, server.requestCount)
     }
 
+    @Test fun legacyCheckpointWithoutDerivativeHashNeverPublishesTheExistingCopy() {
+        val original = file.readText()
+        attachment = attachment.copy(id = "legacy-captured-id", textSha256 = null)
+        File(attachment.textPath!!).writeText("untrusted legacy derivative")
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "read_attached_file"), http,
+            credential = { "mock-only" })
+        val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+        val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+        assertTrue(result.getBoolean("ok"))
+        assertEquals(original, result.getString("content"))
+        val repaired = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONArray("attachments").getJSONObject(0)
+        assertEquals("legacy-captured-id", repaired.getString("id"))
+        assertTrue(repaired.getString("text_sha256").isNotBlank())
+        assertNotEquals(attachment.textPath, repaired.getString("text_path"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun corruptedCheckpointDerivativeIsRebuiltBeforeEachRealChildPost() {
+        val original = file.readText()
+        attachment = OpenRouterAttachmentStore.classifyLocalFile(context, file).copy(id = "captured-file-id")
+        val damaged = File(attachment.textPath!!)
+        damaged.writeText("x".repeat(damaged.length().toInt()))
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        var requests = 0
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                return if (++requests == 1) {
+                    val current = db.getOpenAiToolCheckpoint("chat", "request")!!
+                        .getJSONArray("attachments").getJSONObject(0)
+                    File(current.getString("text_path")).writeText("y".repeat(original.toByteArray().size))
+                    MockResponse().setBody(call("resp_second", "read_attached_file", "call_2").toString())
+                } else MockResponse().setBody(finalResponse().toString())
+            }
+        }
+        val created = mutableListOf<OpenRouterLocalAttachment>()
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "read_attached_file"), http,
+            credential = { "mock-only" }, localToolsFactory = { files, active ->
+                created += files.single()
+                LocalFileTools(files, active)
+            })
+        assertEquals(2, created.size)
+        assertNotEquals(created[0].textPath, created[1].textPath)
+        created.forEach { assertEquals("captured-file-id", it.id) }
+        repeat(2) {
+            val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+            val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+            assertTrue(result.getBoolean("ok"))
+            assertEquals(original, result.getString("content"))
+        }
+        assertEquals(original, file.readText())
+        assertEquals(2, server.requestCount)
+        val durable = OpenRouterLocalAttachment.fromJson(db.getOpenAiToolCheckpoint("chat", "request")!!
+            .getJSONArray("attachments").getJSONObject(0))
+        assertEquals(created.last(), durable)
+        db.close(); db = ChatDatabase(context)
+        assertEquals(durable, LocalArtifactAttachmentResolver.resolveForTools(context, durable))
+    }
+
     @Test fun attachmentClassificationDoesNotSwallowThreadCancellation() {
         val artifacts = listOf(JSONObject().put("chat_id", "chat").put("path", file.path)
             .put("filename", file.name).put("mime_type", "text/plain"))

@@ -77,7 +77,7 @@ object OpenRouterResponseRuntime {
         artifacts.forEach { a -> put(JSONObject().put("type", "local_file").put("state", "READY")
             .put("filename", JsonProtocol.string(a, "filename")).put("local_path", JsonProtocol.string(a, "path"))
             .put("mime_type", a.optString("mime_type")).put("size_bytes", a.optLong("size_bytes")).apply {
-                listOf("patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
+                listOf("sha256", "patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
                     a.opt(key)?.let { put(key, JsonProtocol.copy(it)) }
                 }
             }) }
@@ -134,8 +134,14 @@ object OpenRouterResponseRuntime {
             if (OpenRouterClaudeRoute.isClaude(r.model)) diagnostics.log("openrouter_route", mapOf(
                 "request_id" to r.requestId, "model" to r.model, "route" to r.claudeRoute.preference,
                 "image_base64_limit" to r.claudeRoute.imageBase64Limit, "request_byte_limit" to r.claudeRoute.requestByteLimit))
-            val fileTools = LocalFileTools(r.attachments, ::active)
-            val existingCanonicalPaths = r.attachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
+            val verifiedAttachments = r.attachments.map { attachment ->
+                if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
+                if (attachment.kind in setOf("text", "document", "table"))
+                    LocalArtifactAttachmentResolver.resolveForTools(item.context, attachment) else attachment
+            }
+            verifiedAttachments.filter { it !in item.runtimeAttachments }.forEach(item.runtimeAttachments::add)
+            val fileTools = LocalFileTools(verifiedAttachments, ::active)
+            val existingCanonicalPaths = verifiedAttachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
             db.listLocalFiles(r.chatId).forEach { a ->
                 if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
                 val rawPath = JsonProtocol.nonBlank(a, "path") ?: return@forEach

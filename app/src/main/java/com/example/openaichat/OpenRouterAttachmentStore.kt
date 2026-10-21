@@ -30,13 +30,17 @@ data class OpenRouterLocalAttachment(
     val textEncoding: String? = null,
     val wirePath: String? = null,
     val wireMime: String? = null,
-    val encodingGuessed: Boolean = textEncoding.equals("windows-1251", ignoreCase = true)
+    val encodingGuessed: Boolean = textEncoding.equals("windows-1251", ignoreCase = true),
+    val textSha256: String? = null,
+    val wireSha256: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("kind", kind).put("path", path).put("mime", mime).put("size", size).put("sha256", sha256).apply {
         textPath?.let { put("text_path", it) }
         textEncoding?.let { put("text_encoding", it); put("encoding_guessed", encodingGuessed) }
         wirePath?.let { put("wire_path", it) }
         wireMime?.let { put("wire_mime", it) }
+        textSha256?.let { put("text_sha256", it) }
+        wireSha256?.let { put("wire_sha256", it) }
     }
     companion object {
         private fun optional(o: JSONObject, key: String): String? =
@@ -47,7 +51,8 @@ data class OpenRouterLocalAttachment(
             JsonProtocol.string(o, "path"), JsonProtocol.string(o, "mime", "application/octet-stream"), o.optLong("size", 0L),
             JsonProtocol.string(o, "sha256"), optional(o, "text_path"), optional(o, "text_encoding"),
             optional(o, "wire_path"), optional(o, "wire_mime"),
-            o.optBoolean("encoding_guessed", optional(o, "text_encoding").equals("windows-1251", ignoreCase = true))
+            o.optBoolean("encoding_guessed", optional(o, "text_encoding").equals("windows-1251", ignoreCase = true)),
+            optional(o, "text_sha256"), optional(o, "wire_sha256")
         )
     }
 }
@@ -273,7 +278,8 @@ object OpenRouterAttachmentStore {
         val normalized = PreparedAttachmentFiles.derivative(source.parentFile ?: throw IOException("Нет каталога оригинала"), ".utf8")
         try {
             TextFileFormatPolicy.normalize(source, normalized, false, encoding)
-            return a.copy(textPath = normalized.absolutePath, textEncoding = encoding, encodingGuessed = false)
+            return a.copy(textPath = normalized.absolutePath, textEncoding = encoding, encodingGuessed = false,
+                textSha256 = sha256(normalized))
         } catch (e: Exception) { normalized.delete(); throw e }
     }
 
@@ -295,20 +301,29 @@ object OpenRouterAttachmentStore {
             .digest(name.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it) }
         return if (kind == "text") {
             val textFile = PreparedAttachmentFiles.derivative(dir, ".utf8")
-            val encoding = TextFileFormatPolicy.normalize(file, textFile, TextFileFormatPolicy.knownText(name))
-            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime, size, sha, textFile.absolutePath, encoding)
+            try {
+                val encoding = TextFileFormatPolicy.normalize(file, textFile, TextFileFormatPolicy.knownText(name))
+                OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath,
+                    mimeForFilename(name).takeIf { it != "application/octet-stream" } ?: mime,
+                    size, sha, textFile.absolutePath, encoding, textSha256 = sha256(textFile))
+            } catch (error: Throwable) { textFile.delete(); throw error }
         } else if (kind == "document" || kind == "table") {
             val textFile = PreparedAttachmentFiles.derivative(dir, ".utf8")
-            try { StructuredDocumentExtractor.extract(file, textFile, TextFileFormatPolicy.extension(name)) }
-            catch (e: Exception) { textFile.delete(); throw e }
-            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, mime, size, sha, textFile.absolutePath, "UTF-8")
+            try {
+                StructuredDocumentExtractor.extract(file, textFile, TextFileFormatPolicy.extension(name))
+                OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, mime, size, sha,
+                    textFile.absolutePath, "UTF-8", textSha256 = sha256(textFile))
+            } catch (error: Throwable) { textFile.delete(); throw error }
         } else if (kind == "image") {
             val actualMime = detectImageMime(file)
                 ?: throw IOException("Изображение не соответствует JPEG, PNG, GIF или WebP: " + name)
             val normalized = context?.let { normalizeImageOrientation(it, file, dir, name) }
-            OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath,
-                actualMime, size, sha, null, null, normalized?.absolutePath,
-                if (normalized != null) "image/jpeg" else actualMime)
+            try {
+                OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath,
+                    actualMime, size, sha, null, null, normalized?.absolutePath,
+                    if (normalized != null) "image/jpeg" else actualMime,
+                    wireSha256 = normalized?.let(::sha256))
+            } catch (error: Throwable) { normalized?.delete(); throw error }
         } else {
             OpenRouterLocalAttachment(stableId, name, kind, file.absolutePath, if (kind == "pdf") "application/pdf" else mime, size, sha)
         }
@@ -460,7 +475,7 @@ object OpenRouterAttachmentStore {
         }
     }
 
-    private fun sha256(file: File): String {
+    internal fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(64 * 1024)

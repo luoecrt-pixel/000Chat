@@ -2723,17 +2723,41 @@ data class ExistingMessageRow(
     fun localAttachmentManifests(chatId: String): List<OpenRouterLocalAttachment> {
         if (chatId.isBlank()) return emptyList()
         val out = mutableListOf<OpenRouterLocalAttachment>()
-        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE, arrayOf("attachments"),
-            "chat_id=? AND attachments IS NOT NULL", arrayOf(chatId), null, null, "position ASC").use { c ->
+        val legacy = linkedMapOf<String, OpenRouterLocalAttachment>()
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
+            arrayOf("attachments", "file_paths", "file_names", "file_mimes"),
+            "chat_id=? AND (attachments IS NOT NULL OR file_paths IS NOT NULL)", arrayOf(chatId),
+            null, null, "position ASC").use { c ->
+            fun array(index: Int): JSONArray? {
+                val raw = c.getString(index)
+                return if (raw.isNullOrBlank()) null else JSONArray(raw)
+            }
             while (c.moveToNext()) {
-                val raw = c.getString(0)
-                if (!raw.isNullOrBlank()) {
-                    val a = JSONArray(raw)
-                    for (i in 0 until a.length()) a.optJSONObject(i)?.let { out.add(OpenRouterLocalAttachment.fromJson(it)) }
+                array(0)?.let { manifest ->
+                    for (i in 0 until manifest.length()) manifest.optJSONObject(i)?.let { out.add(OpenRouterLocalAttachment.fromJson(it)) }
+                }
+                val paths = array(1) ?: continue
+                val names = array(2); val mimes = array(3)
+                for (i in 0 until paths.length()) {
+                    val path = JsonProtocol.text(paths, i)?.takeIf { it.isNotBlank() } ?: continue
+                    if (path in legacy) continue
+                    val file = java.io.File(path)
+                    val name = names?.let { JsonProtocol.text(it, i) }?.takeIf { it.isNotBlank() } ?: file.name
+                    val mime = mimes?.let { JsonProtocol.text(it, i) }.orEmpty()
+                    val extension = TextFileFormatPolicy.extension(name)
+                    val binary = extension in TextFileFormatPolicy.office + setOf("pdf", "doc", "xls", "ppt", "zip", "png", "jpg", "jpeg", "webp", "gif", "mp3", "mp4") ||
+                        mime == "application/pdf" || mime.startsWith("audio/") || mime.startsWith("video/") ||
+                        mime.startsWith("image/") && mime != "image/svg+xml"
+                    val textual = mime.startsWith("text/") || mime in setOf("application/json", "application/xml", "application/javascript") ||
+                        mime.endsWith("+json") || mime.endsWith("+xml") || TextFileFormatPolicy.knownText(name)
+                    if (!binary && textual) legacy[path] = OpenRouterLocalAttachment("local_" + file.name,
+                        name, "text", path, mime.ifBlank { "text/plain" }, file.length(), "", textEncoding = "UTF-8")
                 }
             }
         }
-        return out
+        // A later durable manifest must beat a legacy raw-path fallback for the same source.
+        val represented = out.mapTo(mutableSetOf()) { it.path }
+        return out + legacy.values.filter { it.path !in represented }
     }
 
     fun persistLocalArtifactAttachment(chatId: String, path: String, expectedSize: Long,
