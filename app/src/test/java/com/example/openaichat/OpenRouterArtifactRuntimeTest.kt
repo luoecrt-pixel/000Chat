@@ -95,15 +95,14 @@ class OpenRouterArtifactRuntimeTest {
             // work.remove happens before lease.release; registry removal alone is insufficient.
             val finished = !OpenRouterResponseRuntime.contains(requestId)
             val terminal = ChatDatabase(context).use { it.getActiveResponse(chat) == null }
-            if (finished && terminal && derivative.get()?.exists() != true) return
+            if (finished && terminal) return
             Thread.sleep(10)
         }
         assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(requestId))
         ChatDatabase(context).use { assertNull("Request did not reach DB terminal state", it.getActiveResponse(chat)) }
-        assertFalse("Runtime did not remove its temporary derivative", derivative.get()?.exists() == true)
     }
 
-    @Test fun actualRuntimeNormalizesChatArtifactsProtectsLiveDerivativeAndCleansItAfterCompletion() {
+    @Test fun actualRuntimeNormalizesChatArtifactsAndRetainsDurableManifestForTheNextRequest() {
         val text = "Отчёт по эксперименту №1\nРезультат: успешно"
         val sourceBytes = text.toByteArray(Charset.forName("windows-1251"))
         val original = File(originals, "report-cp1251.txt").apply { writeBytes(sourceBytes) }
@@ -195,7 +194,7 @@ class OpenRouterArtifactRuntimeTest {
             assertEquals(3, server.requestCount)
             assertNotNull("Runtime never exposed its normalized artifact", derivative.get())
             assertNotNull("Runtime never executed file_read_range", actualRead.get())
-            assertFalse(derivative.get()!!.exists())
+            assertTrue("The artifact manifest owns its reusable derivative", derivative.get()!!.exists())
             assertArrayEquals("Original CP1251 bytes must stay intact", sourceBytes, original.readBytes())
             assertEquals(foreignText, foreign.readText())
             ChatDatabase(context).use { db ->
@@ -203,6 +202,11 @@ class OpenRouterArtifactRuntimeTest {
                 assertEquals("completed", assistant.getString("status"))
                 assertEquals("done", assistant.getString("text"))
                 assertEquals(setOf(original.path, foreign.path), db.listLocalFiles().map { it.getString("path") }.toSet())
+                assertTrue(derivative.get()!!.path in db.listAllLocalFilePaths())
+                val saved = db.listLocalFiles(chat).single()
+                val reused = LocalArtifactAttachmentResolver.resolve(context, db, chat, saved)
+                assertEquals(derivative.get()!!.path, reused.textPath)
+                db.deleteChat(chat)
                 assertFalse(derivative.get()!!.path in db.listAllLocalFilePaths())
             }
         }

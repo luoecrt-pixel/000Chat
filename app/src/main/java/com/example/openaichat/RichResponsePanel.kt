@@ -60,7 +60,8 @@ class RichResponsePanel(
     private val saveFile: (ResponseBlockParser.Block.File) -> Unit,
     private val continueAnswer: () -> Unit,
     private val detailDepth: Int = 0,
-    private val onAsyncLayoutCommitted: (() -> Unit)? = null
+    private val onAsyncLayoutCommitted: (() -> Unit)? = null,
+    private val evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null
 ) : LinearLayout(context) {
     companion object {
         private val parsers = Executors.newFixedThreadPool(2)
@@ -72,6 +73,7 @@ class RichResponsePanel(
     private var scheduled = false
     private val rendered = mutableListOf<Pair<ResponseBlockParser.Block, View>>()
     private var footer: View? = null
+    private var evidencePanel: LocalEvidencePanel? = null
     private val dialogs = mutableListOf<AlertDialog>()
     private var parseJob: Future<*>? = null
     private var parseJobVersion: Long? = null
@@ -169,7 +171,7 @@ class RichResponsePanel(
     }
 
     /** Parsing and committing children both precede the measurable layout used by scroll anchors. */
-    fun isAsyncParsePending(): Boolean = parseJob != null || asyncLayoutPending ||
+    fun isAsyncParsePending(): Boolean = parseJob != null || asyncLayoutPending || evidencePanel?.isLoading() == true ||
         (scheduled && (latest?.text?.length ?: 0) > 32_000)
 
     private fun render(item: ChatBubbleItem) {
@@ -270,6 +272,7 @@ class RichResponsePanel(
     private fun applyBlocks(item: ChatBubbleItem, blocks: List<ResponseBlockParser.Block>, prefix: Int,
         formulas: Map<Int, List<MathDelimiterScanner.Formula>> = emptyMap()) {
         formulaRanges.clear(); formulaRanges.putAll(formulas)
+        evidencePanel = null
         footer?.let(::removeView); footer = null
         while (rendered.size > prefix) removeView(rendered.removeAt(rendered.lastIndex).second)
         for (index in prefix until blocks.size) {
@@ -313,6 +316,17 @@ class RichResponsePanel(
         if (finish == "length") {
             extra.addView(text("Ответ прерван. Продолжение создаст новый запрос."))
             extra.addView(button("Продолжить", continueAnswer))
+        }
+        if (!item.user && item.message?.optString("status") == "completed" && evidenceSources != null) {
+            val evidenceVersion = parseVersion.get()
+            val panel = LocalEvidencePanel(context, item.message, evidenceSources) {
+                if (!detached && parseVersion.get() == evidenceVersion) {
+                    asyncLayoutPending = true
+                    scheduleAsyncLayoutCommitCheck(evidenceVersion)
+                }
+            }
+            evidencePanel = panel
+            extra.addView(panel)
         }
         if (extra.childCount > 0) { footer = extra; addView(extra) }
     }
@@ -702,7 +716,7 @@ class RichResponsePanel(
     override fun onDetachedFromWindow() {
         detached = true; parseVersion.incrementAndGet()
         parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
-        latest = null
+        latest = null; evidencePanel = null
         handler.removeCallbacks(refresh); scheduled = false
         dialogs.toList().forEach { it.dismiss() }
         super.onDetachedFromWindow()

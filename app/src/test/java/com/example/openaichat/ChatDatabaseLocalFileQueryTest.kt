@@ -153,4 +153,50 @@ class ChatDatabaseLocalFileQueryTest {
             }
         }
     }
+    @Test fun artifactManifestRetainsAllVersionsAndCacheCannotCrossChatOwnership() {
+        val original = file("cache-source.txt"); seed("a"); seed("b"); artifact("a", original)
+        val sha = "a".repeat(64)
+        val manifest = OpenRouterLocalAttachment("f", original.name, "text", original.path, "text/plain",
+            original.length(), sha, textPath = "/derived.utf8", wirePath = "/wire.dat")
+        assertFalse(db.persistLocalArtifactAttachment("b", original.path, original.length(), sha, manifest))
+        assertFalse(db.persistLocalArtifactAttachment("a", original.path, original.length() + 1, sha, manifest))
+        assertTrue(db.persistLocalArtifactAttachment("a", original.path, original.length(), sha, manifest))
+        assertTrue(db.listAllLocalFilePaths().containsAll(listOf(original.path, "/derived.utf8", "/wire.dat")))
+        assertTrue(db.listLocalFilePaths("a").contains("/derived.utf8"))
+        assertFalse(db.listLocalFilePaths("b").contains("/derived.utf8"))
+    }
+
+    @Test fun toolResultReplayIsAtomicRequestOwnedAndChecksArgumentIdentity() {
+        seed("a"); db.setActiveResponse("a", null, "r", "", "in_progress", 1, "max", "max", false, 0, 0, true)
+        fun result(path: String) = JSONObject().put("path", path).put("tool_name", "patch_local_file")
+            .put("arguments_sha256", "hash").put("source_path", "/previous.txt").put("patch_diff_path", "/diff.json")
+        assertNotNull(db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/new.txt")))
+        assertEquals("/new.txt", db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/duplicate.txt"))!!.getString("path"))
+        assertThrows(IllegalStateException::class.java) {
+            db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/bad.txt").put("arguments_sha256", "different"))
+        }
+        assertNull(db.registerLocalArtifactToolResultIfActive("a", "other", "call", result("/foreign.txt")))
+        assertNull(db.getLocalArtifactToolResult("a", "other", "call"))
+        assertTrue(db.listAllLocalFilePaths().containsAll(listOf("/new.txt", "/previous.txt", "/diff.json")))
+    }
+
+    @Test fun legacyAnnotationManifestCasPreservesMetadataAndNeverTouchesForeignChat() {
+        val source = file("legacy-manifest.txt")
+        val item = JSONObject().put("local_path", source.path).put("filename", source.name)
+            .put("size_bytes", source.length()).put("custom", "keep")
+        seed("a", listOf(message().put("annotations", JSONArray().put(item))))
+        seed("b", listOf(message().put("annotations", JSONArray().put(JsonProtocol.objectCopy(item)))))
+        val manifest = OpenRouterLocalAttachment("f", source.name, "text", source.path, "text/plain",
+            source.length(), "a".repeat(64), textPath = "/legacy-derived.utf8")
+        assertTrue(db.persistLocalArtifactAttachment("a", source.path, source.length(), manifest.sha256, manifest))
+        assertEquals("keep", db.getChat("a")!!.getJSONArray("messages").getJSONObject(0)
+            .getJSONArray("annotations").getJSONObject(0).getString("custom"))
+        assertTrue(db.listLocalFiles("a").single().has("attachment_manifest"))
+        assertFalse(db.listLocalFiles("b").single().has("attachment_manifest"))
+        assertTrue(db.listLocalFilePaths("a").contains("/legacy-derived.utf8"))
+        assertFalse(db.listLocalFilePaths("b").contains("/legacy-derived.utf8"))
+        assertTrue(db.listAllLocalFilePaths().contains("/legacy-derived.utf8"))
+        assertFalse(db.persistLocalArtifactAttachment("missing", source.path, source.length(), manifest.sha256, manifest))
+    }
+
 }

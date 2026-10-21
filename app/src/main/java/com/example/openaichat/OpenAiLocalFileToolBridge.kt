@@ -9,17 +9,18 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.CancellationException
 
-/** Durable, request-scoped, read-only Responses tool continuation, shared by Activity and Worker. */
+/** Durable, request-scoped local-file continuation, shared by Activity and Worker. */
 object OpenAiLocalFileToolBridge {
     private const val OUTPUT_PREFIX_FIELD = "openai_tool_output_prefix_attached"
     private val terminalStatuses = setOf("completed", "cancelled", "failed", "incomplete")
     private val names = linkedMapOf(
         "list_attached_files" to "file_list", "search_attached_file" to "file_search",
-        "read_attached_file" to "file_read_range", "read_attached_table" to "file_table_stats"
+        "read_attached_file" to "file_read_range", "read_attached_table" to "file_table_stats",
+        "patch_local_file" to "patch_local_file"
     )
 
     fun schemas(): JSONArray = JSONArray().apply {
-        val source = LocalFileTools.schemas()
+        val source = OpenRouterAppToolCatalog.tools()
         for (i in 0 until source.length()) {
             val function = source.getJSONObject(i).getJSONObject("function")
             val name = names.entries.firstOrNull { it.value == function.optString("name") }?.key ?: continue
@@ -33,7 +34,8 @@ object OpenAiLocalFileToolBridge {
         history: List<JSONObject>,
         localFiles: List<JSONObject> = emptyList(),
         chatId: String? = null,
-        context: Context? = null
+        context: Context? = null,
+        db: ChatDatabase? = null
     ): List<OpenRouterLocalAttachment> {
         val fromMessages = history.flatMap { message ->
             val items = message.optJSONArray("attachments") ?: JSONArray()
@@ -51,17 +53,11 @@ object OpenAiLocalFileToolBridge {
                     if (!file.isFile) return@mapNotNull null
                     val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return@mapNotNull null
                     if (!existingCanonical.add(canonical)) return@mapNotNull null
-                    val name = JsonProtocol.string(a, "filename", file.name).ifBlank { file.name }
-                    val mime = JsonProtocol.string(a, "mime_type")
                     try {
-                        when {
-                            context != null && mime.isNotBlank() -> OpenRouterAttachmentStore.classifyLocalFile(context, file, name, mime)
-                            context != null -> OpenRouterAttachmentStore.classifyLocalFile(context, file, name)
-                            mime.isNotBlank() -> OpenRouterAttachmentStore.classifyLocalFile(file, name, mime)
-                            else -> OpenRouterAttachmentStore.classifyLocalFile(file, name)
-                        }
+                        LocalArtifactAttachmentResolver.resolve(context, db, chatId, a)
                     } catch (error: Exception) {
-                        if (Thread.currentThread().isInterrupted || error is CancellationException) throw error
+                        if (Thread.currentThread().isInterrupted || error is CancellationException ||
+                            a.has("attachment_manifest") || a.has("attachment")) throw error
                         null
                     }
                 }
@@ -82,6 +78,7 @@ object OpenAiLocalFileToolBridge {
         check(db.saveOpenAiToolCheckpoint(chatId, requestId, JSONObject().put("version", 1)
             .put("template", template).put("attachments", JSONArray().apply { files.forEach { put(it.toJson()) } })
             .put("round", 0).put("phase", "idle").put("prior_output", JSONArray()).put("usage", JSONObject())
+            .put("local_artifacts", JSONArray())
             .put(OpenAiUsageLedger.FIELD, OpenAiUsageLedger.empty())
             .put("telemetry", JSONObject().put("rounds_completed", 0).put("calls_executed", 0).put("executed_tools", JSONArray()))))
     }
@@ -98,7 +95,8 @@ object OpenAiLocalFileToolBridge {
         localToolsFactory: (List<OpenRouterLocalAttachment>, () -> Boolean) -> LocalFileTools = { files, running ->
             LocalFileTools(files, running)
         }): JSONObject {
-        val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId) ?: return initial
+        val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId)
+            ?: return JsonProtocol.objectCopy(initial).apply { remove("app_local_artifacts") }
         if (checkpoint.optInt("version") != 1) throw UnrecoverableResponsesStreamException("Неизвестная версия файлового checkpoint OpenAI")
         val runtimeLease = PreparedAttachmentFiles.lease(context)
         val runtimeLeaseScope = runtimeLease.capture()
@@ -118,7 +116,7 @@ object OpenAiLocalFileToolBridge {
             }
             var persisted = checkpoint.toString()
             // v1 checkpoints predate telemetry. Recover only durably saved results, never physical
-            // executions: a crash before this batch's commit can repeat its read-only work.
+            // executions: read-only work may repeat; patch results have a separate idempotent commit.
             if (checkpoint.optJSONObject("telemetry") == null) checkpoint.put("telemetry", committedTelemetry(checkpoint))
             fun persist() {
                 ensureActive()
@@ -257,6 +255,7 @@ object OpenAiLocalFileToolBridge {
                         if (combined.length() > 0 || has("output")) put("output", combined)
                         put(OUTPUT_PREFIX_FIELD, true)
                     }
+                    response.put("app_local_artifacts", JsonProtocol.arrayCopy(checkpoint.optJSONArray("local_artifacts") ?: JSONArray()))
                     OpenAiUsageLedger.attach(response, OpenAiUsageLedger.fromCheckpoint(checkpoint))
                     checkpoint.put("phase", "finished").put("final_response", response); persist()
                     return response
@@ -265,6 +264,9 @@ object OpenAiLocalFileToolBridge {
                 val validated = calls.map { call ->
                     val name = call.optString("name")
                     val id = JsonProtocol.nonBlank(call, "call_id") ?: throw IOException("Нет call_id инструмента")
+                    val declared = checkpoint.optJSONObject("template")?.optJSONArray("tools") ?: JSONArray()
+                    if (name == "patch_local_file" && (0 until declared.length()).none { declared.optJSONObject(it)?.optString("name") == name })
+                        throw UnrecoverableResponsesStreamException("Инструмент записи не включён в исходный запрос")
                     if (name !in names || !ids.add(id)) throw UnrecoverableResponsesStreamException("Необъявленный или повторный вызов инструмента: $name")
                     val raw = JsonProtocol.string(call, "arguments", "{}")
                     if (raw.length > 256 * 1024) throw IOException("Аргументы инструмента слишком велики")
@@ -308,9 +310,51 @@ object OpenAiLocalFileToolBridge {
                 }
                 val local = checkNotNull(localTools)
                 val results = JSONArray()
+                val batchFiles = files.toMutableList()
+                val artifactExecutor = LocalArtifactToolExecutor(context)
                 for ((id, name, args) in validated) {
                     ensureActive()
-                    val result = local.execute(name, args)
+                    val result = if (name == "patch_local_file") {
+                        try {
+                            val argumentsSha = StreamingJsonRequestBody.sha256(args)
+                            val priorResult = db.getLocalArtifactToolResult(chatId, requestId, id)
+                            val artifact = if (priorResult != null) {
+                                if (priorResult.optString("tool_name") != name || priorResult.optString("arguments_sha256") != argumentsSha)
+                                    throw IOException("Повторный call_id с другими аргументами")
+                                priorResult
+                            } else {
+                                val candidate = artifactExecutor.patchLocalFile(args, batchFiles, active = ::toolsActive,
+                                    artifactKey = "$chatId\u0000$requestId\u0000$id")
+                                    .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", id)
+                                val registered = db.registerLocalArtifactToolResultIfActive(chatId, requestId, id, candidate)
+                                if (registered == null || registered.optString("path") != candidate.optString("path")) {
+                                    val durable = db.getLocalArtifactToolResult(chatId, requestId, id)
+                                    if (durable?.optString("path") != candidate.optString("path")) {
+                                        java.io.File(candidate.getString("path")).delete()
+                                        JsonProtocol.nonBlank(candidate, "patch_diff_path")?.let { java.io.File(it).delete() }
+                                    }
+                                }
+                                if (registered == null) throw CancellationException("Владелец файла изменён")
+                                registered
+                            }
+                            ensureActive()
+                            val added = OpenRouterLocalAttachment.fromJson(artifact.getJSONObject("attachment"))
+                            OpenRouterAttachmentPreflight.verifySources(listOf(added))
+                            local.register(added)
+                            if (batchFiles.none { it.id == added.id }) {
+                                batchFiles += added
+                                checkpoint.getJSONArray("attachments").put(added.toJson())
+                            }
+                            val savedArtifacts = checkpoint.optJSONArray("local_artifacts")
+                                ?: JSONArray().also { checkpoint.put("local_artifacts", it) }
+                            if ((0 until savedArtifacts.length()).none { savedArtifacts.optJSONObject(it)?.optString("path") == artifact.optString("path") })
+                                savedArtifacts.put(JsonProtocol.objectCopy(artifact))
+                            LocalArtifactToolExecutor.toolResult(artifact).toString()
+                        } catch (error: IOException) {
+                            if (!toolsActive()) throw error
+                            JSONObject().put("ok", false).put("error", error.message).toString()
+                        }
+                    } else local.execute(name, args)
                     val wireResult = if (name == "file_list") {
                         JSONObject(result).apply {
                             optJSONArray("files")?.let { list -> for (i in 0 until list.length()) {
@@ -368,6 +412,7 @@ object OpenAiLocalFileToolBridge {
             if (received.length() > 0 || has("output")) put("output", received)
             put(OUTPUT_PREFIX_FIELD, true)
         }
+        put("app_local_artifacts", JsonProtocol.arrayCopy(saved?.optJSONArray("local_artifacts") ?: JSONArray()))
         OpenAiUsageLedger.attach(this, OpenAiUsageLedger.resolve(saved, this))
     }
 
@@ -386,6 +431,7 @@ object OpenAiLocalFileToolBridge {
             if (output.length() > 0 || response.has("output")) response.put("output", output)
             response.put(OUTPUT_PREFIX_FIELD, true)
         }
+        response.put("app_local_artifacts", JsonProtocol.arrayCopy(saved.optJSONArray("local_artifacts") ?: JSONArray()))
         return OpenAiUsageLedger.attach(response, OpenAiUsageLedger.resolve(saved, response))
     }
 

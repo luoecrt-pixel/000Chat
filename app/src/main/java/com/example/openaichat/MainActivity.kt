@@ -4061,7 +4061,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         chatDb.updateMessageAttachments(requestChatId, before, after, false)
                     } else null
                     val preparedToolAttachments = if (localToolsEnabled) {
-                        OpenAiLocalFileToolBridge.attachments(historySnapshot, chatOwnedLocalArtifacts, requestChatId, this@MainActivity)
+                        OpenAiLocalFileToolBridge.attachments(historySnapshot, chatOwnedLocalArtifacts, requestChatId, this@MainActivity, chatDb)
                     } else emptyList()
                     if (localToolsEnabled && prepared != null) {
                         val parts = prepared.optJSONObject(prepared.length() - 1)?.optJSONArray("content")
@@ -5280,6 +5280,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         row.addView(fileActionButton("Сохранить"){requestSaveLocalFile(path,filename,mime)})
         row.addView(fileActionButton("Поделиться"){shareLocalFile(path,filename,mime)})
         box.addView(row)
+        if (!JsonProtocol.string(annotation, "patch_diff_path").isBlank()) {
+            box.addView(LocalArtifactDiffPanel(this, annotation))
+        }
     }
 
     private fun addFileRetryButton(box:LinearLayout,annotation:JSONObject,message:JSONObject,chatId:String,generation:Long,filename:String){
@@ -8743,7 +8746,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         sendMessage(false)
                     }
                 },
-                onAsyncLayoutCommitted = { onBubbleAsyncLayoutCommitted(sourceChatId, item.id, card) }))
+                onAsyncLayoutCommitted = { onBubbleAsyncLayoutCommitted(sourceChatId, item.id, card) },
+                evidenceSources = { LocalEvidenceSources.forChat(applicationContext, sourceChatId) }))
         }
 
         val message=item.message

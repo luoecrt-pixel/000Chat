@@ -2719,6 +2719,135 @@ data class ExistingMessageRow(
         return saved
     }
 
+    /** A narrow projection for local evidence; never loads protocol history or materializes files. */
+    fun localAttachmentManifests(chatId: String): List<OpenRouterLocalAttachment> {
+        if (chatId.isBlank()) return emptyList()
+        val out = mutableListOf<OpenRouterLocalAttachment>()
+        SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE, arrayOf("attachments"),
+            "chat_id=? AND attachments IS NOT NULL", arrayOf(chatId), null, null, "position ASC").use { c ->
+            while (c.moveToNext()) {
+                val raw = c.getString(0)
+                if (!raw.isNullOrBlank()) {
+                    val a = JSONArray(raw)
+                    for (i in 0 until a.length()) a.optJSONObject(i)?.let { out.add(OpenRouterLocalAttachment.fromJson(it)) }
+                }
+            }
+        }
+        return out
+    }
+
+    fun persistLocalArtifactAttachment(chatId: String, path: String, expectedSize: Long,
+        expectedSha: String, attachment: OpenRouterLocalAttachment): Boolean {
+        if (expectedSize < 0 || !expectedSha.matches(Regex("[0-9a-f]{64}")) ||
+            attachment.path != path || attachment.size != expectedSize || attachment.sha256 != expectedSha) return false
+        var saved = false
+        writableDatabase.transaction { sql ->
+            val raw = SqliteLargeTextQuery.query(sql, "local_artifacts", arrayOf("metadata"),
+                "chat_id=? AND path=?", arrayOf(chatId, path), null, null, null,
+                keyColumns = arrayOf("path")).use { if (it.moveToFirst()) it.getString(0) else null }
+            if (raw == null) {
+                saved = persistAnnotationAttachment(sql, chatId, path, expectedSize, attachment)
+                return@transaction
+            }
+            val meta = JSONObject(raw)
+            if (JsonProtocol.string(meta, "path") != path || (meta.has("size_bytes") && meta.optLong("size_bytes", -1) != expectedSize)) return@transaction
+            meta.put("attachment_manifest", attachment.toJson())
+            saved = sql.update("local_artifacts", ContentValues().apply { put("metadata", meta.toString()) },
+                "chat_id=? AND path=? AND metadata=?", arrayOf(chatId, path, raw)) == 1
+        }
+        return saved
+    }
+
+    private fun persistAnnotationAttachment(sql: SQLiteDatabase, chatId: String, path: String,
+        expectedSize: Long, attachment: OpenRouterLocalAttachment): Boolean {
+        var saved = false
+        SqliteLargeTextQuery.query(sql, MESSAGE_TABLE, arrayOf("id", "annotations", "generated_images"),
+            "chat_id=? AND (annotations IS NOT NULL OR generated_images IS NOT NULL)", arrayOf(chatId),
+            null, null, null).use { c -> while (c.moveToNext()) {
+            for ((index, column) in listOf(1 to "annotations", 2 to "generated_images")) {
+                val raw = c.getString(index) ?: continue
+                val entries = parseArrayColumn(raw) ?: continue
+                var changed = false
+                for (i in 0 until entries.length()) {
+                    val entry = entries.optJSONObject(i) ?: continue
+                    if (JsonProtocol.string(entry, "local_path") == path &&
+                        entry.optLong("size_bytes", expectedSize) == expectedSize) {
+                        entry.put("attachment_manifest", attachment.toJson()); changed = true
+                    }
+                }
+                if (changed && sql.update(MESSAGE_TABLE, ContentValues().apply { put(column, entries.toString()) },
+                    "id=? AND chat_id=? AND $column=?", arrayOf(c.getLong(0).toString(), chatId, raw)) == 1) saved = true
+            }
+        } }
+        return saved
+    }
+
+    fun getLocalArtifactToolResult(chatId: String, requestId: String, callId: String): JSONObject? {
+        var found: JSONObject? = null
+        SqliteLargeTextQuery.query(readableDatabase, "local_artifacts", arrayOf("metadata"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+            keyColumns = arrayOf("path")).use { c -> while (c.moveToNext()) {
+            val meta = JSONObject(c.getString(0))
+            if (JsonProtocol.string(meta, "tool_call_id") == callId) {
+                check(found == null) { "Conflicting durable tool identities" }
+                found = meta
+            }
+        } }
+        return found
+    }
+
+    /** Writes and replay share request ownership; an already committed call is never executed twice. */
+    fun registerLocalArtifactToolResultIfActive(chatId: String, requestId: String, callId: String,
+        result: JSONObject): JSONObject? {
+        require(callId.isNotBlank() && JsonProtocol.nonBlank(result, "tool_name") != null &&
+            JsonProtocol.nonBlank(result, "arguments_sha256") != null)
+        var committed: JSONObject? = null
+        writableDatabase.transaction { sql ->
+            if (!isActiveRequest(chatId, requestId)) return@transaction
+            val existing = getLocalArtifactToolResult(chatId, requestId, callId)
+            if (existing != null) {
+                check(existing.optString("tool_name") == result.optString("tool_name") &&
+                    existing.optString("arguments_sha256") == result.optString("arguments_sha256")) { "Tool call identity changed" }
+                committed = existing
+                return@transaction
+            }
+            val value = JsonProtocol.objectCopy(result).put("tool_call_id", callId)
+            sql.insertOrThrow("local_artifacts", null, ContentValues().apply {
+                put("path", value.getString("path")); put("chat_id", chatId); put("request_id", requestId)
+                put("created_at", System.currentTimeMillis()); put("metadata", value.toString())
+            })
+            committed = value
+        }
+        return committed
+    }
+
+    private fun localArtifactPaths(chatId: String? = null): Set<String> {
+        val out = linkedSetOf<String>()
+        SqliteLargeTextQuery.query(readableDatabase, "local_artifacts", arrayOf("path", "metadata"),
+            if (chatId == null) null else "chat_id=?", chatId?.let { arrayOf(it) }, null, null, null,
+            keyColumns = arrayOf("path")).use { c -> while (c.moveToNext()) {
+            c.getString(0)?.takeIf { it.isNotBlank() }?.let(out::add)
+            // A damaged reference record stops cleanup instead of deleting paid versions/derivatives.
+            val meta = JSONObject(c.getString(1))
+            for (key in listOf("attachment", "attachment_manifest")) {
+                if (meta.has(key) && !meta.isNull(key)) {
+                    val manifest = meta.optJSONObject(key) ?: error("Invalid artifact manifest")
+                    for (field in listOf("path", "text_path", "wire_path"))
+                        if (manifest.has(field) && !manifest.isNull(field) && JsonProtocol.text(manifest, field) == null)
+                            error("Invalid artifact manifest reference")
+                    out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray().put(manifest)))
+                }
+            }
+            for (key in listOf("source_path", "diff_path", "patch_diff_path")) {
+                if (meta.has(key) && !meta.isNull(key)) {
+                    val path = JsonProtocol.text(meta, key) ?: error("Invalid artifact reference")
+                    if (path.isNotBlank()) out.add(path)
+                }
+            }
+        } }
+        return out
+    }
+
     /** Local copies of assistant-generated/downloaded files and generated images. */
     fun listLocalFiles(chatId: String? = null): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
@@ -2761,7 +2890,9 @@ data class ExistingMessageRow(
                         .put("filename", JsonProtocol.string(a, "filename").ifBlank { "file" })
                         .put("path", path)
                         .put("mime_type", a.optString("mime_type"))
-                        .put("size_bytes", a.optLong("size_bytes", file.length()))
+                        .put("size_bytes", a.optLong("size_bytes", file.length())).apply {
+                            a.optJSONObject("attachment_manifest")?.let { put("attachment_manifest", it) }
+                        }
                 }
                 val images = try { if (!imagesRaw.isNullOrBlank()) JSONArray(imagesRaw) else JSONArray() } catch (_: Exception) { JSONArray() }
                 for (i in 0 until images.length()) {
@@ -2776,7 +2907,9 @@ data class ExistingMessageRow(
                         .put("filename", JsonProtocol.string(a, "filename").ifBlank { "astra_image.png" })
                         .put("path", path)
                         .put("mime_type", a.optString("mime_type").ifBlank { "image/png" })
-                        .put("size_bytes", a.optLong("size_bytes", file.length()))
+                        .put("size_bytes", a.optLong("size_bytes", file.length())).apply {
+                            a.optJSONObject("attachment_manifest")?.let { put("attachment_manifest", it) }
+                        }
                 }
             }
         }
@@ -2806,9 +2939,7 @@ data class ExistingMessageRow(
     fun listLocalFilePaths(chatId: String): List<String> {
         if (chatId.isBlank()) return emptyList()
         val out = linkedSetOf<String>()
-        readableDatabase.query("local_artifacts", arrayOf("path"), "chat_id=?", arrayOf(chatId), null, null, null).use { c ->
-            while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotBlank() }?.let(out::add)
-        }
+        out.addAll(localArtifactPaths(chatId))
         SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             "chat_id=? AND ($LOCAL_FILE_REFERENCE_SELECTION)",
@@ -2835,9 +2966,7 @@ data class ExistingMessageRow(
 
     fun listAllLocalFilePaths(): List<String> {
         val out = linkedSetOf<String>()
-        readableDatabase.query("local_artifacts", arrayOf("path"), null, null, null, null, null).use { c ->
-            while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotBlank() }?.let(out::add)
-        }
+        out.addAll(localArtifactPaths())
         SqliteLargeTextQuery.query(readableDatabase, MESSAGE_TABLE,
             arrayOf("file_paths", "image_path", "attachments", "annotations", "generated_images"),
             LOCAL_FILE_REFERENCE_SELECTION, null, null, null, "position ASC"
@@ -2859,8 +2988,13 @@ data class ExistingMessageRow(
         cursor.getString(1)?.takeIf { it.isNotBlank() }?.let(out::add)
         out.addAll(LocalAttachmentReferences.openRouterPaths(array(2)))
         for (index in 3..4) array(index)?.let { items ->
-            for (i in 0 until items.length()) items.optJSONObject(i)?.optString("local_path")
-                ?.takeIf { it.isNotBlank() }?.let(out::add)
+            for (i in 0 until items.length()) items.optJSONObject(i)?.let { entry ->
+                entry.optString("local_path").takeIf { it.isNotBlank() }?.let(out::add)
+                if (entry.has("attachment_manifest") && !entry.isNull("attachment_manifest")) {
+                    val manifest = entry.optJSONObject("attachment_manifest") ?: error("Invalid annotation manifest")
+                    out.addAll(LocalAttachmentReferences.openRouterPaths(JSONArray().put(manifest)))
+                }
+            }
         }
     }
 
