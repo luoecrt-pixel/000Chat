@@ -15,7 +15,7 @@ class ContextStatusPolicyTest {
         accounting: JSONObject? = null, provider: String = "openai", binding: String? = null,
         expected: String? = null): ContextStatusSnapshot {
         val actualHistory = if (provider == "openrouter") listOf(JSONObject().put("role", "assistant")
-            .put("openrouter_protocol", JSONObject().put("binding_sha256", binding ?: JSONObject.NULL)
+            .put("openrouter_protocol", JSONObject().put("version", 1).put("binding_sha256", binding ?: JSONObject.NULL)
                 .put("tail", org.json.JSONArray().put(JSONObject().put("reasoning", "preserve"))))) else history
         val before = actualHistory.map { it.toString() }
         return ContextStatusPolicy.build(provider, if (provider == "openai") "gpt-test" else "anthropic/claude-test",
@@ -42,6 +42,25 @@ class ContextStatusPolicyTest {
         assertEquals(0L, known.cacheReadTokens)
         assertEquals(42L, known.cacheWriteTokens)
         assertEquals(3000L, known.lastResponseAgeMillis)
+    }
+
+    @Test fun invalidatedUnsupportedAndMissingTailNeverClaimPreservedBinding() {
+        for (case in listOf("invalidated", "version", "tail")) {
+            val protocol = JSONObject().put("version", 1).put("binding_sha256", "bound")
+                .put("tail", org.json.JSONArray().put(JSONObject().put("role", "assistant")))
+            val message = JSONObject().put("role", "assistant").put("openrouter_protocol", protocol)
+            when (case) {
+                "invalidated" -> message.put("protocol_context_state", "invalidated")
+                "version" -> protocol.put("version", 2)
+                "tail" -> protocol.remove("tail")
+            }
+            val value = ContextStatusPolicy.build("openrouter", "anthropic/test", listOf(message), null, "", false,
+                "bound", OpenRouterClaudeRoute.AUTO, "1h", emptyList(), emptyList(), null, null, 10,
+                openRouterPrefixMatches = false, openRouterPrefixReason = "Изменены инструкции")
+            assertFalse(case, value.explanation.contains("привязка сохранена"))
+            assertFalse(case, value.explanation.contains("инструментов сохранена"))
+            assertTrue(value.explanation.contains("Изменены инструкции"))
+        }
     }
 
     @Test fun routerBindingAndUnverifiedPrefixAreSeparateAndSecretsAreAbsent() {
