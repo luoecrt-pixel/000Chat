@@ -31,6 +31,7 @@ class RichResponseSandboxIntegrationTest {
                 assertTrue(descendants(panel).filterIsInstance<WebView>().isEmpty())
                 val launch = descendants(panel).filterIsInstance<Button>().single { it.text.toString() == "▶ Запустить в песочнице" }
                 launch.performClick()
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
                 val dialog = ShadowAlertDialog.getLatestAlertDialog()!!
                 assertTrue(dialog.isShowing)
                 val web = descendants(dialog.window!!.decorView).filterIsInstance<WebView>().single()

@@ -47,6 +47,7 @@ class ContextInspectorDialogTest {
         assertTrue(text.text.contains("captured-model"))
         assertTrue(text.text.contains("неизвестно"))
         dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
         assertFalse(dialog.isShowing)
         activity.finish()
     }

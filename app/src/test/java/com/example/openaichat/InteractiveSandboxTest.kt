@@ -93,9 +93,11 @@ class InteractiveSandboxTest {
             val dialog = InteractiveSandboxDialog.create(activity, source) { dismissed = true }
             assertTrue(descendants(dialog.window!!.decorView).none { it is WebView })
             dialog.show()
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             val content = dialog.window!!.decorView
             assertEquals(1, descendants(content).filterIsInstance<WebView>().size)
             dialog.dismiss()
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             assertTrue(dismissed)
             assertTrue(descendants(content).none { it is WebView })
             val sandbox = InteractiveSandboxView(activity, source)
