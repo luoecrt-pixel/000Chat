@@ -36,7 +36,7 @@ class LocalEvidencePanelLifecycleTest {
             panel.measure(View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
             panel.layout(0, 0, 400, panel.measuredHeight.coerceAtLeast(1))
-            Thread.sleep(5)
+            CountDownLatch(1).await(5, TimeUnit.MILLISECONDS)
         }
         assertTrue("Evidence transition did not complete", ready())
     }
@@ -62,20 +62,22 @@ class LocalEvidencePanelLifecycleTest {
                 } else { newEntered.countDown(); newRelease.await() }
                 listOf(OpenRouterLocalAttachment("file", if (number == 1) "stale.csv" else "current.csv",
                     "text", file.path, "text/plain", file.length(), ""))
-            })
+            }, evidenceEligible = true)
             activity.setContentView(panel)
             panel.submit(ChatBubbleItem.create("same-card", "Model", "Итоги", false, message = message()))
             assertTrue(oldEntered.await(5, TimeUnit.SECONDS))
             assertFalse("Footer discovery must not hold an already parsed reading line", panel.isBodyLayoutPending())
-            assertTrue(panel.isAsyncParsePending())
+            assertFalse(panel.isAsyncParsePending())
+            assertTrue(panel.isEvidencePending())
             assertEquals("Итоги".length, panel.bodyCharacterCount())
             activity.setContentView(View(activity))
             activity.setContentView(panel)
             assertTrue("Same cached card must restart canceled discovery", newEntered.await(5, TimeUnit.SECONDS))
             assertFalse(panel.isBodyLayoutPending())
-            assertTrue(panel.isAsyncParsePending())
+            assertFalse(panel.isAsyncParsePending())
+            assertTrue(panel.isEvidencePending())
             newRelease.countDown()
-            await(panel) { !panel.isAsyncParsePending() && views(panel).filterIsInstance<TextView>().any { it.text.toString().contains("current.csv") } }
+            await(panel) { !panel.isEvidencePending() && views(panel).filterIsInstance<TextView>().any { it.text.toString().contains("current.csv") } }
             assertEquals("Footer labels must not count as body characters", "Итоги".length, panel.bodyCharacterCount())
             oldRelease.countDown()
             shadowOf(Looper.getMainLooper()).idle()
@@ -97,10 +99,10 @@ class LocalEvidencePanelLifecycleTest {
                 prefs.edit().putString("app_theme", id).commit()
                 val panel = RichResponsePanel(activity, {}, {}, evidenceSources = {
                     listOf(OpenRouterLocalAttachment("file", "source.txt", "text", file.path, "text/plain", file.length(), ""))
-                })
+                }, evidenceEligible = true)
                 activity.setContentView(panel)
                 panel.submit(ChatBubbleItem.create("theme-$id", "Model", "Итоги", false, message = message()))
-                await(panel) { !panel.isAsyncParsePending() && views(panel).filterIsInstance<Button>().any { it.text.toString().contains("Проверить цитаты") } }
+                await(panel) { !panel.isEvidencePending() && views(panel).filterIsInstance<Button>().any { it.text.toString().contains("Проверить цитаты") } }
                 views(panel).filterIsInstance<Button>().single { it.text.toString().contains("Проверить цитаты") }.performClick()
                 shadowOf(Looper.getMainLooper()).idle()
                 val dialog = ShadowAlertDialog.getLatestAlertDialog()!!

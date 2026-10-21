@@ -21,6 +21,9 @@ internal object SqliteLargeTextQuery {
         require(value.matches(Regex("[A-Za-z_][A-Za-z0-9_]*"))) { "Expected an internal SQLite identifier" }
         return "\"$value\""
     }
+    // SQLite can interpret an unknown double-quoted name as a string literal.
+    // A qualified reference must resolve to a real column, including on empty tables.
+    private fun column(quotedTable: String, value: String): String = "$quotedTable.${identifier(value)}"
 
     fun query(
         db: SQLiteDatabase, table: String, columns: Array<String>?, selection: String?,
@@ -42,14 +45,14 @@ internal object SqliteLargeTextQuery {
             val inlineBytes = minOf(4096, ROW_BYTES / (fields.size + keyColumns.size + 1)).coerceAtLeast(1)
             val projection = mutableListOf<String>()
             fields.forEach { field ->
-                val name = identifier(field)
-                projection.add("CASE WHEN typeof($name)='text' AND length(CAST($name AS BLOB))>$inlineBytes THEN NULL ELSE $name END AS $name")
+                val name = column(quotedTable, field)
+                projection.add("CASE WHEN typeof($name)='text' AND length(CAST($name AS BLOB))>$inlineBytes THEN NULL ELSE $name END AS ${identifier(field)}")
             }
             fields.forEachIndexed { index, field ->
-                val name = identifier(field)
+                val name = column(quotedTable, field)
                 projection.add("CASE WHEN typeof($name)='text' AND length(CAST($name AS BLOB))>$inlineBytes THEN length(CAST($name AS BLOB)) ELSE NULL END AS _astra_size_$index")
             }
-            keyColumns.forEachIndexed { index, field -> projection.add("${identifier(field)} AS _astra_key_$index") }
+            keyColumns.forEachIndexed { index, field -> projection.add("${column(quotedTable, field)} AS _astra_key_$index") }
             val cursor = db.query(table, projection.toTypedArray(), selection, selectionArgs, null, null, orderBy, limit)
             return LargeTextCursor(cursor, db, quotedTable, fields, keyColumns, ownedTransaction)
         } catch (error: Throwable) {
@@ -84,11 +87,11 @@ internal object SqliteLargeTextQuery {
             val length = size(index) ?: return source.getString(index)
             if (cachedPosition != source.position) { values.clear(); cachedPosition = source.position }
             return values.getOrPut(index) {
-                val where = keys.joinToString(" AND ") { "${identifier(it)}=?" }
+                val where = keys.joinToString(" AND ") { "${column(table, it)}=?" }
                 val args = keys.indices.map { key ->
                     source.getString(fields.size * 2 + key) ?: throw IOException("A large TEXT row has no key")
                 }.toTypedArray()
-                val stream = TextBytes(db, table, identifier(fields[index]), where, args, length)
+                val stream = TextBytes(db, table, column(table, fields[index]), where, args, length)
                 val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                 InputStreamReader(stream, decoder).use { it.readText() }

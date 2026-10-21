@@ -1,5 +1,7 @@
 package com.example.openaichat
 
+import org.json.JSONObject
+
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -61,7 +63,8 @@ class RichResponsePanel(
     private val continueAnswer: () -> Unit,
     private val detailDepth: Int = 0,
     private val onAsyncLayoutCommitted: (() -> Unit)? = null,
-    private val evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null
+    private val evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null,
+    evidenceEligible: Boolean = false
 ) : LinearLayout(context) {
     companion object {
         private val parsers = Executors.newFixedThreadPool(2)
@@ -74,6 +77,8 @@ class RichResponsePanel(
     private val rendered = mutableListOf<Pair<ResponseBlockParser.Block, View>>()
     private var footer: View? = null
     private var evidencePanel: LocalEvidencePanel? = null
+    private var evidenceAllowed = evidenceEligible
+    private var renderedItem: ChatBubbleItem? = null
     private val dialogs = mutableListOf<AlertDialog>()
     private var parseJob: Future<*>? = null
     private var parseJobVersion: Long? = null
@@ -164,7 +169,7 @@ class RichResponsePanel(
             parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
             handler.removeCallbacks(refresh); scheduled = false
             parserSession = ResponseBlockParser.Session()
-            renderId = item.id; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
+            renderId = item.id; renderedItem = null; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
         }
         if (rendered.isEmpty() && parseJob == null) { render(item); return }
         // Throttle, rather than reset a debounce forever on a continuous token stream.
@@ -190,8 +195,60 @@ class RichResponsePanel(
         return characters.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
-    /** Footer discovery must not hold a reading-line restore on already measured text. */
-    fun isAsyncParsePending(): Boolean = isBodyLayoutPending() || evidencePanel?.isLoading() == true || evidenceLayoutPending
+    /** Optional evidence never delays the response's render or scroll readiness. */
+    fun isAsyncParsePending(): Boolean = isBodyLayoutPending()
+
+    fun isEvidencePending(): Boolean = evidencePanel?.isLoading() == true || evidenceLayoutPending
+
+    /** Eligibility can arrive after chat-scoped discovery without rebuilding response text. */
+    fun setEvidenceEligible(eligible: Boolean) {
+        if (evidenceAllowed == eligible) return
+        evidenceAllowed = eligible
+        if (!eligible) {
+            if ((renderedItem ?: latest)?.let(::canShowEvidence) == true) return
+            val old = evidencePanel ?: return
+            evidencePanel = null
+            (old.parent as? ViewGroup)?.removeView(old)
+            val extra = footer as? LinearLayout
+            if (extra != null && extra.childCount == 0) { removeView(extra); footer = null }
+            scheduleEvidenceLayoutCommitCheck()
+            return
+        }
+        val item = renderedItem ?: latest ?: return
+        if (!canShowEvidence(item)) return
+        val extra = (footer as? LinearLayout) ?: column().also { footer = it; addView(it) }
+        attachEvidence(item, extra)
+    }
+
+    private fun canShowEvidence(item: ChatBubbleItem): Boolean = !item.user &&
+        item.message?.optString("status") == "completed" && evidenceSources != null &&
+        (evidenceAllowed || hasLocalReadEvidence(item.message))
+
+    private fun hasLocalReadEvidence(message: JSONObject?): Boolean {
+        message?.optJSONArray("tool_trace")?.let { trace ->
+            for (index in 0 until trace.length()) trace.optJSONObject(index)?.let { entry ->
+                if (entry.optString("name") in setOf("file_read_range", "file_table_stats") &&
+                    entry.optJSONObject("evidence") != null) return true
+            }
+        }
+        message?.optJSONArray("openai_protocol_output")?.let { output ->
+            for (index in 0 until output.length()) output.optJSONObject(index)?.let { item ->
+                if (item.optString("type") == "function_call" &&
+                    item.optString("name") in setOf("read_attached_file", "read_attached_table")) return true
+            }
+        }
+        return false
+    }
+
+    private fun attachEvidence(item: ChatBubbleItem, extra: LinearLayout) {
+        if (!canShowEvidence(item) || evidencePanel != null) return
+        lateinit var panel: LocalEvidencePanel
+        panel = LocalEvidencePanel(context, item.message!!, evidenceSources!!) {
+            if (!detached && evidencePanel === panel) scheduleEvidenceLayoutCommitCheck()
+        }
+        evidencePanel = panel
+        extra.addView(panel)
+    }
 
     private fun render(item: ChatBubbleItem) {
         if (parseJob != null) return // Finish one snapshot while incoming snapshots are conflated.
@@ -306,6 +363,7 @@ class RichResponsePanel(
 
     private fun applyBlocks(item: ChatBubbleItem, blocks: List<ResponseBlockParser.Block>, prefix: Int,
         formulas: Map<Int, List<MathDelimiterScanner.Formula>> = emptyMap()) {
+        renderedItem = item
         formulaRanges.clear(); formulaRanges.putAll(formulas)
         evidencePanel = null; evidenceLayoutPending = false
         footer?.let(::removeView); footer = null
@@ -352,18 +410,7 @@ class RichResponsePanel(
             extra.addView(text("Ответ прерван. Продолжение создаст новый запрос."))
             extra.addView(button("Продолжить", continueAnswer))
         }
-        if (!item.user && item.message?.optString("status") == "completed" && evidenceSources != null) {
-            lateinit var panel: LocalEvidencePanel
-            panel = LocalEvidencePanel(context, item.message, evidenceSources) {
-                // A cached card can detach/reattach without a new submit. Identity
-                // survives that transition, while a new footer owns a new panel.
-                if (!detached && evidencePanel === panel) {
-                    scheduleEvidenceLayoutCommitCheck()
-                }
-            }
-            evidencePanel = panel
-            extra.addView(panel)
-        }
+        attachEvidence(item, extra)
         if (extra.childCount > 0) { footer = extra; addView(extra) }
     }
 
