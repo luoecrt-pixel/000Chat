@@ -67,7 +67,8 @@ object OpenRouterAttachmentPreflight {
         try {
             for (quality in listOf(95, 90, 85, 80, 70, 60, 50)) {
                 copy.outputStream().use { out -> if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) throw IOException("Не удалось сохранить копию") }
-                if (encodedBytes(copy.length()) <= PARTNER_MAX_ENCODED) return a.copy(wirePath = copy.path, wireMime = "image/jpeg")
+                if (encodedBytes(copy.length()) <= PARTNER_MAX_ENCODED) return a.copy(wirePath = copy.path,
+                    wireMime = "image/jpeg", wireSha256 = OpenRouterAttachmentStore.sha256(copy))
             }
             throw IOException("Совместимая копия не помещается в предел провайдера; исходник сохранён")
         } catch (e: Exception) { copy.delete(); throw e } finally { bitmap.recycle() }

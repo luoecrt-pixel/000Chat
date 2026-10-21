@@ -107,7 +107,7 @@ data class AstraResponseModel(
                     annotations.put(JSONObject().put("type", "local_file").put("state", "READY")
                         .put("filename", artifact.optString("filename")).put("local_path", path)
                         .put("mime_type", artifact.optString("mime_type")).put("size_bytes", artifact.optLong("size_bytes"))
-                        .apply { listOf("patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
+                        .apply { listOf("sha256", "patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
                             artifact.opt(key)?.let { put(key, JsonProtocol.copy(it)) }
                         } })
                 }

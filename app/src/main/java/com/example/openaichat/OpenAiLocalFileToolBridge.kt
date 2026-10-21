@@ -96,7 +96,7 @@ object OpenAiLocalFileToolBridge {
             LocalFileTools(files, running)
         }): JSONObject {
         val checkpoint = db.getOpenAiToolCheckpoint(chatId, requestId)
-            ?: return JsonProtocol.objectCopy(initial).apply { remove("app_local_artifacts") }
+            ?: return initial.apply { remove("app_local_artifacts") }
         if (checkpoint.optInt("version") != 1) throw UnrecoverableResponsesStreamException("Неизвестная версия файлового checkpoint OpenAI")
         val runtimeLease = PreparedAttachmentFiles.lease(context)
         val runtimeLeaseScope = runtimeLease.capture()

@@ -16,7 +16,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 
 /** Local, explicit evidence checks; no network or model call, with lifecycle-owned work. */
-class LocalEvidencePanel(context: Context, message: JSONObject,
+class LocalEvidencePanel(context: Context, private val message: JSONObject,
     private val sources: () -> List<OpenRouterLocalAttachment>,
     private val onContentChanged: (() -> Unit)? = null) : LinearLayout(context) {
     companion object { private val workers = Executors.newFixedThreadPool(2) }
@@ -25,30 +25,44 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
     private val jobs = mutableListOf<Future<*>>()
     private val dialogs = mutableListOf<AlertDialog>()
     @Volatile private var generation = 0
-    private var loading = true
+    private var loading = false
+    private var initialLoaded = false
+    private var initialJob: Future<*>? = null
+    private var detached = false
     private var available = emptyList<OpenRouterLocalAttachment>()
     fun isLoading(): Boolean = loading
-    init {
-        orientation = VERTICAL
+    init { orientation = VERTICAL; loadInitial() }
+    private fun loadInitial() {
+        if (detached || initialLoaded || initialJob != null) return
+        loading = true
         val token = generation
-        jobs.add(workers.submit {
+        initialJob = workers.submit {
             val result = runCatching { sources() to LocalEvidenceVerifier.coverage(message) }
             main.post {
-                if (token != generation) return@post
-                loading = false; removeAllViews()
+                if (detached || token != generation) return@post
+                initialJob = null; initialLoaded = true; loading = false; removeAllViews()
                 result.onSuccess { (files, coverage) ->
                     available = files
                     for (entry in coverage.filter { it.partial }) {
                         val name = files.firstOrNull { it.id == entry.fileId }?.name ?: "Файл"
                         val amount = entry.percent?.let { " ($it%)" } ?: " (доля неизвестна)"
-                        addView(label("⚠️ $name: по журналу прочитана только часть$amount. Точный подсчёт всей таблицы не подтверждён."))
+                        addView(label("⚠️ $name: по журналу прочитана только часть$amount. Полный охват исходника не подтверждён."))
+                    }
+                    for (entry in coverage.filter { it.unknown }) {
+                        val name = files.firstOrNull { it.id == entry.fileId }?.name ?: "Файл"
+                        addView(label("$name: полнота чтения неизвестна по журналу."))
                     }
                     if (files.isNotEmpty()) addView(action("🔍 Проверить цитаты по файлам") { quoteDialog() })
                 }
                 visibility = if (childCount == 0) GONE else VISIBLE
                 requestLayout(); onContentChanged?.invoke()
             }
-        })
+        }
+    }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        detached = false
+        if (!initialLoaded) { loadInitial(); onContentChanged?.invoke() }
     }
     private fun label(value: String) = TextView(context).apply {
         text = value; textSize = 12f; setTextColor(theme.textSecondary); setTextIsSelectable(true)
@@ -56,27 +70,25 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
     }
     private fun action(value: String, work: () -> Unit) = Button(context).apply {
         text = value; textSize = 12f; isAllCaps = false
-        setTextColor(theme.accent); setBackgroundColor(theme.buttonBg)
+        AppThemeViews.button(this, theme)
         setOnClickListener { work() }
     }
     private fun themed(dialog: AlertDialog) {
         dialogs.add(dialog)
         dialog.setOnDismissListener { dialogs.remove(dialog) }
-        dialog.show(); dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(theme.cardBg))
-        for (which in listOf(AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE, AlertDialog.BUTTON_NEUTRAL))
-            dialog.getButton(which)?.setTextColor(theme.accent)
+        dialog.show()
     }
     private fun quoteDialog() {
         val box = LinearLayout(context).apply { orientation = VERTICAL; setBackgroundColor(theme.cardBg) }
         box.addView(label("Точное совпадение текста в локальных файлах. Это не проверка достоверности выводов."))
         val input = EditText(context).apply {
             hint = "Вставьте точную цитату"; setTextColor(theme.textPrimary); setHintTextColor(theme.hintText)
-            setBackgroundColor(theme.inputBg); filters = arrayOf(InputFilter.LengthFilter(4096)); minLines = 2
+            filters = arrayOf(InputFilter.LengthFilter(4096)); minLines = 2
+            AppThemeViews.content(this, theme)
         }
         val results = LinearLayout(context).apply { orientation = VERTICAL }
         box.addView(input); box.addView(results)
-        val dialog = AlertDialog.Builder(context).setCustomTitle(label("Проверка цитаты").apply { setTextColor(theme.textPrimary) }).setView(ScrollView(context).apply { addView(box) })
+        val dialog = AppThemeViews.dialog(context, theme).setCustomTitle(label("Проверка цитаты").apply { setTextColor(theme.textPrimary) }).setView(ScrollView(context).apply { addView(box) })
             .setPositiveButton("Проверить", null).setNegativeButton("Закрыть", null).create()
         themed(dialog)
         var checkGeneration = 0
@@ -104,8 +116,8 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
     }
     private fun showMatch(match: LocalEvidenceVerifier.Match) {
         val token = generation
-        val text = label("Открытие…").apply { typeface = Typeface.MONOSPACE }
-        val dialog = AlertDialog.Builder(context).setCustomTitle(label(match.source.name).apply { setTextColor(theme.textPrimary) }).setView(ScrollView(context).apply { addView(text) })
+        val text = label("Открытие…").apply { typeface = Typeface.MONOSPACE; setTextColor(theme.textPrimary) }
+        val dialog = AppThemeViews.dialog(context, theme).setCustomTitle(label(match.source.name).apply { setTextColor(theme.textPrimary) }).setView(ScrollView(context).apply { addView(text) })
             .setPositiveButton("Далее", null).setNegativeButton("Закрыть", null).create()
         themed(dialog)
         val pages = LocalTextPageIndex(); var offset = match.offset; var reading = false
@@ -118,7 +130,7 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
             pageJob = workers.submit {
                 val page = runCatching {
                     OpenRouterAttachmentPreflight.verifySources(listOf(match.source))
-                    pages.range(LocalEvidenceVerifier.textFile(match.source), start, 16000) { token == generation && !Thread.currentThread().isInterrupted }
+                    pages.range(LocalEvidenceVerifier.verifiedTextFile(match.source), start, 16000) { token == generation && !Thread.currentThread().isInterrupted }
                 }
                 main.post {
                     reading = false
@@ -135,7 +147,8 @@ class LocalEvidencePanel(context: Context, message: JSONObject,
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { load() }; load()
     }
     override fun onDetachedFromWindow() {
-        generation++; loading = false
+        detached = true; generation++; loading = false
+        initialJob?.cancel(true); initialJob = null
         jobs.forEach { it.cancel(true) }; jobs.clear()
         dialogs.toList().forEach { it.dismiss() }; dialogs.clear()
         super.onDetachedFromWindow()

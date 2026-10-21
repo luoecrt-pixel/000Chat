@@ -89,17 +89,122 @@ class OpenRouterArtifactRuntimeTest {
         return JSONObject(result.getString("content"))
     }
 
-    private fun awaitRuntimeAndCleanup() {
+    private fun awaitRuntimeAndCleanup(ownerRequestId: String = requestId) {
         val deadline = System.nanoTime() + 10_000_000_000L
         while (System.nanoTime() < deadline) {
             // work.remove happens before lease.release; registry removal alone is insufficient.
-            val finished = !OpenRouterResponseRuntime.contains(requestId)
+            val finished = !OpenRouterResponseRuntime.contains(ownerRequestId)
             val terminal = ChatDatabase(context).use { it.getActiveResponse(chat) == null }
             if (finished && terminal) return
             Thread.sleep(10)
         }
-        assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(requestId))
+        assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(ownerRequestId))
         ChatDatabase(context).use { assertNull("Request did not reach DB terminal state", it.getActiveResponse(chat)) }
+    }
+
+    @Test fun actualRuntimeCreatesPatchesAndReadsNewVersionThenReopenedNextTurnReadsTheSameBytes() {
+        val originalText = "alpha\nbefore\nomega\n"
+        val updatedText = "alpha\nafter\nomega\n"
+        val nextRequestId = "request-artifact-next-turn"
+        ChatDatabase(context).use { db ->
+            db.upsertCurrentChat(chat, "Patch runtime", null, null, listOf(JSONObject().put("role", "user")
+                .put("text", "Create and patch").put("request_id", requestId).put("provider", "openrouter")))
+            db.setActiveResponse(chat, null, requestId, "", "in_progress", System.currentTimeMillis(),
+                "high", "high", false, 0, 0, false)
+            assertTrue(db.startRequestAccounting(chat, requestId, "openrouter", "test-model", "openrouter_api_key"))
+        }
+        val failure = AtomicReference<Throwable?>()
+        val created = AtomicReference<JSONObject>()
+        val patched = AtomicReference<JSONObject>()
+        val phase = AtomicInteger()
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = try {
+                    when (phase.getAndIncrement()) {
+                        0 -> toolRound("gen-create", toolCall(0, "call-create", "create_local_text_file",
+                            JSONObject().put("filename", "runtime-report.txt").put("content", originalText)))
+                        1 -> {
+                            val descriptor = toolResult(request.body.readUtf8(), "call-create").also(created::set)
+                            assertTrue(descriptor.getBoolean("ok")); assertFalse(descriptor.has("path"))
+                            val patch = JSONObject().put("file_id", descriptor.getString("file_id"))
+                                .put("expected_sha256", descriptor.getString("sha256"))
+                                .put("patches", JSONArray().put(JSONObject().put("search", "before").put("replace", "after")))
+                            toolRound("gen-patch", toolCall(0, "call-patch", "patch_local_file", patch),
+                                toolCall(1, "call-foreign", "patch_local_file", JsonProtocol.objectCopy(patch)
+                                    .put("file_id", "file-not-in-this-chat")))
+                        }
+                        2 -> {
+                            val body = request.body.readUtf8()
+                            val descriptor = toolResult(body, "call-patch").also(patched::set)
+                            assertTrue(descriptor.getBoolean("ok")); assertFalse(descriptor.has("path"))
+                            assertFalse(descriptor.has("attachment")); assertFalse(descriptor.has("patch_diff_path"))
+                            assertFalse(toolResult(body, "call-foreign").getBoolean("ok"))
+                            assertNotEquals(created.get().getString("file_id"), descriptor.getString("file_id"))
+                            toolRound("gen-read-patch", toolCall(0, "call-read-new", "file_read_range",
+                                JSONObject().put("file_id", descriptor.getString("file_id"))))
+                        }
+                        3 -> {
+                            val result = toolResult(request.body.readUtf8(), "call-read-new")
+                            assertTrue(result.getBoolean("ok")); assertEquals(updatedText, result.getString("content"))
+                            finalRound()
+                        }
+                        4 -> toolRound("gen-next-turn", toolCall(0, "call-read-reopened", "file_read_range",
+                            JSONObject().put("file_id", patched.get().getString("file_id"))))
+                        5 -> {
+                            val result = toolResult(request.body.readUtf8(), "call-read-reopened")
+                            assertTrue(result.getBoolean("ok")); assertEquals(updatedText, result.getString("content"))
+                            finalRound()
+                        }
+                        else -> throw AssertionError("Unexpected request")
+                    }
+                } catch (error: Throwable) { failure.compareAndSet(null, error); finalRound() }
+            }
+            val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+            try {
+                OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
+                awaitRuntimeAndCleanup()
+                failure.get()?.let { throw AssertionError("Patch runtime failed", it) }
+                assertEquals(4, server.requestCount)
+                ChatDatabase(context).use { reopened ->
+                    val records = reopened.listLocalFiles(chat)
+                    assertEquals("The denied foreign patch must create no version", 2, records.size)
+                    val old = records.single { it.getString("file_id") == created.get().getString("file_id") }
+                    val version = records.single { it.getString("file_id") == patched.get().getString("file_id") }
+                    assertEquals(originalText, File(old.getString("path")).readText())
+                    assertEquals(updatedText, File(version.getString("path")).readText())
+                    val assistant = reopened.getChat(chat)!!.getJSONArray("messages").getJSONObject(1)
+                    val annotations = assistant.getJSONArray("annotations")
+                    assertEquals(2, annotations.length())
+                    val patchAnnotation = (0 until annotations.length()).map { annotations.getJSONObject(it) }
+                        .single { it.has("patch_diff_path") }
+                    assertEquals(version.getString("sha256"), patchAnnotation.getString("sha256"))
+                    val preview = LocalArtifactDiffPanel.readPreview(context, patchAnnotation.getString("patch_diff_path"),
+                        patchAnnotation.getString("sha256"))
+                    assertTrue(preview.lines.any { it.text == "- before" })
+                    assertTrue(preview.lines.any { it.text == "+ after" })
+                    assertTrue(reopened.listAllLocalFilePaths().containsAll(listOf(old.getString("path"),
+                        version.getString("path"), version.getString("patch_diff_path"))))
+                    reopened.setActiveResponse(chat, null, nextRequestId, "", "in_progress", System.currentTimeMillis(),
+                        "high", "high", false, 0, 0, false)
+                    assertTrue(reopened.startRequestAccounting(chat, nextRequestId, "openrouter", "test-model", "openrouter_api_key"))
+                }
+                OpenRouterResponseRuntime.start(context, runtimeRequest().copy(requestId = nextRequestId), client)
+                awaitRuntimeAndCleanup(nextRequestId)
+                failure.get()?.let { throw AssertionError("Reopened patch runtime failed", it) }
+                assertEquals(6, server.requestCount)
+                ChatDatabase(context).use { assertEquals(2, it.listLocalFiles(chat).size) }
+            } finally {
+                OpenRouterResponseRuntime.cancel(nextRequestId)
+                awaitRuntimeAndCleanup(nextRequestId)
+                client.close()
+                ChatDatabase(context).use { db ->
+                    db.listLocalFiles(chat).forEach { artifact ->
+                        File(artifact.getString("path")).delete()
+                        JsonProtocol.nonBlank(artifact, "patch_diff_path")?.let { File(it).delete() }
+                    }
+                }
+            }
+        }
     }
 
     @Test fun actualRuntimeNormalizesChatArtifactsAndRetainsDurableManifestForTheNextRequest() {

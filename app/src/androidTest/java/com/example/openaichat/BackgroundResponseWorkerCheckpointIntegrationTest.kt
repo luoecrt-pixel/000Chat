@@ -34,6 +34,38 @@ class BackgroundResponseWorkerCheckpointIntegrationTest {
                 .build())
             .build()
 
+    @Test fun noToolTerminalWithoutTypedOutputPreservesPaidFlatTextThroughRealWorkerAndReopen() {
+        val chatId = "worker-flat-terminal-" + UUID.randomUUID()
+        val requestId = "request_flat_terminal"
+        val responseId = "resp_flat_terminal"
+        val text = "Оплаченный сохранённый текст без output_item.done"
+        val terminal = JSONObject().put("id", responseId).put("status", "completed")
+            .put("usage", JSONObject().put("input_tokens", 7).put("output_tokens", 11))
+        val state = ResponseEventState(responseId = responseId, text = text, unindexedText = text,
+            terminalState = ResponseTerminalState.COMPLETED, terminalResponse = terminal)
+        try {
+            ChatDatabase(context).use { db ->
+                db.upsertCurrentChat(chatId, "Flat terminal", null, null, listOf(JSONObject()
+                    .put("role", "user").put("provider", "openai").put("request_id", requestId).put("text", "Prompt")))
+                db.setActiveResponse(chatId, responseId, requestId, "", "in_progress", System.currentTimeMillis(),
+                    "high", "high", false, 6, 0, true)
+                db.updateActiveResponse(chatId, responseId, text, "completed", 1, requestId,
+                    ResponseIndexedCheckpoint.serialize(state))
+                assertEquals(text, ResponseIndexedCheckpoint.restore(db.getActiveResponse(chatId)!!).text)
+                assertNull(db.getOpenAiToolCheckpoint(chatId, requestId))
+            }
+            // The paid terminal cursor is consumed locally; no credential or HTTP mock is available.
+            assertEquals(ListenableWorker.Result.success(), runBlocking { worker(chatId, responseId, requestId).doWork() })
+            ChatDatabase(context).use { db ->
+                assertNull(db.getActiveResponse(chatId))
+                val assistant = db.getChat(chatId)!!.getJSONArray("messages").getJSONObject(1)
+                assertEquals(text, assistant.getString("text"))
+                assertEquals("completed", assistant.getString("status"))
+                assertFalse(assistant.has("openai_protocol_output"))
+            }
+        } finally { ChatDatabase(context).use { it.deleteChat(chatId) } }
+    }
+
     @Test fun everyTerminalEventSurvivesSQLiteReopenAndRealWorkerFinalizesItOnlyOnce() {
         for (type in listOf("response.completed", "response.incomplete", "response.failed",
             "response.cancelled", "error", "response.error")) {

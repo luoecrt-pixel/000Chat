@@ -77,7 +77,7 @@ object OpenRouterResponseRuntime {
         artifacts.forEach { a -> put(JSONObject().put("type", "local_file").put("state", "READY")
             .put("filename", JsonProtocol.string(a, "filename")).put("local_path", JsonProtocol.string(a, "path"))
             .put("mime_type", a.optString("mime_type")).put("size_bytes", a.optLong("size_bytes")).apply {
-                listOf("patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
+                listOf("sha256", "patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
                     a.opt(key)?.let { put(key, JsonProtocol.copy(it)) }
                 }
             }) }

@@ -5,9 +5,11 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.io.File
 import java.io.IOException
+import java.io.FileNotFoundException
 import java.util.UUID
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.FileSystemException
 
 class LocalArtifactToolExecutor(private val context: Context) {
     companion object {
@@ -61,7 +63,7 @@ class LocalArtifactToolExecutor(private val context: Context) {
     }
 
     fun patchLocalFile(arguments: JSONObject, files: List<OpenRouterLocalAttachment>,
-        active: () -> Boolean = { true }, artifactKey: String? = null): JSONObject = synchronized(patchLock) {
+        active: () -> Boolean = { true }, artifactKey: String? = null): JSONObject = try { synchronized(patchLock) {
         LocalUtf8FilePatch.checkActive(active)
         if (StreamingJsonRequestBody.countBytes(arguments) > 256 * 1024) throw IOException("Аргументы патча превышают 256 КБ")
         val selector = JsonProtocol.nonBlank(arguments, "file_id") ?: JsonProtocol.nonBlank(arguments, "filename")
@@ -90,12 +92,18 @@ class LocalArtifactToolExecutor(private val context: Context) {
                 .put("sha256", plan.sourceSha256).put("filename", source.name).put("patches", rawPatches))
             val token = artifactKey?.let { LocalUtf8FilePatch.hex(java.security.MessageDigest.getInstance("SHA-256").digest(it.toByteArray(Charsets.UTF_8))) }
                 ?: UUID.randomUUID().toString()
-            val dir = File(context.filesDir, "generated").apply { mkdirs() }
-            val diffDir = File(dir, "patch-diffs").apply { mkdirs() }
+            val dir = File(context.filesDir, "generated")
+            if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Каталог версий файла недоступен")
+            val diffDir = File(dir, "patch-diffs")
+            if (!diffDir.isDirectory && !diffDir.mkdirs()) throw IOException("Каталог изменений файла недоступен")
             val safeName = source.name.substringAfterLast('/').substringAfterLast('\\').replace(Regex("[^A-Za-z0-9._-]"), "_").take(160).ifBlank { "patched.txt" }
             val target = File(dir, "patch_${token}_$safeName")
             val diff = File(diffDir, "$token.json")
-            if (target.exists() || diff.exists()) {
+            // A process may die between publishing the complete version and
+            // its sidecar. Reconstruct only that metadata after proving that
+            // the existing bytes are exactly this operation's expected result.
+            val recoverSidecar = target.isFile && !diff.exists()
+            if ((target.exists() || diff.exists()) && !recoverSidecar) {
                 if (!target.isFile || !diff.isFile || diff.length() > 2L * 1024 * 1024)
                     throw IOException("Предыдущее применение патча неполно; повторная запись запрещена")
                 val saved = JSONObject(diff.readText(Charsets.UTF_8))
@@ -111,11 +119,17 @@ class LocalArtifactToolExecutor(private val context: Context) {
                     throw IOException("Manifest версии патча повреждён")
                 return@synchronized JsonProtocol.objectCopy(metadata)
             }
-            val staged = File.createTempFile("patch_result_", ".tmp", dir)
-            val stagedDiff = File.createTempFile("patch_diff_", ".tmp", diffDir)
+            // Staging belongs to reclaimable cache if the process dies before
+            // finally. Only complete, published versions live in filesDir.
+            val staged = File.createTempFile("patch_result_", ".tmp", context.cacheDir)
+            var stagedDiff: File? = null
             var published = false
             try {
+                // Keep the first allocation guarded if the second one fails.
+                val pendingDiff = File.createTempFile("patch_diff_", ".tmp", context.cacheDir).also { stagedDiff = it }
                 val resultSha = plan.write(staged)
+                if (recoverSidecar && (target.length() != staged.length() || LocalUtf8FilePatch.sha256(target, active) != resultSha))
+                    throw IOException("Существующая версия файла не соответствует результату патча; перезапись запрещена")
                 val metadata = withAttachment(JSONObject().put("ok", true).put("type", "local_file")
                     .put("filename", source.name).put("path", target.absolutePath).put("mime_type", source.mime)
                     .put("size_bytes", staged.length()).put("patch_count", plan.hunks.size)
@@ -125,18 +139,26 @@ class LocalArtifactToolExecutor(private val context: Context) {
                     .put("search", h.replacement.search).put("replace", h.replacement.replace)) } }
                 val sidecar = JSONObject().put("version", 1).put("source_file_id", source.id).put("source_sha256", plan.sourceSha256)
                     .put("result_sha256", resultSha).put("operation_sha256", operation).put("hunks", hunks).put("artifact", metadata)
-                stagedDiff.bufferedWriter(Charsets.UTF_8).use { StreamingJsonRequestBody.writeJson(sidecar, it) }
+                pendingDiff.bufferedWriter(Charsets.UTF_8).use { StreamingJsonRequestBody.writeJson(sidecar, it) }
                 LocalUtf8FilePatch.checkActive(active)
-                Files.move(staged.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
-                published = true
-                Files.move(stagedDiff.toPath(), diff.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                if (!recoverSidecar) {
+                    Files.move(staged.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    published = true
+                }
+                Files.move(pendingDiff.toPath(), diff.toPath(), StandardCopyOption.ATOMIC_MOVE)
                 metadata
             } catch (error: Throwable) {
                 if (published) target.delete()
                 diff.delete()
                 throw error
-            } finally { staged.delete(); stagedDiff.delete() }
+            } finally { staged.delete(); stagedDiff?.delete() }
         }
+    } } catch (error: FileNotFoundException) {
+        // The model receives the message, not an app-private filesystem path.
+        // Retain the cause for local diagnostics without changing interruption.
+        throw IOException("Исходный файл или каталог версии недоступен. Исходник не изменён.", error)
+    } catch (error: FileSystemException) {
+        throw IOException("Не удалось прочитать или сохранить версию файла. Исходник не изменён.", error)
     }
 
     private fun withAttachment(metadata: JSONObject, sha: String): JSONObject {
