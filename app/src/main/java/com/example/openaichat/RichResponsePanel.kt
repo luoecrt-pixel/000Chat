@@ -63,8 +63,9 @@ class RichResponsePanel(
     private val continueAnswer: () -> Unit,
     private val detailDepth: Int = 0,
     private val onAsyncLayoutCommitted: (() -> Unit)? = null,
-    private val evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null,
-    evidenceEligible: Boolean = false
+    evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null,
+    evidenceEligible: Boolean = false,
+    evidenceSourceVersion: Long = 0L
 ) : LinearLayout(context) {
     companion object {
         private val parsers = Executors.newFixedThreadPool(2)
@@ -78,6 +79,8 @@ class RichResponsePanel(
     private var footer: View? = null
     private var evidencePanel: LocalEvidencePanel? = null
     private var evidenceAllowed = evidenceEligible
+    private var evidenceSourceProvider = evidenceSources
+    private var evidenceVersion = evidenceSourceVersion
     private var renderedItem: ChatBubbleItem? = null
     private val dialogs = mutableListOf<AlertDialog>()
     private var parseJob: Future<*>? = null
@@ -167,6 +170,7 @@ class RichResponsePanel(
         if (renderId != item.id) {
             parseVersion.incrementAndGet()
             parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
+            evidencePanel?.dispose(); evidencePanel = null; evidenceLayoutPending = false
             handler.removeCallbacks(refresh); scheduled = false
             parserSession = ResponseBlockParser.Session()
             renderId = item.id; renderedItem = null; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
@@ -208,6 +212,7 @@ class RichResponsePanel(
             if ((renderedItem ?: latest)?.let(::canShowEvidence) == true) return
             val old = evidencePanel ?: return
             evidencePanel = null
+            old.dispose()
             (old.parent as? ViewGroup)?.removeView(old)
             val extra = footer as? LinearLayout
             if (extra != null && extra.childCount == 0) { removeView(extra); footer = null }
@@ -220,8 +225,15 @@ class RichResponsePanel(
         attachEvidence(item, extra)
     }
 
+    fun setEvidenceSources(version: Long, sources: () -> List<OpenRouterLocalAttachment>) {
+        if (version == evidenceVersion) return
+        evidenceVersion = version
+        evidenceSourceProvider = sources
+        evidencePanel?.refreshSources(sources)
+    }
+
     private fun canShowEvidence(item: ChatBubbleItem): Boolean = !item.user &&
-        item.message?.optString("status") == "completed" && evidenceSources != null &&
+        item.message?.optString("status") == "completed" && evidenceSourceProvider != null &&
         (evidenceAllowed || hasLocalReadEvidence(item.message))
 
     private fun hasLocalReadEvidence(message: JSONObject?): Boolean {
@@ -243,7 +255,7 @@ class RichResponsePanel(
     private fun attachEvidence(item: ChatBubbleItem, extra: LinearLayout) {
         if (!canShowEvidence(item) || evidencePanel != null) return
         lateinit var panel: LocalEvidencePanel
-        panel = LocalEvidencePanel(context, item.message!!, evidenceSources!!) {
+        panel = LocalEvidencePanel(context, item.message!!, evidenceSourceProvider!!) {
             if (!detached && evidencePanel === panel) scheduleEvidenceLayoutCommitCheck()
         }
         evidencePanel = panel
@@ -365,6 +377,7 @@ class RichResponsePanel(
         formulas: Map<Int, List<MathDelimiterScanner.Formula>> = emptyMap()) {
         renderedItem = item
         formulaRanges.clear(); formulaRanges.putAll(formulas)
+        evidencePanel?.dispose()
         evidencePanel = null; evidenceLayoutPending = false
         footer?.let(::removeView); footer = null
         while (rendered.size > prefix) removeView(rendered.removeAt(rendered.lastIndex).second)

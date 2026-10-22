@@ -11,7 +11,7 @@ import java.security.MessageDigest
 /** Evidence about local tool reads and exact text presence; never a claim that an answer is true. */
 object LocalEvidenceVerifier {
     data class Coverage(val fileId: String, val readChars: Long, val totalChars: Long?, val exactFullRows: Boolean,
-        private val provenPartial: Boolean = false) {
+        private val provenPartial: Boolean = false, val tableScopeDescription: String? = null) {
         val partial: Boolean get() = !exactFullRows && (totalChars?.let { readChars < it } ?: provenPartial)
         val unknown: Boolean get() = !exactFullRows && totalChars == null && !provenPartial
         val percent: Int? get() = totalChars?.takeIf { it > 0 }?.let { (readChars.toDouble() / it * 100).toInt().coerceIn(0, 100) }
@@ -68,9 +68,14 @@ object LocalEvidenceVerifier {
         val totals = mutableMapOf<String, MutableSet<Long>>()
         val exact = mutableSetOf<String>()
         val unread = mutableSetOf<String>()
+        val tableScopes = linkedMapOf<String, MutableSet<String>>()
         for ((name, args, result) in events) {
             val id = result.optString("file_id"); if (id.isBlank()) continue
             if (name in setOf("file_table_stats", "read_attached_table")) {
+                val scopes = tableScopes.getOrPut(id) { linkedSetOf() }
+                if (JsonProtocol.nonBlank(result, "sheet") != null) scopes.add("sheet")
+                if (result.optString("row_scope") != "all_rows") scopes.add("range")
+                if (!result.optBoolean("complete_requested_range")) scopes.add("incomplete")
                 if (result.optBoolean("complete_requested_range") &&
                     result.optString("row_scope") == "all_rows" && JsonProtocol.nonBlank(result, "sheet") == null &&
                     args.optLong("start_row", 1) == 1L && !args.has("end_row")) exact.add(id)
@@ -86,7 +91,10 @@ object LocalEvidenceVerifier {
             if (result.opt("eof") == true) totals.getOrPut(id) { mutableSetOf() }.add(end)
             else if (result.opt("eof") == false) unread.add(id)
         }
-        return intervals.map { (id, ranges) ->
+        // Table results describe row/sheet scope, never UTF-16 character ranges.
+        // Retain them even when no separate text-read call occurred for this file.
+        return (intervals.keys + tableScopes.keys).distinct().map { id ->
+            val ranges = intervals[id].orEmpty()
             var count = 0L; var end = 0L
             for ((from, to) in ranges.sortedBy { it.first }) {
                 if (to > end) { count += to - maxOf(from, end); end = to }
@@ -94,8 +102,16 @@ object LocalEvidenceVerifier {
             val observedTotals = totals[id].orEmpty()
             val total = observedTotals.singleOrNull()?.takeIf { value -> ranges.all { it.second <= value } }
             val conflicting = observedTotals.size > 1 || observedTotals.size == 1 && total == null
-            val provenPartial = !conflicting && (id in unread || ranges.minOf { it.first } > 0L)
-            Coverage(id, count, total, id in exact, provenPartial)
+            val provenPartial = !conflicting && (id in unread || ranges.minOfOrNull { it.first }?.let { it > 0L } == true)
+            val scope = if (id in exact) null else tableScopes[id]?.let { scopes ->
+                when {
+                    "sheet" in scopes && "range" in scopes -> "Расчёт ограничен выбранными строками отдельных листов; полный охват книги не подтверждён."
+                    "sheet" in scopes -> "Расчёт выполнен для отдельных листов; полный охват книги не подтверждён."
+                    "range" in scopes -> "Расчёт ограничен выбранным диапазоном строк; полный охват файла не подтверждён."
+                    else -> "Завершение расчёта по всем строкам не подтверждено."
+                }
+            }
+            Coverage(id, count, total, id in exact, provenPartial, scope)
         }
     }
     data class Match(val source: OpenRouterLocalAttachment, val offset: Long)

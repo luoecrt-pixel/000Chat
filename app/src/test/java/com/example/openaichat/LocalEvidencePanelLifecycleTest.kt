@@ -122,4 +122,32 @@ class LocalEvidencePanelLifecycleTest {
             controller.pause().stop().destroy(); file.delete()
         }
     }
+
+    @Test fun newSourceVersionRefreshesOnlyFooterAndRejectsOldPendingResult() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val activity = controller.get()
+        val source = File(activity.cacheDir, "evidence-source-version.txt").apply { writeText("source") }
+        try {
+            val panel = RichResponsePanel(activity, {}, {}, evidenceSources = {
+                entered.countDown()
+                while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+                listOf(OpenRouterLocalAttachment("file", "stale.csv", "text", source.path, "text/plain", source.length(), ""))
+            }, evidenceEligible = true)
+            activity.setContentView(panel)
+            panel.submit(ChatBubbleItem.create("source-version", "Model", "Итоги", false, message = message()))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val body = views(panel).filterIsInstance<TextView>().first { it.text.toString() == "Итоги" }
+            panel.setEvidenceSources(1L) {
+                listOf(OpenRouterLocalAttachment("file", "current.csv", "text", source.path, "text/plain", source.length(), ""))
+            }
+            assertFalse(panel.isAsyncParsePending())
+            assertSame(body, views(panel).filterIsInstance<TextView>().first { it.text.toString() == "Итоги" })
+            await(panel) { !panel.isEvidencePending() && views(panel).filterIsInstance<TextView>()
+                .any { it.text.toString().contains("current.csv") } }
+            release.countDown(); shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(views(panel).filterIsInstance<TextView>().none { it.text.toString().contains("stale.csv") })
+            assertSame(body, views(panel).filterIsInstance<TextView>().first { it.text.toString() == "Итоги" })
+        } finally { release.countDown(); controller.pause().stop().destroy(); source.delete() }
+    }
 }

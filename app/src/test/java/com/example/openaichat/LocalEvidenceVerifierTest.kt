@@ -36,6 +36,71 @@ class LocalEvidenceVerifierTest {
         output.put(call("a"))
         assertTrue(LocalEvidenceVerifier.coverage(JSONObject().put("openai_protocol_output", output)).isEmpty())
     }
+    private fun tableMessages(args: JSONObject, result: JSONObject): List<JSONObject> = listOf(
+        JSONObject().put("tool_trace", JSONArray().put(ToolTraceSummary.entry("file_table_stats", args, result.toString()))),
+        JSONObject().put("openai_protocol_output", JSONArray()
+            .put(JSONObject().put("type", "function_call").put("call_id", "table-call").put("name", "read_attached_table").put("arguments", args.toString()))
+            .put(JSONObject().put("type", "function_call_output").put("call_id", "table-call").put("output", result.toString()))))
+
+    @Test fun tableOnlyRangeAndSkippedHeaderProduceUnknownScopeForBothProvidersWithoutInventedPercent() {
+        val file = Files.createTempFile("evidence-scope", ".csv").toFile()
+        try {
+            for (header in listOf(false, true)) {
+                file.writeText(((if (header) listOf("amount") else emptyList()) + (1..100).map { it.toString() }).joinToString("\n"), Charsets.UTF_8)
+                val source = OpenRouterLocalAttachment("f", "data.csv", "text", file.path, "text/csv", file.length(), "", textEncoding = "UTF-8")
+                val args = JSONObject().put("file_id", "f").put("column", 1)
+                if (header) args.put("start_row", 2) else args.put("end_row", 10)
+                val result = JSONObject(LocalFileTools(listOf(source)).execute("file_table_stats", args))
+                assertTrue(result.getBoolean("ok"))
+                assertEquals(if (header) 100L else 10L, result.getLong("rows_scanned"))
+                for (message in tableMessages(args, result)) {
+                    val coverage = LocalEvidenceVerifier.coverage(message).single()
+                    assertEquals("f", coverage.fileId)
+                    assertEquals(0L, coverage.readChars)
+                    assertNull(coverage.totalChars); assertNull(coverage.percent)
+                    assertFalse(coverage.exactFullRows); assertFalse(coverage.partial); assertTrue(coverage.unknown)
+                    assertTrue(coverage.tableScopeDescription!!.contains("диапазоном строк"))
+                }
+            }
+        } finally { file.delete() }
+    }
+
+    @Test fun actualFullCsvStatisticsHaveFullRowCoverageEvenWithoutTextReadAndOnlyForMatchingFile() {
+        val file = Files.createTempFile("evidence-full-table", ".csv").toFile()
+        try {
+            file.writeText((1..100).joinToString("\n"), Charsets.UTF_8)
+            val source = OpenRouterLocalAttachment("f", "data.csv", "text", file.path, "text/csv", file.length(), "", textEncoding = "UTF-8")
+            val args = JSONObject().put("file_id", "f").put("column", 1)
+            val result = JSONObject(LocalFileTools(listOf(source)).execute("file_table_stats", args))
+            assertTrue(result.getBoolean("ok")); assertEquals(100L, result.getLong("rows_scanned"))
+            for (message in tableMessages(args, result)) {
+                val full = LocalEvidenceVerifier.coverage(message).single()
+                assertTrue(full.exactFullRows); assertFalse(full.partial); assertFalse(full.unknown)
+                assertNull(full.totalChars); assertNull(full.percent); assertNull(full.tableScopeDescription)
+                val reads = trace(read(0, 20), read(0, 10).put("file_id", "other")).getJSONArray("tool_trace")
+                message.put("tool_trace", (message.optJSONArray("tool_trace") ?: JSONArray()).apply {
+                    for (i in 0 until reads.length()) put(reads.get(i))
+                })
+                val mixed = LocalEvidenceVerifier.coverage(message).associateBy { it.fileId }
+                assertFalse(mixed.getValue("f").partial)
+                assertTrue(mixed.getValue("other").partial)
+                assertEquals(10, mixed.getValue("other").percent)
+            }
+        } finally { file.delete() }
+    }
+
+    @Test fun failedAndAmbiguousTableCallsCannotCreateOrSuppressCoverage() {
+        val args = JSONObject().put("file_id", "f").put("column", 1)
+        val success = JSONObject().put("file_id", "f").put("ok", true).put("complete_requested_range", true)
+        for (message in tableMessages(args, JsonProtocol.objectCopy(success).put("ok", false)))
+            assertTrue(LocalEvidenceVerifier.coverage(message).isEmpty())
+        val message = tableMessages(args, success).last()
+        message.getJSONArray("openai_protocol_output").put(JsonProtocol.objectCopy(message.getJSONArray("openai_protocol_output").getJSONObject(1)))
+        assertTrue(LocalEvidenceVerifier.coverage(message).isEmpty())
+        message.put("tool_trace", trace(read(0, 20)).getJSONArray("tool_trace"))
+        assertTrue(LocalEvidenceVerifier.coverage(message).single().partial)
+    }
+
     @Test fun exactQuotesCrossBufferBoundaryKeepUnicodeOffsetsAndUnavailableNeverMeansNotFound() {
         val file = Files.createTempFile("evidence", ".txt").toFile()
         try {
@@ -100,6 +165,12 @@ class LocalEvidenceVerifierTest {
             val entry = ToolTraceSummary.entry("file_table_stats", args, result.toString())
             assertEquals("First", entry.getJSONObject("evidence").getString("sheet"))
             assertEquals("all_rows", entry.getJSONObject("evidence").getString("row_scope"))
+            for (message in tableMessages(args, result)) {
+                val tableOnly = LocalEvidenceVerifier.coverage(message).single()
+                assertTrue(tableOnly.unknown); assertFalse(tableOnly.partial); assertFalse(tableOnly.exactFullRows)
+                assertNull(tableOnly.totalChars); assertNull(tableOnly.percent)
+                assertTrue(tableOnly.tableScopeDescription!!.contains("листов"))
+            }
             val partial = trace(read(0, 20)); partial.getJSONArray("tool_trace").put(entry)
             assertTrue(LocalEvidenceVerifier.coverage(partial).single().partial)
             // A CSV full-row scan has no sheet scope and can suppress the partial-read warning.
