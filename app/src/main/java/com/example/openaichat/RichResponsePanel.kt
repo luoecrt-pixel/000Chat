@@ -1,5 +1,7 @@
 package com.example.openaichat
 
+import org.json.JSONObject
+
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -60,7 +62,10 @@ class RichResponsePanel(
     private val saveFile: (ResponseBlockParser.Block.File) -> Unit,
     private val continueAnswer: () -> Unit,
     private val detailDepth: Int = 0,
-    private val onAsyncLayoutCommitted: (() -> Unit)? = null
+    private val onAsyncLayoutCommitted: (() -> Unit)? = null,
+    evidenceSources: (() -> List<OpenRouterLocalAttachment>)? = null,
+    evidenceEligible: Boolean = false,
+    evidenceSourceVersion: Long = 0L
 ) : LinearLayout(context) {
     companion object {
         private val parsers = Executors.newFixedThreadPool(2)
@@ -72,10 +77,16 @@ class RichResponsePanel(
     private var scheduled = false
     private val rendered = mutableListOf<Pair<ResponseBlockParser.Block, View>>()
     private var footer: View? = null
+    private var evidencePanel: LocalEvidencePanel? = null
+    private var evidenceAllowed = evidenceEligible
+    private var evidenceSourceProvider = evidenceSources
+    private var evidenceVersion = evidenceSourceVersion
+    private var renderedItem: ChatBubbleItem? = null
     private val dialogs = mutableListOf<AlertDialog>()
     private var parseJob: Future<*>? = null
     private var parseJobVersion: Long? = null
     private var asyncLayoutPending = false
+    private var evidenceLayoutPending = false
     private val parseVersion = AtomicLong()
     private var parserSession = ResponseBlockParser.Session()
     private var detached = false
@@ -159,9 +170,10 @@ class RichResponsePanel(
         if (renderId != item.id) {
             parseVersion.incrementAndGet()
             parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
+            evidencePanel?.dispose(); evidencePanel = null; evidenceLayoutPending = false
             handler.removeCallbacks(refresh); scheduled = false
             parserSession = ResponseBlockParser.Session()
-            renderId = item.id; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
+            renderId = item.id; renderedItem = null; rendered.clear(); tableStates.clear(); pageStates.clear(); detailStates.clear(); formulaRanges.clear(); removeAllViews(); footer = null
         }
         if (rendered.isEmpty() && parseJob == null) { render(item); return }
         // Throttle, rather than reset a debounce forever on a continuous token stream.
@@ -169,8 +181,86 @@ class RichResponsePanel(
     }
 
     /** Parsing and committing children both precede the measurable layout used by scroll anchors. */
-    fun isAsyncParsePending(): Boolean = parseJob != null || asyncLayoutPending ||
+    fun isBodyLayoutPending(): Boolean = parseJob != null || asyncLayoutPending ||
         (scheduled && (latest?.text?.length ?: 0) > 32_000)
+
+    /** Same visible native text traversal as reading anchors, restricted to response blocks. */
+    fun bodyCharacterCount(): Int {
+        var characters = 0L
+        fun walk(view: View) {
+            if (view.visibility != VISIBLE) return
+            if (view is TextView && view !is Button && view.text.isNotEmpty()) {
+                characters += view.text.length
+                return
+            }
+            if (view is ViewGroup) for (index in 0 until view.childCount) walk(view.getChildAt(index))
+        }
+        rendered.forEach { walk(it.second) }
+        return characters.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /** Optional evidence never delays the response's render or scroll readiness. */
+    fun isAsyncParsePending(): Boolean = isBodyLayoutPending()
+
+    fun isEvidencePending(): Boolean = evidencePanel?.isLoading() == true || evidenceLayoutPending
+
+    /** Eligibility can arrive after chat-scoped discovery without rebuilding response text. */
+    fun setEvidenceEligible(eligible: Boolean) {
+        if (evidenceAllowed == eligible) return
+        evidenceAllowed = eligible
+        if (!eligible) {
+            if ((renderedItem ?: latest)?.let(::canShowEvidence) == true) return
+            val old = evidencePanel ?: return
+            evidencePanel = null
+            old.dispose()
+            (old.parent as? ViewGroup)?.removeView(old)
+            val extra = footer as? LinearLayout
+            if (extra != null && extra.childCount == 0) { removeView(extra); footer = null }
+            scheduleEvidenceLayoutCommitCheck()
+            return
+        }
+        val item = renderedItem ?: latest ?: return
+        if (!canShowEvidence(item)) return
+        val extra = (footer as? LinearLayout) ?: column().also { footer = it; addView(it) }
+        attachEvidence(item, extra)
+    }
+
+    fun setEvidenceSources(version: Long, sources: () -> List<OpenRouterLocalAttachment>) {
+        if (version == evidenceVersion) return
+        evidenceVersion = version
+        evidenceSourceProvider = sources
+        evidencePanel?.refreshSources(sources)
+    }
+
+    private fun canShowEvidence(item: ChatBubbleItem): Boolean = !item.user &&
+        item.message?.optString("status") == "completed" && evidenceSourceProvider != null &&
+        (evidenceAllowed || hasLocalReadEvidence(item.message))
+
+    private fun hasLocalReadEvidence(message: JSONObject?): Boolean {
+        message?.optJSONArray("tool_trace")?.let { trace ->
+            for (index in 0 until trace.length()) trace.optJSONObject(index)?.let { entry ->
+                if (entry.optString("name") in setOf("file_read_range", "file_table_stats") &&
+                    entry.optJSONObject("evidence") != null) return true
+            }
+        }
+        message?.optJSONArray("openai_protocol_output")?.let { output ->
+            for (index in 0 until output.length()) output.optJSONObject(index)?.let { item ->
+                if (item.optString("type") == "function_call" &&
+                    item.optString("name") in setOf("read_attached_file", "read_attached_table")) return true
+            }
+        }
+        return false
+    }
+
+    private fun attachEvidence(item: ChatBubbleItem, extra: LinearLayout) {
+        if (!canShowEvidence(item) || evidencePanel != null) return
+        lateinit var panel: LocalEvidencePanel
+        panel = LocalEvidencePanel(context, item.message!!, evidenceSourceProvider!!) {
+            if (!detached && evidencePanel === panel) scheduleEvidenceLayoutCommitCheck()
+        }
+        evidencePanel = panel
+        extra.addView(panel)
+    }
 
     private fun render(item: ChatBubbleItem) {
         if (parseJob != null) return // Finish one snapshot while incoming snapshots are conflated.
@@ -259,17 +349,36 @@ class RichResponsePanel(
         }
     }
 
+    private fun scheduleEvidenceLayoutCommitCheck() {
+        val owner = evidencePanel
+        evidenceLayoutPending = true
+        requestLayout()
+        handler.post {
+            if (detached || evidencePanel !== owner || !evidenceLayoutPending) return@post
+            if (width > 0 && height > 0 && !isLayoutRequested) {
+                evidenceLayoutPending = false
+                onAsyncLayoutCommitted?.invoke()
+            }
+        }
+    }
+
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         super.onLayout(changed, left, top, right, bottom)
-        if (asyncLayoutPending && parseJob == null && width > 0 && height > 0) {
-            asyncLayoutPending = false
-            onAsyncLayoutCommitted?.invoke()
+        if (width > 0 && height > 0) {
+            val bodyCommitted = asyncLayoutPending && parseJob == null
+            val footerCommitted = evidenceLayoutPending
+            if (bodyCommitted) asyncLayoutPending = false
+            if (footerCommitted) evidenceLayoutPending = false
+            if (bodyCommitted || footerCommitted) onAsyncLayoutCommitted?.invoke()
         }
     }
 
     private fun applyBlocks(item: ChatBubbleItem, blocks: List<ResponseBlockParser.Block>, prefix: Int,
         formulas: Map<Int, List<MathDelimiterScanner.Formula>> = emptyMap()) {
+        renderedItem = item
         formulaRanges.clear(); formulaRanges.putAll(formulas)
+        evidencePanel?.dispose()
+        evidencePanel = null; evidenceLayoutPending = false
         footer?.let(::removeView); footer = null
         while (rendered.size > prefix) removeView(rendered.removeAt(rendered.lastIndex).second)
         for (index in prefix until blocks.size) {
@@ -314,6 +423,7 @@ class RichResponsePanel(
             extra.addView(text("Ответ прерван. Продолжение создаст новый запрос."))
             extra.addView(button("Продолжить", continueAnswer))
         }
+        attachEvidence(item, extra)
         if (extra.childCount > 0) { footer = extra; addView(extra) }
     }
 
@@ -699,10 +809,14 @@ class RichResponsePanel(
         }
         return count
     }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        detached = false
+    }
     override fun onDetachedFromWindow() {
         detached = true; parseVersion.incrementAndGet()
         parseJob?.cancel(true); parseJob = null; parseJobVersion = null; asyncLayoutPending = false
-        latest = null
+        latest = null; evidenceLayoutPending = false
         handler.removeCallbacks(refresh); scheduled = false
         dialogs.toList().forEach { it.dismiss() }
         super.onDetachedFromWindow()

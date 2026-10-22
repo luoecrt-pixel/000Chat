@@ -107,6 +107,20 @@ row_budget = int(re.search(r'ROW_BYTES = (\d+) \* 1024', reader).group(1)) * 102
 chunk_budget = int(re.search(r'CHUNK_BYTES = (\d+) \* 1024', reader).group(1)) * 1024
 templates = re.findall(r'projection.add\("(CASE WHEN[^"\n]+)"\)', reader)
 assert len(templates) == 2
+key_template = re.search(r'keyColumns\.forEachIndexed[^\n]*projection.add\("([^"\n]+)"\)', reader).group(1)
+
+
+def reader_expression(template, field, index, inline):
+    assert re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', field)
+    quoted = '"' + field + '"'
+    qualified = '"data".' + quoted
+    result = (template.replace('${identifier(field)}', quoted)
+              .replace('${column(quotedTable, field)}', qualified)
+              .replace('$name', qualified).replace('$inlineBytes', str(inline)).replace('$index', str(index)))
+    assert '$' not in result, f'Unexpanded SQLite reader template: {result}'
+    return result
+
+
 chunk_template = re.search(r'db.rawQuery\("(SELECT substr[^"\n]+)"', reader).group(1)
 large = "x" * (chunk_budget - 1) + "😀\0Философия科学\n" * 120000
 other = "Подпись😀\n" * 180000
@@ -120,8 +134,8 @@ inline = min(4096, row_budget // (len(fields) + len(keys) + 1))
 projection = []
 for template in templates:
     for index, field in enumerate(fields):
-        projection.append(template.replace("$name", '"' + field + '"').replace("$inlineBytes", str(inline)).replace("$index", str(index)))
-projection += ['"' + key + '" AS _astra_key_' + str(i) for i, key in enumerate(keys)]
+        projection.append(reader_expression(template, field, index, inline))
+projection += [reader_expression(key_template, key, i, inline) for i, key in enumerate(keys)]
 rows = text_db.execute("SELECT " + ",".join(projection) + " FROM data ORDER BY request").fetchall()
 row = rows[1]
 assert row[:4] == (None, None, None, 7)
@@ -130,8 +144,8 @@ assert rows[0][:4] == ("wrong row", "wrong protocol", "next", 8)
 assert sum(len(v.encode()) if isinstance(v, str) else 8 for v in row) < row_budget
 assert text_db.execute("SELECT length(payload) FROM data WHERE request='r'").fetchone()[0] < len(large)
 for index, expected in enumerate((large, other)):
-    sql = chunk_template.replace("$field", '"' + fields[index] + '"').replace("$table", '"data"')
-    sql = sql.replace("$where", '"chat"=? AND "request"=?')
+    sql = chunk_template.replace("$field", '"data"."' + fields[index] + '"').replace("$table", '"data"')
+    sql = sql.replace("$where", '"data"."chat"=? AND "data"."request"=?')
     length = row[len(fields) + index]
     offset = 0
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
@@ -143,6 +157,23 @@ for index, expected in enumerate((large, other)):
         parts.append(decoder.decode(chunk)); offset += len(chunk)
     parts.append(decoder.decode(b"", final=True))
     assert "".join(parts) == expected
+
+# Missing identifiers must fail during preparation even for empty/small rows;
+# SQLite's permissive double-quoted string fallback must not invent owned paths.
+for populated in (False, True):
+    for field, key in (("missing", "id"), ("payload", "missing_key")):
+        with sqlite3.connect(":memory:") as broken:
+            broken.execute("CREATE TABLE data(id INTEGER PRIMARY KEY, payload TEXT)")
+            if populated:
+                broken.execute("INSERT INTO data VALUES(1,'short')")
+            invalid_projection = [reader_expression(template, field, 0, inline) for template in templates]
+            invalid_projection.append(reader_expression(key_template, key, 0, inline))
+            try:
+                broken.execute("SELECT " + ",".join(invalid_projection) + " FROM data").fetchall()
+            except sqlite3.OperationalError as error:
+                assert "no such column" in str(error), str(error)
+            else:
+                raise AssertionError(f"Missing SQLite identifier accepted: {field}/{key}, populated={populated}")
 # Regression guards for the previously reproduced Android foreground loss:
 # provider HTTP x-request-id must not become the SQLite ownership request_id.
 main_activity = (ROOT / "app/src/main/java/com/example/openaichat/MainActivity.kt").read_text()
@@ -180,7 +211,11 @@ assert 'MathDelimiterScanner.scan(source)' in pages_src and 'crossing.start > st
 local_tools = (ROOT / "app/src/main/java/com/example/openaichat/LocalFileTools.kt").read_text()
 assert 'val carryWindow = SEARCH_LEFT_CONTEXT + query.length - 1' in local_tools, "LocalFileTools.search overlap must include both left snippet context and query length"
 orr_runtime = (ROOT / "app/src/main/java/com/example/openaichat/OpenRouterResponseRuntime.kt").read_text()
-assert 'OpenRouterAttachmentStore.classifyLocalFile(' in orr_runtime, "OpenRouterResponseRuntime must classify local files via OpenRouterAttachmentStore.classifyLocalFile"
+artifact_resolver = (ROOT / "app/src/main/java/com/example/openaichat/LocalArtifactAttachmentResolver.kt").read_text()
+assert 'LocalArtifactAttachmentResolver.resolve(' in orr_runtime, "OpenRouterResponseRuntime must use the identity-aware artifact resolver"
+assert 'OpenRouterAttachmentStore.classifyLocalFile(' in artifact_resolver and \
+    'OpenRouterAttachmentPreflight.verifySources(listOf(previous))' in artifact_resolver and \
+    'persistLocalArtifactAttachment(' in artifact_resolver, "Artifact reuse must retain source verification, fallback classification and durable manifest CAS"
 assert 'textEncoding = "UTF-8".takeIf' not in orr_runtime, "Unconditional UTF-8 local file registration must not remain in OpenRouterResponseRuntime"
 chat_db_src = (ROOT / "app/src/main/java/com/example/openaichat/ChatDatabase.kt").read_text()
 assert 'fun listActiveOpenAiToolAttachmentPaths(' in chat_db_src, "ChatDatabase must expose active OpenAI tool checkpoint attachment paths separately from durable paths"

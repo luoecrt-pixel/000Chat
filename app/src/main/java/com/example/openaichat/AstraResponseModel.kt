@@ -20,7 +20,7 @@ data class AstraResponseModel(
     val generatedImageResults: List<String> = emptyList()
 ) {
     val fileAnnotations: List<JSONObject>
-        get() = annotationsToList("container_file_citation") + annotationsToList("file_citation")
+        get() = annotationsToList("container_file_citation") + annotationsToList("file_citation") + annotationsToList("local_file")
 
     val urlAnnotations: List<JSONObject>
         get() = annotationsToList("url_citation")
@@ -98,6 +98,18 @@ data class AstraResponseModel(
                             "container_file_citation", "file_citation", "url_citation" -> annotations.put(JSONObject(a.toString()))
                         }
                     }
+                }
+            }
+            r.optJSONArray("app_local_artifacts")?.let { artifacts ->
+                for (index in 0 until artifacts.length()) {
+                    val artifact = artifacts.optJSONObject(index) ?: continue
+                    val path = JsonProtocol.nonBlank(artifact, "path") ?: continue
+                    annotations.put(JSONObject().put("type", "local_file").put("state", "READY")
+                        .put("filename", artifact.optString("filename")).put("local_path", path)
+                        .put("mime_type", artifact.optString("mime_type")).put("size_bytes", artifact.optLong("size_bytes"))
+                        .apply { listOf("sha256", "patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
+                            artifact.opt(key)?.let { put(key, JsonProtocol.copy(it)) }
+                        } })
                 }
             }
             val status = forcedStatus ?: JsonProtocol.nonBlank(r, "status") ?: "completed"

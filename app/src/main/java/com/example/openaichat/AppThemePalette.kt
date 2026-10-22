@@ -48,6 +48,8 @@ data class ThemeColors(
     val logBg: Int get() = semantic(0xFF282D37, 0xFFF0F3F8, 0xFFD5DEE3)
     val logText: Int get() = semantic(0xFFCCD5E6, 0xFF425572, 0xFF364D5D)
     val surfaceBorder: Int get() = semantic(0xFF505969, 0xFFC2CDDC, 0xFF9DAFB9)
+    val diffAddedBg: Int get() = semantic(0xFF19382B, 0xFFE6F4EA, 0xFFCDDDCF)
+    val diffAddedText: Int get() = semantic(0xFFBDECCB, 0xFF205C35, 0xFF244D32)
     val errorBg: Int get() = semantic(0xFF3A2529, 0xFFFFEEEB, 0xFFECD8D4)
     val errorText: Int get() = semantic(0xFFFFC1B9, 0xFF963F37, 0xFF873D36)
 }

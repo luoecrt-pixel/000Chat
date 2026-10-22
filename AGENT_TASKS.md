@@ -4,27 +4,10 @@
 
 ## Текущие задачи
 
-### 34. [P1/P2, поручение владельца 20.10.2026] Новые функции после пакета оптимизаций
-
-Общий пакет поручения — **не более трёх PR**, включая первый PR с исправлениями. Оставшиеся два PR:
-
-- `patch_local_file`: chat-scoped file ID/однозначное имя, optional expected SHA-256, все search однозначны в исходном UTF-8; атомарная новая версия, старый файл сохранён. Durable idempotency по chat/request/tool-call, регистрация только действующим владельцем, следующему инструменту доступна новая версия. Раскрываемый тематический Diff + Просмотр/Сохранить/Поделиться; полные файлы не переносить в tool output. GitHub tools OpenAI остаются read-only.
-- Локальная проверка чтения/цитат: сохранять безопасные range/eof/total metadata новых OpenRouter tool_trace; старый trace не доказывает процент прочитанного. Для OpenAI связывать function_call/output по call_id. Процент только при известном denominator; учитывать объединение диапазонов и фактический scope table stats. Точный локальный поиск цитат, переход к смещению; missing/unreadable означает unknown. Источники привязаны к исходному chatId; без сети/токенов/изменения оригиналов.
-- Индикатор контекста справа в карточке лога + Context Inspector: тот же captured model/tools/route/chain policy, что Send; OpenAI canReuse учитывает локальные manifests. OpenRouter binding и prefix readiness различать, проверка не изменяет signed history. Actual cache read/write из nullable usage/accounting, unknown не равен нулю; время ответа из terminal event. Не обещать server cache hit и не запускать upload/materialize при открытии inspector.
-- Отдельная интерактивная offline sandbox по явной кнопке у HTML/sandbox/chart: существующий статический preview сохраняется. Model JS только внутри iframe sandbox=allow-scripts без same-origin, строгая CSP; сеть/file/content/storage/Android bridge запрещены. WebView создаётся по нажатию и уничтожается при закрытии/detach; блокировать навигацию, окна, permissions/download/file chooser. Изоляция доступа не является гарантией ограничения CPU/памяти.
-- Устранить повторную нормализацию локальных артефактов через durable attachment_manifest, проверку original SHA/derived bytes и owner/path CAS; без global/path-only cache. Retention сохраняет manifest originals/derivatives, diff и предыдущие версии.
-
-Приёмка: positive/negative реальные runtime/SQLite/HTTP/UI пути обоих providers; исправления, полные Debug/Release CI и точные SHA для каждого PR. Не объявлять функции готовыми до реализации и проверки.
-
 ### 33. [P1/P2] Замечания владельца и проверка присланных решений
 
-- Закрыть подтверждённые runtime gaps: запрет скрытого повторного inference POST OpenRouter при 408/503; durable промежуточный текст до terminal; identity-aware completion исторической загрузки после Remove/Reorder/Replace/Edit/Delete/switch/recreate. Сохранить originals, drafts, accounting, request ownership и OpenAI sequence CAS. Нужны positive/negative actual-client/SQLite/Activity tests и соответствующий Debug/Release CI.
-- Шторка не перехватывает выделение и горизонтальный code/table scroll даже на краю; обычный swipe по ответу сохраняется. Довести плавное открытие/лёгкое закрытие, CANCEL/multitouch/interruption. Первый touch selection не меняет viewport; editable/keyboard/accessibility/явный scroll работают.
-- Сессии сортируются по настоящему изменению; unchanged switch/snapshot/no-op clear не меняют timestamp. Сохранить ordering реального append/title/terminal, поздний Worker tail и reopened state.
-- Нижние model/settings controls одинаковой высоты/стиля, пустой toolLabel скрыт. Выбранная модель не выводится повторно в верхнем status; progress/captured model/usage находятся в framed log preview. После terminal preview показывает accounting, expanded history — chronological с latest только внизу; без зелёного EXACT/кнопки Close; ошибки сохраняются рядом с accounting.
-- Footer assistant: 👍/👎/Копировать/Повторить; удалить TXT-export из footer и long-press согласно последнему поручению. Копирование берёт свежий raw adapter source. Для исторического «Повторить» явно определить request-aware семантику, не повторять последний чужой запрос под видом выбранного ответа. Whole-dialog export перенести в меню чата шторки по #32.
+- В `ChatDatabase.clearActiveResponse()` не менять `updated_at` и порядок чатов, если активного запроса уже нет. Проверить no-op и повторную очистку через SQLite, включая reopen; сохранить существующее поведение реального append/title/terminal и позднего Worker tail.
 - Все темы и app-owned dialogs/buttons/cards используют согласованную контрастную палитру; scientific/rich поверхности отличаются осмысленными оттенками и мягкими рамками. Убрать обычные source toggles, сохранив точный source/copy и диагностический fallback/retry, reattach и sandbox.
-- Уведомления о результате сохранить; промежуточные alerts убрать. Обязательный Android FGS indicator при долгой фоновой работе учитывать явно, не удалять service/Worker foreground contract ради внешнего эффекта.
 - Причину исходного immutable-thinking 400 установить доказательствами. Не считать первую signature/data дельту закрытием блока; сохранять фрагменты, индексы, порядок и raw replay. Не удалять автоматически «битые» unsigned/unknown blocks без подтверждённого upstream контракта и явного безопасного сценария.
 - Для web age не скрывать поле и не утверждать неподтверждённое происхождение. Исследовать provider dates/cache/URL eligibility/шум по реальным ответам; отличать tool evidence от заявлений модели. Инструкции используют captured enabled-tool flags, не обещают отключённый search, не обрезают originals.
 
@@ -80,16 +63,18 @@
 
 На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
 
-Для шторки #4 проверить CANCEL/multitouch/interruption и визуальную плавность; не объявлять их багами без воспроизведения.
+На физическом телефоне принять плавность открытия/закрытия шторки и отсутствие сдвига viewport при первом touch selection (#9).
 
 ### 31. [M · P2] Остальные диалоги и видимый бренд
 
 1. **Темы, остаток #6.** Переименование/создание/удаление чата, Vector Store, diagnostics, local files/errors, GitHub confirmation, encoding, app-owned attachment/export dialogs и другие окна приложения. Системные Photo Picker/SAF оформляет Android, а не helper приложения. Оформлять custom content **и** window/title/list/action buttons/spinner/dropdown, selected/disabled states. Один `applyDialogControlTheme(box)` не покрывает весь dialog chrome. Проверять фактические foreground/background и контраст в dark/light/gray + font scale; отсутствие WHITE текста недостаточно. Theme switch сохраняет draft/attachments/anchor/request.
-2. **Бренд, остаток #25.** Убрать app labels Astra в clipboard diagnostics, предлагаемом имени нового экспорта/Vector Store и других подтверждённых видимых местах. Внутренний speaker label менять только после проверки его видимости. Не переименовывать `gpt-6-astra`, классы/package/БД/старые файлы/compatibility IDs.
+2. **Бренд, остаток #25.** Убрать видимые `Astra diagnostics`, `Astra Files` и временную подпись `Astra` у активной карточки OpenAI до появления объекта сообщения. Проверить header во время генерации и после terminal. Не переименовывать `gpt-6-astra`, классы/package/БД/старые файлы/compatibility IDs.
 
-### 32. [N · P2, отдельное расширение] Экспорт диалога в Markdown и текст
+### 32. [N · P2, остаток] Файл результата инструмента в экспорте OpenRouter
 
-Текущий TXT-export отдельного сообщения уже сохраняет сырой source; порча формул/таблиц не доказана. Добавить отдельные UTF-8 `.md` и `.txt` экспорты всей беседы с порядком/ролями, code fences/формулами/таблицами и краткими summaries (tool/status/result file). Источник для OpenRouter — structured tool_trace; для OpenAI такого поля сейчас нет: нормализовать безопасные metadata typed function_call/function_call_output из `openai_protocol_output` либо сохранить отдельный durable summary при реализации N. Имена `executed_tools` и общие счётчики K не заменяют поимённые статусы/результаты вызовов для экспорта. Не выдумывать неизвестный статус и не выгружать сырые arguments/output JSON вместо сводки. Для TXT сохранить тот же читаемый исходник Markdown без служебных JSON. Не добавлять hidden prompts/reasoning/encrypted_content/checkpoints/secrets; не удалять пользовательский текст regex. По последнему поручению владельца убрать message TXT actions из footer/long-press; полную сохранность raw source обеспечить copy и экспортом диалога, не теряя исходный текст. Tests для обоих providers: кириллица, nested fences, inline math/table, failed/cancelled tools, реальные attachments и открытие обоих файлов без искажения source. Независимо от тем M, без обязательного объединения в один PR.
+Сохранять безопасную связь конкретного вызова OpenRouter с именем созданного файла и экспортировать `tool → status → result file` в `.md` и `.txt`. Сейчас `ToolTraceSummary` не сохраняет результат, а отдельный список вложений не связывает файл с вызовом. Не выводить raw arguments/output, paths, hidden reasoning или секреты; не выдумывать неизвестный результат.
+
+Проверить несколько вызовов/файлов, failed/cancelled/unknown results и реальное сохранение обоих форматов через UI для обоих провайдеров. Сохранить raw source, порядок сообщений и существующую OpenAI-связь по `call_id`.
 
 ### 30. [L · P2, отдельное расширение] GitHub read-only tools для OpenAI
 

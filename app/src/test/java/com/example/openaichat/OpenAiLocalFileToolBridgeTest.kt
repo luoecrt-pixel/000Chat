@@ -63,15 +63,47 @@ class OpenAiLocalFileToolBridgeTest {
         .put("output", JSONArray().put(JSONObject().put("type", "message").put("role", "assistant")
             .put("content", JSONArray().put(JSONObject().put("type", "output_text").put("text", "Found needle")))))
 
-    @Test fun schemasAreFlatAndAllowOnlyTheLocalReadCatalog() {
+    @Test fun schemasAreFlatAndAllowOnlyDeclaredLocalFileTools() {
         val schemas = OpenAiLocalFileToolBridge.schemas()
-        assertEquals(4, schemas.length())
+        assertEquals(5, schemas.length())
         for (i in 0 until schemas.length()) {
             val schema = schemas.getJSONObject(i)
             assertEquals("function", schema.getString("type")); assertFalse(schema.has("function"))
             assertFalse(schema.getBoolean("strict")); assertEquals("object", schema.getJSONObject("parameters").getString("type"))
         }
     }
+    @Test fun patchCreatesOneDurableVersionAndReplaysItsResultWithoutRewriting() {
+        val patch = call("resp_first", "patch_local_file", "call_patch")
+        patch.getJSONArray("output").getJSONObject(1).put("arguments", JSONObject()
+            .put("file_id", attachment.id).put("expected_sha256", attachment.sha256)
+            .put("patches", JSONArray().put(JSONObject().put("search", "needle").put("replace", "updated"))).toString())
+        val before = db.getOpenAiToolCheckpoint("chat", "request")!!
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        val first = OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", patch, http, credential = { "mock-only" })
+        val saved = db.getLocalArtifactToolResult("chat", "request", "call_patch")!!
+        val version = File(saved.getString("path"))
+        assertTrue(version.readText().startsWith("updated"))
+        assertTrue(file.readText().startsWith("needle"))
+        val model = AstraResponseModel.fromResponse(first, "done")
+        assertEquals(version.path, model.fileAnnotations.single().getString("local_path"))
+        val timestamp = version.lastModified()
+        // Model a crash after artifact commit but before the tool batch checkpoint.
+        assertTrue(db.saveOpenAiToolCheckpoint("chat", "request", before))
+        db.setActiveResponse("chat", "resp_first", "request", "", "in_progress", System.currentTimeMillis(), "high", "high", false, 6, 1, true)
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", patch, http, credential = { "mock-only" })
+        assertEquals(version.path, db.getLocalArtifactToolResult("chat", "request", "call_patch")!!.getString("path"))
+        assertEquals(timestamp, version.lastModified())
+        assertEquals(1, db.listLocalFiles("chat").size)
+        repeat(2) {
+            val result = JSONObject(JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+                .getJSONArray("input").getJSONObject(0).getString("output"))
+            assertTrue(result.getBoolean("ok"))
+            assertFalse(result.has("path")); assertFalse(result.has("attachment"))
+        }
+        assertEquals(2, server.requestCount)
+    }
+
     @Test fun listedFilesDescribeOnlyResponsesToolNames() {
         server.enqueue(MockResponse().setBody(finalResponse().toString()))
         val response = call("resp_first", "list_attached_files")
@@ -194,6 +226,68 @@ class OpenAiLocalFileToolBridgeTest {
         assertEquals(createdPaths[1], db.getOpenAiToolCheckpoint("chat", "request")!!
             .getJSONArray("attachments").getJSONObject(0).getString("text_path"))
         assertEquals(2, server.requestCount)
+    }
+
+    @Test fun legacyCheckpointWithoutDerivativeHashNeverPublishesTheExistingCopy() {
+        val original = file.readText()
+        attachment = attachment.copy(id = "legacy-captured-id", textSha256 = null)
+        File(attachment.textPath!!).writeText("untrusted legacy derivative")
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        server.enqueue(MockResponse().setBody(finalResponse().toString()))
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "read_attached_file"), http,
+            credential = { "mock-only" })
+        val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+        val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+        assertTrue(result.getBoolean("ok"))
+        assertEquals(original, result.getString("content"))
+        val repaired = db.getOpenAiToolCheckpoint("chat", "request")!!.getJSONArray("attachments").getJSONObject(0)
+        assertEquals("legacy-captured-id", repaired.getString("id"))
+        assertTrue(repaired.getString("text_sha256").isNotBlank())
+        assertNotEquals(attachment.textPath, repaired.getString("text_path"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun corruptedCheckpointDerivativeIsRebuiltBeforeEachRealChildPost() {
+        val original = file.readText()
+        attachment = OpenRouterAttachmentStore.classifyLocalFile(context, file).copy(id = "captured-file-id")
+        val damaged = File(attachment.textPath!!)
+        damaged.writeText("x".repeat(damaged.length().toInt()))
+        OpenAiLocalFileToolBridge.configure(db, "chat", "request",
+            JSONObject().put("model", "gpt-6-astra").put("background", true), listOf(attachment))
+        var requests = 0
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                return if (++requests == 1) {
+                    val current = db.getOpenAiToolCheckpoint("chat", "request")!!
+                        .getJSONArray("attachments").getJSONObject(0)
+                    File(current.getString("text_path")).writeText("y".repeat(original.toByteArray().size))
+                    MockResponse().setBody(call("resp_second", "read_attached_file", "call_2").toString())
+                } else MockResponse().setBody(finalResponse().toString())
+            }
+        }
+        val created = mutableListOf<OpenRouterLocalAttachment>()
+        OpenAiLocalFileToolBridge.finish(context, db, "chat", "request", call("resp_first", "read_attached_file"), http,
+            credential = { "mock-only" }, localToolsFactory = { files, active ->
+                created += files.single()
+                LocalFileTools(files, active)
+            })
+        assertEquals(2, created.size)
+        assertNotEquals(created[0].textPath, created[1].textPath)
+        created.forEach { assertEquals("captured-file-id", it.id) }
+        repeat(2) {
+            val sent = JSONObject(server.takeRequest(2, TimeUnit.SECONDS)!!.body.readUtf8())
+            val result = JSONObject(sent.getJSONArray("input").getJSONObject(0).getString("output"))
+            assertTrue(result.getBoolean("ok"))
+            assertEquals(original, result.getString("content"))
+        }
+        assertEquals(original, file.readText())
+        assertEquals(2, server.requestCount)
+        val durable = OpenRouterLocalAttachment.fromJson(db.getOpenAiToolCheckpoint("chat", "request")!!
+            .getJSONArray("attachments").getJSONObject(0))
+        assertEquals(created.last(), durable)
+        db.close(); db = ChatDatabase(context)
+        assertEquals(durable, LocalArtifactAttachmentResolver.resolveForTools(context, durable))
     }
 
     @Test fun attachmentClassificationDoesNotSwallowThreadCancellation() {

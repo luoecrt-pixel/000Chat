@@ -12,6 +12,8 @@ object ToolTraceSummary {
         return JSONObject().put("name", name).put("target", target)
             .put("ok", parsed?.optBoolean("ok", true) ?: true)
             .put("status", if (parsed?.optBoolean("ok", true) == false) "ошибка" else "готово")
-            .put("summary", (JsonProtocol.nonBlank(parsed ?: JSONObject(), "error") ?: "Выполнено").take(300))
+            .put("summary", (JsonProtocol.nonBlank(parsed ?: JSONObject(), "error") ?: "Выполнено").take(300)).apply {
+                parsed?.let { LocalEvidenceVerifier.evidence(name, arguments, it) }?.let { put("evidence", it) }
+            }
     }
 }

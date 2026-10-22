@@ -89,21 +89,185 @@ class OpenRouterArtifactRuntimeTest {
         return JSONObject(result.getString("content"))
     }
 
-    private fun awaitRuntimeAndCleanup() {
+    private fun awaitRuntimeAndCleanup(ownerRequestId: String = requestId) {
         val deadline = System.nanoTime() + 10_000_000_000L
         while (System.nanoTime() < deadline) {
             // work.remove happens before lease.release; registry removal alone is insufficient.
-            val finished = !OpenRouterResponseRuntime.contains(requestId)
+            val finished = !OpenRouterResponseRuntime.contains(ownerRequestId)
             val terminal = ChatDatabase(context).use { it.getActiveResponse(chat) == null }
-            if (finished && terminal && derivative.get()?.exists() != true) return
+            if (finished && terminal) return
             Thread.sleep(10)
         }
-        assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(requestId))
+        assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(ownerRequestId))
         ChatDatabase(context).use { assertNull("Request did not reach DB terminal state", it.getActiveResponse(chat)) }
-        assertFalse("Runtime did not remove its temporary derivative", derivative.get()?.exists() == true)
     }
 
-    @Test fun actualRuntimeNormalizesChatArtifactsProtectsLiveDerivativeAndCleansItAfterCompletion() {
+    @Test fun actualRuntimeCanPatchRevertedAndNoOpVersionsByTheirReturnedExactIds() {
+        val original = LocalArtifactToolExecutor(context).createTextFile(JSONObject()
+            .put("filename", "reverted-runtime.txt").put("content", "a"))
+        ChatDatabase(context).use { db ->
+            db.ensureChat(chat, "Version identities")
+            assertTrue(db.registerLocalArtifact(chat, requestId, original))
+            db.setActiveResponse(chat, null, requestId, "", "in_progress", System.currentTimeMillis(),
+                "high", "high", false, 0, 0, false)
+            assertTrue(db.startRequestAccounting(chat, requestId, "openrouter", "test-model", "openrouter_api_key"))
+        }
+        val failure = AtomicReference<Throwable?>()
+        val phase = AtomicInteger()
+        val ids = mutableListOf(original.getString("file_id"))
+        val replacements = listOf("a" to "b", "b" to "a", "a" to "a", "a" to "c")
+        try {
+            MockWebServer().use { server ->
+                server.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = try {
+                        val step = phase.getAndIncrement()
+                        if (step in 1..4) {
+                            val descriptor = toolResult(request.body.readUtf8(), "version-${step - 1}")
+                            assertTrue(descriptor.toString(), descriptor.getBoolean("ok"))
+                            val id = descriptor.getString("file_id")
+                            assertFalse("Every retained version has its own exact ID", id in ids)
+                            ids.add(id)
+                        }
+                        if (step < replacements.size) {
+                            val (search, replacement) = replacements[step]
+                            toolRound("gen-version-$step", toolCall(0, "version-$step", "patch_local_file",
+                                JSONObject().put("file_id", ids.last()).put("patches", JSONArray()
+                                    .put(JSONObject().put("search", search).put("replace", replacement)))))
+                        } else if (step == 4) {
+                            toolRound("gen-version-read", toolCall(0, "read-final-version", "file_read_range",
+                                JSONObject().put("file_id", ids.last())))
+                        } else {
+                            val result = toolResult(request.body.readUtf8(), "read-final-version")
+                            assertTrue(result.getBoolean("ok")); assertEquals("c", result.getString("content"))
+                            finalRound()
+                        }
+                    } catch (error: Throwable) { failure.compareAndSet(null, error); finalRound() }
+                }
+                val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+                OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
+                awaitRuntimeAndCleanup()
+                failure.get()?.let { throw AssertionError("Version identity runtime failed", it) }
+                assertEquals(6, server.requestCount)
+                ChatDatabase(context).use { db ->
+                    val versions = db.listLocalFiles(chat).associateBy { it.getString("file_id") }
+                    assertEquals(5, versions.size)
+                    assertEquals(listOf("a", "b", "a", "a", "c"), ids.map { File(versions.getValue(it).getString("path")).readText() })
+                }
+            }
+        } finally {
+            ChatDatabase(context).use { db -> db.listLocalFiles(chat).forEach { value ->
+                File(value.getString("path")).delete()
+                JsonProtocol.nonBlank(value, "patch_diff_path")?.let { File(it).delete() }
+            } }
+        }
+    }
+
+    @Test fun actualRuntimeCreatesPatchesAndReadsNewVersionThenReopenedNextTurnReadsTheSameBytes() {
+        val originalText = "alpha\nbefore\nomega\n"
+        val updatedText = "alpha\nafter\nomega\n"
+        val nextRequestId = "request-artifact-next-turn"
+        ChatDatabase(context).use { db ->
+            db.upsertCurrentChat(chat, "Patch runtime", null, null, listOf(JSONObject().put("role", "user")
+                .put("text", "Create and patch").put("request_id", requestId).put("provider", "openrouter")))
+            db.setActiveResponse(chat, null, requestId, "", "in_progress", System.currentTimeMillis(),
+                "high", "high", false, 0, 0, false)
+            assertTrue(db.startRequestAccounting(chat, requestId, "openrouter", "test-model", "openrouter_api_key"))
+        }
+        val failure = AtomicReference<Throwable?>()
+        val created = AtomicReference<JSONObject>()
+        val patched = AtomicReference<JSONObject>()
+        val phase = AtomicInteger()
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = try {
+                    when (phase.getAndIncrement()) {
+                        0 -> toolRound("gen-create", toolCall(0, "call-create", "create_local_text_file",
+                            JSONObject().put("filename", "runtime-report.txt").put("content", originalText)))
+                        1 -> {
+                            val descriptor = toolResult(request.body.readUtf8(), "call-create").also(created::set)
+                            assertTrue(descriptor.getBoolean("ok")); assertFalse(descriptor.has("path"))
+                            val patch = JSONObject().put("file_id", descriptor.getString("file_id"))
+                                .put("expected_sha256", descriptor.getString("sha256"))
+                                .put("patches", JSONArray().put(JSONObject().put("search", "before").put("replace", "after")))
+                            toolRound("gen-patch", toolCall(0, "call-patch", "patch_local_file", patch),
+                                toolCall(1, "call-foreign", "patch_local_file", JsonProtocol.objectCopy(patch)
+                                    .put("file_id", "file-not-in-this-chat")))
+                        }
+                        2 -> {
+                            val body = request.body.readUtf8()
+                            val descriptor = toolResult(body, "call-patch").also(patched::set)
+                            assertTrue(descriptor.getBoolean("ok")); assertFalse(descriptor.has("path"))
+                            assertFalse(descriptor.has("attachment")); assertFalse(descriptor.has("patch_diff_path"))
+                            assertFalse(toolResult(body, "call-foreign").getBoolean("ok"))
+                            assertNotEquals(created.get().getString("file_id"), descriptor.getString("file_id"))
+                            toolRound("gen-read-patch", toolCall(0, "call-read-new", "file_read_range",
+                                JSONObject().put("file_id", descriptor.getString("file_id"))))
+                        }
+                        3 -> {
+                            val result = toolResult(request.body.readUtf8(), "call-read-new")
+                            assertTrue(result.getBoolean("ok")); assertEquals(updatedText, result.getString("content"))
+                            finalRound()
+                        }
+                        4 -> toolRound("gen-next-turn", toolCall(0, "call-read-reopened", "file_read_range",
+                            JSONObject().put("file_id", patched.get().getString("file_id"))))
+                        5 -> {
+                            val result = toolResult(request.body.readUtf8(), "call-read-reopened")
+                            assertTrue(result.getBoolean("ok")); assertEquals(updatedText, result.getString("content"))
+                            finalRound()
+                        }
+                        else -> throw AssertionError("Unexpected request")
+                    }
+                } catch (error: Throwable) { failure.compareAndSet(null, error); finalRound() }
+            }
+            val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+            try {
+                OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
+                awaitRuntimeAndCleanup()
+                failure.get()?.let { throw AssertionError("Patch runtime failed", it) }
+                assertEquals(4, server.requestCount)
+                ChatDatabase(context).use { reopened ->
+                    val records = reopened.listLocalFiles(chat)
+                    assertEquals("The denied foreign patch must create no version", 2, records.size)
+                    val old = records.single { it.getString("file_id") == created.get().getString("file_id") }
+                    val version = records.single { it.getString("file_id") == patched.get().getString("file_id") }
+                    assertEquals(originalText, File(old.getString("path")).readText())
+                    assertEquals(updatedText, File(version.getString("path")).readText())
+                    val assistant = reopened.getChat(chat)!!.getJSONArray("messages").getJSONObject(1)
+                    val annotations = assistant.getJSONArray("annotations")
+                    assertEquals(2, annotations.length())
+                    val patchAnnotation = (0 until annotations.length()).map { annotations.getJSONObject(it) }
+                        .single { it.has("patch_diff_path") }
+                    assertEquals(version.getString("sha256"), patchAnnotation.getString("sha256"))
+                    val preview = LocalArtifactDiffPanel.readPreview(context, patchAnnotation.getString("patch_diff_path"),
+                        patchAnnotation.getString("sha256"))
+                    assertTrue(preview.lines.any { it.text == "- before" })
+                    assertTrue(preview.lines.any { it.text == "+ after" })
+                    assertTrue(reopened.listAllLocalFilePaths().containsAll(listOf(old.getString("path"),
+                        version.getString("path"), version.getString("patch_diff_path"))))
+                    reopened.setActiveResponse(chat, null, nextRequestId, "", "in_progress", System.currentTimeMillis(),
+                        "high", "high", false, 0, 0, false)
+                    assertTrue(reopened.startRequestAccounting(chat, nextRequestId, "openrouter", "test-model", "openrouter_api_key"))
+                }
+                OpenRouterResponseRuntime.start(context, runtimeRequest().copy(requestId = nextRequestId), client)
+                awaitRuntimeAndCleanup(nextRequestId)
+                failure.get()?.let { throw AssertionError("Reopened patch runtime failed", it) }
+                assertEquals(6, server.requestCount)
+                ChatDatabase(context).use { assertEquals(2, it.listLocalFiles(chat).size) }
+            } finally {
+                OpenRouterResponseRuntime.cancel(nextRequestId)
+                awaitRuntimeAndCleanup(nextRequestId)
+                client.close()
+                ChatDatabase(context).use { db ->
+                    db.listLocalFiles(chat).forEach { artifact ->
+                        File(artifact.getString("path")).delete()
+                        JsonProtocol.nonBlank(artifact, "patch_diff_path")?.let { File(it).delete() }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun actualRuntimeNormalizesChatArtifactsAndRetainsDurableManifestForTheNextRequest() {
         val text = "Отчёт по эксперименту №1\nРезультат: успешно"
         val sourceBytes = text.toByteArray(Charset.forName("windows-1251"))
         val original = File(originals, "report-cp1251.txt").apply { writeBytes(sourceBytes) }
@@ -195,7 +359,7 @@ class OpenRouterArtifactRuntimeTest {
             assertEquals(3, server.requestCount)
             assertNotNull("Runtime never exposed its normalized artifact", derivative.get())
             assertNotNull("Runtime never executed file_read_range", actualRead.get())
-            assertFalse(derivative.get()!!.exists())
+            assertTrue("The artifact manifest owns its reusable derivative", derivative.get()!!.exists())
             assertArrayEquals("Original CP1251 bytes must stay intact", sourceBytes, original.readBytes())
             assertEquals(foreignText, foreign.readText())
             ChatDatabase(context).use { db ->
@@ -203,6 +367,11 @@ class OpenRouterArtifactRuntimeTest {
                 assertEquals("completed", assistant.getString("status"))
                 assertEquals("done", assistant.getString("text"))
                 assertEquals(setOf(original.path, foreign.path), db.listLocalFiles().map { it.getString("path") }.toSet())
+                assertTrue(derivative.get()!!.path in db.listAllLocalFilePaths())
+                val saved = db.listLocalFiles(chat).single()
+                val reused = LocalArtifactAttachmentResolver.resolve(context, db, chat, saved)
+                assertEquals(derivative.get()!!.path, reused.textPath)
+                db.deleteChat(chat)
                 assertFalse(derivative.get()!!.path in db.listAllLocalFilePaths())
             }
         }

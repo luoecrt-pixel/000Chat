@@ -48,7 +48,7 @@ internal class LocalTextPageIndex {
         val index = indexes[file.path]?.takeIf { it.size == file.length() && it.modified == file.lastModified() }
             ?: build(file, active).also { indexes[file.path] = it }
         if (offset > index.chars) return JSONObject().put("content", "").put("offset", offset)
-            .put("next_offset", index.chars).put("eof", true).put("offset_past_eof", true)
+            .put("next_offset", index.chars).put("total_chars", index.chars).put("eof", true).put("offset_past_eof", true)
         val found = index.points.binarySearchBy(offset) { it.chars }
         val point = index.points[if (found >= 0) found else (-found - 2).coerceAtLeast(0)]
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
@@ -57,7 +57,7 @@ internal class LocalTextPageIndex {
             InputStreamReader(stream, decoder).use { reader ->
                 return BoundedTextRead.range(reader, offset - point.chars, limit, active).apply {
                     put("offset", offset); put("next_offset", point.chars + getLong("next_offset"))
-                    put("index_preceding_chars", offset - point.chars)
+                    put("index_preceding_chars", offset - point.chars); put("total_chars", index.chars)
                 }
             }
         }

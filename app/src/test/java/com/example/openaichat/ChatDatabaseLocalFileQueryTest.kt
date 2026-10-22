@@ -2,6 +2,7 @@ package com.example.openaichat
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -51,6 +52,25 @@ class ChatDatabaseLocalFileQueryTest {
     }
 
     private fun paths(items: List<JSONObject>) = items.map { it.getString("path") }.toSet()
+
+    @Test fun missingArtifactPathColumnStopsOwnershipCollectionInsteadOfInventingAPath() {
+        val original = file("schema-corruption-original.txt")
+        seed("a")
+        for (populated in listOf(false, true)) {
+            db.writableDatabase.execSQL("DROP TABLE local_artifacts")
+            db.writableDatabase.execSQL("CREATE TABLE local_artifacts(chat_id TEXT, request_id TEXT, created_at INTEGER, metadata TEXT)")
+            if (populated) db.writableDatabase.execSQL("INSERT INTO local_artifacts VALUES(?,?,?,?)",
+                arrayOf("a", "request-a", 1, JSONObject().put("path", original.path).toString()))
+            assertThrows("Corrupt schema must stop global cleanup; populated=$populated", SQLiteException::class.java) {
+                db.listAllLocalFilePaths()
+            }
+            assertThrows("Corrupt schema must stop scoped cleanup; populated=$populated", SQLiteException::class.java) {
+                db.listLocalFilePaths("a")
+            }
+            assertFalse(db.readableDatabase.inTransaction())
+            assertTrue(original.isFile)
+        }
+    }
 
     @Test fun scopedListingIncludesOnlyItsArtifactsAnnotationsAndImagesWhileGlobalListingIsPreserved() {
         val artifactA = file("artifact-a.txt")
@@ -153,4 +173,79 @@ class ChatDatabaseLocalFileQueryTest {
             }
         }
     }
+    @Test fun artifactManifestRetainsAllVersionsAndCacheCannotCrossChatOwnership() {
+        val original = file("cache-source.txt"); seed("a"); seed("b"); artifact("a", original)
+        val sha = "a".repeat(64)
+        val manifest = OpenRouterLocalAttachment("f", original.name, "text", original.path, "text/plain",
+            original.length(), sha, textPath = "/derived.utf8", wirePath = "/wire.dat")
+        assertFalse(db.persistLocalArtifactAttachment("b", original.path, original.length(), sha, manifest))
+        assertFalse(db.persistLocalArtifactAttachment("a", original.path, original.length() + 1, sha, manifest))
+        assertTrue(db.persistLocalArtifactAttachment("a", original.path, original.length(), sha, manifest))
+        assertTrue(db.listAllLocalFilePaths().containsAll(listOf(original.path, "/derived.utf8", "/wire.dat")))
+        assertTrue(db.listLocalFilePaths("a").contains("/derived.utf8"))
+        assertFalse(db.listLocalFilePaths("b").contains("/derived.utf8"))
+    }
+
+    @Test fun toolResultReplayIsAtomicRequestOwnedAndChecksArgumentIdentity() {
+        seed("a"); db.setActiveResponse("a", null, "r", "", "in_progress", 1, "max", "max", false, 0, 0, true)
+        fun result(path: String) = JSONObject().put("path", path).put("tool_name", "patch_local_file")
+            .put("arguments_sha256", "hash").put("source_path", "/previous.txt").put("patch_diff_path", "/diff.json")
+        assertNotNull(db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/new.txt")))
+        assertEquals("/new.txt", db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/duplicate.txt"))!!.getString("path"))
+        assertThrows(IllegalStateException::class.java) {
+            db.registerLocalArtifactToolResultIfActive("a", "r", "call", result("/bad.txt").put("arguments_sha256", "different"))
+        }
+        assertNull(db.registerLocalArtifactToolResultIfActive("a", "other", "call", result("/foreign.txt")))
+        assertNull(db.getLocalArtifactToolResult("a", "other", "call"))
+        assertTrue(db.listAllLocalFilePaths().containsAll(listOf("/new.txt", "/previous.txt", "/diff.json")))
+    }
+
+    @Test fun legacyAnnotationManifestCasPreservesMetadataAndNeverTouchesForeignChat() {
+        val source = file("legacy-manifest.txt")
+        val item = JSONObject().put("local_path", source.path).put("filename", source.name)
+            .put("size_bytes", source.length()).put("custom", "keep")
+        seed("a", listOf(message().put("annotations", JSONArray().put(item))))
+        seed("b", listOf(message().put("annotations", JSONArray().put(JsonProtocol.objectCopy(item)))))
+        val manifest = OpenRouterLocalAttachment("f", source.name, "text", source.path, "text/plain",
+            source.length(), "a".repeat(64), textPath = "/legacy-derived.utf8")
+        assertTrue(db.persistLocalArtifactAttachment("a", source.path, source.length(), manifest.sha256, manifest))
+        assertEquals("keep", db.getChat("a")!!.getJSONArray("messages").getJSONObject(0)
+            .getJSONArray("annotations").getJSONObject(0).getString("custom"))
+        assertTrue(db.listLocalFiles("a").single().has("attachment_manifest"))
+        assertFalse(db.listLocalFiles("b").single().has("attachment_manifest"))
+        assertTrue(db.listLocalFilePaths("a").contains("/legacy-derived.utf8"))
+        assertFalse(db.listLocalFilePaths("b").contains("/legacy-derived.utf8"))
+        assertTrue(db.listAllLocalFilePaths().contains("/legacy-derived.utf8"))
+        assertFalse(db.persistLocalArtifactAttachment("missing", source.path, source.length(), manifest.sha256, manifest))
+    }
+
+    @Test fun legacyOpenAiSourcesStayChatScopedAcrossReopenWithoutNormalizationWrites() {
+        val text = file("legacy-raw.bin").apply { writeText("Точная цитата 😀 из старого вложения", Charsets.UTF_8) }
+        val json = file("legacy-json.bin").apply { writeText("{\"value\":42}") }
+        val pdf = file("legacy-pdf.bin")
+        val badUtf8 = file("legacy-encoding.bin").apply { writeBytes(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0x41)) }
+        val foreign = file("foreign-source.txt")
+        seed("a", listOf(message().put("role", "user")
+            .put("file_paths", JSONArray().put(text.path).put(json.path).put(pdf.path).put(badUtf8.path))
+            .put("file_names", JSONArray().put("Заметки.md").put("payload").put("report.pdf").put("legacy.txt"))
+            .put("file_mimes", JSONArray().put("text/markdown").put("application/json").put("text/plain").put("text/plain"))))
+        seed("b", listOf(message().put("role", "user").put("file_paths", JSONArray().put(foreign.path))
+            .put("file_names", JSONArray().put("foreign.txt")).put("file_mimes", JSONArray().put("text/plain"))))
+        fun diskFiles() = context.filesDir.walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toSet()
+        val before = diskFiles()
+        repeat(2) {
+            val sources = LocalEvidenceSources.forChat(context, "a")
+            assertEquals(setOf(text.path, json.path, badUtf8.path), sources.map { it.path }.toSet())
+            assertEquals("Заметки.md", sources.single { it.path == text.path }.name)
+            assertEquals("application/json", sources.single { it.path == json.path }.mime)
+            assertTrue(sources.all { it.textPath == null })
+            assertTrue(LocalEvidenceSources.forChat(context, "missing").isEmpty())
+            assertEquals(setOf(foreign.path), LocalEvidenceSources.forChat(context, "b").map { it.path }.toSet())
+            assertEquals(0L, LocalEvidenceVerifier.quotes("Точная цитата", sources.filter { it.path == text.path }).matches.single().offset)
+            assertTrue(LocalEvidenceVerifier.quotes("anything", sources.filter { it.path == badUtf8.path }).incomplete)
+            assertEquals(before, diskFiles())
+            if (it == 0) { db.close(); db = ChatDatabase(context) }
+        }
+    }
+
 }

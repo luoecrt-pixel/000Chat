@@ -76,7 +76,11 @@ object OpenRouterResponseRuntime {
     private fun annotations(artifacts: List<JSONObject>) = JSONArray().apply {
         artifacts.forEach { a -> put(JSONObject().put("type", "local_file").put("state", "READY")
             .put("filename", JsonProtocol.string(a, "filename")).put("local_path", JsonProtocol.string(a, "path"))
-            .put("mime_type", a.optString("mime_type")).put("size_bytes", a.optLong("size_bytes"))) }
+            .put("mime_type", a.optString("mime_type")).put("size_bytes", a.optLong("size_bytes")).apply {
+                listOf("sha256", "patch_diff", "patch_diff_truncated", "diff_path", "patch_diff_path", "source_path", "source_file_id", "source_sha256").forEach { key ->
+                    a.opt(key)?.let { put(key, JsonProtocol.copy(it)) }
+                }
+            }) }
     }
     private fun run(item: Work) {
         val r = item.request
@@ -130,8 +134,14 @@ object OpenRouterResponseRuntime {
             if (OpenRouterClaudeRoute.isClaude(r.model)) diagnostics.log("openrouter_route", mapOf(
                 "request_id" to r.requestId, "model" to r.model, "route" to r.claudeRoute.preference,
                 "image_base64_limit" to r.claudeRoute.imageBase64Limit, "request_byte_limit" to r.claudeRoute.requestByteLimit))
-            val fileTools = LocalFileTools(r.attachments, ::active)
-            val existingCanonicalPaths = r.attachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
+            val verifiedAttachments = r.attachments.map { attachment ->
+                if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
+                if (attachment.kind in setOf("text", "document", "table"))
+                    LocalArtifactAttachmentResolver.resolveForTools(item.context, attachment) else attachment
+            }
+            verifiedAttachments.filter { it !in item.runtimeAttachments }.forEach(item.runtimeAttachments::add)
+            val fileTools = LocalFileTools(verifiedAttachments, ::active)
+            val existingCanonicalPaths = verifiedAttachments.mapNotNull { runCatching { File(it.path).canonicalPath }.getOrNull() }.toMutableSet()
             db.listLocalFiles(r.chatId).forEach { a ->
                 if (!active()) throw java.io.IOException("Подготовка файлов остановлена")
                 val rawPath = JsonProtocol.nonBlank(a, "path") ?: return@forEach
@@ -139,22 +149,17 @@ object OpenRouterResponseRuntime {
                 if (!file.isFile) return@forEach
                 val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return@forEach
                 if (!existingCanonicalPaths.add(canonical)) return@forEach
-                val mime = JsonProtocol.string(a, "mime_type")
-                val name = JsonProtocol.string(a, "filename", file.name)
                 try {
-                    val classified = if (mime.isNotBlank()) {
-                        OpenRouterAttachmentStore.classifyLocalFile(item.context, file, name, mime)
-                    } else {
-                        OpenRouterAttachmentStore.classifyLocalFile(item.context, file, name)
-                    }
+                    val classified = LocalArtifactAttachmentResolver.resolve(item.context, db, r.chatId, a)
                     item.runtimeAttachments.add(classified)
                     fileTools.register(classified)
                 } catch (error: Exception) {
-                    if (!active() || error is java.util.concurrent.CancellationException) throw error
-                    // Unsupported or binary local artifacts are not registered as text tools.
+                    if (!active() || error is java.util.concurrent.CancellationException ||
+                        a.has("attachment_manifest") || a.has("attachment")) throw error
                 }
             }
             val artifactTools = LocalArtifactToolExecutor(item.context)
+            var artifactCall = 0
             if (r.github) {
                 github = GitHubToolExecutor(secure, { r.githubRepo }, { r.githubBranches },
                     { name, args -> OpenRouterUiBridge.confirm(r.chatId, r.requestId, name, args) },
@@ -172,22 +177,29 @@ object OpenRouterResponseRuntime {
                 shouldContinue = ::active,
                 executeTool = { name, args ->
                     val response = try { when {
-                        name == "create_local_text_file" -> {
-                            val a = artifactTools.createTextFile(args)
-                            if (!db.registerLocalArtifact(r.chatId, r.requestId, a)) {
-                                File(a.getString("path")).delete(); throw java.io.IOException("Чат удалён")
+                        name == "create_local_text_file" || name == "patch_local_file" -> {
+                            if (!active()) throw java.io.IOException("Запрос остановлен")
+                            val callId = "local_artifact_${artifactCall++}"
+                            val argumentsSha = StreamingJsonRequestBody.sha256(args)
+                            val a = (if (name == "patch_local_file") artifactTools.patchLocalFile(args,
+                                r.attachments + item.runtimeAttachments, active = ::active,
+                                artifactKey = "${r.chatId}\u0000${r.requestId}\u0000$callId")
+                                else artifactTools.createTextFile(args))
+                                .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", callId)
+                            val registered = db.registerLocalArtifactToolResultIfActive(r.chatId, r.requestId, callId, a)
+                            if (registered == null || JsonProtocol.string(registered, "path") != JsonProtocol.string(a, "path")) {
+                                val durable = db.getLocalArtifactToolResult(r.chatId, r.requestId, callId)
+                                if (durable?.let { JsonProtocol.string(it, "path") } != JsonProtocol.string(a, "path")) {
+                                    File(a.getString("path")).delete()
+                                    JsonProtocol.nonBlank(a, "patch_diff_path")?.let { File(it).delete() }
+                                }
                             }
-                            artifacts.add(a)
-                            val file = File(a.getString("path"))
-                            val f = OpenRouterAttachmentStore.classifyLocalFile(
-                                item.context,
-                                file,
-                                a.getString("filename"),
-                                a.getString("mime_type")
-                            )
+                            if (registered == null) throw java.io.IOException("Запрос остановлен")
+                            artifacts.add(registered)
+                            val f = OpenRouterLocalAttachment.fromJson(registered.getJSONObject("attachment"))
                             item.runtimeAttachments.add(f)
                             fileTools.register(f)
-                            a.put("file_id", f.id).toString()
+                            LocalArtifactToolExecutor.toolResult(registered).toString()
                         }
                         name in LocalFileTools.names -> fileTools.execute(name, args)
                         r.github && github != null -> github!!.execute(name, args)
