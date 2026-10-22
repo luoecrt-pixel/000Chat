@@ -128,6 +128,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private var localEvidenceEligible = false
     private var localEvidencePresencePending = false
     private var localEvidencePresenceVersion = 0L
+    private var localEvidenceSourceSession: LocalEvidenceSourceSession? = null
     // Preparation finishes in picker order, rather than whichever image decodes first.
     // Reuse the Activity executor so response work stays independent and teardown
     // still owns every attachment task; a failed item does not block later items.
@@ -505,6 +506,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
 
     override fun onDestroy() {
+        localEvidenceSourceSession?.invalidate()
         retainPendingScrollAnchor()
         scrollCallbacksStopped = true
         cancelScrollRestore()
@@ -889,7 +891,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             addOnChildAttachStateChangeListener(object : RecyclerView.OnChildAttachStateChangeListener {
                 override fun onChildViewAttachedToWindow(view: View) {
                     if (!messageAdapter.isListCommitPending()) view.findViewWithTag<RichResponsePanel>("rich-response")
-                        ?.setEvidenceEligible(localEvidenceSnapshotChatId == currentChatId() && localEvidenceEligible)
+                        ?.let { applyLocalEvidenceState(it) }
                 }
                 override fun onChildViewDetachedFromWindow(view: View) = Unit
             })
@@ -7298,12 +7300,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private fun refreshLocalEvidenceEligibility() {
         val sourceChatId = currentChatId()
         val version = ++localEvidencePresenceVersion
+        localEvidenceSourceSession?.invalidate()
+        localEvidenceSourceSession = null
         if (localEvidenceSnapshotChatId != sourceChatId) localEvidenceEligible = false
         localEvidenceSnapshotChatId = sourceChatId
         if (sourceChatId.isBlank() || executor.isShutdown) {
             localEvidencePresencePending = false
             return
         }
+        evidenceSourceSession(sourceChatId)
         val generation = activeResponseState.state.generation
         localEvidencePresencePending = true
         executor.execute {
@@ -7323,9 +7328,23 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
     private fun applyLocalEvidenceEligibility() {
         if (!::scroll.isInitialized || !::messageAdapter.isInitialized || messageAdapter.isListCommitPending()) return
-        val eligible = localEvidenceSnapshotChatId == currentChatId() && localEvidenceEligible
         for (index in 0 until scroll.childCount)
-            scroll.getChildAt(index).findViewWithTag<RichResponsePanel>("rich-response")?.setEvidenceEligible(eligible)
+            scroll.getChildAt(index).findViewWithTag<RichResponsePanel>("rich-response")?.let(::applyLocalEvidenceState)
+    }
+
+    private fun evidenceSourceSession(chatId: String): LocalEvidenceSourceSession {
+        localEvidenceSourceSession?.takeIf { it.chatId == chatId && it.version == localEvidencePresenceVersion }?.let { return it }
+        localEvidenceSourceSession?.invalidate()
+        return LocalEvidenceSourceSession(chatId, localEvidencePresenceVersion, executor) { capturedChat ->
+            localEvidenceSourcesHookForTests?.invoke() ?: LocalEvidenceSources.forChat(applicationContext, capturedChat)
+        }.also { localEvidenceSourceSession = it }
+    }
+
+    private fun applyLocalEvidenceState(panel: RichResponsePanel) {
+        val chatId = currentChatId()
+        val session = evidenceSourceSession(chatId)
+        panel.setEvidenceSources(session.version, session::sources)
+        panel.setEvidenceEligible(localEvidenceSnapshotChatId == chatId && localEvidenceEligible)
     }
 
     private fun restoreAttachmentSelectionFromMessage(message:JSONObject){
@@ -8937,6 +8956,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
 
         if (!item.user) {
             val sourceChatId = currentChatId()
+            val evidenceSession = evidenceSourceSession(sourceChatId)
             card.addView(RichResponsePanel(this,
                 saveFile = { block -> saveTaggedResponseFile(sourceChatId, item, block) },
                 continueAnswer = {
@@ -8950,8 +8970,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     }
                 },
                 onAsyncLayoutCommitted = { onBubbleAsyncLayoutCommitted(sourceChatId, item.id, card) },
-                evidenceSources = { localEvidenceSourcesHookForTests?.invoke() ?: LocalEvidenceSources.forChat(applicationContext, sourceChatId) },
-                evidenceEligible = localEvidenceSnapshotChatId == sourceChatId && localEvidenceEligible))
+                evidenceSources = evidenceSession::sources,
+                evidenceEligible = localEvidenceSnapshotChatId == sourceChatId && localEvidenceEligible,
+                evidenceSourceVersion = evidenceSession.version))
         }
 
         val message=item.message

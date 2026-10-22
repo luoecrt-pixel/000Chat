@@ -17,7 +17,7 @@ import java.util.concurrent.Future
 
 /** Local, explicit evidence checks; no network or model call, with lifecycle-owned work. */
 class LocalEvidencePanel(context: Context, private val message: JSONObject,
-    private val sources: () -> List<OpenRouterLocalAttachment>,
+    sources: () -> List<OpenRouterLocalAttachment>,
     private val onContentChanged: (() -> Unit)? = null) : LinearLayout(context) {
     companion object { private val workers = Executors.newFixedThreadPool(2) }
     private val main = Handler(Looper.getMainLooper())
@@ -30,14 +30,16 @@ class LocalEvidencePanel(context: Context, private val message: JSONObject,
     private var initialJob: Future<*>? = null
     private var detached = false
     private var available = emptyList<OpenRouterLocalAttachment>()
+    private var sourceProvider = sources
     fun isLoading(): Boolean = loading
     init { orientation = VERTICAL; loadInitial() }
     private fun loadInitial() {
         if (detached || initialLoaded || initialJob != null) return
         loading = true
         val token = generation
+        val provider = sourceProvider
         initialJob = workers.submit {
-            val result = runCatching { sources() to LocalEvidenceVerifier.coverage(message) }
+            val result = runCatching { provider() to LocalEvidenceVerifier.coverage(message) }
             main.post {
                 if (detached || token != generation) return@post
                 initialJob = null; initialLoaded = true; loading = false; removeAllViews()
@@ -46,11 +48,13 @@ class LocalEvidencePanel(context: Context, private val message: JSONObject,
                     for (entry in coverage.filter { it.partial }) {
                         val name = files.firstOrNull { it.id == entry.fileId }?.name ?: "Файл"
                         val amount = entry.percent?.let { " ($it%)" } ?: " (доля неизвестна)"
-                        addView(label("⚠️ $name: по журналу прочитана только часть$amount. Полный охват исходника не подтверждён."))
+                        val table = entry.tableScopeDescription?.let { " $it" }.orEmpty()
+                        addView(label("⚠️ $name: по журналу прочитана только часть$amount. Полный охват исходника не подтверждён.$table"))
                     }
                     for (entry in coverage.filter { it.unknown }) {
                         val name = files.firstOrNull { it.id == entry.fileId }?.name ?: "Файл"
-                        addView(label("$name: полнота чтения неизвестна по журналу."))
+                        val table = entry.tableScopeDescription
+                        addView(label(if (table != null) "⚠️ $name: $table" else "$name: полнота чтения неизвестна по журналу."))
                     }
                     if (files.isNotEmpty()) addView(action("🔍 Проверить цитаты по файлам") { quoteDialog() })
                 }
@@ -58,6 +62,22 @@ class LocalEvidencePanel(context: Context, private val message: JSONObject,
                 requestLayout(); onContentChanged?.invoke()
             }
         }
+    }
+    fun refreshSources(sources: () -> List<OpenRouterLocalAttachment>) {
+        cancelWork()
+        sourceProvider = sources
+        initialLoaded = false; available = emptyList(); removeAllViews()
+        if (!detached) loadInitial()
+    }
+    fun dispose() {
+        detached = true
+        cancelWork()
+    }
+    private fun cancelWork() {
+        generation++; loading = false
+        initialJob?.cancel(true); initialJob = null
+        jobs.forEach { it.cancel(true) }; jobs.clear()
+        dialogs.toList().forEach { it.dismiss() }; dialogs.clear()
     }
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
@@ -147,10 +167,7 @@ class LocalEvidencePanel(context: Context, private val message: JSONObject,
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { load() }; load()
     }
     override fun onDetachedFromWindow() {
-        detached = true; generation++; loading = false
-        initialJob?.cancel(true); initialJob = null
-        jobs.forEach { it.cancel(true) }; jobs.clear()
-        dialogs.toList().forEach { it.dismiss() }; dialogs.clear()
+        dispose()
         super.onDetachedFromWindow()
     }
 }
