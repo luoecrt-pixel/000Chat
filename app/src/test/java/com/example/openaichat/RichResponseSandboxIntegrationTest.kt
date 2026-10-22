@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import android.widget.Button
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -16,6 +17,10 @@ import org.robolectric.shadows.ShadowAlertDialog
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], shadows = [ShadowInteractiveSandboxWebViewFeature::class, ShadowInteractiveSandboxWebViewCompat::class])
 class RichResponseSandboxIntegrationTest {
+    @Before fun resetWebKitState() {
+        InteractiveSandboxWebKitState.reset()
+    }
+
     private fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
         (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
 

@@ -12,6 +12,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ScrollView
 import android.widget.TextView
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -22,6 +23,11 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], shadows = [ShadowInteractiveSandboxWebViewFeature::class, ShadowInteractiveSandboxWebViewCompat::class])
 class InteractiveSandboxTest {
+    @Before fun resetWebKitState() {
+        // The custom shadow's @Resetter does not isolate these per-test flags.
+        InteractiveSandboxWebKitState.reset()
+    }
+
     private fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
         (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
 
@@ -34,6 +40,41 @@ class InteractiveSandboxTest {
         override fun getRequestHeaders() = emptyMap<String, String>()
     }
 
+    @Test fun documentStartFeatureShadowFollowsConfiguredCapability() {
+        assertTrue(InteractiveSandboxScriptGuard.supported())
+        InteractiveSandboxWebKitState.supported = false
+        assertFalse(InteractiveSandboxScriptGuard.supported())
+        InteractiveSandboxWebKitState.supported = true
+        assertTrue(InteractiveSandboxScriptGuard.supported())
+    }
+
+    @Test fun documentStartInstallationShadowRecordsTheGuardAndPropagatesInjectedFailure() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val web = WebView(controller.get())
+        try {
+            val handler = InteractiveSandboxScriptGuard.install(web)
+            assertEquals(1, InteractiveSandboxWebKitState.installationAttempts)
+            assertEquals(1, InteractiveSandboxWebKitState.installed)
+            assertEquals(InteractiveSandboxScriptGuard.bootstrap, InteractiveSandboxWebKitState.script)
+            assertEquals(setOf("*"), InteractiveSandboxWebKitState.origins)
+            assertFalse(web.settings.javaScriptEnabled)
+            assertNull(Shadows.shadowOf(web).lastLoadedUrl)
+            handler.remove()
+            assertEquals(1, InteractiveSandboxWebKitState.removed)
+
+            InteractiveSandboxWebKitState.installationFailure = true
+            val failure = assertThrows(IllegalStateException::class.java) { InteractiveSandboxScriptGuard.install(web) }
+            assertEquals("Simulated document-start installation failure", failure.message)
+            assertEquals(2, InteractiveSandboxWebKitState.installationAttempts)
+            assertEquals(1, InteractiveSandboxWebKitState.installed)
+            assertFalse(web.settings.javaScriptEnabled)
+            assertNull(Shadows.shadowOf(web).lastLoadedUrl)
+        } finally {
+            web.destroy()
+            controller.pause().stop().destroy()
+        }
+    }
+
     @Test fun unsupportedDocumentStartCapabilityRefusesExecutionAndKeepsCompleteSource() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         try {
@@ -41,6 +82,7 @@ class InteractiveSandboxTest {
             val source = "<script>window.mustNeverRun='😀 исходник';</script>"
             val sandbox = InteractiveSandboxView(controller.get(), source)
             controller.get().setContentView(sandbox); sandbox.start()
+            assertEquals(0, InteractiveSandboxWebKitState.installationAttempts)
             assertTrue(descendants(sandbox).none { it is WebView })
             assertEquals(0, InteractiveSandboxWebKitState.installed)
             assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
@@ -55,6 +97,7 @@ class InteractiveSandboxTest {
             val source = "<script>window.mustNeverRun=true</script>"
             val sandbox = InteractiveSandboxView(controller.get(), source)
             controller.get().setContentView(sandbox); sandbox.start()
+            assertEquals(1, InteractiveSandboxWebKitState.installationAttempts)
             assertEquals(0, InteractiveSandboxWebKitState.installed)
             assertTrue(descendants(sandbox).none { it is WebView })
             assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })

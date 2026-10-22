@@ -14,12 +14,13 @@ import org.robolectric.annotation.Resetter
 internal object InteractiveSandboxWebKitState {
     var supported = true
     var installationFailure = false
+    var installationAttempts = 0
     var installed = 0
     var removed = 0
     var script: String? = null
     var origins: Set<String>? = null
     fun reset() {
-        supported = true; installationFailure = false; installed = 0; removed = 0
+        supported = true; installationFailure = false; installationAttempts = 0; installed = 0; removed = 0
         script = null; origins = null
     }
 }
@@ -40,6 +41,7 @@ class ShadowInteractiveSandboxWebViewCompat {
             allowedOriginRules: Set<String>): ScriptHandler {
             assertFalse("The guard must be installed before enabling JavaScript", web.settings.javaScriptEnabled)
             assertNull("The guard must be installed before loading a document", Shadows.shadowOf(web).lastLoadedUrl)
+            InteractiveSandboxWebKitState.installationAttempts++
             if (InteractiveSandboxWebKitState.installationFailure) error("Simulated document-start installation failure")
             InteractiveSandboxWebKitState.installed++
             InteractiveSandboxWebKitState.script = script
