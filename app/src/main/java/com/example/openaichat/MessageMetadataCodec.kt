@@ -14,7 +14,7 @@ object MessageMetadataCodec {
         "openai_instructions_sha256"
     )
     val arrayKeys = listOf("tool_trace", "openai_protocol_output")
-    val objectKeys = listOf("usage", "openrouter_protocol", "telemetry_summary", "openai_usage_ledger")
+    val objectKeys = listOf("usage", "openrouter_protocol", "telemetry_summary", "openai_usage_ledger", "deepseek_protocol")
     val allKeys: List<String> = textKeys + arrayKeys + objectKeys
 
     fun serialized(message: JSONObject, key: String): String? = when (key) {

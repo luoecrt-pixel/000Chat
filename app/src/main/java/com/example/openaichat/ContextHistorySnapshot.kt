@@ -39,6 +39,13 @@ class ContextHistorySnapshot private constructor(
                     put(OpenRouterLocalAttachment.fromJson(a).toJson())
                 } })
             }
+            message.optJSONObject(DeepSeekProtocolCodec.FIELD)?.let { protocol ->
+                put(DeepSeekProtocolCodec.FIELD, JSONObject().put("version", protocol.optInt("version"))
+                    .put("binding_sha256", JsonProtocol.string(protocol, "binding_sha256"))
+                    .put("input_sha256", JsonProtocol.string(protocol, "input_sha256"))
+                    .put("replayable", protocol.optBoolean("replayable", false))
+                    .put("_context_tail_count", protocol.optJSONArray("tail")?.length() ?: -1))
+            }
             message.optJSONObject("openrouter_protocol")?.let { protocol ->
                 put("openrouter_protocol", JSONObject().put("version", protocol.optInt("version"))
                     .put("binding_sha256", JsonProtocol.string(protocol, "binding_sha256"))

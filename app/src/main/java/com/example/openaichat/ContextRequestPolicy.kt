@@ -6,7 +6,11 @@ import org.json.JSONObject
 /** Small request decisions shared by Send and the read-only context inspector. */
 object ContextRequestPolicy {
     fun model(provider: String, configured: String?): String {
-        val value = configured ?: if (provider == "openrouter") "anthropic/claude-opus-5.5" else "gpt-6-astra"
+        val value = configured ?: when (provider) {
+            "openrouter" -> "anthropic/claude-opus-5.5"
+            "deepseek" -> "deepseek-flash"
+            else -> "gpt-6-astra"
+        }
         return if (provider == "openai") OpenAiInstructionChainPolicy.normalizedModel(value) else value
     }
 
@@ -15,6 +19,10 @@ object ContextRequestPolicy {
             if (github) append(this, GitHubToolCatalog.tools())
             append(this, OpenRouterServerToolCatalog.tools(webSearch, webFetch))
         }
+
+    fun deepSeekTools(github: Boolean): JSONArray = OpenRouterAppToolCatalog.tools().apply {
+        if (github) append(this, GitHubToolCatalog.tools())
+    }
 
     private fun append(target: JSONArray, source: JSONArray) {
         for (i in 0 until source.length()) target.put(source.get(i))

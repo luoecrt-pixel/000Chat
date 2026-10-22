@@ -17,10 +17,15 @@ object BackgroundRecoveryPolicy {
         nowElapsedMs - startedAtElapsedMs >= MAX_RECOVERY_MS
 
     fun isEligibleForResume(active: JSONObject): Boolean =
-        active.optBoolean("background_enabled", true) &&
+        supportsResponsesRecovery(JsonProtocol.nonBlank(active, "provider")) &&
+            active.optBoolean("background_enabled", true) &&
             active.optString("chat_id").isNotBlank() &&
             active.optString("response_id").isNotBlank() &&
             active.optString("request_id").isNotBlank()
+
+    /** Unlabelled legacy Responses requests remain recoverable. Inference providers never are. */
+    fun supportsResponsesRecovery(provider: String?): Boolean =
+        provider.isNullOrBlank() || provider == "openai"
 
     fun actionForHttpStatus(statusCode: Int): BackgroundRecoveryAction = when (statusCode) {
         401, 403 -> BackgroundRecoveryAction.AUTH_FAILURE
