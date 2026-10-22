@@ -111,9 +111,6 @@
 ### 1. [P2] Версии ответа и обратимость
 Альтернативы regenerate/edit и возврат к branch point; сначала pure snapshot/branch contract + DB test.
 
-### 2. [P2] Context Inspector перед Send
-Immutable snapshot model/effort/tools/attachments/IDs/context volume/background mode: что реально уйдёт.
-
 ### 3. [P2] Поиск по истории
 Оценить SQLite FTS5, индексацию/удаление и переход к точному сообщению.
 
