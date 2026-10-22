@@ -20,7 +20,7 @@ import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [ShadowInteractiveSandboxWebViewFeature::class, ShadowInteractiveSandboxWebViewCompat::class])
 class InteractiveSandboxTest {
     private fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup)
         (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
@@ -32,6 +32,33 @@ class InteractiveSandboxTest {
         override fun hasGesture() = false
         override fun getMethod() = method
         override fun getRequestHeaders() = emptyMap<String, String>()
+    }
+
+    @Test fun unsupportedDocumentStartCapabilityRefusesExecutionAndKeepsCompleteSource() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            InteractiveSandboxWebKitState.supported = false
+            val source = "<script>window.mustNeverRun='😀 исходник';</script>"
+            val sandbox = InteractiveSandboxView(controller.get(), source)
+            controller.get().setContentView(sandbox); sandbox.start()
+            assertTrue(descendants(sandbox).none { it is WebView })
+            assertEquals(0, InteractiveSandboxWebKitState.installed)
+            assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
+            assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString().contains("не поддерживает") })
+        } finally { controller.pause().stop().destroy() }
+    }
+
+    @Test fun failedNativeGuardInstallationNeverEnablesOrLoadsTheModelRenderer() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            InteractiveSandboxWebKitState.installationFailure = true
+            val source = "<script>window.mustNeverRun=true</script>"
+            val sandbox = InteractiveSandboxView(controller.get(), source)
+            controller.get().setContentView(sandbox); sandbox.start()
+            assertEquals(0, InteractiveSandboxWebKitState.installed)
+            assertTrue(descendants(sandbox).none { it is WebView })
+            assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
+        } finally { controller.pause().stop().destroy() }
     }
 
     @Test fun sourceCannotEscapeTheOpaqueFrameAndBothPoliciesPermitOnlyInlineCode() {
@@ -62,6 +89,11 @@ class InteractiveSandboxTest {
             assertTrue(descendants(sandbox).none { it is WebView })
             sandbox.start()
             val web = descendants(sandbox).filterIsInstance<WebView>().single()
+            assertEquals(1, InteractiveSandboxWebKitState.installed)
+            assertEquals(setOf("*"), InteractiveSandboxWebKitState.origins)
+            assertEquals(InteractiveSandboxScriptGuard.bootstrap, InteractiveSandboxWebKitState.script)
+            assertTrue(InteractiveSandboxScriptGuard.bootstrap.contains("configurable: false"))
+            assertTrue(InteractiveSandboxScriptGuard.bootstrap.contains("writable: false"))
             assertTrue(web.settings.javaScriptEnabled)
             assertFalse(web.settings.allowFileAccess)
             assertFalse(web.settings.allowContentAccess)
@@ -83,10 +115,59 @@ class InteractiveSandboxTest {
             assertTrue(web.webChromeClient!!.onShowFileChooser(web, { value -> assertNull(value); chooserCalled = true }, null))
             assertTrue(chooserCalled)
             sandbox.close()
+            assertEquals(1, InteractiveSandboxWebKitState.removed)
             assertTrue(descendants(sandbox).none { it is WebView })
             assertEquals(403, client.shouldInterceptRequest(web, request(url, true))!!.statusCode)
             sandbox.start()
             assertTrue(descendants(sandbox).none { it is WebView })
+        } finally { controller.pause().stop().destroy() }
+    }
+
+    @Test fun trustedPreflightWithholdsModelUntilPositiveResultAndIgnoresStaleCallbacks() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val source = "<script>window.uniqueModelPayload='never-in-preflight'</script>"
+            val sandbox = InteractiveSandboxView(controller.get(), source)
+            controller.get().setContentView(sandbox); sandbox.start()
+            val web = descendants(sandbox).filterIsInstance<WebView>().single()
+            val preflight = requireNotNull(Shadows.shadowOf(web).lastLoadedUrl)
+            assertTrue(preflight.endsWith("/preflight.html"))
+            val model = preflight.removeSuffix("preflight.html") + "index.html"
+            val client = web.webViewClient!!
+            val preflightBody = client.shouldInterceptRequest(web, request(preflight, true))!!.data.bufferedReader().readText()
+            assertFalse(preflightBody.contains("uniqueModelPayload"))
+            assertTrue(preflightBody.contains("integral-trusted-rtc-preflight"))
+            assertEquals(403, client.shouldInterceptRequest(web, request(model, true))!!.statusCode)
+            val callback = InteractiveSandboxView::class.java.getDeclaredMethod("onPreflightResult", WebView::class.java, String::class.java)
+                .apply { isAccessible = true }
+            callback.invoke(sandbox, web, "null")
+            assertEquals(preflight, Shadows.shadowOf(web).lastLoadedUrl)
+            callback.invoke(sandbox, web, "true")
+            assertEquals(model, Shadows.shadowOf(web).lastLoadedUrl)
+            assertEquals(403, client.shouldInterceptRequest(web, request(preflight, true))!!.statusCode)
+            val modelBody = client.shouldInterceptRequest(web, request(model, true))!!.data.bufferedReader().readText()
+            assertTrue(modelBody.contains("uniqueModelPayload"))
+            sandbox.close()
+            callback.invoke(sandbox, web, "true")
+            assertTrue(descendants(sandbox).none { it is WebView })
+            assertEquals(403, client.shouldInterceptRequest(web, request(model, true))!!.statusCode)
+        } finally { controller.pause().stop().destroy() }
+    }
+
+    @Test fun rejectedTrustedPreflightDestroysRendererWithoutEverServingModel() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        try {
+            val source = "<script>window.mustNeverRun=true</script>"
+            val sandbox = InteractiveSandboxView(controller.get(), source)
+            controller.get().setContentView(sandbox); sandbox.start()
+            val web = descendants(sandbox).filterIsInstance<WebView>().single()
+            val model = requireNotNull(Shadows.shadowOf(web).lastLoadedUrl).removeSuffix("preflight.html") + "index.html"
+            val client = web.webViewClient!!
+            InteractiveSandboxView::class.java.getDeclaredMethod("onPreflightResult", WebView::class.java, String::class.java)
+                .apply { isAccessible = true }.invoke(sandbox, web, "false")
+            assertTrue(descendants(sandbox).none { it is WebView })
+            assertTrue(descendants(sandbox).filterIsInstance<TextView>().any { it.text.toString() == source })
+            assertEquals(403, client.shouldInterceptRequest(web, request(model, true))!!.statusCode)
         } finally { controller.pause().stop().destroy() }
     }
 

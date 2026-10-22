@@ -1358,7 +1358,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val sourceChat = currentChatId()
         val generation = activeResponseState.state.generation
         val configuration = captureContextConfiguration()
-        val history = chat.map { JsonProtocol.objectCopy(it) }
+        val capturedHistory = ContextHistorySnapshot.capture(chat,
+            if (::messageAdapter.isInitialized) messageAdapter.snapshot() else emptyList())
+        val history = capturedHistory.messages
         val draft = JSONObject().put("role", "user").put("text", input.text.toString().trim()).apply {
             put("file_paths", JSONArray(attachedFilePaths.toList()))
             put("file_names", JSONArray(attachedFileNames.toList()))
@@ -1412,20 +1414,25 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val format = if (configuration.provider == "openrouter")
                     OpenRouterStructuredOutputPolicy.format(configuration.responseFormat, configuration.schema) else null
                 if (configuration.provider == "openrouter") {
-                    val byMessage = history.map { message ->
+                    val durable = chatDb.getChat(sourceChat)?.optJSONArray("messages")
+                    val durableRows = durable?.let { rows -> (0 until rows.length()).mapNotNull { rows.optJSONObject(it) } }.orEmpty()
+                    val exactHistory = capturedHistory.validatedDurableHistory(durableRows)
+                    val prefixHistory = exactHistory.orEmpty()
+                    val byMessage = prefixHistory.map { message ->
                         message.optJSONArray("attachments")?.let { a -> (0 until a.length()).mapNotNull {
                             a.optJSONObject(it)?.let(OpenRouterLocalAttachment::fromJson)
                         } }.orEmpty()
                     }
-                    val requiresPreparation = history.withIndex().any { (index, message) ->
+                    val requiresPreparation = prefixHistory.withIndex().any { (index, message) ->
                         val paths = byMessage[index].map { it.path }.toSet()
                         val legacy = message.optJSONArray("file_paths")
                         (legacy != null && (0 until legacy.length()).any { JsonProtocol.string(legacy, it) !in paths }) ||
                             JsonProtocol.nonBlank(message, "image_path")?.let { it !in paths } == true
                     } || configuration.compatibleImages && byMessage.flatten().any { it.kind == "image" }
-                    if (requiresPreparation) prefixReason = "Точное сравнение префикса ожидает подготовки вложений."
+                    if (exactHistory == null) prefixReason = "Точное сравнение префикса ожидает согласованного сохранённого снимка истории. Текущие настройки и черновик учтены."
+                    else if (requiresPreparation) prefixReason = "Точное сравнение префикса ожидает подготовки вложений."
                     else try {
-                        OpenRouterContextSnapshot.build(history, OpenRouterContextSnapshot.systemContent(configuration.instructions,
+                        OpenRouterContextSnapshot.build(exactHistory, OpenRouterContextSnapshot.systemContent(configuration.instructions,
                             configuration.github, configuration.githubRepo, configuration.githubBranches), byMessage,
                             protocolPrefix = { _, matches -> prefix = matches })
                     } catch (_: java.io.IOException) {

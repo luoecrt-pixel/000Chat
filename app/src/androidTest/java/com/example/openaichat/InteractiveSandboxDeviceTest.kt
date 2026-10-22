@@ -95,7 +95,7 @@ class InteractiveSandboxDeviceTest {
                 }
                 val renderer = web.get()
                 awaitJavascript(scenario, renderer,
-                    "document.readyState==='complete' && document.querySelector('iframe')!==null") { it == "true" }
+                    "location.pathname.endsWith('/index.html') && document.readyState==='complete' && document.querySelector('iframe')!==null") { it == "true" }
                 awaitJavascript(scenario, renderer, """
                     window.__sandboxTestEvidence=null;
                     addEventListener('message',event=>{

@@ -28,6 +28,7 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.webkit.ScriptHandler
 import java.io.ByteArrayInputStream
 import java.util.UUID
 
@@ -39,8 +40,15 @@ class InteractiveSandboxView(
 ) : LinearLayout(context), AutoCloseable {
     private val handler = Handler(Looper.getMainLooper())
     private val documentUrl = InteractiveSandboxDocument.ORIGIN + UUID.randomUUID() + "/index.html"
+    private val preflightUrl = documentUrl.removeSuffix("index.html") + "preflight.html"
+    private enum class Stage { PREFLIGHT, MODEL, CLOSED }
+    @Volatile private var stage = Stage.CLOSED
+    @Volatile private var modelDocument: String? = null
     @Volatile private var renderer: WebView? = null
     @Volatile private var closed = false
+    private var documentStartScript: ScriptHandler? = null
+    private var preflightPoll: Runnable? = null
+    private var preflightEvaluationPending = false
     private val notice = TextView(context).apply {
         text = "JavaScript запускается только здесь, без сети и доступа к данным приложения."
         setTextColor(theme.textSecondary); textSize = 12f
@@ -80,9 +88,17 @@ class InteractiveSandboxView(
             fail("Код слишком велик для песочницы; исходник сохранён полностью."); return
         }
         try {
-            val document = InteractiveSandboxDocument.create(source, theme)
+            if (!InteractiveSandboxScriptGuard.supported()) {
+                fail("WebView не поддерживает безопасный запуск JavaScript. Исходник сохранён полностью.")
+                return
+            }
+            val preflightDocument = InteractiveSandboxDocument.preflight(theme)
+            stage = Stage.PREFLIGHT
             val web = WebView(context)
             renderer = web
+            // Register for every origin/frame while JavaScript is still disabled,
+            // before either the host or opaque srcdoc can begin loading.
+            documentStartScript = InteractiveSandboxScriptGuard.install(web)
             web.apply {
                 setBackgroundColor(theme.assistantBubbleBg)
                 importantForAutofill = IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
@@ -117,7 +133,10 @@ class InteractiveSandboxView(
                     @Deprecated("Legacy navigation is denied too")
                     override fun shouldOverrideUrlLoading(view: WebView?, url: String?) = true
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
-                        if (!closed && renderer === view && request.isForMainFrame && request.method == "GET" && request.url.toString() == documentUrl) {
+                        val expectedUrl = if (stage == Stage.PREFLIGHT) preflightUrl else documentUrl
+                        val document = if (stage == Stage.PREFLIGHT) preflightDocument else modelDocument
+                        if (!closed && stage != Stage.CLOSED && document != null && renderer === view && request.isForMainFrame &&
+                            request.method == "GET" && request.url.toString() == expectedUrl) {
                             return WebResourceResponse("text/html", "UTF-8", 200, "OK", mapOf(
                                 "Cache-Control" to "no-store", "X-Content-Type-Options" to "nosniff",
                                 "Content-Security-Policy" to InteractiveSandboxDocument.HOST_CSP,
@@ -128,7 +147,9 @@ class InteractiveSandboxView(
                         return WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
                     }
                     override fun onPageFinished(view: WebView, url: String?) {
-                        if (!closed && renderer === view && url == documentUrl) {
+                        if (!closed && renderer === view && stage == Stage.PREFLIGHT && url == preflightUrl) {
+                            checkPreflight(view)
+                        } else if (!closed && renderer === view && stage == Stage.MODEL && url == documentUrl) {
                             handler.removeCallbacks(loadTimeout); notice.text = "Офлайн-песочница · исходник сохранён"
                         }
                     }
@@ -142,17 +163,55 @@ class InteractiveSandboxView(
                 }
             }
             addView(web, LayoutParams(-1, (360 * resources.displayMetrics.density).toInt()))
+            preflightPoll = Runnable { checkPreflight(web) }
             handler.postDelayed(loadTimeout, 12_000)
-            web.loadUrl(documentUrl)
+            web.loadUrl(preflightUrl)
         } catch (_: Exception) { fail("Не удалось открыть песочницу. Исходник сохранён полностью.") }
+    }
+
+    private fun checkPreflight(view: WebView) {
+        if (closed || renderer !== view || stage != Stage.PREFLIGHT || preflightEvaluationPending) return
+        preflightEvaluationPending = true
+        view.evaluateJavascript("window.__integralSandboxPreflight === true ? true : (window.__integralSandboxPreflight === false ? false : null)") {
+            onPreflightResult(view, it)
+        }
+    }
+
+    private fun onPreflightResult(view: WebView, value: String?) {
+        if (closed || renderer !== view || stage != Stage.PREFLIGHT) return
+        preflightEvaluationPending = false
+        when (value) {
+            "true" -> {
+                // No untrusted HTML is created or served before actual trusted
+                // code in this engine's opaque frame confirms the guard.
+                modelDocument = InteractiveSandboxDocument.create(source, theme)
+                stage = Stage.MODEL
+                view.loadUrl(documentUrl)
+            }
+            "false" -> fail("WebView не подтвердил изоляцию WebRTC. Исходник сохранён полностью.")
+            else -> preflightPoll?.let { handler.postDelayed(it, 16L) }
+        }
     }
 
     private fun destroyRenderer() {
         handler.removeCallbacks(loadTimeout)
-        val old = renderer ?: return
+        preflightPoll?.let(handler::removeCallbacks)
+        preflightPoll = null
+        preflightEvaluationPending = false
+        stage = Stage.CLOSED
+        modelDocument = null
+        val script = documentStartScript
+        documentStartScript = null
+        val old = renderer
         renderer = null
+        if (old == null) { script?.remove(); return }
         (old.parent as? ViewGroup)?.removeView(old)
-        try { old.stopLoading() } finally { old.destroy() }
+        try {
+            old.settings.javaScriptEnabled = false
+            old.stopLoading()
+        } finally {
+            try { script?.remove() } finally { old.destroy() }
+        }
     }
     private fun fail(message: String) {
         destroyRenderer(); notice.text = message; originalScroll.visibility = VISIBLE

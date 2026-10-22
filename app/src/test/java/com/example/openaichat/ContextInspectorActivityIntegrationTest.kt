@@ -23,6 +23,7 @@ import org.robolectric.shadows.ShadowDialog
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
@@ -173,6 +174,93 @@ class ContextInspectorActivityIntegrationTest {
             assertFalse("The previous OpenAI replay mode must not remain", badge.text.toString().contains("replay"))
         } finally {
             preparation.set(activity, null)
+            release.countDown()
+        }
+    }
+
+    private class TrackedHistoryObject(
+        private val keysVisits: AtomicInteger,
+        private val stringVisits: AtomicInteger,
+        private val mainVisits: AtomicInteger
+    ) : JSONObject() {
+        override fun keys(): MutableIterator<String> {
+            keysVisits.incrementAndGet()
+            if (Looper.myLooper() == Looper.getMainLooper()) mainVisits.incrementAndGet()
+            return super.keys()
+        }
+        override fun toString(): String {
+            stringVisits.incrementAndGet()
+            if (Looper.myLooper() == Looper.getMainLooper()) mainVisits.incrementAndGet()
+            return super.toString()
+        }
+    }
+
+    @Test fun actualInspectorCapturesHeadersWithoutTraversing2010LiveProtocolObjects() {
+        start("saved.txt", "text/plain")
+        ShadowDialog.getLatestDialog()?.dismiss()
+        val keysVisits = AtomicInteger()
+        val stringVisits = AtomicInteger()
+        val mainVisits = AtomicInteger()
+        @Suppress("UNCHECKED_CAST")
+        val live = field("chat") as MutableList<JSONObject>
+        // Build the fixture outside the checked request invocation: ten messages
+        // and two thousand typed protocol outputs, none persisted to SQLite.
+        val fixture = (0 until 10).map { messageIndex ->
+            val output = JSONArray().apply { repeat(200) { index ->
+                put(TrackedHistoryObject(keysVisits, stringVisits, mainVisits)
+                    .put("type", "function_call_output").put("call_id", "$messageIndex-$index")
+                    .put("output", "immutable source"))
+            } }
+            TrackedHistoryObject(keysVisits, stringVisits, mainVisits)
+                .put("role", "assistant").put("provider", "openrouter").put("status", "completed")
+                .put("text", "captured answer $messageIndex").put("openai_protocol_output", output)
+                .put("openrouter_protocol", JSONObject().put("version", 1).put("binding_sha256", "saved-binding")
+                    .put("tail", JSONArray().put(JSONObject().put("role", "assistant").put("content", "signed tail"))))
+        }
+        live.clear(); live.addAll(fixture)
+        prefs.edit().putString("provider", "openrouter").putString("model", "anthropic/claude-captured").commit()
+        val draft = "captured draft"
+        (field("input") as EditText).setText(draft)
+        val expectedCharacters = fixture.sumOf { JsonProtocol.string(it, "text").length } + draft.length
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val shown = CountDownLatch(1)
+        val preparation = MainActivity::class.java.getDeclaredField("contextInspectionPreparationHook").apply { isAccessible = true }
+        val completion = MainActivity::class.java.getDeclaredField("contextInspectionCompletedHook").apply { isAccessible = true }
+        preparation.set(activity, { entered.countDown(); assertTrue(release.await(5, TimeUnit.SECONDS)) })
+        completion.set(activity, { shown.countDown() })
+        try {
+            assertEquals(Looper.getMainLooper(), Looper.myLooper())
+            MainActivity::class.java.getDeclaredMethod("requestContextSnapshot", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(activity, true)
+            assertEquals("Capture must not enumerate the live protocol graph", 0, keysVisits.get())
+            assertEquals("Capture must not serialize live message or protocol objects", 0, stringVisits.get())
+            assertEquals("No recursive graph work may run on UI", 0, mainVisits.get())
+            assertTrue("The real executor must reach its preparation boundary", entered.await(5, TimeUnit.SECONDS))
+            fixture.first().put("text", "later UI mutation")
+            fixture.first().getJSONArray("openai_protocol_output").getJSONObject(0).put("output", "later protocol mutation")
+            prefs.edit().putString("model", "anthropic/claude-later").commit()
+            (field("input") as EditText).setText("later draft")
+            preparation.set(activity, null)
+            release.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (shown.count > 0 && System.nanoTime() < deadline) {
+                shadowOf(Looper.getMainLooper()).idle()
+                shown.await(5, TimeUnit.MILLISECONDS)
+            }
+            assertEquals("Captured inspection must complete", 0L, shown.count)
+            val details = ShadowDialog.getLatestDialog().findViewById<android.view.View>(android.R.id.content)
+                .findViewWithTag<TextView>("context-inspector-details").text.toString()
+            assertTrue(details.contains("anthropic/claude-captured"))
+            assertFalse(details.contains("anthropic/claude-later"))
+            assertTrue(details.contains("История: 11 сообщений · $expectedCharacters символов"))
+            assertTrue("Unsaved UI history must not be replaced by older SQLite rows",
+                details.contains("ожидает согласованного сохранённого снимка истории"))
+            assertEquals("Worker must not traverse the live UI graph either", 0, keysVisits.get())
+            assertEquals(0, stringVisits.get())
+        } finally {
+            preparation.set(activity, null)
+            completion.set(activity, null)
             release.countDown()
         }
     }

@@ -74,7 +74,7 @@ object ContextStatusPolicy {
                 previous?.optString("protocol_context_state") == "invalidated" -> "Подписанная история сброшена после изменения контекста."
                 protocol == null -> "Сохранённой подписанной привязки нет."
                 protocol.optInt("version") != 1 -> "Версия сохранённого протокола не поддерживается."
-                protocol.optJSONArray("tail")?.length()?.let { it > 0 } != true -> "В сохранённом протоколе нет воспроизводимой истории."
+                (protocol.optJSONArray("tail")?.length() ?: protocol.optInt("_context_tail_count", -1)) <= 0 -> "В сохранённом протоколе нет воспроизводимой истории."
                 saved == null -> "Сохранённой подписанной привязки нет."
                 saved == expectedOpenRouterBinding -> "Привязка модели, маршрута и инструментов сохранена."
                 else -> "Привязка изменилась: модель, аккаунт, маршрут, формат или инструменты."
