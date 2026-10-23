@@ -127,7 +127,9 @@ class GitHubToolExecutor(
                 } else {
                     BoundedResponseDecoder.readErrorBody(httpResponse.body)
                 }
-                if (code != 403 && code != 429) return code to body
+                // A guarded write gets one application-level attempt, including explicit
+                // rate-limit/refusal responses. Retrying can duplicate an external effect.
+                if (guardedWrite || (code != 403 && code != 429)) return code to body
                 val retryMs = httpResponse.header("Retry-After")?.toLongOrNull()
                     ?.coerceIn(0L, 10L)?.times(1000L) ?: 750L * (attempt + 1)
                 try {

@@ -280,10 +280,20 @@ object OpenRouterResponseRuntime {
                             if (!active()) throw java.io.IOException("Запрос остановлен")
                             val callId = "local_artifact_${artifactCall++}"
                             val argumentsSha = StreamingJsonRequestBody.sha256(args)
+                            val artifactKey = "${r.chatId}\u0000${r.requestId}\u0000$callId"
                             val a = (if (name == "patch_local_file") artifactTools.patchLocalFile(args,
                                 r.attachments + item.runtimeAttachments, active = ::active,
-                                artifactKey = "${r.chatId}\u0000${r.requestId}\u0000$callId")
-                                else artifactTools.createTextFile(args))
+                                artifactKey = artifactKey)
+                                else if (isDeepSeek) {
+                                    // Commit the exact prospective file identity before publishing any bytes.
+                                    // Recovery verifies that identity; it never executes the tool again.
+                                    val intent = artifactTools.prepareCreateTextFile(args, artifactKey)
+                                        .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", callId)
+                                    if (!db.saveLocalArtifactIntentIfActive(r.chatId, r.requestId, callId, intent) || !active()) {
+                                        throw java.util.concurrent.CancellationException("DeepSeek create intent owner changed")
+                                    }
+                                    artifactTools.createTextFile(args, artifactKey)
+                                } else artifactTools.createTextFile(args))
                                 .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", callId)
                             // Keep confirmed effects reachable even when persisting the
                             // protocol or the active-owner registration subsequently fails.

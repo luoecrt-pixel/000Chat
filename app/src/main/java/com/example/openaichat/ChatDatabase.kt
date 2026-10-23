@@ -174,6 +174,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         super.onOpen(db)
         ensureLocalArtifactsTable(db)
         ensureTelemetryAndCostColumns(db)
+        recoverPublishedArtifactIntentsInDb(db)
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -2865,6 +2866,12 @@ data class ExistingMessageRow(
             created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, request_id),
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifact_intents (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, call_id TEXT NOT NULL,
+            metadata TEXT NOT NULL, created_at INTEGER NOT NULL,
+            PRIMARY KEY(chat_id, request_id, call_id),
+            FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifacts (
             path TEXT PRIMARY KEY NOT NULL, chat_id TEXT NOT NULL, request_id TEXT NOT NULL,
             created_at INTEGER NOT NULL, metadata TEXT NOT NULL,
@@ -2953,6 +2960,87 @@ data class ExistingMessageRow(
     ).use { c -> if (c.moveToFirst()) JSONObject(c.getString(0)) else null }
     fun clearOpenRouterCheckpoint(chatId: String, requestId: String) {
         writableDatabase.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
+    }
+
+    /** Persist the planned identity before a file-producing DeepSeek operation writes any bytes. */
+    fun saveLocalArtifactIntentIfActive(chatId: String, requestId: String, callId: String, metadata: JSONObject): Boolean {
+        if (chatId.isBlank() || requestId.isBlank() || callId.isBlank()) return false
+        require(metadata.optString("tool_name") == "create_local_text_file" && metadata.optString("tool_call_id") == callId)
+        require(JsonProtocol.nonBlank(metadata, "arguments_sha256") != null && verifiedIntentPath(metadata) != null)
+        require(StreamingJsonRequestBody.countBytes(metadata) <= 256 * 1024) { "Artifact intent metadata is too large" }
+        var saved = false
+        writableDatabase.transaction { db ->
+            val owns = db.rawQuery("""SELECT 1 FROM $CHAT_TABLE c JOIN $REQUEST_ACCOUNTING_TABLE a
+                ON a.chat_id=c.id AND a.local_request_id=c.active_request_id
+                WHERE c.id=? AND c.active_request_id=? AND a.provider='deepseek' AND a.local_status='running'""",
+                arrayOf(chatId, requestId)).use { it.moveToFirst() }
+            if (!owns) return@transaction
+            val prior = SqliteLargeTextQuery.query(db, "local_artifact_intents", arrayOf("metadata"),
+                "chat_id=? AND request_id=? AND call_id=?", arrayOf(chatId, requestId, callId), null, null, null,
+                "1", arrayOf("chat_id", "request_id", "call_id")).use { if (it.moveToFirst()) it.getString(0) else null }
+            if (prior != null) {
+                check(prior == metadata.toString()) { "Artifact intent identity changed" }
+                saved = true
+            } else {
+                db.insertOrThrow("local_artifact_intents", null, ContentValues().apply {
+                    put("chat_id", chatId); put("request_id", requestId); put("call_id", callId)
+                    put("metadata", metadata.toString()); put("created_at", System.currentTimeMillis())
+                })
+                saved = true
+            }
+        }
+        return saved
+    }
+
+    /** Validate only app-owned generated paths and precommitted hashes; never trust arbitrary filesystem paths. */
+    private fun verifiedIntentPath(metadata: JSONObject): java.io.File? {
+        val rawPath = JsonProtocol.nonBlank(metadata, "path") ?: return null
+        val sha = JsonProtocol.nonBlank(metadata, "sha256") ?: return null
+        if (!Regex("[0-9a-f]{64}").matches(sha) || metadata.optLong("size_bytes", -1L) < 0L) return null
+        val file = java.io.File(rawPath)
+        val directory = java.io.File(appContext.filesDir, "generated").canonicalFile
+        if (file.canonicalFile.parentFile != directory) return null
+        val attachment = metadata.optJSONObject("attachment") ?: return null
+        if (JsonProtocol.string(attachment, "path") != rawPath || JsonProtocol.string(attachment, "sha256") != sha) return null
+        return file
+    }
+
+    /** Recover metadata for an already published complete file, never execute or reconstruct the tool operation. */
+    private fun recoverPublishedArtifactIntentsInDb(db: SQLiteDatabase) {
+        val pending = mutableListOf<Triple<String, String, Pair<String, JSONObject>>>()
+        SqliteLargeTextQuery.query(db, "local_artifact_intents", arrayOf("chat_id", "request_id", "call_id", "metadata"),
+            null, null, null, null, "created_at ASC", keyColumns = arrayOf("chat_id", "request_id", "call_id")).use { c ->
+            while (c.moveToNext()) {
+                val metadata = try { JSONObject(c.getString(3)) } catch (_: org.json.JSONException) { continue }
+                pending += Triple(c.getString(0), c.getString(1), Pair(c.getString(2), metadata))
+            }
+        }
+        for ((chatId, requestId, planned) in pending) {
+            val (callId, metadata) = planned
+            val file = try { verifiedIntentPath(metadata) } catch (_: java.io.IOException) { null } ?: continue
+            if (!file.isFile || file.length() != metadata.getLong("size_bytes")) continue
+            val actualSha = try { LocalUtf8FilePatch.sha256(file) } catch (_: java.io.IOException) { null }
+            if (actualSha != metadata.getString("sha256")) continue
+            db.transaction { sql ->
+                val exists = sql.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(chatId), null, null, null, "1").use { it.moveToFirst() }
+                if (!exists) return@transaction
+                val previous = sql.query("local_artifacts", arrayOf("chat_id", "request_id"), "path=?", arrayOf(file.path),
+                    null, null, null, "1").use { if (it.moveToFirst()) Pair(it.getString(0), it.getString(1)) else null }
+                check(previous == null || previous == Pair(chatId, requestId)) { "Artifact recovery ownership changed" }
+                if (previous == null) sql.insertOrThrow("local_artifacts", null, ContentValues().apply {
+                    put("path", file.path); put("chat_id", chatId); put("request_id", requestId)
+                    put("created_at", System.currentTimeMillis()); put("metadata", metadata.toString())
+                })
+                readCheckpointInDb(sql, "request_recovery_archive", "recovery_message", chatId, requestId)?.let { archive ->
+                    if (archive.optString("provider") == "deepseek") {
+                        archive.put("confirmed_artifacts", confirmedArtifactsInDb(sql, chatId, requestId))
+                        sql.update("request_recovery_archive", ContentValues().apply { put("recovery_message", archive.toString()) },
+                            "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
+                    }
+                }
+                sql.delete("local_artifact_intents", "chat_id=? AND request_id=? AND call_id=?", arrayOf(chatId, requestId, callId))
+            }
+        }
     }
 
     /** Durable even if a tool succeeded just before Stop consumed response ownership. */
@@ -3155,6 +3243,7 @@ data class ExistingMessageRow(
                 put("path", value.getString("path")); put("chat_id", chatId); put("request_id", requestId)
                 put("created_at", System.currentTimeMillis()); put("metadata", value.toString())
             })
+            sql.delete("local_artifact_intents", "chat_id=? AND request_id=? AND call_id=?", arrayOf(chatId, requestId, callId))
             committed = value
         }
         return committed

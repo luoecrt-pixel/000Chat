@@ -55,4 +55,34 @@ class DeepSeekGitHubWriteSafetyTest {
             } finally { executor.close() }
         }
     }
+    @Test fun guardedRateLimitedWriteDoesNotConsumeQueuedSuccess() {
+        assertGuardedRefusalIsSingleAttempt(429)
+    }
+
+    @Test fun guardedForbiddenWriteDoesNotConsumeQueuedSuccess() {
+        assertGuardedRefusalIsSingleAttempt(403)
+    }
+
+    private fun assertGuardedRefusalIsSingleAttempt(status: Int) {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(status).setHeader("Retry-After", "0")
+                .setBody("{\"message\":\"synthetic refusal\"}"))
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{\"id\":2}"))
+            server.start()
+            val executor = GitHubToolExecutor(SecureStore(RuntimeEnvironment.getApplication()),
+                { "owner/repo" }, { setOf("main") }, { _, _ -> true }, { _, _ -> },
+                failOnUncertainWrite = true)
+            try {
+                val call = GitHubToolExecutor::class.java.getDeclaredMethod("call", Request::class.java)
+                    .apply { isAccessible = true }
+                val result = call.invoke(executor, Request.Builder().url(server.url("/write"))
+                    .post("{\"body\":\"synthetic\"}".toRequestBody()).build()) as Pair<*, *>
+                assertEquals(status, result.first)
+                assertEquals("{\"message\":\"synthetic refusal\"}", result.second)
+                assertEquals(1, server.requestCount)
+                assertEquals("POST", server.takeRequest().method)
+            } finally { executor.close() }
+        }
+    }
+
 }

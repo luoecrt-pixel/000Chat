@@ -26,40 +26,91 @@ class LocalArtifactToolExecutor(private val context: Context) {
         }
     }
 
-    fun createTextFile(arguments: JSONObject): JSONObject {
+    /** Durable intent metadata, computed without creating a directory or writing file bytes. */
+    fun prepareCreateTextFile(arguments: JSONObject, artifactKey: String): JSONObject {
+        if (artifactKey.isBlank()) throw IOException("artifactKey must not be blank")
+        return planCreateTextFile(arguments, "create_" + StreamingJsonRequestBody.sha256(JSONObject().put("artifact_key", artifactKey)))
+    }
+
+    /** A stable artifact key permits recovery of a completed publication, never another write. */
+    fun createTextFile(arguments: JSONObject, artifactKey: String? = null): JSONObject = synchronized(patchLock) {
+        val metadata = if (artifactKey != null) prepareCreateTextFile(arguments, artifactKey)
+            else planCreateTextFile(arguments, UUID.randomUUID().toString())
+        val content = JsonProtocol.text(arguments, "content") ?: throw IOException("content must be a string")
+        val file = File(metadata.getString("path"))
+        val dir = file.parentFile ?: throw IOException("Каталог файла недоступен")
+        if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) throw IOException("Каталог файла недоступен")
+        fun verifyPublished() {
+            if (!file.isFile || file.length() != metadata.getLong("size_bytes") ||
+                LocalUtf8FilePatch.sha256(file) != metadata.getString("sha256"))
+                throw IOException("Идентификатор вызова уже использован другим или неполным файлом; перезапись запрещена")
+        }
+        if (file.exists()) {
+            verifyPublished()
+            return@synchronized metadata
+        }
+        // A partial stage is never a confirmed user artifact. Publication links the fsynced
+        // inode into its final name atomically and fails if that name already exists.
+        val staged = File.createTempFile(".create-", ".tmp", dir)
+        try {
+            java.io.FileOutputStream(staged).use { output ->
+                val nonClosing = object : java.io.FilterOutputStream(output) {
+                    override fun write(buffer: ByteArray, offset: Int, length: Int) { output.write(buffer, offset, length) }
+                    override fun close() { flush() }
+                }
+                // Closing the encoder emits even a trailing unmatched surrogate;
+                // the actual descriptor remains open until fsync completes.
+                nonClosing.writer(Charsets.UTF_8).buffered(64 * 1024).use { writeCreateContent(content, it) }
+                output.fd.sync()
+            }
+            if (staged.length() != metadata.getLong("size_bytes") ||
+                LocalUtf8FilePatch.sha256(staged) != metadata.getString("sha256"))
+                throw IOException("Файл записан не полностью; публикация отменена")
+            try {
+                // filesDir is app-private; same-directory hard-link publication cannot
+                // overwrite an existing complete version, unlike rename(ATOMIC_MOVE).
+                Files.createLink(file.toPath(), staged.toPath())
+            } catch (collision: java.nio.file.FileAlreadyExistsException) {
+                verifyPublished()
+            }
+            metadata
+        } finally {
+            staged.delete()
+        }
+    }
+
+    private fun writeCreateContent(content: String, writer: java.io.Writer) {
+        var offset = 0
+        while (offset < content.length) {
+            val count = minOf(64 * 1024, content.length - offset)
+            writer.write(content, offset, count)
+            offset += count
+        }
+    }
+
+    private fun planCreateTextFile(arguments: JSONObject, token: String): JSONObject {
         val rawName = JsonProtocol.nonBlank(arguments, "filename")?.trim() ?: throw IOException("filename is required")
         val content = JsonProtocol.text(arguments, "content") ?: throw IOException("content must be a string")
-        if (rawName.isBlank()) throw IOException("filename is required")
         if (TextFileFormatPolicy.extension(rawName) in TextFileFormatPolicy.office + setOf("pdf", "doc", "xls", "ppt", "png", "jpg", "jpeg", "gif", "webp", "zip", "mp3", "mp4"))
             throw IOException("create_local_text_file создаёт UTF-8 текст, а не настоящий бинарный ${TextFileFormatPolicy.extension(rawName)}. Используйте текстовый формат, например TXT, Markdown, CSV или исходный код.")
         val safeName = rawName.substringAfterLast('/').substringAfterLast('\\')
-            .replace(Regex("[^A-Za-z0-9._-]"), "_")
-            .take(160)
-            .ifBlank { "generated.txt" }
-        val dir = File(context.filesDir, "generated").apply { mkdirs() }
-        val file = File(dir, UUID.randomUUID().toString() + "_" + safeName)
-        try {
-            // A whole String -> UTF-8 ByteArray duplicates a potentially very large answer.
-            file.bufferedWriter(Charsets.UTF_8, 64 * 1024).use { writer ->
-                var offset = 0
-                while (offset < content.length) {
-                    val count = minOf(64 * 1024, content.length - offset)
-                    writer.write(content, offset, count)
-                    offset += count
-                }
+            .replace(Regex("[^A-Za-z0-9._-]"), "_").take(160).ifBlank { "generated.txt" }
+        val file = File(File(context.filesDir, "generated"), "${token}_$safeName")
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var bytes = 0L
+        val sink = object : java.io.OutputStream() {
+            override fun write(value: Int) { digest.update(value.toByte()); bytes++ }
+            override fun write(buffer: ByteArray, offset: Int, length: Int) {
+                digest.update(buffer, offset, length); bytes += length
             }
-        } catch (error: Throwable) {
-            file.delete()
-            throw error
         }
-        return try { withAttachment(JSONObject()
-            .put("ok", true)
-            .put("type", "local_file")
-            .put("filename", rawName)
-            .put("path", file.absolutePath)
-            .put("mime_type", mimeForFilename(rawName))
-            .put("size_bytes", file.length()), LocalUtf8FilePatch.sha256(file)) }
-        catch (error: Throwable) { file.delete(); throw error }
+        // Hash exactly the same UTF-8 encoding as publication without a content-sized copy.
+        sink.writer(Charsets.UTF_8).buffered(64 * 1024).use { writeCreateContent(content, it) }
+        val sha = LocalUtf8FilePatch.hex(digest.digest())
+        return withAttachment(JSONObject().put("ok", true).put("type", "local_file")
+            .put("filename", rawName).put("path", file.absolutePath)
+            .put("mime_type", mimeForFilename(rawName)).put("size_bytes", bytes)
+            .put("operation_sha256", StreamingJsonRequestBody.sha256(arguments)), sha)
     }
 
     fun patchLocalFile(arguments: JSONObject, files: List<OpenRouterLocalAttachment>,
