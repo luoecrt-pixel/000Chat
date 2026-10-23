@@ -9,6 +9,7 @@ import java.io.IOException
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 private data class DeepSeekStreamToolCall(
     var id: String = "", var type: String? = null, var name: String = "",
@@ -27,14 +28,15 @@ class DeepSeekChatClient(
     internal val maxCheckpointBytes: Long = 8L * 1024 * 1024
 ) : ChatCompletionTransport {
     override val provider: String = "deepseek"
-    private val flushers = ConcurrentHashMap<String, () -> Unit>()
+    private val flushers = ConcurrentHashMap<String, (Boolean) -> Unit>()
     private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.SECONDS).build()
 
     init { require(maxAccumulatedChars > 0 && maxInlineToolResultBytes > 0 && maxCheckpointBytes > 0) }
 
-    override fun flushCheckpoint(sessionId: String) { flushers[sessionId]?.invoke() }
+    override fun flushCheckpoint(sessionId: String) { flushers[sessionId]?.invoke(false) }
+    override fun freezeAndFlushCheckpoint(sessionId: String) { flushers[sessionId]?.invoke(true) }
 
     override fun complete(
         apiKey: String, model: String, messages: JSONArray, sessionId: String?, tools: JSONArray?,
@@ -71,6 +73,8 @@ class DeepSeekChatClient(
             }
         }
         val lock = Any()
+        val frozen = AtomicBoolean(false)
+        var frozenCheckpoint: JSONObject? = null
         val textRounds = mutableListOf<String>()
         val reasoningRounds = mutableListOf<String>()
         val roundUsage = mutableListOf<JSONObject?>()
@@ -117,7 +121,7 @@ class DeepSeekChatClient(
             }
         }
         fun ensureActive() {
-            if (!shouldContinue() || Thread.currentThread().isInterrupted) throw CancellationException("DeepSeek request is no longer current")
+            if (frozen.get() || !shouldContinue() || Thread.currentThread().isInterrupted) throw CancellationException("DeepSeek request is no longer current")
         }
         fun ensureBudget() {
             ensureActive()
@@ -151,6 +155,7 @@ class DeepSeekChatClient(
                 "Checkpoint DeepSeek превышает безопасный лимит $maxCheckpointBytes байт; сохранён последний подтверждённый префикс, инструменты автоматически не повторяются")
         }
         fun publish(force: Boolean = true) = synchronized(lock) {
+            if (frozen.get()) return@synchronized
             val now = System.nanoTime()
             if (!force && lastCheckpointNanos != 0L && now - lastCheckpointNanos < TimeUnit.SECONDS.toNanos(2)) return@synchronized
             val checkpoint = candidateCheckpoint()
@@ -158,7 +163,21 @@ class DeepSeekChatClient(
             onProtocolCheckpoint(JsonProtocol.objectCopy(checkpoint))
             lastCheckpointNanos = now
         }
-        val flusher: () -> Unit = { publish() }
+        val flusher: (Boolean) -> Unit = { freeze ->
+            synchronized(lock) {
+                if (freeze) {
+                    // The same lock covers delta mutation and snapshot creation: no later frame
+                    // can slip between this durable prefix and Stop's ownership transaction.
+                    frozen.set(true)
+                    val snapshot = frozenCheckpoint ?: candidateCheckpoint().also {
+                        checkCheckpoint(it)
+                    }.let(JsonProtocol::objectCopy).also { frozenCheckpoint = it }
+                    // Repeated Stop/cancel calls reuse the exact frozen source, even if an
+                    // already started external operation reports an outcome afterwards.
+                    onProtocolCheckpoint(JsonProtocol.objectCopy(snapshot))
+                } else publish()
+            }
+        }
         if (sessionId != null) check(flushers.putIfAbsent(sessionId, flusher) == null) { "DeepSeek session is already active" }
 
         fun requestRound(): Pair<JSONObject, String?> {
@@ -214,6 +233,7 @@ class DeepSeekChatClient(
             }
             synchronized(lock) { uncommitted = { assistant().takeIf { content.isNotEmpty() || sawReasoning || calls.isNotEmpty() } } }
             fun consume(data: String) = synchronized(lock) {
+                ensureActive()
                 if (data == "[DONE]") { done = true; return@synchronized }
                 // The decoder bounds raw frame allocation; accumulated builders have a separate budget.
                 val json = try { JSONObject(data) } catch (e: Exception) { throw IOException("Invalid DeepSeek SSE event", e) }
@@ -285,6 +305,7 @@ class DeepSeekChatClient(
                     if (!done) throw IOException("DeepSeek SSE ended before [DONE]")
                 }
                 synchronized(lock) {
+                    ensureActive()
                     emit(force = true)
                     publish()
                     roundsCompleted++
@@ -331,8 +352,9 @@ class DeepSeekChatClient(
                     if (format?.optString("type") == "json_object" && generationComplete &&
                         !strictObject(JsonProtocol.string(message, "content"))) throw IOException("DeepSeek вернул невалидный JSON-объект в режиме json_object")
                     val protocol = synchronized(lock) {
-                        uncommitted = null
-                        val candidate = candidateCheckpoint(extra = message)
+                        // Keep the in-flight final response available to a concurrent Stop.
+                        // Only this result view substitutes its assistant into the raw tail.
+                        val candidate = candidateCheckpoint(pending = null, extra = message)
                         checkCheckpoint(candidate)
                         JsonProtocol.objectCopy(candidate).put("generation_complete", generationComplete)
                             .put("usage_complete", usageComplete)
@@ -371,6 +393,7 @@ class DeepSeekChatClient(
                     validated += Triple(id, name, JSONObject(raw))
                 }
                 synchronized(lock) {
+                    ensureActive()
                     uncommitted = null
                     checkCheckpoint(candidateCheckpoint(extra = message))
                     JsonProtocol.string(message, "content").takeIf { it.isNotEmpty() }?.let(textRounds::add)
@@ -381,15 +404,24 @@ class DeepSeekChatClient(
                 for ((id, name, args) in validated) {
                     ensureBudget()
                     val execution = synchronized(lock) {
+                        ensureActive()
                         (0 until executions.length()).map { executions.getJSONObject(it) }.last { it.optString("call_id") == id }
                             .apply { put("state", "in_flight") }.also { publish() }
                     }
                     toolNames += name
                     val result = try { executeTool(name, args) } catch (failure: Exception) {
-                        synchronized(lock) { execution.put("state", "outcome_unknown"); try { publish() } catch (cp: Exception) { failure.addSuppressed(cp) } }
+                        synchronized(lock) {
+                            if (!frozen.get()) {
+                                execution.put("state", "outcome_unknown")
+                                try { publish() } catch (cp: Exception) { failure.addSuppressed(cp) }
+                            }
+                        }
                         throw failure
                     }
                     synchronized(lock) {
+                        // Stop may have frozen an in-flight operation. Its outcome remains unknown
+                        // in that immutable snapshot; runtime stores any late confirmed artifact separately.
+                        ensureActive()
                         // The operation has happened. Never label it cancelled or delete its artifacts.
                         execution.put("state", "completed")
                         val bytes = StreamingJsonRequestBody.countBytes(result)

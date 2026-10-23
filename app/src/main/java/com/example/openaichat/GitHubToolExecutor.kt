@@ -6,10 +6,15 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
+import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+
+class GitHubWriteOutcomeUnknownException(cause: IOException) : IOException(
+    "Результат записи GitHub не подтверждён. Операция могла выполниться; автоматическое продолжение и повтор запрещены.", cause)
 
 class GitHubToolExecutor(
     private val secureStore: SecureStore,
@@ -18,12 +23,15 @@ class GitHubToolExecutor(
     private val confirmWrite: (toolName: String, arguments: JSONObject) -> Boolean,
     private val auditWrite: (toolName: String, arguments: JSONObject) -> Unit,
     private val canExecute: () -> Boolean = { true },
-    private val cacheDirectory: java.io.File? = null
+    private val cacheDirectory: java.io.File? = null,
+    private val failOnUncertainWrite: Boolean = false,
+    httpClientOverride: OkHttpClient? = null
 ) {
-    private val httpClient = OkHttpClient.Builder()
+    private val httpClient = httpClientOverride ?: OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .callTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(!failOnUncertainWrite)
         .build()
 
     fun close() {
@@ -55,6 +63,7 @@ class GitHubToolExecutor(
         if (!canExecute()) throw IOException("GitHub request owner is no longer current", e)
         errorResult("GitHub request interrupted")
     } catch (e: Exception) {
+        if (e is GitHubWriteOutcomeUnknownException) throw e
         if (!canExecute() && e is IOException) throw e
         errorResult(e.message ?: e.javaClass.simpleName)
     }
@@ -96,12 +105,22 @@ class GitHubToolExecutor(
         .addHeader("X-GitHub-Api-Version", "2022-11-28")
 
     private fun call(request: Request): Pair<Int, String> {
+        val guardedWrite = failOnUncertainWrite && request.method !in setOf("GET", "HEAD")
+        val wireRequest = if (guardedWrite && request.body != null) {
+            val original = request.body!!
+            request.newBuilder().method(request.method, object : RequestBody() {
+                override fun contentType() = original.contentType()
+                override fun contentLength() = original.contentLength()
+                override fun isOneShot() = true
+                override fun writeTo(sink: BufferedSink) = original.writeTo(sink)
+            }).build()
+        } else request
         var attempt = 0
         var code = 0
         var body = ""
         while (attempt < 3) {
             if (!canExecute()) throw IOException("GitHub request owner is no longer current")
-            httpClient.newCall(request).execute().use { httpResponse ->
+            try { httpClient.newCall(wireRequest).execute().use { httpResponse ->
                 code = httpResponse.code
                 body = if (httpResponse.isSuccessful) {
                     BoundedResponseDecoder.readBody(httpResponse.body)
@@ -117,6 +136,9 @@ class GitHubToolExecutor(
                     Thread.currentThread().interrupt()
                     throw IOException("GitHub retry interrupted", interrupted)
                 }
+            } } catch (failure: IOException) {
+                if (guardedWrite) throw GitHubWriteOutcomeUnknownException(failure)
+                throw failure
             }
             attempt++
         }

@@ -84,8 +84,9 @@ class DeepSeekAttachmentActivityTest {
     @Test fun cameraResultUsesCapturedDeepSeekProviderForOriginalChatAfterNavigation() {
         val source = "deepseek-camera-source"
         ChatDatabase(context).use { it.upsertCurrentChat(source, "source", null, null, emptyList()) }
-        val photo = File(context.filesDir, "deepseek-camera.png").apply {
-            val image = javaClass.classLoader!!.getResourceAsStream("images/solid-3x2-225fc7.png")!!
+        val photo = File(File(context.filesDir, "attachments").apply { mkdirs() }, "deepseek-camera.png").apply {
+            val image = DeepSeekAttachmentActivityTest::class.java.classLoader!!
+                .getResourceAsStream("images/solid-3x2-225fc7.png")!!
             image.use { input -> outputStream().use { input.copyTo(it) } }
         }
         files += photo

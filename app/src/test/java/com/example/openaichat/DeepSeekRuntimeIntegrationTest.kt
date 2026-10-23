@@ -193,19 +193,19 @@ class DeepSeekRuntimeIntegrationTest {
         started()
         MockWebServer().use { server ->
             val prefix = "{\"prefix\":"
-            val first = JSONObject().put("choices", JSONArray().put(JSONObject().put("delta", JSONObject()
-                .put("tool_calls", JSONArray().put(JSONObject().put("index", 0).put("id", "unconfirmed-call")
-                    .put("type", "function").put("function", JSONObject().put("name", "create_local_text_file")
-                        .put("arguments", prefix)))))))
+            val callFragment = JSONObject().put("index", 0).put("id", "unconfirmed-call")
+                .put("type", "function").put("function", JSONObject().put("name", "create_local_text_file").put("arguments", prefix))
+            val delta = JSONObject().put("tool_calls", JSONArray().put(callFragment))
+            val first = JSONObject().put("choices", JSONArray().put(JSONObject().put("delta", delta)))
             // One full frame is delivered, then the socket remains in a later throttle window.
-            val body = ("data: $first".padEnd(510, ' ') + "\n\n") +
-                ("data: {}".padEnd(510, ' ') + "\n\n") + "data: [DONE]\n\n"
+            val body = ("data: $first".padEnd(131070, ' ') + "\n\n") +
+                ("data: {}".padEnd(131070, ' ') + "\n\n") + "data: [DONE]\n\n"
             server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(body)
-                .throttleBody(512, 2, TimeUnit.SECONDS))
+                .throttleBody(131072, 2, TimeUnit.SECONDS))
             OpenRouterResponseRuntime.start(context, request(), DeepSeekChatClient(server.url("/").toString()))
-            await { ChatDatabase(context).use { it.getDeepSeekCheckpoint(chat, requestId) != null } }
-            assertTrue(OpenRouterResponseRuntime.contains(requestId))
-            OpenRouterResponseRuntime.flushCheckpoint(requestId)
+            await { ChatDatabase(context).use { it.getDeepSeekCheckpoint(chat, requestId) != null } || !OpenRouterResponseRuntime.contains(requestId) }
+            assertTrue(ChatDatabase(context).use { it.getChat(chat).toString() }, OpenRouterResponseRuntime.contains(requestId))
+            assertNull(OpenRouterResponseRuntime.prepareStop(requestId))
             ChatDatabase(context).use { db -> assertTrue(db.stopActiveRequestOnce(chat, requestId)) }
             OpenRouterResponseRuntime.cancel(requestId, "Остановлено пользователем")
             await { !OpenRouterResponseRuntime.contains(requestId) }
@@ -242,19 +242,19 @@ class DeepSeekRuntimeIntegrationTest {
         started()
         MockWebServer().use { server ->
             val arguments = JSONObject().put("filename", "confirmed.txt").put("content", "confirmed user bytes")
-            val tool = JSONObject().put("choices", JSONArray().put(JSONObject().put("delta", JSONObject()
-                .put("tool_calls", JSONArray().put(JSONObject().put("index", 0).put("id", "create-confirmed")
-                    .put("type", "function").put("function", JSONObject().put("name", "create_local_text_file")
-                        .put("arguments", arguments.toString()))))).put("finish_reason", "tool_calls")))
-                .put("usage", JSONObject(usage()))
+            val callFragment = JSONObject().put("index", 0).put("id", "create-confirmed")
+                .put("type", "function").put("function", JSONObject().put("name", "create_local_text_file")
+                    .put("arguments", arguments.toString()))
+            val choice = JSONObject().put("delta", JSONObject().put("tool_calls", JSONArray().put(callFragment)))
+                .put("finish_reason", "tool_calls")
+            val tool = JSONObject().put("choices", JSONArray().put(choice)).put("usage", JSONObject(usage()))
             server.enqueue(sse(tool.toString(), "[DONE]"))
-            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream")
-                .setBody("data: {}\n\n".padEnd(4096, ' ')).throttleBody(16, 2, TimeUnit.SECONDS))
+            server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
             OpenRouterResponseRuntime.start(context, request(), DeepSeekChatClient(server.url("/").toString()))
             assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
             val second = server.takeRequest(5, TimeUnit.SECONDS)!!
             assertTrue(second.body.readUtf8().contains("create-confirmed"))
-            OpenRouterResponseRuntime.flushCheckpoint(requestId)
+            assertNull(OpenRouterResponseRuntime.prepareStop(requestId))
             ChatDatabase(context).use { db -> assertTrue(db.stopActiveRequestOnce(chat, requestId)) }
             OpenRouterResponseRuntime.cancel(requestId, "Остановлено пользователем")
             await { !OpenRouterResponseRuntime.contains(requestId) }

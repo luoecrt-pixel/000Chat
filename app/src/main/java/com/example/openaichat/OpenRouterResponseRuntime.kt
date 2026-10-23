@@ -33,6 +33,11 @@ object OpenRouterResponseRuntime {
     private class Work(val context: Context, val request: OpenRouterRuntimeRequest, val client: ChatCompletionTransport) {
         val launched = AtomicBoolean(false)
         val cancelled = AtomicBoolean(false)
+        val stopping = AtomicBoolean(false)
+        val stopLock = Any()
+        var stopPrepared = false
+        var stopReservesTerminal = false
+        var stopWarning: String? = null
         val runtimeAttachments = java.util.concurrent.CopyOnWriteArrayList<OpenRouterLocalAttachment>()
         @Volatile var call: Call? = null
         @Volatile var cancelReason = "Соединение прервано"
@@ -58,6 +63,33 @@ object OpenRouterResponseRuntime {
             } catch (lostOwner: java.util.concurrent.CancellationException) {
                 if (db.isActiveRequest(item.request.chatId, requestId)) throw lostOwner
             }
+        }
+    }
+    /** Freeze stream/tool admission and persist its final cursor before SQLite Stop consumes ownership. */
+    fun prepareStop(requestId: String, reserveTerminal: Boolean = true): String? {
+        val item = work[requestId] ?: return null
+        return synchronized(item.stopLock) {
+            item.stopReservesTerminal = item.stopReservesTerminal || reserveTerminal
+            if (item.stopPrepared) return@synchronized item.stopWarning
+            item.stopping.set(true)
+            try {
+                if (item.request.provider == "deepseek") ChatDatabase(item.context).use { db ->
+                    if (db.isActiveRequest(item.request.chatId, requestId)) {
+                        item.client.freezeAndFlushCheckpoint(requestId)
+                    }
+                }
+            } catch (failure: Exception) {
+                // Stop can still archive the last acknowledged SQLite prefix. Do not
+                // claim that the newer in-memory suffix was saved or retry any effect.
+                item.stopWarning = "Не удалось сохранить последний фрагмент: " +
+                    (failure.message ?: failure.javaClass.simpleName).take(240) +
+                    ". В архиве сохранён последний подтверждённый checkpoint; автоматического повтора нет."
+            } finally {
+                item.stopPrepared = true
+                item.call?.cancel()
+                OpenRouterUiBridge.cancelReasoning(item.request.chatId, requestId)
+            }
+            item.stopWarning
         }
     }
     fun localFilePaths(): Set<String> = work.values.flatMap { w ->
@@ -95,18 +127,18 @@ object OpenRouterResponseRuntime {
         if (item.launched.compareAndSet(false, true)) executor.execute { run(item) }
     }
     fun cancel(requestId: String, reason: String = "Соединение прервано") {
-        work[requestId]?.let {
+        work[requestId]?.let { synchronized(it.stopLock) {
             // Flush while the old request still owns its durable SQLite checkpoint.
-            // A failed flush is surfaced to the Stop caller; ownership must not be silently revoked.
+            // Explicit Stop reserves its terminal transaction; a disconnect still finalizes disconnected.
             try {
-                if (!it.cancelled.get()) flushCheckpoint(requestId)
+                if (!it.cancelled.get()) prepareStop(requestId, reserveTerminal = false)
             } finally {
                 it.cancelReason = reason
                 it.cancelled.set(true)
                 it.call?.cancel()
                 OpenRouterUiBridge.cancelReasoning(it.request.chatId, requestId)
             }
-        }
+        } }
     }
     fun cancelAll(reason: String) { work.keys.toList().forEach { cancel(it, reason) } }
     fun cancelBackground(reason: String) { work.values.filter { it.request.background }.forEach { cancel(it.request.requestId, reason) } }
@@ -137,7 +169,7 @@ object OpenRouterResponseRuntime {
         var terminalCommitted = false
         var github: GitHubToolExecutor? = null
         var latestFileIoJson: JSONObject? = null
-        fun active() = !item.cancelled.get() && !Thread.currentThread().isInterrupted && db.isActiveRequest(r.chatId, r.requestId)
+        fun active() = !item.cancelled.get() && !item.stopping.get() && !Thread.currentThread().isInterrupted && db.isActiveRequest(r.chatId, r.requestId)
         fun completeUsage(usage: JSONObject?): Boolean = !isDeepSeek ||
             (usage != null && usage.optBoolean("usage_complete", false) &&
                 usage.has("prompt_tokens") && !usage.isNull("prompt_tokens") &&
@@ -166,7 +198,9 @@ object OpenRouterResponseRuntime {
             val compactTelemetry = FileBackedIoTelemetry.mergeCompactTelemetry(toolTelemetry = toolTelemetry,
                 fileIoJson = fileIo ?: latestFileIoJson, costDetails = totals.costDetails)
             compactTelemetry?.let { message.put("telemetry_summary", it) }
-            val committed = db.finalizeCurrentChatIfActiveRequest(r.chatId, "", null, null, listOf(message), r.requestId)
+            val committed = synchronized(item.stopLock) {
+                !item.stopReservesTerminal && db.finalizeCurrentChatIfActiveRequest(r.chatId, "", null, null, listOf(message), r.requestId)
+            }
             if (!committed) return false
             terminalCommitted = true
             try {
@@ -228,7 +262,7 @@ object OpenRouterResponseRuntime {
                 github = GitHubToolExecutor(secure, { r.githubRepo }, { r.githubBranches },
                     { name, args -> OpenRouterUiBridge.confirm(r.chatId, r.requestId, name, args) },
                     { name, args -> diagnostics.log("github_write", mapOf("tool" to name, "target" to ToolTraceSummary.entry(name, args, "{}").optJSONObject("target"))) },
-                    ::active, File(item.context.cacheDir, "github_text_pages"))
+                    ::active, File(item.context.cacheDir, "github_text_pages"), failOnUncertainWrite = isDeepSeek)
             }
             val tools = if (isDeepSeek) ContextRequestPolicy.deepSeekTools(r.github) else OpenRouterAppToolCatalog.tools().apply {
                 if (r.github) GitHubToolCatalog.tools().let { array -> for (i in 0 until array.length()) put(array.get(i)) }
@@ -279,7 +313,7 @@ object OpenRouterResponseRuntime {
                         r.github && github != null -> github!!.execute(name, args)
                         else -> JSONObject().put("ok", false).put("error", "Инструмент отключён").toString()
                     } } catch (e: java.io.IOException) {
-                        if (!active()) throw e
+                        if (e is GitHubWriteOutcomeUnknownException || !active()) throw e
                         JSONObject().put("ok", false).put("error", e.message).toString()
                     }
                     trace.put(ToolTraceSummary.entry(name, args, response)); response

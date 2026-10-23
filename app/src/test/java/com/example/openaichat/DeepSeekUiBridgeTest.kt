@@ -3,6 +3,7 @@ package com.example.openaichat
 import android.os.Looper
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,6 +15,7 @@ import java.time.Duration
 @RunWith(RobolectricTestRunner::class)
 @LooperMode(LooperMode.Mode.PAUSED)
 class DeepSeekUiBridgeTest {
+    @Before fun resetStaticBridge() = resetOpenRouterUiBridgeForTest()
     private class RecordingHost : OpenRouterUiBridge.Host {
         val events = mutableListOf<String>()
         override fun responseChanged(chatId: String, requestId: String) { events += "text:$chatId:$requestId" }
@@ -99,5 +101,19 @@ class DeepSeekUiBridgeTest {
         OpenRouterUiBridge.reasoning("chat", "a|b", "two")
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(240))
         assertEquals(setOf("reasoning:chat|a:b:one", "reasoning:chat:a|b:two"), host.events.toSet())
+    }
+}
+
+/** Robolectric resets the main queue/clock, while application Kotlin singletons can survive. */
+internal fun resetOpenRouterUiBridgeForTest() {
+    fun field(name: String) = OpenRouterUiBridge::class.java.getDeclaredField(name).apply { isAccessible = true }
+    val lock = field("reasoningLock").get(OpenRouterUiBridge)
+    synchronized(lock) {
+        val handler = field("handler").get(OpenRouterUiBridge) as android.os.Handler
+        handler.removeCallbacks(field("flushReasoning").get(OpenRouterUiBridge) as Runnable)
+        (field("reasoningStates").get(OpenRouterUiBridge) as MutableMap<*, *>).clear()
+        field("reasoningFlushScheduled").setBoolean(OpenRouterUiBridge, false)
+        field("lastReasoningFlushUptimeMs").setLong(OpenRouterUiBridge, -120L)
+        field("host").set(OpenRouterUiBridge, java.lang.ref.WeakReference<OpenRouterUiBridge.Host>(null))
     }
 }

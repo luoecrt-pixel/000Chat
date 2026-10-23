@@ -36,5 +36,8 @@ interface ChatCompletionTransport {
 
     /** Called while the request still owns its SQLite slot, before Stop revokes it. */
     fun flushCheckpoint(sessionId: String) {}
+
+    /** Freeze stream mutation and persist its final prefix before Stop releases SQLite ownership. */
+    fun freezeAndFlushCheckpoint(sessionId: String) { flushCheckpoint(sessionId) }
     fun close()
 }

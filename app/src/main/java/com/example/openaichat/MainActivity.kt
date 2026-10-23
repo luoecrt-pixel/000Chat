@@ -2916,7 +2916,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
-        active?.let { JsonProtocol.nonBlank(it, "request_id") }?.let(OpenRouterResponseRuntime::flushCheckpoint)
+        val stopCheckpointWarning = active?.let { JsonProtocol.nonBlank(it, "request_id") }
+            ?.let { OpenRouterResponseRuntime.prepareStop(it) }
         val originalCredential = captureOpenAiRequestCredential(chatId, active)
         val originalCreate = try {
             activeResponsePersistence.getActiveResponse(chatId)?.let {
@@ -2934,6 +2935,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             ?: chat.lastOrNull { it.optString("role") == "user" }?.let { JsonProtocol.nonBlank(it, "request_id") }
         val stopped = activeRequestId?.let { chatDb.stopActiveRequestOnce(chatId, it, removeUserMessage = !activeRequestRegenerate) } ?: false
         activeRequestId?.let { OpenRouterResponseRuntime.cancel(it, "Остановлено пользователем") }
+        if (stopped && stopCheckpointWarning != null) Toast.makeText(this, stopCheckpointWarning, Toast.LENGTH_LONG).show()
         if (activeRequestId != null && !stopped) {
             // A terminal transaction already won: Stop must not remove its committed bubble.
             restoreCurrentChat()
@@ -7503,9 +7505,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // Invalidate the persisted request *before* truncating history. UI Stop would
         // restore/remove unrelated bubbles and is not suitable for Edit.
         if (editingRequestId != null) {
-            OpenRouterResponseRuntime.flushCheckpoint(editingRequestId)
+            val editStopWarning = OpenRouterResponseRuntime.prepareStop(editingRequestId)
             OpenRouterResponseRuntime.cancel(editingRequestId, "Сообщение изменено")
-            chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
+            val editStopped = chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
+            if (editStopped && editStopWarning != null) Toast.makeText(this, editStopWarning, Toast.LENGTH_LONG).show()
             BackgroundResponseWorkScheduler.cancel(applicationContext, editingChatId, editingRequestId)
             activeResumeCalls.remove(editingChatId)?.cancel()
             val activeId = active?.optString("response_id")?.takeIf { it.isNotBlank() && it != "null" }

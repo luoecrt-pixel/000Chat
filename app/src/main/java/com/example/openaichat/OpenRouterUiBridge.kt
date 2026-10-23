@@ -73,8 +73,16 @@ object OpenRouterUiBridge {
     }
 
     fun attach(value: Host) {
-        host = WeakReference(value)
         synchronized(reasoningLock) {
+            if (host.get() !== value) {
+                // A replacement view gets its first snapshot immediately. Requeue the
+                // callback for that subscriber rather than carrying the former UI's
+                // scheduled/throttle state across a lifecycle transition.
+                handler.removeCallbacks(flushReasoning)
+                reasoningFlushScheduled = false
+                lastReasoningFlushUptimeMs = -REASONING_THROTTLE_MS
+            }
+            host = WeakReference(value)
             if (reasoningStates.values.any { it.pending }) scheduleReasoningLocked()
         }
     }

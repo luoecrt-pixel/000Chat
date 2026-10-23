@@ -186,9 +186,13 @@ class DeepSeekIntegrationTest {
     @Test fun stopFlushesLatestToolOnlyPrefixBeforeCancellation() {
         MockWebServer().use { server ->
             server.start()
-            val event = "data: " + frame(JSONObject().put("tool_calls", JSONArray().put(call(0, arguments = "{\"path\":\"part")))) + "\n\n"
+            // MockWebServer applies throttleBody to the POST upload as well. This first
+            // event exceeds the request body so upload admission cannot stall before SSE.
+            val first = JSONObject(frame(JSONObject().put("tool_calls", JSONArray().put(call(0, arguments = "{\"path\":\"part")))))
+                .put("padding", "x".repeat(4096))
+            val event = "data: $first\n\n"
             server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(event + " ".repeat(10_000))
-                .throttleBody(event.toByteArray().size.toLong(), 1, TimeUnit.DAYS))
+                .throttleBody(event.toByteArray().size.toLong(), 200, TimeUnit.MILLISECONDS))
             val client = DeepSeekChatClient(server.url("/").toString())
             val active = AtomicBoolean(true)
             val ready = CountDownLatch(1)
@@ -259,4 +263,64 @@ class DeepSeekIntegrationTest {
             } finally { client.close() }
         }
     }
+    @Test fun stopFreezeRejectsBufferedLateDeltaAndRetainsExactDurablePrefix() {
+        MockWebServer().use { server ->
+            server.start()
+            enqueue(server,
+                frame(JSONObject().put("tool_calls", JSONArray().put(call(0, arguments = "{\"path\":\"prefix")))),
+                frame(JSONObject().put("tool_calls", JSONArray().put(call(0, arguments = "-late\"}", first = false)))
+                    .put("content", "late visible text"), "tool_calls", usage()))
+            val client = DeepSeekChatClient(server.url("/").toString())
+            val freezeOnce = AtomicBoolean(false)
+            val saved = AtomicReference<JSONObject>()
+            var executions = 0
+            try {
+                try {
+                    complete(client, tools = tools(), execute = { _, _ -> executions++; "unexpected" }, checkpoint = { cp ->
+                        saved.set(cp)
+                        if (freezeOnce.compareAndSet(false, true)) client.freezeAndFlushCheckpoint("test-request")
+                    })
+                    fail("frozen buffered stream completed")
+                } catch (_: java.util.concurrent.CancellationException) { }
+                val cp = saved.get()
+                val pending = cp.getJSONObject("uncommitted_assistant")
+                assertEquals("{\"path\":\"prefix", pending.getJSONArray("tool_calls").getJSONObject(0).getJSONObject("function").getString("arguments"))
+                assertEquals("", pending.getString("content"))
+                assertEquals(0, executions)
+                assertEquals(1, server.requestCount)
+            } finally { client.close() }
+        }
+    }
+
+    @Test fun stopFreezeDuringExternalOperationNeverRewritesSnapshotOrStartsChildPost() {
+        MockWebServer().use { server ->
+            server.start()
+            enqueue(server, frame(JSONObject().put("reasoning_content", "r")
+                .put("tool_calls", JSONArray().put(call(0))), "tool_calls", usage()))
+            val client = DeepSeekChatClient(server.url("/").toString())
+            val saved = AtomicReference<JSONObject>()
+            val artifact = File.createTempFile("deepseek-frozen-effect-", ".txt")
+            var executions = 0
+            var frozenSource: String? = null
+            try {
+                try {
+                    complete(client, tools = tools(), checkpoint = saved::set, execute = { _, _ ->
+                        executions++
+                        artifact.writeText("effect confirmed")
+                        client.freezeAndFlushCheckpoint("test-request")
+                        frozenSource = StreamingJsonRequestBody.sha256(saved.get())
+                        "late successful result"
+                    })
+                    fail("frozen tool continued inference")
+                } catch (_: java.util.concurrent.CancellationException) { }
+                assertEquals(frozenSource, StreamingJsonRequestBody.sha256(saved.get()))
+                assertEquals("in_flight", saved.get().getJSONArray("tool_execution").getJSONObject(0).getString("state"))
+                assertEquals(1, saved.get().getJSONArray("tail").length())
+                assertEquals("effect confirmed", artifact.readText())
+                assertEquals(1, executions)
+                assertEquals(1, server.requestCount)
+            } finally { client.close(); artifact.delete() }
+        }
+    }
+
 }
