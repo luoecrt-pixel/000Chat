@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         .build()
     private val pollingClient = OkHttpClient.Builder().connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS).readTimeout(45, java.util.concurrent.TimeUnit.SECONDS).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
     private val executor = Executors.newCachedThreadPool()
+    private val artifactRecoveryScheduled = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var localEvidenceSourcesHookForTests: (() -> List<OpenRouterLocalAttachment>)? = null
     private var localEvidenceSnapshotChatId: String? = null
     private var localEvidenceEligible = false
@@ -448,6 +449,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         scrollCallbacksStopped = false
         OpenRouterUiBridge.attach(this)
         recoverInterruptedOpenRouterRequests()
+        reconcilePublishedArtifactsInBackground()
         executor.execute { ResponseNotifications.restorePending(applicationContext) }
         // A Worker may have completed while this Activity was stopped. Reconcile
         // committed history before launching another resume, without losing a new draft.
@@ -2671,6 +2673,30 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         if (chatDb.getChatTitle(id) != null && id != currentChatId()) switchChat(id)
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); openNotificationChat(intent) }
+
+    private fun reconcilePublishedArtifactsInBackground() {
+        if (!artifactRecoveryScheduled.compareAndSet(false, true)) return
+        val app = applicationContext
+        executor.execute {
+            try {
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+                ChatDatabase(app).use { db ->
+                    repeat(8) {
+                        if (Thread.currentThread().isInterrupted || System.nanoTime() >= deadline) return@use
+                        val batch = db.reconcilePublishedArtifactIntents(
+                            shouldContinue = { !Thread.currentThread().isInterrupted && System.nanoTime() < deadline },
+                            maxRows = 32
+                        )
+                        if (!batch.hasMore || batch.cancelled || batch.examined == 0) return@use
+                    }
+                }
+            } catch (error: Exception) {
+                AstraDiagnostics(app).log("artifact_recovery_deferred", mapOf("error_type" to error.javaClass.simpleName))
+            } finally {
+                artifactRecoveryScheduled.set(false)
+            }
+        }
+    }
 
     private fun recoverInterruptedOpenRouterRequests() {
         chatDb.listActiveResponses().forEach { a ->

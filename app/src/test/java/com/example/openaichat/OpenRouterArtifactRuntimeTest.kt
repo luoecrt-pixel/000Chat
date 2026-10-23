@@ -32,12 +32,14 @@ class OpenRouterArtifactRuntimeTest {
     private val chat = "artifact-runtime"
     private val requestId = "request-artifact-runtime"
     private val derivative = AtomicReference<File?>()
+    private val finalGenerationIds = AtomicInteger()
 
     @Before fun setup() {
         context = RuntimeEnvironment.getApplication()
         SQLiteDatabase.deleteDatabase(context.getDatabasePath("astra_chats.db"))
         context.getSharedPreferences("app", Context.MODE_PRIVATE).edit()
             .putBoolean("response_notifications", false).commit()
+        AstraDiagnostics(context).clear()
         metadataClient = OkHttpClient()
         originals = File(context.filesDir, "generated/artifact-runtime").apply { mkdirs() }
     }
@@ -78,7 +80,7 @@ class OpenRouterArtifactRuntimeTest {
             .put("delta", JSONObject().put("tool_calls", JSONArray(calls.toList())))
             .put("finish_reason", "tool_calls"))))
 
-    private fun finalRound() = sse(JSONObject().put("id", "gen-artifact-final").put("model", "test-model")
+    private fun finalRound() = sse(JSONObject().put("id", "gen-artifact-final-${finalGenerationIds.incrementAndGet()}").put("model", "test-model")
         .put("choices", JSONArray().put(JSONObject().put("delta", JSONObject().put("content", "done"))
             .put("finish_reason", "stop"))))
 
@@ -87,6 +89,53 @@ class OpenRouterArtifactRuntimeTest {
         val result = (0 until messages.length()).map { messages.getJSONObject(it) }
             .single { it.optString("role") == "tool" && it.optString("tool_call_id") == callId }
         return JSONObject(result.getString("content"))
+    }
+
+    private fun runtimeDiagnostic(ownerRequestId: String, client: OpenRouterChatClient? = null): String = buildString {
+        append("request=").append(ownerRequestId).append(" runtimePresent=")
+            .append(OpenRouterResponseRuntime.contains(ownerRequestId)).append(" runtimeCount=")
+            .append(OpenRouterResponseRuntime.count()).append(" runtimeChat=")
+            .append(OpenRouterResponseRuntime.chatFor(ownerRequestId))
+        client?.let { value ->
+            append(" clientProvider=").append(value.provider).append(" clientIdentity=")
+                .append(System.identityHashCode(value)).append(" clientInUse=").append(OpenRouterResponseRuntime.uses(value))
+            try {
+                val http = OpenRouterChatClient::class.java.getDeclaredField("httpClient")
+                    .apply { isAccessible = true }.get(value) as OkHttpClient
+                append(" dispatcherShutdown=").append(http.dispatcher.executorService.isShutdown)
+                    .append(" runningCalls=").append(http.dispatcher.runningCallsCount())
+            } catch (failure: Exception) { append(" clientInspection=").append(failure.javaClass.simpleName) }
+        }
+        fun selected(source: JSONObject?, keys: List<String>): JSONObject = JSONObject().apply {
+            if (source != null) for (key in keys) source.opt(key)?.let { put(key, it) }
+        }
+        try {
+            ChatDatabase(context).use { db ->
+                append(" active=").append(selected(db.getActiveResponse(chat), listOf("request_id", "response_id", "status", "error")))
+                val messages = db.getChat(chat)?.optJSONArray("messages") ?: JSONArray()
+                append(" messages=").append(JSONArray().apply {
+                    for (i in 0 until messages.length()) put(selected(messages.optJSONObject(i),
+                        listOf("role", "request_id", "provider", "status", "finish_reason", "error")))
+                })
+                append(" accounting=").append(JSONArray(db.listRequestAccounting(chat).map { selected(it,
+                    listOf("local_request_id", "provider", "local_status", "error", "usage_complete", "rounds_sealed")) }))
+            }
+        } catch (failure: Exception) {
+            append(" databaseInspection=").append(failure.javaClass.name).append(":").append(failure.message)
+                .append(" cause=").append(failure.cause?.javaClass?.name).append(":").append(failure.cause?.message)
+                .append(" stack=\n").append(failure.stackTraceToString())
+        }
+        append(" diagnostics=\n").append(AstraDiagnostics(context).tail(30))
+    }.let { AstraDiagnostics(context).redactDisplayText(it) }
+
+    private fun assertRuntimeCompleted(ownerRequestId: String, client: OpenRouterChatClient) {
+        val status = ChatDatabase(context).use { db ->
+            val messages = db.getChat(chat)?.optJSONArray("messages") ?: JSONArray()
+            (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
+                .lastOrNull { it.optString("role") == "assistant" && it.optString("request_id") == ownerRequestId }
+                ?.optString("status")
+        }
+        assertEquals(runtimeDiagnostic(ownerRequestId, client), "completed", status)
     }
 
     private fun awaitRuntimeAndCleanup(ownerRequestId: String = requestId) {
@@ -98,8 +147,8 @@ class OpenRouterArtifactRuntimeTest {
             if (finished && terminal) return
             Thread.sleep(10)
         }
-        assertFalse("Runtime did not finish", OpenRouterResponseRuntime.contains(ownerRequestId))
-        ChatDatabase(context).use { assertNull("Request did not reach DB terminal state", it.getActiveResponse(chat)) }
+        assertFalse(runtimeDiagnostic(ownerRequestId), OpenRouterResponseRuntime.contains(ownerRequestId))
+        ChatDatabase(context).use { assertNull(runtimeDiagnostic(ownerRequestId), it.getActiveResponse(chat)) }
     }
 
     @Test fun actualRuntimeCanPatchRevertedAndNoOpVersionsByTheirReturnedExactIds() {
@@ -146,6 +195,7 @@ class OpenRouterArtifactRuntimeTest {
                 val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
                 OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
                 awaitRuntimeAndCleanup()
+                assertRuntimeCompleted(requestId, client)
                 failure.get()?.let { throw AssertionError("Version identity runtime failed", it) }
                 assertEquals(6, server.requestCount)
                 ChatDatabase(context).use { db ->
@@ -226,6 +276,7 @@ class OpenRouterArtifactRuntimeTest {
             try {
                 OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
                 awaitRuntimeAndCleanup()
+                assertRuntimeCompleted(requestId, client)
                 failure.get()?.let { throw AssertionError("Patch runtime failed", it) }
                 assertEquals(4, server.requestCount)
                 ChatDatabase(context).use { reopened ->
@@ -253,6 +304,7 @@ class OpenRouterArtifactRuntimeTest {
                 }
                 OpenRouterResponseRuntime.start(context, runtimeRequest().copy(requestId = nextRequestId), client)
                 awaitRuntimeAndCleanup(nextRequestId)
+                assertRuntimeCompleted(nextRequestId, client)
                 failure.get()?.let { throw AssertionError("Reopened patch runtime failed", it) }
                 assertEquals(6, server.requestCount)
                 ChatDatabase(context).use { assertEquals(2, it.listLocalFiles(chat).size) }
@@ -358,6 +410,7 @@ class OpenRouterArtifactRuntimeTest {
                     if (!OpenRouterResponseRuntime.uses(client)) client.close()
                 }
             }
+            assertRuntimeCompleted(requestId, client)
             dispatchFailure.get()?.let { throw AssertionError("Runtime artifact exchange failed", it) }
             assertEquals(3, server.requestCount)
             assertNotNull("Runtime never exposed its normalized artifact", derivative.get())

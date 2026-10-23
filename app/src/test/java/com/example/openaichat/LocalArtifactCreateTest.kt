@@ -64,6 +64,58 @@ class LocalArtifactCreateTest {
         } finally { file.delete() }
     }
 
+    @Test fun legacyDefaultDoesNotDependOnDeterministicHardLinkPublication() {
+        val unavailableHardLinks = LocalArtifactToolExecutor(context) { _, _ ->
+            throw UnsupportedOperationException("synthetic unsupported filesystem")
+        }
+        val result = unavailableHardLinks.createTextFile(args("OpenAI/OpenRouter legacy source 😀"))
+        val file = File(result.getString("path"))
+        try {
+            assertEquals("OpenAI/OpenRouter legacy source 😀", file.readText())
+            assertFalse(file.name.startsWith("create_"))
+            assertEquals(result.getString("sha256"), LocalUtf8FilePatch.sha256(file))
+        } finally { file.delete() }
+    }
+
+    @Test fun unsupportedDeepSeekPublicationIsExplicitAndKeepsTheStableIntent() {
+        val unavailableHardLinks = LocalArtifactToolExecutor(context) { _, _ ->
+            throw UnsupportedOperationException("synthetic unsupported filesystem")
+        }
+        val arguments = args("DeepSeek planned output")
+        val key = "unsupported-${UUID.randomUUID()}"
+        val intent = unavailableHardLinks.prepareCreateTextFile(arguments, key)
+        val file = File(intent.getString("path"))
+        try {
+            unavailableHardLinks.createTextFile(arguments, key)
+            fail("unsupported deterministic publication must fail closed")
+        } catch (error: IOException) {
+            assertTrue(error.message!!.contains("не поддерживает"))
+            assertTrue(error.cause is UnsupportedOperationException)
+        }
+        assertFalse(file.exists())
+        assertEquals(intent.toString(), unavailableHardLinks.prepareCreateTextFile(arguments, key).toString())
+    }
+
+    @Test fun publicationFailureAfterLinkCannotDeleteTheCompletedArtifact() {
+        val uncertainPublisher = LocalArtifactToolExecutor(context) { target, staged ->
+            java.nio.file.Files.createLink(target.toPath(), staged.toPath())
+            throw java.nio.file.FileSystemException("synthetic post-publication failure")
+        }
+        val arguments = args("confirmed bytes survive metadata failure")
+        val key = "post-publication-${UUID.randomUUID()}"
+        val plan = uncertainPublisher.prepareCreateTextFile(arguments, key)
+        val file = File(plan.getString("path"))
+        try {
+            try {
+                uncertainPublisher.createTextFile(arguments, key)
+                fail("publication outcome should be reported for durable reconciliation")
+            } catch (_: IOException) {}
+            assertTrue(file.isFile)
+            assertEquals(plan.getString("sha256"), LocalUtf8FilePatch.sha256(file))
+            assertEquals(plan.toString(), executor.createTextFile(arguments, key).toString())
+        } finally { file.delete() }
+    }
+
     @Test fun invalidCreateIsRejectedBeforeIntentCanBePrepared() {
         for (invalid in listOf(JSONObject().put("filename", "image.png").put("content", "fake binary"),
             JSONObject().put("filename", "result.txt").put("content", 123),

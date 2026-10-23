@@ -11,7 +11,14 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.FileSystemException
 
-class LocalArtifactToolExecutor(private val context: Context) {
+class LocalArtifactToolExecutor internal constructor(
+    private val context: Context,
+    private val publishDeterministicFile: (destination: File, staged: File) -> Unit
+) {
+    constructor(context: Context) : this(context, { destination, staged ->
+        Files.createLink(destination.toPath(), staged.toPath())
+        Unit
+    })
     companion object {
         private val patchLock = Any()
         /** Only descriptors, never device paths or full local diff contents, reach the model. */
@@ -34,8 +41,10 @@ class LocalArtifactToolExecutor(private val context: Context) {
 
     /** A stable artifact key permits recovery of a completed publication, never another write. */
     fun createTextFile(arguments: JSONObject, artifactKey: String? = null): JSONObject = synchronized(patchLock) {
-        val metadata = if (artifactKey != null) prepareCreateTextFile(arguments, artifactKey)
-            else planCreateTextFile(arguments, UUID.randomUUID().toString())
+        // Existing OpenAI/OpenRouter callers retain their direct UUID-file contract.
+        // Hard-link support is required only by the opt-in durable DeepSeek path.
+        if (artifactKey == null) return@synchronized createLegacyTextFile(arguments)
+        val metadata = prepareCreateTextFile(arguments, artifactKey)
         val content = JsonProtocol.text(arguments, "content") ?: throw IOException("content must be a string")
         val file = File(metadata.getString("path"))
         val dir = file.parentFile ?: throw IOException("Каталог файла недоступен")
@@ -69,13 +78,40 @@ class LocalArtifactToolExecutor(private val context: Context) {
             try {
                 // filesDir is app-private; same-directory hard-link publication cannot
                 // overwrite an existing complete version, unlike rename(ATOMIC_MOVE).
-                Files.createLink(file.toPath(), staged.toPath())
+                publishDeterministicFile(file, staged)
             } catch (collision: java.nio.file.FileAlreadyExistsException) {
                 verifyPublished()
+            } catch (unsupported: UnsupportedOperationException) {
+                throw IOException("Файловая система не поддерживает безопасную публикацию файла DeepSeek. " +
+                    "Результат операции не подтверждён; автоматический повтор не выполнялся.", unsupported)
+            } catch (filesystem: FileSystemException) {
+                throw IOException("Не удалось подтвердить безопасную публикацию файла DeepSeek. " +
+                    "Сохранённое намерение остаётся для проверки; автоматический повтор не выполнялся.", filesystem)
             }
             metadata
         } finally {
             staged.delete()
+        }
+    }
+
+    private fun createLegacyTextFile(arguments: JSONObject): JSONObject {
+        val metadata = planCreateTextFile(arguments, UUID.randomUUID().toString())
+        val content = JsonProtocol.text(arguments, "content") ?: throw IOException("content must be a string")
+        val file = File(metadata.getString("path"))
+        val directory = file.parentFile ?: throw IOException("Каталог файла недоступен")
+        if (!directory.isDirectory && !directory.mkdirs() && !directory.isDirectory)
+            throw IOException("Каталог файла недоступен")
+        // Reserve a fresh UUID name, never remove somebody else's complete artifact.
+        if (!file.createNewFile()) throw IOException("Имя файла уже занято; перезапись запрещена")
+        try {
+            file.bufferedWriter(Charsets.UTF_8, 64 * 1024).use { writeCreateContent(content, it) }
+            if (file.length() != metadata.getLong("size_bytes") ||
+                LocalUtf8FilePatch.sha256(file) != metadata.getString("sha256"))
+                throw IOException("Файл записан не полностью")
+            return metadata
+        } catch (error: Throwable) {
+            file.delete()
+            throw error
         }
     }
 
