@@ -88,15 +88,15 @@ class LocalArtifactCreateTest {
         try {
             unavailableAtomicMoves.createTextFile(arguments, key)
             fail("unsupported deterministic publication must fail closed")
-        } catch (error: IOException) {
-            assertTrue(error.message!!.contains("не поддерживает"))
-            assertTrue(error.cause is UnsupportedOperationException)
+        } catch (error: FileWriteOutcomeUnknownException) {
+            assertTrue(error.message!!.contains("не подтверждён"))
+            assertTrue(generateSequence<Throwable>(error) { it.cause }.any { it is UnsupportedOperationException })
         }
         assertFalse(file.exists())
         assertEquals(intent.toString(), unavailableAtomicMoves.prepareCreateTextFile(arguments, key).toString())
     }
 
-    @Test fun publicationFailureAfterLinkCannotDeleteTheCompletedArtifact() {
+    @Test fun publicationFailureAfterMoveIsTypedAndCannotDeleteTheCompletedArtifact() {
         val uncertainPublisher = LocalArtifactToolExecutor(context) { target, staged ->
             java.nio.file.Files.move(staged.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
             throw java.nio.file.FileSystemException("synthetic post-publication failure")
@@ -109,7 +109,7 @@ class LocalArtifactCreateTest {
             try {
                 uncertainPublisher.createTextFile(arguments, key)
                 fail("publication outcome should be reported for durable reconciliation")
-            } catch (_: IOException) {}
+            } catch (_: FileWriteOutcomeUnknownException) {}
             assertTrue(file.isFile)
             assertEquals(plan.getString("sha256"), LocalUtf8FilePatch.sha256(file))
             assertEquals(plan.toString(), executor.createTextFile(arguments, key).toString())
@@ -160,6 +160,58 @@ class LocalArtifactCreateTest {
         } finally { source.delete() }
     }
 
+    @Test fun patchAfterResultMoveThrowsTypedUnknownAndPreservesOriginalAndPublishedBytes() {
+        val original = executor.createTextFile(args("original content"))
+        val source = File(original.getString("path"))
+        val attachment = OpenRouterLocalAttachment.fromJson(original.getJSONObject("attachment"))
+        val arguments = JSONObject().put("file_id", attachment.id).put("patches", org.json.JSONArray().put(
+            JSONObject().put("search", "original").put("replace", "modified")))
+        var intent: JSONObject? = null
+        var publications = 0
+        val failing = LocalArtifactToolExecutor(context) { target, stage ->
+            publications++
+            java.nio.file.Files.move(stage.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            throw IOException("synthetic failure after actual result move")
+        }
+        try {
+            try {
+                failing.patchLocalFile(arguments, listOf(attachment), artifactKey = "postmove-patch-${UUID.randomUUID()}",
+                    beforePublish = { intent = it })
+                fail("published patch outcome must be typed unknown")
+            } catch (_: FileWriteOutcomeUnknownException) {}
+            assertEquals(1, publications)
+            assertNotNull(intent)
+            val result = File(intent!!.getString("path"))
+            assertEquals("modified content", result.readText())
+            assertEquals(intent!!.getString("sha256"), LocalUtf8FilePatch.sha256(result))
+            assertFalse(File(intent!!.getString("patch_diff_path")).exists())
+            assertEquals("original content", source.readText())
+        } finally {
+            source.delete()
+            intent?.let { File(it.getString("path")).delete(); File(it.getString("patch_diff_path")).delete() }
+        }
+    }
+
+    @Test fun rejectedPrepublicationIntentIsAnOrdinaryIoFailureWithoutAnyPublishedEffect() {
+        val original = executor.createTextFile(args("original content"))
+        val source = File(original.getString("path"))
+        val attachment = OpenRouterLocalAttachment.fromJson(original.getJSONObject("attachment"))
+        val arguments = JSONObject().put("file_id", attachment.id).put("patches", org.json.JSONArray().put(
+            JSONObject().put("search", "original").put("replace", "modified")))
+        var intent: JSONObject? = null
+        try {
+            try {
+                executor.patchLocalFile(arguments, listOf(attachment), artifactKey = "beforewrite-${UUID.randomUUID()}",
+                    beforePublish = { intent = it; throw IOException("synthetic SQLite intent rejection") })
+                fail("rejected intent must abort before publication")
+            } catch (error: IOException) { assertFalse(error is FileWriteOutcomeUnknownException) }
+            assertNotNull(intent)
+            assertFalse(File(intent!!.getString("path")).exists())
+            assertFalse(File(intent!!.getString("patch_diff_path")).exists())
+            assertEquals("original content", source.readText())
+        } finally { source.delete() }
+    }
+
     @Test fun invalidCreateIsRejectedBeforeIntentCanBePrepared() {
         for (invalid in listOf(JSONObject().put("filename", "image.png").put("content", "fake binary"),
             JSONObject().put("filename", "result.txt").put("content", 123),
@@ -167,7 +219,7 @@ class LocalArtifactCreateTest {
             try {
                 executor.prepareCreateTextFile(invalid, "invalid-${UUID.randomUUID()}")
                 fail("invalid file operation must not produce durable intent metadata")
-            } catch (_: IOException) {}
+            } catch (error: IOException) { assertFalse(error is FileWriteOutcomeUnknownException) }
         }
     }
 }

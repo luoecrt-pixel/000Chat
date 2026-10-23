@@ -54,8 +54,10 @@ class LocalArtifactToolExecutor internal constructor(
                 LocalUtf8FilePatch.sha256(file) != metadata.getString("sha256"))
                 throw IOException("Идентификатор вызова уже использован другим или неполным файлом; перезапись запрещена")
         }
-        withPublicationLock(file) {
+        var publicationMayHaveOccurred = false
+        try { withPublicationLock(file) {
             if (file.exists()) {
+                publicationMayHaveOccurred = true
                 verifyPublished()
                 return@withPublicationLock metadata
             }
@@ -76,6 +78,7 @@ class LocalArtifactToolExecutor internal constructor(
                 try {
                     // The stable cross-process lock and target check above are mandatory:
                     // ATOMIC_MOVE alone is allowed to replace an existing destination.
+                    publicationMayHaveOccurred = true
                     publishDeterministicFile(file, staged)
                 } catch (collision: java.nio.file.FileAlreadyExistsException) {
                     verifyPublished()
@@ -92,6 +95,12 @@ class LocalArtifactToolExecutor internal constructor(
                 // A published target is immutable even if a later verification fails.
                 staged.delete()
             }
+        } } catch (error: Exception) {
+            if (error is FileWriteOutcomeUnknownException) throw error
+            if (publicationMayHaveOccurred) throw FileWriteOutcomeUnknownException(
+                "Исход создания файла не подтверждён: файл мог быть опубликован. " +
+                    "Намерение сохранено для проверки; повторное исполнение не выполнялось.", error)
+            throw error
         }
     }
 
@@ -179,7 +188,9 @@ class LocalArtifactToolExecutor internal constructor(
 
     fun patchLocalFile(arguments: JSONObject, files: List<OpenRouterLocalAttachment>,
         active: () -> Boolean = { true }, artifactKey: String? = null,
-        beforePublish: (JSONObject) -> Unit = {}): JSONObject = try { synchronized(patchLock) {
+        beforePublish: (JSONObject) -> Unit = {}): JSONObject {
+        var publicationMayHaveOccurred = false
+        return try { synchronized(patchLock) {
         LocalUtf8FilePatch.checkActive(active)
         if (StreamingJsonRequestBody.countBytes(arguments) > 256 * 1024) throw IOException("Аргументы патча превышают 256 КБ")
         val selector = JsonProtocol.nonBlank(arguments, "file_id") ?: JsonProtocol.nonBlank(arguments, "filename")
@@ -220,6 +231,7 @@ class LocalArtifactToolExecutor internal constructor(
             // the existing bytes are exactly this operation's expected result.
             // Sidecar identity is shared by the operation even if source filenames differ.
             withPublicationLock(diff) {
+            if (target.exists()) publicationMayHaveOccurred = true
             val recoverSidecar = target.isFile && !diff.exists()
             if ((target.exists() || diff.exists()) && !recoverSidecar) {
                 if (!target.isFile || !diff.isFile || diff.length() > 2L * 1024 * 1024)
@@ -269,9 +281,16 @@ class LocalArtifactToolExecutor internal constructor(
                 LocalUtf8FilePatch.checkActive(active)
                 checkPublicationInterrupted()
                 if (!recoverSidecar) {
-                    Files.move(staged.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                    publicationMayHaveOccurred = true
+                    publishDeterministicFile(target, staged)
                 }
-                Files.move(pendingDiff.toPath(), diff.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                publicationMayHaveOccurred = true
+                publishDeterministicFile(diff, pendingDiff)
+                if (!target.isFile || target.length() != metadata.getLong("size_bytes") ||
+                    LocalUtf8FilePatch.sha256(target) != metadata.getString("sha256") ||
+                    !diff.isFile || diff.length() != metadata.getLong("patch_sidecar_size_bytes") ||
+                    LocalUtf8FilePatch.sha256(diff) != metadata.getString("patch_sidecar_sha256"))
+                    throw IOException("Проверка опубликованной версии файла или sidecar не завершена")
                 metadata
             } catch (error: Throwable) {
                 // Never erase a complete version or an existing sidecar after a
@@ -280,12 +299,17 @@ class LocalArtifactToolExecutor internal constructor(
             } finally { staged.delete(); stagedDiff?.delete() }
             }
         }
-    } } catch (error: FileNotFoundException) {
-        // The model receives the message, not an app-private filesystem path.
-        // Retain the cause for local diagnostics without changing interruption.
-        throw IOException("Исходный файл или каталог версии недоступен. Исходник не изменён.", error)
-    } catch (error: FileSystemException) {
-        throw IOException("Не удалось прочитать или сохранить версию файла. Исходник не изменён.", error)
+    } } catch (error: Exception) {
+        if (error is FileWriteOutcomeUnknownException) throw error
+        if (publicationMayHaveOccurred) throw FileWriteOutcomeUnknownException(
+            "Исход изменения файла не подтверждён: версия могла быть опубликована. " +
+                "Намерение сохранено для проверки; повторное исполнение не выполнялось.", error)
+        when (error) {
+            is FileNotFoundException -> throw IOException("Исходный файл или каталог версии недоступен. Исходник не изменён.", error)
+            is FileSystemException -> throw IOException("Не удалось прочитать или сохранить версию файла. Исходник не изменён.", error)
+            else -> throw error
+        }
+    }
     }
 
     private fun withAttachment(metadata: JSONObject, sha: String): JSONObject {

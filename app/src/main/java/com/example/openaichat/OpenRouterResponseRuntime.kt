@@ -30,7 +30,8 @@ data class OpenRouterRuntimeRequest(
 
 /** Application-owned requests. Lifecycle visibility is not request ownership. */
 object OpenRouterResponseRuntime {
-    private class Work(val context: Context, val request: OpenRouterRuntimeRequest, val client: ChatCompletionTransport) {
+    private class Work(val context: Context, val request: OpenRouterRuntimeRequest, val client: ChatCompletionTransport,
+        val artifactToolsFactory: (Context) -> LocalArtifactToolExecutor) {
         val launched = AtomicBoolean(false)
         val cancelled = AtomicBoolean(false)
         val stopping = AtomicBoolean(false)
@@ -100,10 +101,14 @@ object OpenRouterResponseRuntime {
         if (chatId.isBlank()) return
         work.values.filter { it.request.chatId == chatId }.forEach { cancel(it.request.requestId, reason) }
     }
-    fun start(context: Context, request: OpenRouterRuntimeRequest, client: ChatCompletionTransport) {
+    fun start(context: Context, request: OpenRouterRuntimeRequest, client: ChatCompletionTransport) =
+        start(context, request, client, ::LocalArtifactToolExecutor)
+
+    internal fun start(context: Context, request: OpenRouterRuntimeRequest, client: ChatCompletionTransport,
+        artifactToolsFactory: (Context) -> LocalArtifactToolExecutor) {
         require(request.provider in setOf("openrouter", "deepseek")) { "Unsupported runtime provider: ${request.provider}" }
         require(request.provider == client.provider) { "Provider/transport mismatch: ${request.provider}/${client.provider}" }
-        val item = Work(context.applicationContext, request, client)
+        val item = Work(context.applicationContext, request, client, artifactToolsFactory)
         retainClient(client)
         if (work.putIfAbsent(request.requestId, item) != null) {
             releaseClient(client)
@@ -256,7 +261,7 @@ object OpenRouterResponseRuntime {
                         a.has("attachment_manifest") || a.has("attachment")) throw error
                 }
             }
-            val artifactTools = LocalArtifactToolExecutor(item.context)
+            val artifactTools = item.artifactToolsFactory(item.context)
             var artifactCall = 0
             if (r.github) {
                 github = GitHubToolExecutor(secure, { r.githubRepo }, { r.githubBranches },
@@ -306,6 +311,7 @@ object OpenRouterResponseRuntime {
                                     artifactTools.createTextFile(args, artifactKey)
                                 } else artifactTools.createTextFile(args))
                                 .put("tool_name", name).put("arguments_sha256", argumentsSha).put("tool_call_id", callId)
+                            try {
                             // Keep confirmed effects reachable even when persisting the
                             // protocol or the active-owner registration subsequently fails.
                             if (isDeepSeek) artifacts.add(a)
@@ -329,12 +335,19 @@ object OpenRouterResponseRuntime {
                             item.runtimeAttachments.add(f)
                             fileTools.register(f)
                             LocalArtifactToolExecutor.toolResult(registered).toString()
+                            } catch (failure: Exception) {
+                                if (isDeepSeek && failure !is FileWriteOutcomeUnknownException) {
+                                    throw FileWriteOutcomeUnknownException(
+                                        "Файл опубликован, но подтверждение результата не сохранено; автоматический повтор запрещён.", failure)
+                                }
+                                throw failure
+                            }
                         }
                         name in LocalFileTools.names -> fileTools.execute(name, args)
                         r.github && github != null -> github!!.execute(name, args)
                         else -> JSONObject().put("ok", false).put("error", "Инструмент отключён").toString()
                     } } catch (e: java.io.IOException) {
-                        if (e is GitHubWriteOutcomeUnknownException || !active()) throw e
+                        if (e is GitHubWriteOutcomeUnknownException || (isDeepSeek && e is FileWriteOutcomeUnknownException) || !active()) throw e
                         JSONObject().put("ok", false).put("error", e.message).toString()
                     }
                     trace.put(ToolTraceSummary.entry(name, args, response)); response
