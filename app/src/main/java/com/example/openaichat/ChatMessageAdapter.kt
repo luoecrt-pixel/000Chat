@@ -81,6 +81,7 @@ class ChatMessageAdapter(
 
     companion object {
         private const val PAYLOAD_TEXT = "text"
+        private const val PAYLOAD_REASONING = "reasoning"
         @Volatile internal var diffExecutorForTests: java.util.concurrent.Executor? = null
     }
 
@@ -136,9 +137,20 @@ class ChatMessageAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
         val item = itemForBoundPosition(position)
-        if (payloads.contains(PAYLOAD_TEXT)) {
-            holder.body?.text = renderBody(item)
-            holder.body?.let { renderExtras(holder.card, item, it) }
+        val textChanged = payloads.contains(PAYLOAD_TEXT)
+        val reasoningChanged = payloads.contains(PAYLOAD_REASONING)
+        if ((textChanged || reasoningChanged) && holder.itemId == item.id) {
+            val reasoningBody = holder.card.findViewWithTag<TextView>("reasoning-summary-body")
+            // A recycled holder or the first fragment needs the normal panel creation path.
+            if (reasoningChanged && reasoningBody == null) {
+                bindFull(holder, item)
+                return
+            }
+            if (textChanged) {
+                holder.body?.text = renderBody(item)
+                holder.body?.let { renderExtras(holder.card, item, it) }
+            }
+            if (reasoningChanged) reasoningBody?.text = item.reasoningSummary.orEmpty()
             bindHolder(item.id, holder)
             return
         }
@@ -259,6 +271,7 @@ class ChatMessageAdapter(
     fun updateReasoningSummary(id: String, summary: String): Boolean {
         val index = itemIndexById[id] ?: return false
         val current = items[index]
+        if (current.reasoningSummary == summary) return true
         val updated = if (current.message == null) {
             ChatBubbleItem.create(
                 id = current.id,
@@ -276,7 +289,12 @@ class ChatMessageAdapter(
         refreshModelItem(index, updated)
         val displayPosition = displayPositionById[id]
         if (displayPosition != null) {
-            notifyItemChanged(displayPosition)
+            val holder = boundHolders[id]
+            if (holder?.card?.findViewWithTag<TextView>("reasoning-summary-body") != null) {
+                notifyItemChanged(displayPosition, PAYLOAD_REASONING)
+            } else {
+                notifyItemChanged(displayPosition)
+            }
         } else {
             submitModel()
         }

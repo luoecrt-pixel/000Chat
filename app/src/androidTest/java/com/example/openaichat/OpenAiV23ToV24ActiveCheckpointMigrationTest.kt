@@ -57,7 +57,7 @@ class OpenAiV23ToV24ActiveCheckpointMigrationTest {
         }
         try {
             ChatDatabase(isolated).use { db ->
-                assertEquals(25, db.readableDatabase.version)
+                assertEquals(26, db.readableDatabase.version)
                 LegacyOpenAiMigrationSchema.assertCurrentAdditions(db.readableDatabase)
                 val active = db.getActiveResponse(chatId)!!
                 assertEquals("Hello", active.getString("text"))
@@ -84,7 +84,7 @@ class OpenAiV23ToV24ActiveCheckpointMigrationTest {
                 assertTrue(ResponseIndexedCheckpoint.restore(active).legacyFlatCheckpoint)
                 assertEquals(signedOutput, db.getChat(chatId)!!.getJSONArray("messages")
                     .getJSONObject(0).getJSONArray("openai_protocol_output").toString())
-                assertEquals(25, db.readableDatabase.version)
+                assertEquals(26, db.readableDatabase.version)
             }
         } finally {
             file.delete()

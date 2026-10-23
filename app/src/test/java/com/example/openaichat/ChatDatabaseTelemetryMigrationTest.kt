@@ -88,7 +88,7 @@ class ChatDatabaseTelemetryMigrationTest {
     private fun assertUpgradeAndRepeatedOpen() {
         repeat(2) {
             ChatDatabase(context).use { db ->
-                assertEquals(25, db.readableDatabase.version)
+                assertEquals(26, db.readableDatabase.version)
                 assertTrue(columns(db.readableDatabase, "messages").containsAll(setOf("telemetry_summary", "openai_usage_ledger")))
                 assertTrue(columns(db.readableDatabase, "request_accounting").containsAll(setOf("telemetry_summary", "cache_write_tokens")))
                 assertTrue(columns(db.readableDatabase, "request_events").contains("telemetry_summary"))

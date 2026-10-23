@@ -90,6 +90,9 @@ class SecureStore(
     fun setOpenRouterApiKey(v: String): Boolean = setSecret("openrouter_key", v)
     fun getOpenRouterApiKey(): String = getSecret("openrouter_key")
 
+    fun setDeepSeekApiKey(v: String): Boolean = setSecret("deepseek_key", v)
+    fun getDeepSeekApiKey(): String = getSecret("deepseek_key")
+
     fun setGitHubToken(v: String): Boolean = setSecret("github_pat", v)
     fun getGitHubToken(): String = getSecret("github_pat")
 }

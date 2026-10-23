@@ -135,7 +135,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     private var attachmentPreparationTail = CompletableFuture.completedFuture(Unit)
     private val resumableResponseClient by lazy { ResumableResponseStreamClient(this) }
     @Volatile private var openRouterClientFactory: () -> OpenRouterChatClient = { OpenRouterChatClient() }
-    private val openRouterClient by lazy { openRouterClientFactory() }
+    private val openRouterClientDelegate = lazy {
+        openRouterClientFactory().also(OpenRouterResponseRuntime::retainClient)
+    }
+    private val openRouterClient by openRouterClientDelegate
+    @Volatile private var deepSeekClientFactory: () -> DeepSeekChatClient = { DeepSeekChatClient() }
+    private val deepSeekClientDelegate = lazy {
+        deepSeekClientFactory().also(OpenRouterResponseRuntime::retainClient)
+    }
+    private val deepSeekClient by deepSeekClientDelegate
     private val openRouterModelPreflightCall = AtomicReference<Call?>()
     private val pendingGitHubConfirmation = AtomicReference<CompletableFuture<Boolean>?>(null)
     private val pendingGitHubConfirmationDialog = AtomicReference<AlertDialog?>(null)
@@ -190,7 +198,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             prefs.getBoolean("openrouter_web_fetch", false), prefs.getBoolean("parallel_tools", true),
             prefs.getString("openrouter_cache_mode", "1h") ?: "1h", OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null)),
             prefs.getString("openrouter_pdf_engine", "native") ?: "native", prefs.getString("openrouter_image_mode", "original") == "compatible",
-            prefs.getString("openrouter_text_format", "text") ?: "text", prefs.getString("openrouter_json_schema", "").orEmpty())
+            prefs.getString(if (provider == "deepseek") "deepseek_text_format" else "openrouter_text_format", "text") ?: "text", prefs.getString("openrouter_json_schema", "").orEmpty())
     }
     @Volatile private var openAiReceivedEventHook: ((JSONObject) -> Unit)? = null
     // Deterministic lower budget for instrumentation; reducer always caps this
@@ -440,6 +448,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         scrollCallbacksStopped = false
         OpenRouterUiBridge.attach(this)
         recoverInterruptedOpenRouterRequests()
+        reconcilePublishedArtifactsInBackground()
         executor.execute { ResponseNotifications.restorePending(applicationContext) }
         // A Worker may have completed while this Activity was stopped. Reconcile
         // committed history before launching another resume, without losing a new draft.
@@ -451,6 +460,12 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             persistComposerStateNow()
             restoreCurrentChat()
             renderRequestTelemetry()
+        }
+        // Reasoning-only progress does not change durable message history. Reconcile it
+        // on every foreground transition, even when the same Activity is resumed.
+        chatDb.getActiveResponse(currentId)?.let { active ->
+            JsonProtocol.nonBlank(active, "request_id")?.takeIf(OpenRouterResponseRuntime::contains)
+                ?.let { responseChanged(currentId, it) }
         }
         BackgroundResponseWorkScheduler.cancelAll(applicationContext)
         activeResumeCalls.values.forEach { it.cancel() }
@@ -526,7 +541,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         try { cancelOpenRouterRequest() } catch (_: Exception) {}
         try { openRouterModelPreflightCall.getAndSet(null)?.cancel() } catch (_: Exception) {}
         OpenRouterUiBridge.detach(this)
-        try { if (!OpenRouterResponseRuntime.uses(openRouterClient)) openRouterClient.close() } catch (_: Exception) {}
+        try { if (openRouterClientDelegate.isInitialized()) OpenRouterResponseRuntime.releaseClient(openRouterClient) } catch (_: Exception) {}
+        try { if (deepSeekClientDelegate.isInitialized()) OpenRouterResponseRuntime.releaseClient(deepSeekClient) } catch (_: Exception) {}
         try { resumableResponseClient.close() } catch (_: Exception) {}
         // shutdownNow can leave a parsed/archived Create callback alive. It
         // still owns its SQLite claim and compensating /cancel; close only
@@ -1390,10 +1406,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 val accounts = chatDb.listRequestAccounting(sourceChat)
                 val events = chatDb.listRequestEvents(sourceChat, 100)
                 val lastRequest = ContextLastRequestPolicy.selectLatestCompletedRequest(accounts, events)
-                val key = if (configuration.provider == "openai") secure.getApiKey() else secure.getOpenRouterApiKey()
+                val key = credentialForProvider(configuration.provider)
                 val localCandidates = !configuration.openAi.fileAnalysis &&
                     ContextRequestPolicy.localToolCandidates(inspectionHistory, localArtifacts)
-                val tools = if (configuration.provider == "openrouter") ContextRequestPolicy.openRouterTools(
+                val tools = if (configuration.provider == "deepseek") ContextRequestPolicy.deepSeekTools(configuration.github)
+                else if (configuration.provider == "openrouter") ContextRequestPolicy.openRouterTools(
                     configuration.github, configuration.webSearch, configuration.webFetch)
                 else ContextToolSchemas.openAi(configuration.openAi.web, configuration.openAi.fileSearch,
                     configuration.openAi.vectorStore, configuration.openAi.codeInterpreter,
@@ -1413,9 +1430,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 names.addAll(localArtifacts.mapNotNull { JsonProtocol.nonBlank(it, "filename") })
                 var prefix: Boolean? = null
                 var prefixReason: String? = null
-                val format = if (configuration.provider == "openrouter")
+                val format = if (configuration.provider == "deepseek")
+                    DeepSeekContextSnapshot.validateResponseFormat(JSONObject().put("type", configuration.responseFormat))
+                else if (configuration.provider == "openrouter")
                     OpenRouterStructuredOutputPolicy.format(configuration.responseFormat, configuration.schema) else null
-                if (configuration.provider == "openrouter") {
+                if (configuration.provider in setOf("openrouter", "deepseek")) {
                     val durable = chatDb.getChat(sourceChat)?.optJSONArray("messages")
                     val durableRows = durable?.let { rows -> (0 until rows.length()).mapNotNull { rows.optJSONObject(it) } }.orEmpty()
                     val exactHistory = capturedHistory.validatedDurableHistory(durableRows)
@@ -1434,7 +1453,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     if (exactHistory == null) prefixReason = "Точное сравнение префикса ожидает согласованного сохранённого снимка истории. Текущие настройки и черновик учтены."
                     else if (requiresPreparation) prefixReason = "Точное сравнение префикса ожидает подготовки вложений."
                     else try {
-                        OpenRouterContextSnapshot.build(exactHistory, OpenRouterContextSnapshot.systemContent(configuration.instructions,
+                        if (configuration.provider == "deepseek") {
+                            DeepSeekContextSnapshot.validateAttachments(configuration.model, byMessage.flatten())
+                            DeepSeekContextSnapshot.build(exactHistory, DeepSeekContextSnapshot.systemContent(configuration.instructions,
+                                configuration.github, configuration.githubRepo, configuration.githubBranches,
+                                format?.optString("type") == "json_object"), byMessage,
+                                expectedBinding = DeepSeekProtocolCodec.binding(configuration.model, tools, key, format),
+                                protocolPrefix = { _, matches -> prefix = matches })
+                        } else OpenRouterContextSnapshot.build(exactHistory, OpenRouterContextSnapshot.systemContent(configuration.instructions,
                             configuration.github, configuration.githubRepo, configuration.githubBranches), byMessage,
                             protocolPrefix = { _, matches -> prefix = matches })
                     } catch (_: java.io.IOException) {
@@ -1449,7 +1475,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     configuration.openAi.previousResponseId,
                     if (configuration.provider == "openai") OpenAiInstructionChainPolicy.fingerprint(configuration.instructions,
                         key, configuration.model) else "", pendingManifests,
-                    if (configuration.provider == "openrouter") OpenRouterProtocolCodec.binding(configuration.model, tools, key,
+                    if (configuration.provider == "deepseek") DeepSeekProtocolCodec.binding(configuration.model, tools, key, format)
+                    else if (configuration.provider == "openrouter") OpenRouterProtocolCodec.binding(configuration.model, tools, key,
                         format, configuration.route) else null, configuration.route, configuration.cacheMode, names,
                     visibleTools, null, null, System.currentTimeMillis(), prefix, prefixReason, lastRequest).let { base ->
                     base.copy(messages = inspectionHistory.size,
@@ -1897,8 +1924,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             isChecked = prefs.getBoolean(pref, def)
         }
 
-        sectionHeader(if (openAi) "Мышление и формат (OpenAI)" else "Мышление и формат (OpenRouter / Claude)")
-        val efforts = arrayOf("auto","low","medium","high","xhigh","max")
+        sectionHeader(when (provider) { "openai" -> "Мышление и формат (OpenAI)"; "deepseek" -> "Мышление и формат (DeepSeek)"; else -> "Мышление и формат (OpenRouter / Claude)" })
+        val supportedDeepSeekEfforts = arrayOf("auto", "none", "low", "high", "max")
+        val savedEffort = prefs.getString("reasoning", "high") ?: "high"
+        val efforts = if (provider == "deepseek") {
+            if (savedEffort in supportedDeepSeekEfforts) supportedDeepSeekEfforts
+            else arrayOf(savedEffort, *supportedDeepSeekEfforts)
+        } else arrayOf("auto","low","medium","high","xhigh","max")
         val effort = spinner("Усилие мышления", efforts, "reasoning", "high")
         if (provider == "openrouter") {
             box.addView(TextView(this).apply {
@@ -1907,17 +1939,22 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 textSize = 11.5f
             })
         }
+        if (provider == "deepseek") box.addView(TextView(this).apply {
+            text = "DeepSeek: none выключает мышление; low/high/max задают усилие; auto выбирает high. Неподдерживаемое сохранённое усилие требует явного изменения."
+            setTextColor(theme.textSecondary)
+            textSize = 11.5f
+        })
         val modes = arrayOf("standard","pro")
         val mode = if (supportsMode) spinner("Режим ответа (standard/pro)", modes, "reasoning_mode", "standard") else null
         val summaries = arrayOf("auto","concise","detailed","null")
         val summary = if (openAi) spinner("Краткий ход рассуждений", summaries, "reasoning_summary", "auto") else null
         val verbosities = arrayOf("low","medium","high")
         val verbosity = spinner("Подробность ответа", verbosities, "verbosity", "medium")
-        val canSetVerbosity = provider != "openrouter" ||
+        val canSetVerbosity = provider == "openai" || provider == "openrouter" &&
             OpenRouterReasoningPolicy.supportsResponseVerbosity(model)
         verbosity.isEnabled = canSetVerbosity
         if (!canSetVerbosity) box.addView(TextView(this).apply {
-            text = "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие."
+            text = if (provider == "deepseek") "DeepSeek не поддерживает параметр verbosity." else "Claude: verbosity отключена, иначе OpenRouter может переопределить выбранное усилие."
             textSize = 11.5f
             setTextColor(theme.textSecondary)
             setPadding(0, dp(3), 0, dp(6))
@@ -1940,8 +1977,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         box.addView(presentation)
         val scientificPreview = chk("Офлайн-превью формул и диаграмм", "response_scientific_preview", true)
         box.addView(scientificPreview)
-        val formats = arrayOf("text","json_object","json_schema")
-        val formatKey = if (openAi) "text_format" else "openrouter_text_format"
+        val formats = if (provider == "deepseek") arrayOf("text","json_object") else arrayOf("text","json_object","json_schema")
+        val formatKey = when (provider) { "openai" -> "text_format"; "deepseek" -> "deepseek_text_format"; else -> "openrouter_text_format" }
         val schemaKey = if (openAi) "json_schema" else "openrouter_json_schema"
         val format = spinner("Формат ответа", formats, formatKey, "text")
         val schema = EditText(this).apply {
@@ -1950,9 +1987,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setText(prefs.getString(schemaKey, "").orEmpty())
             minLines = 2
         }
-        box.addView(schema)
+        if (provider != "deepseek") box.addView(schema)
 
-        sectionHeader(if (openAi) "Инструменты и контекст OpenAI" else "Инструменты, маршрут и кэш OpenRouter")
+        sectionHeader(when (provider) { "openai" -> "Инструменты и контекст OpenAI"; "deepseek" -> "Локальные инструменты и GitHub"; else -> "Инструменты, маршрут и кэш OpenRouter" })
         val web = if (openAi) chk("Web Search (OpenAI)", "web", false).also { box.addView(it) } else null
         val fileSearch = if (openAi) chk("File Search (Vector Store)", "file_search", false).also { box.addView(it) } else null
         val vectorInput = if (openAi) EditText(this).apply {
@@ -1977,10 +2014,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             setText(prefs.getString("cache_key", "").orEmpty())
         }.also { box.addView(it) } else null
 
-        val openRouterWebSearch = if (!openAi) chk("OpenRouter: Web Search", "openrouter_web_search", false).also { box.addView(it) } else null
-        val openRouterWebFetch = if (!openAi) chk("OpenRouter: Web Fetch", "openrouter_web_fetch", false).also { box.addView(it) } else null
+        val openRouterWebSearch = if (provider == "openrouter") chk("OpenRouter: Web Search", "openrouter_web_search", false).also { box.addView(it) } else null
+        val openRouterWebFetch = if (provider == "openrouter") chk("OpenRouter: Web Fetch", "openrouter_web_fetch", false).also { box.addView(it) } else null
         val githubTools = if (!openAi) chk("Разрешить GitHub-инструменты", "github_tools", false).also { box.addView(it) } else null
-        val claudeRoute = if (!openAi) Spinner(this).apply {
+        val claudeRoute = if (provider == "openrouter") Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 arrayOf("Автоматический: с резервными провайдерами", "Прямой Anthropic: без резервного провайдера"))
             setSelection(if (OpenRouterClaudeRoute.fromPreference(prefs.getString("openrouter_claude_route", null)) == OpenRouterClaudeRoute.ANTHROPIC) 1 else 0)
@@ -1993,15 +2030,15 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             })
             box.addView(it)
         } else null
-        val cacheMode = if (!openAi) spinner("Кэш промпта Claude (1h / 5m / off)", arrayOf("1h", "5m", "off"), "openrouter_cache_mode", "1h") else null
-        val pdfEngine = if (!openAi) spinner("Движок PDF OpenRouter", arrayOf("native", "auto", "cloudflare-ai", "mistral-ocr"), "openrouter_pdf_engine", "native") else null
+        val cacheMode = if (provider == "openrouter") spinner("Кэш промпта Claude (1h / 5m / off)", arrayOf("1h", "5m", "off"), "openrouter_cache_mode", "1h") else null
+        val pdfEngine = if (provider == "openrouter") spinner("Движок PDF OpenRouter", arrayOf("native", "auto", "cloudflare-ai", "mistral-ocr"), "openrouter_pdf_engine", "native") else null
         val imageMode = if (!openAi) Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 arrayOf("Исходное изображение", "Совместимая копия JPEG"))
             setSelection(if (prefs.getString("openrouter_image_mode", "original") == "compatible") 1 else 0)
         }.also {
             box.addView(TextView(this).apply {
-                text = "Передача фото OpenRouter"
+                text = "Передача фото"
                 textSize = 12f
                 setTextColor(theme.textSecondary)
                 setPadding(0, dp(10), 0, dp(4))
@@ -2065,7 +2102,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 if (pdfEngine != null) editor.putString("openrouter_pdf_engine", pdfEngine.selectedItem.toString())
                 if (imageMode != null) editor.putString("openrouter_image_mode", if (imageMode.selectedItemPosition == 1) "compatible" else "original")
                 editor.putString(formatKey, formats[format.selectedItemPosition])
-                editor.putString(schemaKey, schema.text.toString())
+                if (provider != "deepseek") editor.putString(schemaKey, schema.text.toString())
                 editor.apply()
                 updateEffortBadge()
                 renderRequestTelemetry()
@@ -2213,6 +2250,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         section("Подключение (API ключи)")
         val key = field("OpenAI API key", secure.getApiKey(), true); spaced(key)
         val openRouterKey = field("OpenRouter API key", secure.getOpenRouterApiKey(), true); spaced(openRouterKey)
+        val deepSeekKey = field("DeepSeek API key", secure.getDeepSeekApiKey(), true); spaced(deepSeekKey)
 
         section("Оформление и уведомления")
         val themeIds = AppThemePalette.themes
@@ -2288,8 +2326,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             .setPositiveButton("Сохранить") { _,_ ->
                 val openAiKeySaved = secure.setApiKey(key.text.toString().trim())
                 val openRouterKeySaved = secure.setOpenRouterApiKey(openRouterKey.text.toString().trim())
+                val deepSeekKeySaved = secure.setDeepSeekApiKey(deepSeekKey.text.toString().trim())
                 val githubTokenSaved = secure.setGitHubToken(githubToken.text.toString().trim())
-                val allSecretsSaved = openAiKeySaved && openRouterKeySaved && githubTokenSaved
+                val allSecretsSaved = openAiKeySaved && openRouterKeySaved && deepSeekKeySaved && githubTokenSaved
                 val selectedTheme = themeIds.getOrElse(themeSpinner.selectedItemPosition) { "dark" }
                 prefs.edit()
                     .putString("app_theme", selectedTheme)
@@ -2306,6 +2345,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                     diagnostics.log("secure_store_save_failed", mapOf(
                         "openai_saved" to openAiKeySaved,
                         "openrouter_saved" to openRouterKeySaved,
+                        "deepseek_saved" to deepSeekKeySaved,
                         "github_saved" to githubTokenSaved
                     ))
                 }
@@ -2458,6 +2498,40 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         developerInstructions, githubToolsEnabled, githubRepo, githubBranches, null, false,
         presentationInstructionsForRequest())
 
+    private fun credentialForProvider(provider: String): String = when (provider) {
+        "openai" -> secure.getApiKey()
+        "openrouter" -> secure.getOpenRouterApiKey()
+        "deepseek" -> secure.getDeepSeekApiKey()
+        else -> throw IllegalArgumentException("Неизвестный провайдер: $provider")
+    }
+
+    private fun prepareDeepSeekSnapshot(
+        history: List<JSONObject>, instructions: GenerationInstructions,
+        githubToolsEnabled: Boolean, githubRepo: String, githubBranches: String,
+        model: String, compatibleImages: Boolean, tools: JSONArray, apiKey: String,
+        responseFormat: JSONObject?
+    ): PreparedOpenRouterMessages {
+        val originals = history.map { message ->
+            if (message.optString("role") == "user") resolveOpenRouterAttachments(message) else emptyList()
+        }
+        OpenRouterAttachmentPreflight.verifySources(originals.flatten().distinctBy { it.path })
+        val copies = mutableMapOf<String, OpenRouterLocalAttachment>()
+        val edge = if (originals.flatten().count { it.kind == "image" } >= 15) 4096 else 8192
+        val byMessage = originals.map { items -> items.map { attachment ->
+            if (compatibleImages && attachment.kind == "image")
+                copies.getOrPut(attachment.id) { OpenRouterAttachmentPreflight.compatible(attachment, edge) }
+            else attachment
+        } }
+        // The complete outgoing history participates in the provider limit.
+        DeepSeekContextSnapshot.validateAttachments(model, byMessage.flatten())
+        val format = DeepSeekContextSnapshot.validateResponseFormat(responseFormat)
+        val expectedBinding = DeepSeekProtocolCodec.binding(model, tools, apiKey, format)
+        val messages = DeepSeekContextSnapshot.build(history,
+            DeepSeekContextSnapshot.systemContent(instructions, githubToolsEnabled, githubRepo, githubBranches,
+                format?.optString("type") == "json_object"), byMessage, expectedBinding = expectedBinding)
+        return PreparedOpenRouterMessages(messages, byMessage.flatten().distinctBy { it.id })
+    }
+
     private fun prepareOpenRouterSnapshot(
         history: List<JSONObject>, systemPrompt: String?, developerInstructions: String?,
         githubToolsEnabled: Boolean, githubRepo: String, githubBranches: String,
@@ -2502,10 +2576,11 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         webSearchEnabled: Boolean, webFetchEnabled: Boolean, parallelToolCallsEnabled: Boolean,
         githubRepo: String, githubBranches: String, cacheMode: String, background: Boolean, pdfEngine: String,
         responseFormat: JSONObject? = null,
-        claudeRoute: OpenRouterClaudeRoute = OpenRouterClaudeRoute.AUTO
+        claudeRoute: OpenRouterClaudeRoute = OpenRouterClaudeRoute.AUTO,
+        provider: String = "openrouter"
     ) {
         activeAssistantItemId = addBubble(
-            AssistantModelLabel.text(JSONObject().put("provider", "openrouter").put("requested_model", model)),
+            AssistantModelLabel.text(JSONObject().put("provider", provider).put("requested_model", model)),
             "",
             false,
             itemId = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
@@ -2517,11 +2592,26 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             effort, verbosity, maxOut, githubEnabled, githubRepo,
             githubBranches.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
             webSearchEnabled, webFetchEnabled, parallelToolCallsEnabled, cacheMode, background,
-            startedAt, taskClass, effortPref, autoSelected, promptChars, apiKey, pollingClient, pdfEngine, responseFormat, claudeRoute), openRouterClient)
+            startedAt, taskClass, effortPref, autoSelected, promptChars, apiKey, pollingClient, pdfEngine, responseFormat, claudeRoute, provider),
+            if (provider == "deepseek") deepSeekClient else openRouterClient)
     }
 
     override fun isViewing(chatId: String): Boolean = activityVisible && !isFinishing && currentChatId() == chatId
-    override fun ownsClient(client: OpenRouterChatClient): Boolean = openRouterClient === client
+    override fun ownsClient(client: ChatCompletionTransport): Boolean =
+        openRouterClientDelegate.isInitialized() && openRouterClient === client ||
+            deepSeekClientDelegate.isInitialized() && deepSeekClient === client
+
+    override fun reasoningChanged(chatId: String, requestId: String, reasoning: String) {
+        if (!isViewing(chatId) || !::messageAdapter.isInitialized ||
+            chatDb.getActiveResponse(chatId)?.optString("request_id") != requestId ||
+            OpenRouterResponseRuntime.chatFor(requestId) != chatId) return
+        if (activeAssistantItemId == null) responseChanged(chatId, requestId)
+        val expected = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
+        if (activeAssistantItemId == expected) {
+            messageAdapter.updateReasoningSummary(expected, reasoning)
+        }
+    }
+
     override fun protocolWarning(chatId: String, requestId: String, warning: String) {
         if (isViewing(chatId) && chatDb.getActiveResponse(chatId)?.optString("request_id") == requestId) {
             toolLabel.text = warning
@@ -2538,15 +2628,20 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val active = chatDb.getActiveResponse(chatId)
         if (active?.optString("request_id") == requestId) {
             if (activeAssistantItemId == null) {
-                val model = chatDb.listRequestAccounting(chatId).firstOrNull { it.optString("local_request_id") == requestId }?.optString("requested_model")
+                val account = chatDb.listRequestAccounting(chatId).firstOrNull { it.optString("local_request_id") == requestId }
                 activeAssistantItemId = addBubble(
-                    AssistantModelLabel.text(JSONObject().put("requested_model", model)),
+                    AssistantModelLabel.text(JSONObject().put("requested_model", account?.optString("requested_model"))
+                        .put("provider", account?.optString("provider"))),
                     "",
                     false,
                     itemId = ChatScrollPolicy.activeAssistantIdentity(requestId, null, chat.size)
                 )
             }
-            activeAssistantItemId?.let { messageAdapter.updateText(it, JsonProtocol.string(active, "text")) }
+            activeAssistantItemId?.let {
+                messageAdapter.updateText(it, JsonProtocol.string(active, "text"))
+                OpenRouterResponseRuntime.activeReasoning(requestId).takeIf { value -> value.isNotBlank() }
+                    ?.let { value -> messageAdapter.updateReasoningSummary(it, value) }
+            }
             setBusy(true)
             scrollToLatest()
         } else if (active == null) {
@@ -2558,7 +2653,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             status.text = when (terminal.optString("status")) {
                 "completed" -> "Готово"
                 "incomplete" -> "Ответ не завершён · ${OpenRouterFinishPolicy.description(JsonProtocol.text(terminal, "finish_reason"))}"
-                else -> "Ошибка OpenRouter — частичный ответ сохранён"
+                else -> "${ModelCatalog.source(terminal.optString("provider")).label}: частичный ответ сохранён"
             }
             renderRequestTelemetry()
         }
@@ -2578,19 +2673,31 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); openNotificationChat(intent) }
 
+    private fun reconcilePublishedArtifactsInBackground() {
+        ArtifactIntentReconciler.enqueue(applicationContext)
+    }
+
     private fun recoverInterruptedOpenRouterRequests() {
         chatDb.listActiveResponses().forEach { a ->
             val id = a.optString("request_id"); val chatId = a.optString("chat_id")
             val account = chatDb.listRequestAccounting(chatId).firstOrNull { it.optString("local_request_id") == id }
-            if (account?.optString("provider") == "openrouter" && !OpenRouterResponseRuntime.contains(id)) {
+            if (account?.optString("provider") in setOf("openrouter", "deepseek") && !OpenRouterResponseRuntime.contains(id)) {
                 val error = "Соединение прервано после остановки процесса Android. Частичный ответ сохранён; повторная платная отправка не выполнялась."
-                val m = JSONObject().put("role", "assistant").put("provider", "openrouter").put("request_id", id)
-                    .put("requested_model", account.opt("requested_model")).put("status", "disconnected").put("error", error)
+                val m = JSONObject().put("role", "assistant").put("provider", account?.optString("provider")).put("request_id", id)
+                    .put("requested_model", account?.opt("requested_model")).put("status", "disconnected").put("error", error)
                     .put("text", JsonProtocol.string(a, "text"))
-                chatDb.getOpenRouterCheckpoint(chatId, id)?.let { m.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(it, m)) }
+                if (account?.optString("provider") == "deepseek") {
+                    chatDb.getDeepSeekCheckpoint(chatId, id)?.let {
+                        val archive = DeepSeekProtocolCodec.withVisibleTail(it, m)
+                        m.put(DeepSeekProtocolCodec.FIELD, archive)
+                        DeepSeekProtocolCodec.extractReasoningSummary(archive).takeIf { value -> value.isNotBlank() }
+                            ?.let { value -> m.put("reasoning_summary", value) }
+                    }
+                } else chatDb.getOpenRouterCheckpoint(chatId, id)?.let { m.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(it, m)) }
                 if (chatDb.finalizeCurrentChatIfActiveRequest(chatId, "", null, null, listOf(m), id)) {
                     chatDb.recordRequestAccounting(chatId = chatId, localRequestId = id, status = "disconnected", error = error)
-                    chatDb.sealOpenRouterRounds(chatId, id)
+                    if (account?.optString("provider") == "deepseek") chatDb.sealDeepSeekRounds(chatId, id)
+                    else chatDb.sealOpenRouterRounds(chatId, id)
                     ResponseNotifications.finished(applicationContext, chatId, id, false)
                 }
             }
@@ -2814,6 +2921,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val chatId=currentChatId()
         val generation=activeResponseState.markUserStop()
         val active=try{activeResponsePersistence.getActiveResponse(chatId)}catch(_:Exception){null}
+        val stopCheckpointWarning = active?.let { JsonProtocol.nonBlank(it, "request_id") }
+            ?.let { OpenRouterResponseRuntime.prepareStop(it) }
         val originalCredential = captureOpenAiRequestCredential(chatId, active)
         val originalCreate = try {
             activeResponsePersistence.getActiveResponse(chatId)?.let {
@@ -2831,6 +2940,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             ?: chat.lastOrNull { it.optString("role") == "user" }?.let { JsonProtocol.nonBlank(it, "request_id") }
         val stopped = activeRequestId?.let { chatDb.stopActiveRequestOnce(chatId, it, removeUserMessage = !activeRequestRegenerate) } ?: false
         activeRequestId?.let { OpenRouterResponseRuntime.cancel(it, "Остановлено пользователем") }
+        if (stopped && stopCheckpointWarning != null) Toast.makeText(this, stopCheckpointWarning, Toast.LENGTH_LONG).show()
         if (activeRequestId != null && !stopped) {
             // A terminal transaction already won: Stop must not remove its committed bubble.
             restoreCurrentChat()
@@ -2842,6 +2952,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             activeResponsePersistence.clearActiveResponse(chatId, expectedRequestId = null)
         }
         BackgroundResponseWorkScheduler.cancel(applicationContext, chatId, activeRequestId)
+        if (stopped && activeRequestId != null && chatDb.listRequestAccounting(chatId).any {
+                it.optString("local_request_id") == activeRequestId && it.optString("provider") == "deepseek"
+            }) chatDb.sealDeepSeekRounds(chatId, activeRequestId)
         if (stopped && activeRequestId != null &&
             chatDb.listRequestAccounting(chatId).any {
                 it.optString("local_request_id") == activeRequestId && it.optString("provider") == "openrouter"
@@ -3025,8 +3138,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         } else null
         val configuration = captureContextConfiguration()
         val provider = configuration.provider
-        val openRouterResponseFormat = if (provider == "openrouter") try {
-            OpenRouterStructuredOutputPolicy.format(configuration.responseFormat, configuration.schema)
+        val openRouterResponseFormat = if (provider in setOf("openrouter", "deepseek")) try {
+            if (provider == "deepseek") DeepSeekContextSnapshot.validateResponseFormat(JSONObject().put("type", configuration.responseFormat))
+            else OpenRouterStructuredOutputPolicy.format(configuration.responseFormat, configuration.schema)
         } catch (_: Exception) {
             status.text = "Сначала укажите корректный формат/JSON Schema в панели «Мышление и ответ»"; return
         } else null
@@ -3037,13 +3151,13 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 return
             }
         }
-        if (provider == "openrouter") {
+        if (provider in setOf("openrouter", "deepseek")) {
             cancelOpenRouterRequest()
             cancelPendingGitHubConfirmation()
         }
         // Capture the credential, model and instructions once. Chain reuse,
         // the actual wire request and persisted metadata share this snapshot.
-        val key = if (provider == "openrouter") secure.getOpenRouterApiKey() else secure.getApiKey()
+        val key = credentialForProvider(provider)
         if(key.isBlank()){showSettings();return}
         val model = configuration.model
         val openAiInstructions = configuration.instructions
@@ -3051,7 +3165,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // previous_response_id inherits prior role-bearing input. Reuse is safe
         // only for the immediate completed turn under identical instructions.
         if (pendingUploadUris.any { it.second == "zip" } && !preparingZipAttachments) {
-            if (provider == "openrouter") preparePendingOpenRouterZipsThenSend(regenerate)
+            if (provider in setOf("openrouter", "deepseek")) preparePendingOpenRouterZipsThenSend(regenerate)
             else preparePendingZipsThenSend(regenerate)
             return
         }
@@ -3121,7 +3235,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         }
         val knownFileBytes = requestFileSizes.sumOf { it.coerceAtLeast(0L) }
         val maxTotalInputFileBytes = 50L * 1024L * 1024L
-        if (provider != "openrouter" && knownFileBytes > maxTotalInputFileBytes) {
+        if (provider == "openai" && knownFileBytes > maxTotalInputFileBytes) {
             status.text = "Суммарный размер файлов больше " + formatBytes(maxTotalInputFileBytes) + " — уменьшите количество/размер вложений"
             return
         }
@@ -3139,7 +3253,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         val autoSelected = effortPref=="auto"
         val taskClass = classifyTask(text, hasAttachments)
         val baselineAutoEffort = autoEffortHeuristic(text,hasAttachments)
-        val effort=if(autoSelected) chatDb.autoEffortHint(taskClass, baselineAutoEffort) else effortPref
+        val effort=if(autoSelected && provider == "deepseek") "high" else if(autoSelected) chatDb.autoEffortHint(taskClass, baselineAutoEffort) else effortPref
         val reasoningMode=prefs.getString("reasoning_mode","standard") ?: "standard"
         val supportedReasoningMode = ModelRequestPolicy.supportedMode(provider, model, reasoningMode)
         var configUpdateEffort:String? = null
@@ -3182,7 +3296,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if(fileSizes.length()>0) put("file_sizes",fileSizes)
             if(filePaths.length()>0) put("file_paths",filePaths)
             if(fileMimes.length()>0) put("file_mimes",fileMimes)
-            requestImagePath?.takeIf { provider == "openrouter" || File(it).isFile }
+            requestImagePath?.takeIf { provider in setOf("openrouter", "deepseek") || File(it).isFile }
                 ?.let { path -> put("image_path", path) }
             requestImageFileId?.let{fid->put("image_file_id",fid)}
             (sourceToRepeat?.let { JsonProtocol.nonBlank(it, "image_name") } ?: pendingImageName)?.takeIf{it.isNotBlank()}?.let{put("image_name",it)}
@@ -3191,7 +3305,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             if (requestOpenRouterAttachments.isNotEmpty()) put("attachments", JSONArray().apply { requestOpenRouterAttachments.forEach { put(it.toJson()) } })
         }
 
-        if (provider == "openrouter") {
+        if (provider in setOf("openrouter", "deepseek")) {
             // Capture immutable JSON and settings on UI; all history I/O and Base64 run
             // on the executor. Never dereference the current chat/prefs after navigation.
             val capturedHistory = chat.map { JsonProtocol.objectCopy(it) } +
@@ -3202,8 +3316,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val capturedGithubEnabled = configuration.github
             val capturedGithubRepo = configuration.githubRepo
             val capturedGithubBranches = configuration.githubBranches
-            val capturedWebSearch = configuration.webSearch
-            val capturedWebFetch = configuration.webFetch
+            val capturedWebSearch = provider == "openrouter" && configuration.webSearch
+            val capturedWebFetch = provider == "openrouter" && configuration.webFetch
             val capturedParallelTools = configuration.parallel
             val capturedPdfEngine = configuration.pdfEngine
             val capturedCacheMode = configuration.cacheMode
@@ -3224,11 +3338,18 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 try {
                     // Test-only seam to hold a real Send at the serialization boundary.
                     openRouterPreparationHook?.invoke()
-                    val prepared = prepareOpenRouterSnapshot(
+                    val prepared = if (provider == "deepseek") {
+                        DeepSeekContextSnapshot.validateMaxTokens(maxOut)
+                        DeepSeekContextSnapshot.resolveThinking(actualEffort)
+                        prepareDeepSeekSnapshot(capturedHistory,
+                            GenerationInstructions(capturedSystemPrompt, capturedDeveloperInstructions, capturedPresentation),
+                            capturedGithubEnabled, capturedGithubRepo, capturedGithubBranches, model, capturedCompatibleImages,
+                            ContextRequestPolicy.deepSeekTools(capturedGithubEnabled), key, openRouterResponseFormat)
+                    } else prepareOpenRouterSnapshot(
                         capturedHistory, capturedSystemPrompt, capturedDeveloperInstructions,
                         capturedGithubEnabled, capturedGithubRepo, capturedGithubBranches, model, capturedCompatibleImages, capturedPresentation, capturedClaudeRoute
                     )
-                    if (!validateOpenRouterModalities(key, model, prepared.attachments, requestChatId, requestGeneration)) return@execute
+                    if (provider == "openrouter" && !validateOpenRouterModalities(key, model, prepared.attachments, requestChatId, requestGeneration)) return@execute
                     if (!isRequestCurrent(requestChatId, requestGeneration) ||
                         pendingOpenRouterPreparation.get() != localRequestId) return@execute
                     handedToUi = true
@@ -3264,7 +3385,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                         chatDb.startRequestAccounting(
                             chatId = requestChatId, localRequestId = localRequestId,
                             provider = provider, requestedModel = model,
-                            credentialSource = "openrouter_api_key"
+                            credentialSource = if (provider == "deepseek") "deepseek_api_key" else "openrouter_api_key"
                         )
                         status.text = if (preflightWarning.isNullOrBlank()) "Модель отвечает…"
                             else "⚠ $preflightWarning\nМодель отвечает…"
@@ -3300,7 +3421,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                             parallelToolCallsEnabled = capturedParallelTools,
                             githubRepo = capturedGithubRepo, githubBranches = capturedGithubBranches,
                             cacheMode = capturedCacheMode, background = backgroundEnabled, pdfEngine = capturedPdfEngine,
-                            responseFormat = openRouterResponseFormat, claudeRoute = capturedClaudeRoute
+                            responseFormat = openRouterResponseFormat, claudeRoute = capturedClaudeRoute, provider = provider
                         )
                         } finally { releasePreparedFiles(preparedFiles) }
                     }
@@ -4452,7 +4573,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             val chatId=a.optString("chat_id")
             val requestId=a.optString("request_id").takeIf{it.isNotBlank() && it!="null"}
             val responseId=a.optString("response_id").takeIf{it.isNotBlank() && it!="null"}
-            if (requestId != null && chatDb.listRequestAccounting(chatId).any { it.optString("local_request_id") == requestId && it.optString("provider") == "openrouter" }) return@forEach
+            if (requestId != null && chatDb.listRequestAccounting(chatId).any { it.optString("local_request_id") == requestId && it.optString("provider") in setOf("openrouter", "deepseek") }) return@forEach
             // A closed socket may still own parsed bytes and its final SQLite
             // transaction. Neither foreground cleanup nor another resume may
             // discard that owner while the original callback is finishing.
@@ -5156,12 +5277,14 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
              setPadding(0,dp(8),0,dp(2))
          }
          val toggle=TextView(this).apply{
+             tag="reasoning-summary-toggle"
              text=if(summary.isBlank())"🧠 Модель размышляет…" else if(initiallyExpanded)"🧠 Скрыть ход рассуждений ▲" else "🧠 Показать ход рассуждений ▼"
              textSize=12.5f
              setTextColor(currentTheme().accent)
              setPadding(0,dp(2),0,dp(4))
          }
          val body=TextView(this).apply{
+             tag="reasoning-summary-body"
              text=summary
              textSize=13f
              setTextColor(currentTheme().textPrimary)
@@ -5735,6 +5858,8 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             return buildString{
                 append("$title\n")
                 append("Запросов: $requests (успешных $success)\n")
+                val unknownUsage = o.optLong("unknown_usage_requests", 0L)
+                if (unknownUsage > 0L) append("Токены ниже: только подтверждённые полные снимки; у $unknownUsage запросов итог неизвестен.\n")
                 append("Input: ${fmtTokens(input)} · cache: ${fmtTokens(cached)}\n")
                 append("Cache write: ${fmtTokens(writes)}\n")
                 append("Output: ${fmtTokens(output)} · reasoning: ${fmtTokens(reasoning)}\n")
@@ -5956,7 +6081,7 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
             return
         }
 
-        if (sourceProvider == "openrouter") {
+        if (sourceProvider in setOf("openrouter", "deepseek")) {
             // Classify the private camera file for the source draft, never the current composer.
             executor.execute {
                 try {
@@ -7277,7 +7402,9 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
                 id = activeId,
                 label = activeLabel,
                 text = partial,
-                user = false
+                user = false,
+                reasoningSummary = OpenRouterResponseRuntime.activeReasoning(active.optString("request_id"))
+                    .trim().takeIf { it.isNotBlank() }
             )
             activeAssistantItemId = activeId
             status.text=if(active.optString("status")=="queued")"Модель в очереди…" else "Продолжается генерация…"
@@ -7383,8 +7510,10 @@ class MainActivity : ComponentActivity(), OpenRouterUiBridge.Host {
         // Invalidate the persisted request *before* truncating history. UI Stop would
         // restore/remove unrelated bubbles and is not suitable for Edit.
         if (editingRequestId != null) {
+            val editStopWarning = OpenRouterResponseRuntime.prepareStop(editingRequestId)
             OpenRouterResponseRuntime.cancel(editingRequestId, "Сообщение изменено")
-            chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
+            val editStopped = chatDb.stopActiveRequestOnce(editingChatId, editingRequestId)
+            if (editStopped && editStopWarning != null) Toast.makeText(this, editStopWarning, Toast.LENGTH_LONG).show()
             BackgroundResponseWorkScheduler.cancel(applicationContext, editingChatId, editingRequestId)
             activeResumeCalls.remove(editingChatId)?.cancel()
             val activeId = active?.optString("response_id")?.takeIf { it.isNotBlank() && it != "null" }

@@ -62,7 +62,7 @@ class OpenAiV22ToV23MigrationTest {
         }
         try {
             ChatDatabase(isolatedContext).use { upgraded ->
-                assertEquals(25, upgraded.readableDatabase.version)
+                assertEquals(26, upgraded.readableDatabase.version)
                 LegacyOpenAiMigrationSchema.assertCurrentAdditions(upgraded.readableDatabase)
                 val chat = upgraded.getChat(chatId)!!
                 val restored = chat.getJSONArray("messages")
@@ -88,7 +88,7 @@ class OpenAiV22ToV23MigrationTest {
                 // Reopening the migrated file must not re-run the migration.
             }
             ChatDatabase(isolatedContext).use { reopened ->
-                assertEquals(25, reopened.readableDatabase.version)
+                assertEquals(26, reopened.readableDatabase.version)
                 LegacyOpenAiMigrationSchema.assertCurrentAdditions(reopened.readableDatabase)
                 assertEquals("Preserved original answer",
                     reopened.getChat(chatId)!!.getJSONArray("messages")

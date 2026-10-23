@@ -40,6 +40,13 @@ object ModelCatalog {
                 ModelOption("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
                 ModelOption("anthropic/claude-fable-5.1", "Claude Fable 5.1")
             )
+        ),
+        ApiSourceOption(
+            id = "deepseek",
+            label = "DeepSeek API",
+            models = listOf(
+                ModelOption("deepseek-flash", "DeepSeek Flash")
+            )
         )
     )
 

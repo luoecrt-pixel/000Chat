@@ -43,9 +43,11 @@ internal object FileBackedIoTelemetry {
     ): JSONObject? {
         val out = JSONObject()
         toolTelemetry?.let { tools ->
-            for (key in listOf("rounds_completed", "calls_executed")) {
+            for (key in listOf("rounds_completed", "calls_executed", "rounds_with_usage", "rounds_total")) {
                 if (tools.has(key)) out.put(key, tools.optLong(key, 0L).coerceAtLeast(0L))
             }
+            if (tools.optBoolean("usage_incomplete", false)) out.put("usage_incomplete", true)
+            tools.optJSONObject("observed_partial_usage")?.let { out.put("observed_partial_usage", JsonProtocol.objectCopy(it)) }
             tools.optJSONArray("executed_tools")?.let { names ->
                 val clean = (0 until names.length()).mapNotNull { i ->
                     JsonProtocol.string(names, i).trim().takeIf { it.isNotEmpty() }
@@ -78,9 +80,10 @@ internal object FileBackedIoTelemetry {
             when {
                 key == OpenAiUsageLedger.FIELD && value is JSONObject ->
                     merged.put(key, OpenAiUsageLedger.merge(merged.optJSONObject(key), value))
-                key == "cost_details" && value is JSONObject ->
+                key in setOf("cost_details", "observed_partial_usage") && value is JSONObject ->
                     merged.put(key, mergeObjects(merged.optJSONObject(key), value))
-                key in setOf("rounds_completed", "calls_executed", "files", "source_read_passes", "source_read_bytes", "file_work_ms") ->
+                key == "usage_incomplete" && value is Boolean -> merged.put(key, merged.optBoolean(key, false) || value)
+                key in setOf("rounds_completed", "calls_executed", "rounds_with_usage", "rounds_total", "files", "source_read_passes", "source_read_bytes", "file_work_ms") ->
                     value.toString().toLongOrNull()?.takeIf { it >= 0L }?.let {
                         merged.put(key, maxOf(merged.optLong(key, 0L), it))
                     }

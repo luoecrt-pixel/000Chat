@@ -7,6 +7,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BackgroundRecoveryPolicyTest {
+    @Test fun inferenceProvidersNeverBecomeResponsesRecoveryEvenWithAResponseId() {
+        for (provider in listOf("deepseek", "openrouter", "unknown")) {
+            val active = JSONObject().put("provider", provider).put("chat_id", "chat")
+                .put("response_id", "stale-response-id").put("request_id", "request")
+                .put("background_enabled", true)
+            assertFalse(provider, BackgroundRecoveryPolicy.isEligibleForResume(active))
+        }
+        assertTrue(BackgroundRecoveryPolicy.supportsResponsesRecovery("openai"))
+        assertTrue(BackgroundRecoveryPolicy.supportsResponsesRecovery(null))
+    }
+
     @Test
     fun resumeRequiresCompleteEligibleActiveResponseState() {
         fun active(chatId: String, responseId: String, requestId: String, enabled: Boolean = true) =

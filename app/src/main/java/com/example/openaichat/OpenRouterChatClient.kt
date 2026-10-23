@@ -19,7 +19,11 @@ data class OpenRouterCompletionResult(
     val finishReason: String? = null,
     val protocol: JSONObject? = null,
     val fileIoTelemetry: JSONObject? = null,
-    val roundsCompleted: Int = 0
+    val roundsCompleted: Int = 0,
+    val generationComplete: Boolean? = null,
+    val usageComplete: Boolean? = null,
+    val replayable: Boolean? = null,
+    val protocolWarning: String? = null
 )
 
 class OpenRouterCompletionException(
@@ -58,7 +62,8 @@ class OpenRouterChatClient(
     httpClientOverride: OkHttpClient? = null,
     internal val reconcileGenerations: Boolean = true,
     internal val sseLimits: BoundedResponseDecoder.SseLimits = BoundedResponseDecoder.SseLimits()
-) {
+) : ChatCompletionTransport {
+    override val provider: String = "openrouter"
     internal val metadataBaseUrl get() = (baseUrl.trimEnd('/') + "/").toHttpUrl()
     private companion object {
         // Safety ceiling for one OpenRouter task. Do not add smaller per-response
@@ -78,29 +83,30 @@ class OpenRouterChatClient(
         .callTimeout(0, TimeUnit.SECONDS)
         .build()
 
-    fun complete(
+    override fun complete(
         apiKey: String,
         model: String,
         messages: JSONArray,
-        sessionId: String? = null,
+        sessionId: String?,
         tools: JSONArray?,
         maxTokens: Int?,
         reasoningEffort: String?,
         verbosity: String?,
         parallelToolCalls: Boolean,
         executeTool: (name: String, arguments: JSONObject) -> String,
-        onCallCreated: (Call) -> Unit = {},
-        shouldContinue: () -> Boolean = { true },
-        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit = { _, _, _ -> },
-        onTextDelta: (String) -> Unit = {},
-        onPayloadObserved: (roundIndex: Int, jsonBytes: Int) -> Unit = { _, _ -> },
-        cacheMode: String = "1h",
-        onProtocolWarning: (String) -> Unit = {},
-        onProtocolCheckpoint: (JSONObject) -> Unit = {},
-        pdfEngine: String? = null,
-        responseFormat: JSONObject? = null,
-        claudeRoute: OpenRouterClaudeRoute = OpenRouterClaudeRoute.AUTO,
-        onFileIoObserved: (roundIndex: Int, stats: JSONObject) -> Unit = { _, _ -> }
+        onCallCreated: (Call) -> Unit,
+        shouldContinue: () -> Boolean,
+        onRoundObserved: (roundIndex: Int, generationId: String?, usage: JSONObject?) -> Unit,
+        onTextDelta: (String) -> Unit,
+        onPayloadObserved: (roundIndex: Int, jsonBytes: Int) -> Unit,
+        cacheMode: String,
+        onProtocolWarning: (String) -> Unit,
+        onProtocolCheckpoint: (JSONObject) -> Unit,
+        pdfEngine: String?,
+        responseFormat: JSONObject?,
+        claudeRoute: OpenRouterClaudeRoute,
+        onFileIoObserved: (roundIndex: Int, stats: JSONObject) -> Unit,
+        onReasoningDelta: (String) -> Unit
     ): OpenRouterCompletionResult {
         // Resolve once before HTTP and all tool rounds; Activity already resolves auto.
         val requestEffort = OpenRouterReasoningPolicy.requestEffort(model, reasoningEffort)
@@ -570,7 +576,7 @@ class OpenRouterChatClient(
         }
     }
 
-    fun close() {
+    override fun close() {
         httpClient.dispatcher.executorService.shutdown()
         httpClient.connectionPool.evictAll()
         httpClient.cache?.close()

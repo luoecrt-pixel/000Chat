@@ -68,11 +68,12 @@ object ContextStatusPolicy {
         } else {
             mode = if (OpenRouterClaudeRoute.isClaude(model)) "кэш $cacheMode" else "полная история"
             val previous = history.lastOrNull { it.optString("role") == "assistant" }
-            val protocol = previous?.optJSONObject("openrouter_protocol")
+            val protocol = previous?.optJSONObject(if (provider == "deepseek") DeepSeekProtocolCodec.FIELD else "openrouter_protocol")
             val saved = protocol?.let { JsonProtocol.nonBlank(it, "binding_sha256") }
             val bindingReason = when {
                 previous?.optString("protocol_context_state") == "invalidated" -> "Подписанная история сброшена после изменения контекста."
-                protocol == null -> "Сохранённой подписанной привязки нет."
+                protocol == null -> "Сохранённой протокольной привязки нет."
+                provider == "deepseek" && !protocol.optBoolean("replayable", false) -> "Предыдущий DeepSeek-протокол неполон; точный replay запрещён."
                 protocol.optInt("version") != 1 -> "Версия сохранённого протокола не поддерживается."
                 (protocol.optJSONArray("tail")?.length() ?: protocol.optInt("_context_tail_count", -1)) <= 0 -> "В сохранённом протоколе нет воспроизводимой истории."
                 saved == null -> "Сохранённой подписанной привязки нет."
@@ -89,7 +90,7 @@ object ContextStatusPolicy {
         val usage = if (lastRequest != null) lastRequest.accounting else accounting
         val terminalAt = if (lastRequest != null) lastRequest.terminalAtMillis else lastResponseAtMillis
         return ContextStatusSnapshot(model,
-            if (provider == "openai") "OpenAI Responses" else if (OpenRouterClaudeRoute.isClaude(model) && route == OpenRouterClaudeRoute.ANTHROPIC)
+            if (provider == "deepseek") "DeepSeek · прямой API" else if (provider == "openai") "OpenAI Responses" else if (OpenRouterClaudeRoute.isClaude(model) && route == OpenRouterClaudeRoute.ANTHROPIC)
                 "Anthropic через OpenRouter" else "OpenRouter · Auto",
             mode, reason, history.size, history.sumOf { JsonProtocol.string(it, "text").length.toLong() },
             attachmentNames.distinct(), tools.distinct(), counter(usage, "cached_tokens"),

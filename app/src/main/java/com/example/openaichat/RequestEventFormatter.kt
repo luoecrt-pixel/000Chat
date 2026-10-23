@@ -54,6 +54,9 @@ object RequestEventFormatter {
             "disconnected" -> "Связь прервана · "
             else -> ""
         }
+        if (event.has("usage_complete") && !event.optBoolean("usage_complete", true)) {
+            return "$state$modelText · токены неизвестны · $cost$telemetrySuffix · %.1fs".format(Locale.US, latency / 1000.0)
+        }
         return "$state$modelText · ${tokens(event.optLong("input_tokens"))} in · " +
             "${tokens(event.optLong("output_tokens"))} out · " +
             "${tokens(event.optLong("reasoning_tokens"))} reasoning · " +
@@ -68,11 +71,11 @@ object RequestEventFormatter {
         append("response_model=").append(JsonProtocol.nonBlank(event, "response_model") ?: "unknown").append('\n')
         append("model_match=").append(JsonProtocol.nonBlank(event, "model_match") ?: "unknown").append('\n')
         append("status=").append(JsonProtocol.nonBlank(event, "status") ?: "unknown").append('\n')
-        append("input_tokens=").append(event.optLong("input_tokens")).append('\n')
-        append("cached_tokens=").append(event.optLong("cached_tokens")).append('\n')
-        append("cache_write_tokens=").append(event.optLong("cache_write_tokens")).append('\n')
-        append("output_tokens=").append(event.optLong("output_tokens")).append('\n')
-        append("reasoning_tokens=").append(event.optLong("reasoning_tokens")).append('\n')
+        val complete = !event.has("usage_complete") || event.optBoolean("usage_complete", true)
+        append("usage_complete=").append(complete).append('\n')
+        for (key in listOf("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens")) {
+            append(key).append('=').append(if (complete && !event.isNull(key)) event.optLong(key).toString() else "unknown").append('\n')
+        }
         append("estimated_cost_usd=legacy/unverified").append('\n')
         append("cost=").append(RequestCostFormatter.text(event)).append('\n')
         append("cost_kind=").append(JsonProtocol.nonBlank(event, "cost_kind") ?: "unknown").append('\n')
@@ -89,6 +92,7 @@ object RequestEventFormatter {
                 if (names.isNotEmpty()) append("executed_tools=").append(names.joinToString(",")).append('\n')
             }
             telemetry.optJSONObject("cost_details")?.let { append("cost_details=").append(it).append('\n') }
+            telemetry.optJSONObject("observed_partial_usage")?.let { append("observed_partial_usage=").append(it).append('\n') }
         }
         append("request_id=").append(JsonProtocol.nonBlank(event, "request_id").orEmpty()).append('\n')
         val error = JsonProtocol.nonBlank(event, "error").orEmpty()

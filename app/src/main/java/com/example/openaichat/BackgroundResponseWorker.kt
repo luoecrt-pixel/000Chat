@@ -70,6 +70,13 @@ class BackgroundResponseWorker(
                 (0 until messages.length()).mapNotNull { messages.optJSONObject(it) }
                     .firstOrNull { it.optString("request_id") == requestId }
             }
+            val accounting = db.listRequestAccounting(chatId, setOf(requestId)).firstOrNull()
+            // Check both durable sources before selecting an OpenAI credential or
+            // changing the ledger. A stale response_id cannot turn inference into Responses.
+            if (!BackgroundRecoveryPolicy.supportsResponsesRecovery(JsonProtocol.nonBlank(accounting ?: JSONObject(), "provider")) ||
+                !BackgroundRecoveryPolicy.supportsResponsesRecovery(requestMeta?.let { JsonProtocol.nonBlank(it, "provider") })) {
+                return Result.success()
+            }
             val requestedModel = requestMeta?.optString("requested_model").orEmpty()
                 .ifBlank { requestMeta?.optString("model").orEmpty() }
                 .takeIf { it.isNotBlank() }

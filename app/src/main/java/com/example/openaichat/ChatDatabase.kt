@@ -21,7 +21,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         // during connection initialization. Concurrent helper opens can race
         // for its exclusive journal-mode transition and raise SQLITE_BUSY.
         private val CONNECTION_OPEN_LOCK = Any()
-        private const val DB_VERSION = 25
+        private val ARTIFACT_RECONCILIATION_RUNNING = java.util.concurrent.atomic.AtomicBoolean(false)
+        private const val DB_VERSION = 26
         private const val CHAT_TABLE = "chats"
         private const val MESSAGE_TABLE = "messages"
         private const val LOCAL_FILE_REFERENCE_SELECTION = "file_paths IS NOT NULL OR image_path IS NOT NULL OR attachments IS NOT NULL OR annotations IS NOT NULL OR generated_images IS NOT NULL"
@@ -29,6 +30,8 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         private const val REQUEST_EVENT_TABLE = "request_events"
         private const val REQUEST_ACCOUNTING_TABLE = "request_accounting"
         private const val OPENROUTER_ROUND_TABLE = "openrouter_request_rounds"
+        private const val DEEPSEEK_ROUND_TABLE = "deepseek_request_rounds"
+        private val TOKEN_COLUMNS = listOf("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens")
     }
 
     init {
@@ -157,6 +160,15 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             )
         """.trimIndent())
         db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_openrouter_generation_identity ON $OPENROUTER_ROUND_TABLE(generation_id) WHERE generation_id IS NOT NULL")
+    }
+
+    private fun ensureDeepSeekRoundsTable(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS $DEEPSEEK_ROUND_TABLE (
+            chat_id TEXT NOT NULL, local_request_id TEXT NOT NULL, round_index INTEGER NOT NULL,
+            usage_snapshot TEXT, usage_complete INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+            PRIMARY KEY(chat_id, local_request_id, round_index),
+            FOREIGN KEY(chat_id, local_request_id) REFERENCES $REQUEST_ACCOUNTING_TABLE(chat_id, local_request_id) ON DELETE CASCADE
+        )""")
     }
 
     override fun onOpen(db: SQLiteDatabase) {
@@ -330,6 +342,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         column(MESSAGE_TABLE, "telemetry_summary")
         column(MESSAGE_TABLE, "openai_usage_ledger")
+        column(MESSAGE_TABLE, "deepseek_protocol")
+        column(REQUEST_EVENT_TABLE, "usage_complete", "INTEGER NOT NULL DEFAULT 1")
+        column(REQUEST_ACCOUNTING_TABLE, "usage_complete", "INTEGER NOT NULL DEFAULT 0")
+        column(METRICS_TABLE, "usage_complete", "INTEGER NOT NULL DEFAULT 1")
+        ensureDeepSeekRoundsTable(db)
         column(REQUEST_EVENT_TABLE, "telemetry_summary")
         column(REQUEST_ACCOUNTING_TABLE, "telemetry_summary")
         column(REQUEST_ACCOUNTING_TABLE, "cache_write_tokens", "INTEGER")
@@ -428,7 +445,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         if (oldVersion < 17) {
             MessageMetadataCodec.allKeys.filter {
                 it !in setOf("finish_reason", "openrouter_protocol", "protocol_context_state",
-                    "openai_instructions_sha256", "openai_protocol_output", "telemetry_summary", "openai_usage_ledger")
+                    "openai_instructions_sha256", "openai_protocol_output", "telemetry_summary", "openai_usage_ledger", "deepseek_protocol")
             }.forEach { key ->
                 db.execSQL("ALTER TABLE $MESSAGE_TABLE ADD COLUMN $key TEXT")
             }
@@ -499,7 +516,11 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             if ("active_indexed_checkpoint" !in columns)
                 db.execSQL("ALTER TABLE $CHAT_TABLE ADD COLUMN active_indexed_checkpoint TEXT")
         }
-        if (oldVersion < 25) ensureTelemetryAndCostColumns(db)
+        if (oldVersion < 26) {
+            ensureTelemetryAndCostColumns(db)
+            // Existing optional counters retain their meaning. No old row is assigned DeepSeek data.
+            db.execSQL("UPDATE $REQUEST_ACCOUNTING_TABLE SET usage_complete=1 WHERE provider!='deepseek' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL")
+        }
     }
 
     /** One-time migration from v4.13's SharedPreferences chat_store JSON. */
@@ -903,7 +924,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     private fun readAccountingInDb(db: SQLiteDatabase, chatId: String, requestId: String): JSONObject? =
         SqliteLargeTextQuery.query(db, REQUEST_ACCOUNTING_TABLE,
             arrayOf("local_status", "cost_kind", "cost_usd", "input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens",
-                "reasoning_tokens", "telemetry_summary"), "chat_id=? AND local_request_id=?",
+                "reasoning_tokens", "telemetry_summary", "usage_complete", "provider"), "chat_id=? AND local_request_id=?",
             arrayOf(chatId, requestId), null, null, null, "1", arrayOf("chat_id", "local_request_id")).use { c ->
             if (!c.moveToFirst()) null else JSONObject().apply {
                 for (i in 0 until c.columnCount) if (!c.isNull(i)) put(c.getColumnName(i),
@@ -914,6 +935,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     /** A late metric/event must reflect the already committed ledger, not an older callback snapshot. */
     private fun enrichFromAccounting(values: ContentValues, accounting: JSONObject?, metric: Boolean = false) {
         if (accounting == null) return
+        if (accounting.optString("provider") == "deepseek" && accounting.has("usage_complete")) values.put("usage_complete", accounting.optInt("usage_complete"))
         for (key in listOf("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens")) {
             if (accounting.has(key)) values.put(key, accounting.getLong(key))
         }
@@ -932,10 +954,16 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         provided: JSONObject?, terminalStatus: String, unrecoverableIndexedCheckpoint: String? = null): JSONObject? {
         val oa = readCheckpointInDb(db, "openai_tool_checkpoints", "request_checkpoint", chatId, requestId)
         val or = readCheckpointInDb(db, "openrouter_checkpoints", "protocol", chatId, requestId)
+        val ds = readCheckpointInDb(db, "deepseek_checkpoints", "protocol", chatId, requestId)
         val capturedProvider = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("provider"),
             "chat_id=? AND local_request_id=?", arrayOf(chatId, requestId), null, null, null, "1")
             .use { if (it.moveToFirst()) it.getString(0) else null }
-        val router = or != null || provided?.optString("provider") == "openrouter" || capturedProvider == "openrouter"
+        val router = capturedProvider == "openrouter" || (capturedProvider == null && provided?.optString("provider") == "openrouter")
+        val deepSeek = capturedProvider == "deepseek" || (capturedProvider == null && provided?.optString("provider") == "deepseek")
+        val providedProvider = provided?.let { JsonProtocol.nonBlank(it, "provider") }
+        require(capturedProvider !in setOf("openai", "openrouter", "deepseek") || providedProvider == null || providedProvider == capturedProvider) {
+            "Terminal provider does not match captured request provider"
+        }
         val active = SqliteLargeTextQuery.query(db, CHAT_TABLE,
             arrayOf("active_response_id", "active_text", "active_indexed_checkpoint",
                 "active_last_sequence_number", "active_status"), "id=? AND active_request_id=?",
@@ -948,9 +976,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 c.getString(4)?.let { put("status", it) }
             }
         }
-        var durable = OpenAiLocalFileToolBridge.durableResponse(oa)
+        var durable = if (!router && !deepSeek) OpenAiLocalFileToolBridge.durableResponse(oa) else null
         var unrecoverableIndexedState: JSONObject? = null
-        if (!router && JsonProtocol.nonBlank(active, "indexed_checkpoint") != null) {
+        if (!router && !deepSeek && JsonProtocol.nonBlank(active, "indexed_checkpoint") != null) {
             val state = try {
                 ResponseIndexedCheckpoint.restore(active)
             } catch (error: UnrecoverableResponsesCheckpointException) {
@@ -986,8 +1014,9 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         }
         val message = provided?.let(JsonProtocol::objectCopy) ?: JSONObject()
             .put("role", "assistant").put("request_id", requestId).put("status", terminalStatus)
-            .put("provider", if (router) "openrouter" else "openai")
+            .put("provider", if (deepSeek) "deepseek" else if (router) "openrouter" else "openai")
             .put("text", JsonProtocol.string(active, "text"))
+        if (capturedProvider in setOf("openai", "openrouter", "deepseek")) message.put("provider", capturedProvider)
         val output = durable?.optJSONArray("output")
         if (output != null && (oa?.optString("phase") == "finished" || !message.has("openai_protocol_output"))) {
             message.put("openai_protocol_output", OpenAiLocalFileToolBridge.completePendingOutputs(output))
@@ -1006,7 +1035,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                 message.put("generated_images", GeneratedImageStore.save(appContext.filesDir, model.generatedImageResults) { _, _ -> })
             }
         }
-        if (or != null && !message.has("openrouter_protocol"))
+        if (router && or != null && !message.has("openrouter_protocol"))
             message.put("openrouter_protocol", OpenRouterProtocolCodec.withVisibleTail(or, message))
         val accountingTelemetryRaw = readAccountingTelemetryInDb(db, chatId, requestId)
         if (router) {
@@ -1024,7 +1053,25 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                     ?.let { message.put("telemetry_summary", JSONObject(it)) }
             }
         }
-        if (!router) {
+        if (deepSeek) {
+            val confirmedArtifacts = confirmedArtifactsInDb(db, chatId, requestId)
+            if (confirmedArtifacts.length() > 0) message.put("confirmed_artifacts", confirmedArtifacts)
+            if (ds != null && !message.has(DeepSeekProtocolCodec.FIELD)) {
+                message.put(DeepSeekProtocolCodec.FIELD, DeepSeekProtocolCodec.withVisibleTail(ds, message))
+            }
+            val protocol = message.optJSONObject(DeepSeekProtocolCodec.FIELD)
+            if (JsonProtocol.nonBlank(message, "reasoning_summary") == null) {
+                DeepSeekProtocolCodec.extractReasoningSummary(protocol).takeIf { it.isNotBlank() }
+                    ?.let { message.put("reasoning_summary", it) }
+            }
+            aggregateDeepSeekUsageInDb(db, chatId, requestId)?.let { message.put("usage", it) }
+            val usage = message.optJSONObject("usage")
+            val complete = isDeepSeekUsageComplete(usage)
+            val telemetry = deepSeekUsageTelemetry(usage, complete)
+            FileBackedIoTelemetry.mergeTelemetryJson(message.optJSONObject("telemetry_summary")?.toString(), telemetry)
+                ?.let { message.put("telemetry_summary", JSONObject(it)) }
+        }
+        if (!router && !deepSeek) {
             // Marked aggregates merge as ledgers; they are never reinserted under a single response ID.
             val ledger = OpenAiUsageLedger.resolve(oa, message)
             val paidLedger = OpenAiUsageLedger.merge(ledger, durable?.optJSONObject(OpenAiUsageLedger.FIELD))
@@ -1044,7 +1091,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
         // the durable message as well as accounting when the resumed caller has no in-memory body.
         FileBackedIoTelemetry.mergeTelemetryJson(accountingTelemetryRaw, message.optJSONObject("telemetry_summary"))
             ?.let { message.put("telemetry_summary", JSONObject(it)) }
-        val evidence = provided != null || oa != null || or != null ||
+        val evidence = provided != null || oa != null || or != null || ds != null ||
             JsonProtocol.string(message, "text").isNotBlank() || message.has("openai_protocol_output")
         unrecoverableIndexedState?.let { source ->
             // Keep the original raw bytes and envelope out of model replay, but durably available
@@ -1057,12 +1104,15 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
 
     private fun persistTerminalAssistantInDb(db: SQLiteDatabase, chatId: String, requestId: String,
         assistant: JSONObject, archive: Boolean = false) {
-        if (archive) {
+        val deepSeekArchive = assistant.optString("provider") == "deepseek" &&
+            assistant.optJSONObject(DeepSeekProtocolCodec.FIELD)?.optBoolean("replayable", false) == false
+        if (archive || deepSeekArchive) {
             check(db.insertWithOnConflict("request_recovery_archive", null, ContentValues().apply {
                 put("chat_id", chatId); put("request_id", requestId)
                 put("recovery_message", assistant.toString()); put("created_at", System.currentTimeMillis())
             }, SQLiteDatabase.CONFLICT_REPLACE) != -1L) { "Recovery archive was not persisted" }
-        } else {
+        }
+        if (!archive) {
             val existing = db.query(MESSAGE_TABLE, arrayOf("id", "position"),
                 "chat_id=? AND request_id=? AND role='assistant'", arrayOf(chatId, requestId),
                 null, null, "position DESC", "1").use { c -> if (c.moveToFirst()) Pair(c.getLong(0), c.getInt(1)) else null }
@@ -1077,13 +1127,17 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             assistant.optJSONObject("telemetry_summary"))
         val usage = assistant.optJSONObject("usage")
         val router = assistant.optString("provider") == "openrouter"
+        val deepSeek = assistant.optString("provider") == "deepseek"
+        val complete = if (deepSeek) isDeepSeekUsageComplete(usage) else hasTokenPair(usage, router)
         db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply {
             put("local_status", assistant.optString("status").ifBlank { "unknown" })
             put("updated_at", System.currentTimeMillis())
             JsonProtocol.nonBlank(assistant, "response_id")?.let { put("response_id", it) }
             JsonProtocol.nonBlank(assistant, "error")?.let { put("error", it.take(1200)) }
             telemetry?.let { put("telemetry_summary", it) }
-            putUsageValues(this, usage, router)
+            put("usage_complete", if (complete) 1 else 0)
+            if (!deepSeek || complete) putUsageValues(this, usage, router || deepSeek)
+            else for (key in TOKEN_COLUMNS) putNull(key)
             if (router) OpenRouterUsageSnapshot.from(usage).reportedCostUsd?.let {
                 put("cost_kind", "provider_reported"); put("cost_usd", it.toString())
             }
@@ -1101,10 +1155,19 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
     }
 
     /** Explicit recovery archive, independent of visible bubbles; deleted with its owning chat. */
-    fun getRequestRecoveryArchive(chatId: String, requestId: String): JSONObject? =
-        SqliteLargeTextQuery.query(readableDatabase, "request_recovery_archive", arrayOf("recovery_message"),
+    fun getRequestRecoveryArchive(chatId: String, requestId: String): JSONObject? {
+        val db = readableDatabase
+        return SqliteLargeTextQuery.query(db, "request_recovery_archive", arrayOf("recovery_message"),
             "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
-            "1", arrayOf("chat_id", "request_id")).use { c -> if (c.moveToFirst()) JSONObject(c.getString(0)) else null }
+            "1", arrayOf("chat_id", "request_id")).use { c ->
+                if (!c.moveToFirst()) null else JSONObject(c.getString(0)).apply {
+                    if (optString("provider") == "deepseek") {
+                        val confirmed = confirmedArtifactsInDb(db, chatId, requestId)
+                        if (confirmed.length() > 0) put("confirmed_artifacts", confirmed)
+                    }
+                }
+            }
+    }
 
     /**
      * Stop and active-cursor release are a single SQLite transaction. A Worker
@@ -1166,8 +1229,10 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             ) == 1
             if (stopped) {
                 sealOpenRouterRoundsInDb(db, chatId, expectedRequestId)
+                sealDeepSeekRoundsInDb(db, chatId, expectedRequestId)
                 db.delete("openai_tool_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
                 db.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
+                db.delete("deepseek_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
                 if (removeUserMessage) db.delete(MESSAGE_TABLE,
                     "chat_id=? AND request_id=? AND role='user'", arrayOf(chatId, expectedRequestId))
                 // One event for this exact stopped local request, within the CAS transaction.
@@ -1177,7 +1242,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         chat_id, created_at, event_type, request_id, provider,
                         requested_model, model_match, status, input_tokens,
                         cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-                        cost_kind, cost_usd, latency_ms, telemetry_summary
+                        cost_kind, cost_usd, latency_ms, telemetry_summary, usage_complete
                     )
                     SELECT chat_id, ?, 'request_stopped', local_request_id, provider,
                         requested_model, 'unknown', 'stopped',
@@ -1186,7 +1251,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
                         CASE WHEN cost_kind='provider_reported' AND cost_usd IS NOT NULL
                             THEN 'provider_reported' ELSE 'unknown' END,
                         CASE WHEN cost_kind='provider_reported' THEN cost_usd ELSE NULL END,
-                        MAX(0, ? - created_at), telemetry_summary
+                        MAX(0, ? - created_at), telemetry_summary, usage_complete
                     FROM $REQUEST_ACCOUNTING_TABLE
                     WHERE chat_id=? AND local_request_id=?
                 """.trimIndent(), arrayOf(now, now, chatId, expectedRequestId))
@@ -1231,6 +1296,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             }
             persist(db)
             sealOpenRouterRoundsInDb(db, chatId, expectedRequestId)
+            sealDeepSeekRoundsInDb(db, chatId, expectedRequestId)
             val cleared = ContentValues().apply {
                 putNull("active_response_id")
                 putNull("active_request_id")
@@ -1254,6 +1320,7 @@ class ChatDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 
             check(committed) { "Active owner changed inside terminal transaction" }
             db.delete("openai_tool_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
             db.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
+            db.delete("deepseek_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, expectedRequestId))
         }
         if (committed) cleanupReleasedPreparedAttachmentFiles()
         return committed
@@ -1453,7 +1520,7 @@ data class ExistingMessageRow(
             }
             requestId?.let { enrichFromAccounting(v, readAccountingInDb(db, chatId, it), metric = true) }
             db.insert(METRICS_TABLE, null, v)
-            requestId?.let { recomputeOpenRouterTotalsInDb(db, chatId, it) }
+            requestId?.let { recomputeOpenRouterTotalsInDb(db, chatId, it); recomputeDeepSeekTotalsInDb(db, chatId, it) }
         }
     }
 
@@ -1588,7 +1655,14 @@ data class ExistingMessageRow(
                 httpRequestId?.takeIf { it.isNotBlank() }?.let { put("http_request_id", it) }
                 error?.takeIf { it.isNotBlank() }?.let { put("error", it.take(1200)) }
                 // No optLong defaults: omitted counters remain SQL NULL.
-                val openRouter = capturedProvider == "openrouter"
+                val deepSeek = capturedProvider == "deepseek"
+                val openRouter = capturedProvider in setOf("openrouter", "deepseek")
+                val complete = if (deepSeek) isDeepSeekUsageComplete(effectiveUsage) else hasTokenPair(effectiveUsage, openRouter)
+                if (effectiveUsage != null || deepSeek) put("usage_complete", if (complete) 1 else 0)
+                if (deepSeek && !complete) {
+                    for (key in TOKEN_COLUMNS) putNull(key)
+                    effectiveUsage = null
+                }
                 val inputKey = if (openRouter) "prompt_tokens" else "input_tokens"
                 val outputKey = if (openRouter) "completion_tokens" else "output_tokens"
                 fun knownNonnegative(source: JSONObject?, key: String): Long? =
@@ -1613,7 +1687,7 @@ data class ExistingMessageRow(
                     knownNonnegative(it, "reasoning_tokens")
                 }
                 reasoning?.let { put("reasoning_tokens", it) }
-                val cost = reportedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
+                val cost = if (deepSeek) null else reportedCostUsd?.takeIf { it.isFinite() && it >= 0.0 }
                 if (cost != null && knownCost != "provider_reported") {
                     put("cost_kind", "provider_reported")
                     put("cost_usd", cost.toString())
@@ -1622,6 +1696,7 @@ data class ExistingMessageRow(
             written = db.update(REQUEST_ACCOUNTING_TABLE, values,
                 "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId)) == 1
             if (written && capturedProvider == "openrouter") recomputeOpenRouterTotalsInDb(db, chatId, localRequestId)
+            if (written && capturedProvider == "deepseek") recomputeDeepSeekTotalsInDb(db, chatId, localRequestId)
         }
         return written
     }
@@ -1835,10 +1910,29 @@ data class ExistingMessageRow(
             null, null, null, "1").use { it.moveToFirst() }
         if (!hasRound) return
         val usage = aggregateOpenRouterUsageInDb(db, chatId, localRequestId)
+        // A partial sum may contain both counters from different rounds. Only a
+        // confirmed pair for every round proves the request's full token total.
+        val usageComplete = db.rawQuery("""SELECT COUNT(*), COUNT(input_tokens), COUNT(output_tokens)
+            FROM $OPENROUTER_ROUND_TABLE WHERE chat_id=? AND local_request_id=?""",
+            arrayOf(chatId, localRequestId)).use { c ->
+            c.moveToFirst()
+            c.getLong(0) > 0L && c.getLong(0) == c.getLong(1) && c.getLong(0) == c.getLong(2)
+        }
         val cost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
-        val summary = FileBackedIoTelemetry.mergeCompactTelemetry(costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
+        val partialUsage = if (!usageComplete && usage != null) JSONObject()
+            .put("usage_incomplete", true).put("observed_partial_usage", JsonProtocol.objectCopy(usage)) else null
+        val summary = FileBackedIoTelemetry.mergeCompactTelemetry(toolTelemetry = partialUsage,
+            costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
         val telemetry = FileBackedIoTelemetry.mergeTelemetryJson(readAccountingTelemetryInDb(db, chatId, localRequestId), summary)
-        val usageValues = ContentValues().apply { putUsageValues(this, usage, router = true) }
+            ?.let { raw -> JSONObject(raw).apply {
+                // The raw observation remains diagnostic history after reconciliation,
+                // but the current completeness marker must reflect the latest ledger.
+                if (usageComplete) remove("usage_incomplete")
+            }.toString() }
+        val usageValues = ContentValues().apply {
+            putUsageValues(this, usage, router = true)
+            put("usage_complete", if (usageComplete) 1 else 0)
+        }
         db.update(REQUEST_ACCOUNTING_TABLE, ContentValues(usageValues).apply {
             put("updated_at", System.currentTimeMillis())
             put("cost_kind", if (cost != null) "provider_reported" else "unknown")
@@ -1854,6 +1948,151 @@ data class ExistingMessageRow(
             put("cost_kind", if (cost != null) "provider_reported" else "unknown")
             put("estimated_cost_usd", cost ?: 0.0)
         }, "chat_id=? AND request_id=?", arrayOf(chatId, localRequestId))
+    }
+
+    private fun hasTokenPair(usage: JSONObject?, chatCompletion: Boolean = true): Boolean {
+        fun known(key: String) = usage?.opt(key)?.toString()?.toLongOrNull()?.let { it >= 0L } == true
+        return known(if (chatCompletion) "prompt_tokens" else "input_tokens") &&
+            known(if (chatCompletion) "completion_tokens" else "output_tokens")
+    }
+
+    private fun isDeepSeekUsageComplete(usage: JSONObject?): Boolean =
+        usage?.optBoolean("usage_complete", false) == true && hasTokenPair(usage)
+
+    private fun deepSeekUsageTelemetry(usage: JSONObject?, complete: Boolean): JSONObject = JSONObject().apply {
+        if (!complete) put("usage_incomplete", true)
+        for (key in listOf("rounds_with_usage", "rounds_total")) {
+            if (usage?.has(key) == true) put(key, usage.optInt(key))
+        }
+        usage?.optJSONObject("observed_partial_usage")?.let {
+            put("observed_partial_usage", JsonProtocol.objectCopy(it))
+        }
+    }
+
+    /** One durable row per attempted DeepSeek POST; observations replace snapshots, never add them. */
+    fun observeDeepSeekRound(chatId: String, localRequestId: String, roundIndex: Int, usage: JSONObject? = null): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank() || roundIndex < 0) return false
+        var changed = false
+        writableDatabase.transaction { db ->
+            val owner = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("local_status", "rounds_sealed"),
+                "chat_id=? AND local_request_id=? AND provider='deepseek'", arrayOf(chatId, localRequestId),
+                null, null, null, "1").use { c -> if (c.moveToFirst()) Pair(c.getString(0), c.getInt(1)) else null }
+                ?: return@transaction
+            val previous = SqliteLargeTextQuery.query(db, DEEPSEEK_ROUND_TABLE, arrayOf("usage_snapshot"),
+                "chat_id=? AND local_request_id=? AND round_index=?", arrayOf(chatId, localRequestId, roundIndex.toString()),
+                null, null, null, "1", arrayOf("chat_id", "local_request_id", "round_index")).use { c ->
+                if (!c.moveToFirst()) null else Pair(true, if (c.isNull(0)) null else JSONObject(c.getString(0)))
+            }
+            if (previous == null && (owner.first != "running" || owner.second != 0)) return@transaction
+            val snapshot = OpenRouterUsageAccumulator.mergeSnapshot(previous?.second, usage)?.apply { remove("cost") }
+            changed = db.insertWithOnConflict(DEEPSEEK_ROUND_TABLE, null, ContentValues().apply {
+                put("chat_id", chatId); put("local_request_id", localRequestId); put("round_index", roundIndex)
+                if (snapshot == null) putNull("usage_snapshot") else put("usage_snapshot", snapshot.toString())
+                put("usage_complete", if (hasTokenPair(snapshot)) 1 else 0)
+                put("updated_at", System.currentTimeMillis())
+            }, SQLiteDatabase.CONFLICT_REPLACE) != -1L
+            if (changed) recomputeDeepSeekTotalsInDb(db, chatId, localRequestId)
+        }
+        return changed
+    }
+
+    fun sealDeepSeekRounds(chatId: String, localRequestId: String): Boolean {
+        if (chatId.isBlank() || localRequestId.isBlank()) return false
+        var changed = false
+        writableDatabase.transaction { db -> changed = sealDeepSeekRoundsInDb(db, chatId, localRequestId) }
+        return changed
+    }
+
+    private fun sealDeepSeekRoundsInDb(db: SQLiteDatabase, chatId: String, localRequestId: String): Boolean {
+        val changed = db.update(REQUEST_ACCOUNTING_TABLE, ContentValues().apply { put("rounds_sealed", 1) },
+            "chat_id=? AND local_request_id=? AND provider='deepseek' AND rounds_sealed=0", arrayOf(chatId, localRequestId)) == 1
+        if (changed) recomputeDeepSeekTotalsInDb(db, chatId, localRequestId)
+        return changed
+    }
+
+    /** A partial round remains diagnostic; a known subtotal is never presented as the full request. */
+    private fun aggregateDeepSeekUsageInDb(db: SQLiteDatabase, chatId: String, localRequestId: String): JSONObject? {
+        val snapshots = mutableListOf<JSONObject?>()
+        SqliteLargeTextQuery.query(db, DEEPSEEK_ROUND_TABLE, arrayOf("usage_snapshot"),
+            "chat_id=? AND local_request_id=?", arrayOf(chatId, localRequestId), null, null, "round_index ASC",
+            keyColumns = arrayOf("chat_id", "local_request_id", "round_index")).use { c ->
+            while (c.moveToNext()) snapshots += if (c.isNull(0)) null else JSONObject(c.getString(0))
+        }
+        if (snapshots.isEmpty()) return null
+        val known = snapshots.count { hasTokenPair(it) }
+        val complete = known == snapshots.size
+        val observed = OpenRouterUsageAccumulator.aggregate(snapshots.filterNotNull())?.apply { remove("cost") }
+        return (if (complete) observed ?: JSONObject() else JSONObject())
+            .put("usage_complete", complete).put("rounds_with_usage", known).put("rounds_total", snapshots.size)
+            .apply {
+                if (!complete && observed != null && observed.length() > 0) put("observed_partial_usage", observed)
+                if (!complete) put("observed_rounds", JSONArray().apply {
+                    snapshots.forEachIndexed { index, snapshot ->
+                        put(JSONObject().put("round_index", index).put("usage_complete", hasTokenPair(snapshot))
+                            .apply { if (snapshot != null) put("usage", JsonProtocol.objectCopy(snapshot)) })
+                    }
+                })
+            }
+    }
+
+    private fun recomputeDeepSeekTotalsInDb(db: SQLiteDatabase, chatId: String, localRequestId: String) {
+        val sealed = db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("rounds_sealed"),
+            "chat_id=? AND local_request_id=? AND provider='deepseek'", arrayOf(chatId, localRequestId),
+            null, null, null, "1").use { it.moveToFirst() && it.getInt(0) == 1 }
+        if (!sealed) return
+        val usage = aggregateDeepSeekUsageInDb(db, chatId, localRequestId) ?: return
+        val complete = isDeepSeekUsageComplete(usage)
+        val telemetry = FileBackedIoTelemetry.mergeTelemetryJson(readAccountingTelemetryInDb(db, chatId, localRequestId),
+            deepSeekUsageTelemetry(usage, complete))
+        val counters = ContentValues().apply {
+            put("usage_complete", if (complete) 1 else 0)
+            if (complete) putUsageValues(this, usage, router = true)
+        }
+        db.update(REQUEST_ACCOUNTING_TABLE, ContentValues(counters).apply {
+            if (!complete) for (key in TOKEN_COLUMNS) putNull(key)
+            put("updated_at", System.currentTimeMillis()); put("cost_kind", "unknown"); putNull("cost_usd")
+            telemetry?.let { put("telemetry_summary", it) }
+        }, "chat_id=? AND local_request_id=? AND provider='deepseek'", arrayOf(chatId, localRequestId))
+        db.update(REQUEST_EVENT_TABLE, ContentValues(counters).apply {
+            // The old physical schema is NOT NULL; the flag makes these storage sentinels unavailable to sums/UI.
+            if (!complete) for (key in TOKEN_COLUMNS) put(key, 0L)
+            put("cost_kind", "unknown"); putNull("cost_usd")
+            telemetry?.let { put("telemetry_summary", it) }
+        }, "chat_id=? AND request_id=? AND provider='deepseek'", arrayOf(chatId, localRequestId))
+        db.update(METRICS_TABLE, ContentValues(counters).apply {
+            if (!complete) for (key in TOKEN_COLUMNS) put(key, 0L)
+            put("cost_kind", "unknown"); put("estimated_cost_usd", 0.0)
+        }, "chat_id=? AND request_id=?", arrayOf(chatId, localRequestId))
+    }
+
+    /** Only the current DeepSeek request may persist a working protocol cursor. */
+    fun saveDeepSeekCheckpoint(chatId: String, requestId: String, protocol: JSONObject): Boolean {
+        if (chatId.isBlank() || requestId.isBlank()) return false
+        var saved = false
+        writableDatabase.transaction { db ->
+            val owns = db.rawQuery("""SELECT 1 FROM $CHAT_TABLE c JOIN $REQUEST_ACCOUNTING_TABLE a
+                ON a.chat_id=c.id AND a.local_request_id=c.active_request_id
+                WHERE c.id=? AND c.active_request_id=? AND a.provider='deepseek' AND a.local_status='running'""",
+                arrayOf(chatId, requestId)).use { it.moveToFirst() }
+            if (!owns) return@transaction
+            saved = db.insertWithOnConflict("deepseek_checkpoints", null, ContentValues().apply {
+                put("chat_id", chatId); put("request_id", requestId); put("protocol", protocol.toString())
+            }, SQLiteDatabase.CONFLICT_REPLACE) != -1L
+        }
+        return saved
+    }
+
+    fun getDeepSeekCheckpoint(chatId: String, requestId: String): JSONObject? =
+        SqliteLargeTextQuery.query(readableDatabase, "deepseek_checkpoints", arrayOf("protocol"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, null,
+            keyColumns = arrayOf("chat_id", "request_id")).use { if (it.moveToFirst()) JSONObject(it.getString(0)) else null }
+
+    private fun confirmedArtifactsInDb(db: SQLiteDatabase, chatId: String, requestId: String): JSONArray {
+        val result = JSONArray()
+        SqliteLargeTextQuery.query(db, "local_artifacts", arrayOf("metadata"),
+            "chat_id=? AND request_id=?", arrayOf(chatId, requestId), null, null, "created_at ASC, path ASC",
+            keyColumns = arrayOf("path")).use { c -> while (c.moveToNext()) result.put(JSONObject(c.getString(0))) }
+        return result
     }
 
     /** A provider generation lookup can enrich only a previously captured ID. */
@@ -1965,7 +2204,8 @@ data class ExistingMessageRow(
         latencyMs: Long = 0L,
         toolSummary: String? = null,
         error: String? = null,
-        telemetrySummary: JSONObject? = null
+        telemetrySummary: JSONObject? = null,
+        usageComplete: Boolean = true
     ) {
         if (chatId.isBlank()) return
         writableDatabase.transaction { db ->
@@ -1993,6 +2233,7 @@ data class ExistingMessageRow(
                 putStringOrNull("response_model", responseModel)
                 put("model_match", modelMatch.name.lowercase())
                 put("status", status.ifBlank { "unknown" })
+                put("usage_complete", if (usageComplete) 1 else 0)
                 put("input_tokens", inputTokens.coerceAtLeast(0L))
                 put("cached_tokens", cachedTokens.coerceAtLeast(0L))
                 put("cache_write_tokens", cacheWriteTokens.coerceAtLeast(0L))
@@ -2015,7 +2256,7 @@ data class ExistingMessageRow(
                     ?.let { values.put("telemetry_summary", it) }
             }
             db.insert(REQUEST_EVENT_TABLE, null, values)
-            requestId?.let { recomputeOpenRouterTotalsInDb(db, chatId, it) }
+            requestId?.let { recomputeOpenRouterTotalsInDb(db, chatId, it); recomputeDeepSeekTotalsInDb(db, chatId, it) }
         }
     }
 
@@ -2050,6 +2291,9 @@ data class ExistingMessageRow(
                     .put("estimated_cost_usd", c.getDouble(c.getColumnIndexOrThrow("estimated_cost_usd")))
                     .put("cost_kind", c.getString(c.getColumnIndexOrThrow("cost_kind")) ?: "unknown")
                     .put("latency_ms", c.getLong(c.getColumnIndexOrThrow("latency_ms")))
+                val complete = c.getInt(c.getColumnIndexOrThrow("usage_complete")) == 1
+                event.put("usage_complete", complete)
+                if (!complete) for (key in TOKEN_COLUMNS) event.put(key, JSONObject.NULL)
                 c.getString(c.getColumnIndexOrThrow("cost_usd"))?.let { event.put("cost_usd", it) }
                 c.getString(c.getColumnIndexOrThrow("request_id"))?.let { event.put("request_id", it) }
                 c.getString(c.getColumnIndexOrThrow("requested_model"))?.let { event.put("requested_model", it) }
@@ -2390,7 +2634,7 @@ data class ExistingMessageRow(
                 AND active_indexed_checkpoint IS NULL
                 AND EXISTS (SELECT 1 FROM $REQUEST_ACCOUNTING_TABLE a
                     WHERE a.chat_id=$CHAT_TABLE.id AND a.local_request_id=$CHAT_TABLE.active_request_id
-                    AND a.provider='openrouter' AND a.local_status='running')""".trimIndent(),
+                    AND a.provider IN ('openrouter','deepseek') AND a.local_status='running')""".trimIndent(),
             arrayOf(chatId, expectedRequestId, localSequence.toString())) == 1
     }
 
@@ -2484,9 +2728,16 @@ data class ExistingMessageRow(
         "SELECT 1 FROM $CHAT_TABLE WHERE id=? AND active_request_id=? LIMIT 1", arrayOf(chatId, requestId)
     ).use { it.moveToFirst() }
 
+    private fun activeProviderInDb(db: SQLiteDatabase, chatId: String, requestId: String?): String? {
+        if (requestId.isNullOrBlank()) return null
+        return db.query(REQUEST_ACCOUNTING_TABLE, arrayOf("provider"), "chat_id=? AND local_request_id=?",
+            arrayOf(chatId, requestId), null, null, null, "1").use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
     fun getActiveResponse(chatId: String): JSONObject? {
         if (chatId.isBlank()) return null
-        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
+        val db = readableDatabase
+        SqliteLargeTextQuery.query(db, CHAT_TABLE,
             arrayOf(
                 "active_response_id", "active_request_id", "active_text", "active_status",
                 "active_started_at", "active_effort_pref", "active_effective_effort",
@@ -2511,13 +2762,17 @@ data class ExistingMessageRow(
                 .put("attachments", c.getInt(9))
                 .put("background_enabled", c.getInt(10) != 0)
                 .put("last_sequence_number", c.getLong(11))
-                .apply { c.getString(12)?.let { put("indexed_checkpoint", it) } }
+                .apply {
+                    c.getString(12)?.let { put("indexed_checkpoint", it) }
+                    activeProviderInDb(db, chatId, c.getString(1))?.let { put("provider", it) }
+                }
         }
     }
 
     fun listActiveResponses(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        SqliteLargeTextQuery.query(readableDatabase, CHAT_TABLE,
+        val db = readableDatabase
+        SqliteLargeTextQuery.query(db, CHAT_TABLE,
             arrayOf(
                 "id", "title", "active_response_id", "active_request_id", "active_text",
                 "active_status", "active_started_at", "active_effort_pref",
@@ -2543,7 +2798,10 @@ data class ExistingMessageRow(
                     .put("attachments", c.getInt(11))
                     .put("background_enabled", c.getInt(12) != 0)
                     .put("last_sequence_number", c.getLong(13))
-                    .apply { c.getString(14)?.let { put("indexed_checkpoint", it) } }
+                    .apply {
+                        c.getString(14)?.let { put("indexed_checkpoint", it) }
+                        activeProviderInDb(db, c.getString(0), c.getString(3))?.let { put("provider", it) }
+                    }
             }
         }
         return out
@@ -2575,13 +2833,14 @@ data class ExistingMessageRow(
 
     fun usageTotals(since: Long = 0L): JSONObject {
         readableDatabase.rawQuery("""
-            SELECT COUNT(*), COALESCE(SUM(success),0), COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0),
-                COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0),
+            SELECT COUNT(*), COALESCE(SUM(success),0), COALESCE(SUM(CASE WHEN usage_complete=1 THEN input_tokens ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN usage_complete=1 THEN cached_tokens ELSE 0 END),0), COALESCE(SUM(CASE WHEN usage_complete=1 THEN cache_write_tokens ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN usage_complete=1 THEN output_tokens ELSE 0 END),0), COALESCE(SUM(CASE WHEN usage_complete=1 THEN reasoning_tokens ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN estimated_cost_usd ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN cost_kind='provider_reported' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN cost_kind='estimated' THEN estimated_cost_usd ELSE 0 END),0),
-                COALESCE(SUM(CASE WHEN cost_kind='estimated' THEN 1 ELSE 0 END),0)
+                COALESCE(SUM(CASE WHEN cost_kind='estimated' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN usage_complete=0 THEN 1 ELSE 0 END),0)
             FROM $METRICS_TABLE WHERE created_at>=?
         """.trimIndent(), arrayOf(since.coerceAtLeast(0L).toString())).use { c ->
             if (!c.moveToFirst()) return JSONObject()
@@ -2591,7 +2850,7 @@ data class ExistingMessageRow(
                 .put("cache_write_tokens",c.getLong(4)).put("output_tokens",c.getLong(5)).put("reasoning_tokens",c.getLong(6))
                 .put("provider_reported_cost_usd",c.getDouble(7)).put("known_cost_requests",known)
                 .put("estimated_cost_usd",c.getDouble(9)).put("estimated_cost_requests",estimates)
-                .put("unknown_cost_requests",total-known-estimates)
+                .put("unknown_cost_requests",total-known-estimates).put("unknown_usage_requests",c.getLong(11))
         }
     }
 
@@ -2609,9 +2868,20 @@ data class ExistingMessageRow(
             chat_id TEXT NOT NULL, request_id TEXT NOT NULL, protocol TEXT NOT NULL,
             PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS deepseek_checkpoints (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, protocol TEXT NOT NULL,
+            PRIMARY KEY(chat_id, request_id), FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS request_recovery_archive (
             chat_id TEXT NOT NULL, request_id TEXT NOT NULL, recovery_message TEXT NOT NULL,
             created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, request_id),
+            FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
+        )""")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifact_intents (
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, call_id TEXT NOT NULL,
+            metadata TEXT NOT NULL, created_at INTEGER NOT NULL,
+            recovery_state TEXT NOT NULL DEFAULT 'pending', recovery_error TEXT,
+            PRIMARY KEY(chat_id, request_id, call_id),
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
         db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifacts (
@@ -2620,6 +2890,17 @@ data class ExistingMessageRow(
             FOREIGN KEY(chat_id) REFERENCES $CHAT_TABLE(id) ON DELETE CASCADE
         )""")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifacts_chat_created ON local_artifacts(chat_id, created_at DESC)")
+        val intentColumns = db.rawQuery("PRAGMA table_info(local_artifact_intents)", null).use { c ->
+            buildSet { while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name"))) }
+        }
+        if ("recovery_state" !in intentColumns) db.execSQL("ALTER TABLE local_artifact_intents ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending'")
+        if ("recovery_error" !in intentColumns) db.execSQL("ALTER TABLE local_artifact_intents ADD COLUMN recovery_error TEXT")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifact_intents_recovery ON local_artifact_intents(recovery_state, created_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifact_intents_scan ON local_artifact_intents(recovery_state, created_at, chat_id, request_id, call_id)")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifact_recovery_cursor (
+            id INTEGER PRIMARY KEY CHECK(id=1), created_at INTEGER NOT NULL,
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, call_id TEXT NOT NULL
+        )""")
     }
 
     fun getOpenAiToolCheckpoint(chatId: String, requestId: String): JSONObject? =
@@ -2704,6 +2985,231 @@ data class ExistingMessageRow(
         writableDatabase.delete("openrouter_checkpoints", "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
     }
 
+    /** Persist the planned identity before a file-producing DeepSeek operation writes any bytes. */
+    fun saveLocalArtifactIntentIfActive(chatId: String, requestId: String, callId: String, metadata: JSONObject): Boolean {
+        if (chatId.isBlank() || requestId.isBlank() || callId.isBlank()) return false
+        require(JsonProtocol.string(metadata, "tool_name") in setOf("create_local_text_file", "patch_local_file") && JsonProtocol.string(metadata, "tool_call_id") == callId)
+        require(JsonProtocol.nonBlank(metadata, "arguments_sha256") != null && verifiedIntentPath(metadata) != null)
+        require(StreamingJsonRequestBody.countBytes(metadata) <= 256 * 1024) { "Artifact intent metadata is too large" }
+        var saved = false
+        writableDatabase.transaction { db ->
+            val owns = db.rawQuery("""SELECT 1 FROM $CHAT_TABLE c JOIN $REQUEST_ACCOUNTING_TABLE a
+                ON a.chat_id=c.id AND a.local_request_id=c.active_request_id
+                WHERE c.id=? AND c.active_request_id=? AND a.provider='deepseek' AND a.local_status='running'""",
+                arrayOf(chatId, requestId)).use { it.moveToFirst() }
+            if (!owns) return@transaction
+            val prior = SqliteLargeTextQuery.query(db, "local_artifact_intents", arrayOf("metadata"),
+                "chat_id=? AND request_id=? AND call_id=?", arrayOf(chatId, requestId, callId), null, null, null,
+                "1", arrayOf("chat_id", "request_id", "call_id")).use { if (it.moveToFirst()) it.getString(0) else null }
+            if (prior != null) {
+                check(prior == metadata.toString()) { "Artifact intent identity changed" }
+                saved = true
+            } else {
+                db.insertOrThrow("local_artifact_intents", null, ContentValues().apply {
+                    put("chat_id", chatId); put("request_id", requestId); put("call_id", callId)
+                    put("metadata", metadata.toString()); put("created_at", System.currentTimeMillis())
+                })
+                saved = true
+            }
+        }
+        return saved
+    }
+
+    /** Validate only app-owned generated paths and precommitted hashes; never trust arbitrary filesystem paths. */
+    private fun verifiedIntentPath(metadata: JSONObject): java.io.File? {
+        val rawPath = JsonProtocol.nonBlank(metadata, "path") ?: return null
+        val sha = JsonProtocol.nonBlank(metadata, "sha256") ?: return null
+        if (!Regex("[0-9a-f]{64}").matches(sha) || metadata.optLong("size_bytes", -1L) < 0L) return null
+        val file = java.io.File(rawPath)
+        val directory = java.io.File(appContext.filesDir, "generated").canonicalFile
+        if (file.canonicalFile.parentFile != directory) return null
+        val attachment = metadata.optJSONObject("attachment") ?: return null
+        if (JsonProtocol.string(attachment, "path") != rawPath || JsonProtocol.string(attachment, "sha256") != sha) return null
+        if (JsonProtocol.string(metadata, "tool_name") == "patch_local_file") {
+            for (key in listOf("source_sha256", "operation_sha256", "patch_sidecar_sha256")) {
+                if (!Regex("[0-9a-f]{64}").matches(JsonProtocol.string(metadata, key))) return null
+            }
+            if (JsonProtocol.nonBlank(metadata, "source_file_id") == null ||
+                JsonProtocol.nonBlank(metadata, "source_path") == null ||
+                metadata.optLong("patch_sidecar_size_bytes", -1L) !in 0L..(2L * 1024L * 1024L)) return null
+            val source = java.io.File(metadata.getString("source_path"))
+            val sidecar = JsonProtocol.nonBlank(metadata, "patch_diff_path")?.let { java.io.File(it) } ?: return null
+            if (source.canonicalFile == file.canonicalFile ||
+                sidecar.canonicalFile.parentFile != java.io.File(directory, "patch-diffs").canonicalFile) return null
+        }
+        return file
+    }
+
+    data class ArtifactIntentRecoveryBatch(val examined: Int, val recovered: Int, val quarantined: Int,
+        val hasMore: Boolean, val cancelled: Boolean)
+
+    /** Optional background work. Opening SQLite never reads intent bodies or hashes generated files. */
+    fun reconcilePublishedArtifactIntents(
+        shouldContinue: () -> Boolean = { true },
+        requestIsRunning: (String) -> Boolean = { OpenRouterResponseRuntime.contains(it) },
+        maxRows: Int = 8,
+        maxMetadataBytes: Long = 512L * 1024L,
+        maxFileBytes: Long = 4L * 1024L * 1024L,
+        maxWorkMillis: Long = 200L
+    ): ArtifactIntentRecoveryBatch {
+        require(maxRows > 0 && maxMetadataBytes > 0L && maxFileBytes > 0L && maxWorkMillis > 0L)
+        if (!ARTIFACT_RECONCILIATION_RUNNING.compareAndSet(false, true))
+            return ArtifactIntentRecoveryBatch(0, 0, 0, true, false)
+        try {
+        val rowBudget = maxRows.coerceAtMost(32)
+        val metadataBudget = maxMetadataBytes.coerceAtMost(1024L * 1024L)
+        val fileBudget = maxFileBytes.coerceAtMost(32L * 1024L * 1024L)
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(maxWorkMillis.coerceAtMost(500L))
+        var examined = 0; var recovered = 0; var quarantined = 0
+        var metadataRead = 0L; var fileRead = 0L
+        fun running() = shouldContinue() && !Thread.currentThread().isInterrupted && System.nanoTime() < deadline
+        if (!running()) return ArtifactIntentRecoveryBatch(0, 0, 0, true, true)
+        val db = writableDatabase
+        data class Candidate(val chatId: String, val requestId: String, val callId: String, val bytes: Long, val createdAt: Long)
+        val candidates = mutableListOf<Candidate>()
+        val previousCursor = db.query("local_artifact_recovery_cursor", arrayOf("created_at", "chat_id", "request_id", "call_id"),
+            "id=1", null, null, null, null, "1").use { c ->
+            if (c.moveToFirst()) arrayOf(c.getLong(0).toString(), c.getString(1), c.getString(2), c.getString(3)) else null
+        }
+        fun selectCandidates(cursor: Array<String>?) {
+            db.query("local_artifact_intents", arrayOf("chat_id", "request_id", "call_id", "length(CAST(metadata AS BLOB))", "created_at"),
+                "recovery_state='pending'" + if (cursor == null) "" else " AND (created_at,chat_id,request_id,call_id)>(?,?,?,?)",
+                cursor, null, null, "created_at ASC,chat_id ASC,request_id ASC,call_id ASC", rowBudget.toString()).use { c ->
+                while (c.moveToNext()) candidates += Candidate(c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getLong(4))
+            }
+        }
+        selectCandidates(previousCursor)
+        if (candidates.isEmpty() && previousCursor != null && running()) selectCandidates(null)
+        var lastVisited: Candidate? = null
+        for (candidate in candidates) {
+            if (!running()) break
+            val (chatId, requestId, callId, bytes) = candidate
+            lastVisited = candidate
+            examined++
+            if (requestIsRunning(requestId)) continue
+            val identity = arrayOf(chatId, requestId, callId)
+            fun quarantine(reason: String) {
+                quarantined += db.update("local_artifact_intents", ContentValues().apply {
+                    put("recovery_state", "quarantined"); put("recovery_error", reason)
+                }, "chat_id=? AND request_id=? AND call_id=? AND recovery_state='pending'", identity)
+            }
+            if (bytes > 256L * 1024L) { quarantine("metadata_size"); continue }
+            if (metadataRead + bytes > metadataBudget) break
+            metadataRead += bytes
+            val raw = SqliteLargeTextQuery.query(db, "local_artifact_intents", arrayOf("metadata"),
+                "chat_id=? AND request_id=? AND call_id=? AND recovery_state='pending'", identity, null, null, null,
+                "1", arrayOf("chat_id", "request_id", "call_id")).use { if (it.moveToFirst()) it.getString(0) else null } ?: continue
+            val metadata = try { JSONObject(raw) } catch (_: org.json.JSONException) { quarantine("invalid_metadata"); continue }
+            if (JsonProtocol.string(metadata, "tool_call_id") != callId ||
+                JsonProtocol.string(metadata, "tool_name") !in setOf("create_local_text_file", "patch_local_file") ||
+                JsonProtocol.nonBlank(metadata, "arguments_sha256") == null) {
+                quarantine("invalid_operation_identity"); continue
+            }
+            val file = try { verifiedIntentPath(metadata) } catch (_: java.io.IOException) { null }
+            if (file == null) { quarantine("invalid_path_or_identity"); continue }
+            val size = metadata.getLong("size_bytes")
+            if (!file.isFile || file.length() != size) { quarantine("unconfirmed_publication"); continue }
+            if (size > BoundedAttachmentCopy.MAX_INPUT_BYTES) { quarantine("file_size"); continue }
+            if (fileRead + size > fileBudget) break
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            var interrupted = false
+            var fileBytes = 0L
+            val actualSha = try {
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(32 * 1024)
+                    while (true) {
+                        if (fileBytes == size) break
+                        if (!running() || requestIsRunning(requestId)) { interrupted = true; break }
+                        val remaining = fileBudget - fileRead
+                        if (remaining <= 0L) { interrupted = true; break }
+                        val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                        if (count < 0) break
+                        fileRead += count
+                        fileBytes += count
+                        if (fileRead > fileBudget) { interrupted = true; break }
+                        digest.update(buffer, 0, count)
+                    }
+                }
+                if (interrupted) null else LocalUtf8FilePatch.hex(digest.digest())
+            } catch (_: java.io.IOException) { quarantine("unreadable_file"); continue }
+            if (interrupted) break
+            if (fileBytes != size || file.length() != size) { quarantine("unconfirmed_publication"); continue }
+            if (actualSha != metadata.getString("sha256")) { quarantine("digest_mismatch"); continue }
+            if (!running() || requestIsRunning(requestId)) break
+            val recoveredMetadata = JsonProtocol.objectCopy(metadata)
+            if (JsonProtocol.string(metadata, "tool_name") == "patch_local_file") {
+                val sidecar = java.io.File(metadata.getString("patch_diff_path"))
+                if (!sidecar.exists()) {
+                    // The exact version is proven; never invent a missing diff or rerun its patch.
+                    recoveredMetadata.put("patch_diff_state", "missing")
+                } else {
+                    val expectedSidecarSize = metadata.getLong("patch_sidecar_size_bytes")
+                    if (!sidecar.isFile || sidecar.length() != expectedSidecarSize) { quarantine("patch_sidecar_size"); continue }
+                    if (fileRead + expectedSidecarSize > fileBudget) break
+                    val sidecarBytes = try { sidecar.inputStream().use { input ->
+                        val output = java.io.ByteArrayOutputStream(expectedSidecarSize.toInt())
+                        val buffer = ByteArray(32 * 1024)
+                        var remaining = expectedSidecarSize
+                        while (remaining > 0L && running()) {
+                            val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                            if (count < 0) break
+                            output.write(buffer, 0, count); remaining -= count; fileRead += count
+                        }
+                        output.toByteArray()
+                    } } catch (_: java.io.IOException) { quarantine("unreadable_patch_sidecar"); continue }
+                    if (!running()) break
+                    val sidecarSha = LocalUtf8FilePatch.hex(java.security.MessageDigest.getInstance("SHA-256").digest(sidecarBytes))
+                    if (sidecarBytes.size.toLong() != expectedSidecarSize || sidecar.length() != expectedSidecarSize ||
+                        sidecarSha != metadata.getString("patch_sidecar_sha256")) { quarantine("patch_sidecar_digest"); continue }
+                    val saved = try { JSONObject(sidecarBytes.toString(Charsets.UTF_8)) }
+                        catch (_: org.json.JSONException) { quarantine("invalid_patch_sidecar"); continue }
+                    val savedArtifact = saved.optJSONObject("artifact")
+                    if (saved.optInt("version") != 1 || savedArtifact == null ||
+                        JsonProtocol.string(saved, "operation_sha256") != JsonProtocol.string(metadata, "operation_sha256") ||
+                        JsonProtocol.string(saved, "result_sha256") != JsonProtocol.string(metadata, "sha256") ||
+                        JsonProtocol.string(saved, "source_file_id") != JsonProtocol.string(metadata, "source_file_id") ||
+                        JsonProtocol.string(saved, "source_sha256") != JsonProtocol.string(metadata, "source_sha256") ||
+                        JsonProtocol.string(savedArtifact, "path") != JsonProtocol.string(metadata, "path") ||
+                        JsonProtocol.string(savedArtifact, "patch_diff_path") != JsonProtocol.string(metadata, "patch_diff_path") ||
+                        JsonProtocol.string(savedArtifact, "sha256") != JsonProtocol.string(metadata, "sha256")) {
+                        quarantine("patch_sidecar_identity"); continue
+                    }
+                    recoveredMetadata.put("patch_diff_state", "confirmed")
+                }
+            }
+            if (!running() || requestIsRunning(requestId)) break
+            db.transaction { sql ->
+                val stillPending = sql.query("local_artifact_intents", arrayOf("call_id"),
+                    "chat_id=? AND request_id=? AND call_id=? AND metadata=? AND recovery_state='pending'",
+                    identity + raw, null, null, null, "1").use { it.moveToFirst() }
+                if (!stillPending) return@transaction
+                val exists = sql.query(CHAT_TABLE, arrayOf("id"), "id=?", arrayOf(chatId), null, null, null, "1").use { it.moveToFirst() }
+                if (!exists) return@transaction
+                val previous = sql.query("local_artifacts", arrayOf("chat_id", "request_id"), "path=?", arrayOf(file.path),
+                    null, null, null, "1").use { if (it.moveToFirst()) Pair(it.getString(0), it.getString(1)) else null }
+                check(previous == null || previous == Pair(chatId, requestId)) { "Artifact recovery ownership changed" }
+                if (previous == null) sql.insertOrThrow("local_artifacts", null, ContentValues().apply {
+                    put("path", file.path); put("chat_id", chatId); put("request_id", requestId)
+                    put("created_at", System.currentTimeMillis()); put("metadata", recoveredMetadata.toString())
+                })
+                // Confirmations live durably in local_artifacts. Archive retrieval joins them;
+                // recovery must not copy an unbounded protocol archive on this optional batch.
+                sql.delete("local_artifact_intents", "chat_id=? AND request_id=? AND call_id=?", identity)
+                recovered++
+            }
+        }
+        lastVisited?.let { visited ->
+            db.insertWithOnConflict("local_artifact_recovery_cursor", null, ContentValues().apply {
+                put("id", 1); put("created_at", visited.createdAt); put("chat_id", visited.chatId)
+                put("request_id", visited.requestId); put("call_id", visited.callId)
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+        val hasMore = db.query("local_artifact_intents", arrayOf("call_id"), "recovery_state='pending'", null,
+            null, null, null, "1").use { it.moveToFirst() }
+        return ArtifactIntentRecoveryBatch(examined, recovered, quarantined, hasMore, !running())
+        } finally { ARTIFACT_RECONCILIATION_RUNNING.set(false) }
+    }
+
     /** Durable even if a tool succeeded just before Stop consumed response ownership. */
     fun registerLocalArtifact(chatId: String, requestId: String, metadata: JSONObject): Boolean {
         var saved = false
@@ -2715,6 +3221,14 @@ data class ExistingMessageRow(
                 put("created_at", System.currentTimeMillis()); put("metadata", metadata.toString())
             }, SQLiteDatabase.CONFLICT_REPLACE)
             saved = true
+            // A late successful side effect enriches its archive, never rewrites the original protocol tail.
+            readCheckpointInDb(db, "request_recovery_archive", "recovery_message", chatId, requestId)?.let { archived ->
+                if (archived.optString("provider") == "deepseek") {
+                    archived.put("confirmed_artifacts", confirmedArtifactsInDb(db, chatId, requestId))
+                    db.update("request_recovery_archive", ContentValues().apply { put("recovery_message", archived.toString()) },
+                        "chat_id=? AND request_id=?", arrayOf(chatId, requestId))
+                }
+            }
         }
         return saved
     }
@@ -2896,6 +3410,7 @@ data class ExistingMessageRow(
                 put("path", value.getString("path")); put("chat_id", chatId); put("request_id", requestId)
                 put("created_at", System.currentTimeMillis()); put("metadata", value.toString())
             })
+            sql.delete("local_artifact_intents", "chat_id=? AND request_id=? AND call_id=?", arrayOf(chatId, requestId, callId))
             committed = value
         }
         return committed
@@ -3159,7 +3674,7 @@ data class ExistingMessageRow(
         val d = readableDatabase
         d.query(
             METRICS_TABLE,
-            arrayOf("effective_effort", "COUNT(*) AS n", "AVG(latency_ms) AS latency", "SUM(output_tokens) AS output", "SUM(reasoning_tokens) AS reasoning", "SUM(success) AS success", "SUM(CASE WHEN feedback IS NOT NULL THEN 1 ELSE 0 END) AS ratings", "AVG(feedback) AS avg_feedback"),
+            arrayOf("effective_effort", "COUNT(*) AS n", "AVG(latency_ms) AS latency", "SUM(CASE WHEN usage_complete=1 THEN output_tokens ELSE 0 END) AS output", "SUM(CASE WHEN usage_complete=1 THEN reasoning_tokens ELSE 0 END) AS reasoning", "SUM(success) AS success", "SUM(CASE WHEN feedback IS NOT NULL THEN 1 ELSE 0 END) AS ratings", "AVG(feedback) AS avg_feedback"),
             "created_at>=?",
             arrayOf(since.toString()),
             "effective_effort",
