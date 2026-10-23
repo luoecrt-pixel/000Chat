@@ -1900,10 +1900,21 @@ data class ExistingMessageRow(
             null, null, null, "1").use { it.moveToFirst() }
         if (!hasRound) return
         val usage = aggregateOpenRouterUsageInDb(db, chatId, localRequestId)
+        // A partial sum may contain both counters from different rounds. Only a
+        // confirmed pair for every round proves the request's full token total.
+        val usageComplete = db.rawQuery("""SELECT COUNT(*), COUNT(input_tokens), COUNT(output_tokens)
+            FROM $OPENROUTER_ROUND_TABLE WHERE chat_id=? AND local_request_id=?""",
+            arrayOf(chatId, localRequestId)).use { c ->
+            c.moveToFirst()
+            c.getLong(0) > 0L && c.getLong(0) == c.getLong(1) && c.getLong(0) == c.getLong(2)
+        }
         val cost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
         val summary = FileBackedIoTelemetry.mergeCompactTelemetry(costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
         val telemetry = FileBackedIoTelemetry.mergeTelemetryJson(readAccountingTelemetryInDb(db, chatId, localRequestId), summary)
-        val usageValues = ContentValues().apply { putUsageValues(this, usage, router = true) }
+        val usageValues = ContentValues().apply {
+            putUsageValues(this, usage, router = true)
+            put("usage_complete", if (usageComplete) 1 else 0)
+        }
         db.update(REQUEST_ACCOUNTING_TABLE, ContentValues(usageValues).apply {
             put("updated_at", System.currentTimeMillis())
             put("cost_kind", if (cost != null) "provider_reported" else "unknown")

@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.util.concurrent.TimeUnit
 
@@ -18,10 +19,25 @@ class ModelCatalogTest {
             for (model in source.models) {
                 assertEquals(model.label, ModelCatalog.displayName(source.id, "~${model.id}"))
                 val isOpenAi = source.id == "openai"
+                val isDeepSeek = source.id == "deepseek"
                 assertEquals(isOpenAi, ModelRequestPolicy.supportsReasoningMode(source.id, model.id))
-                assertEquals(isOpenAi, OpenRouterReasoningPolicy.supportsResponseVerbosity(model.id))
+                if (!isDeepSeek) {
+                    assertEquals(isOpenAi, OpenRouterReasoningPolicy.supportsResponseVerbosity(model.id))
+                } else {
+                    val disabled = DeepSeekContextSnapshot.resolveThinking("none")
+                    assertFalse(disabled.enabled)
+                    assertNull(disabled.effort)
+                }
                 for (effort in listOf("low", "medium", "high", "xhigh", "max")) {
-                    assertEquals(effort, OpenRouterReasoningPolicy.requestEffort(model.id, effort))
+                    if (!isDeepSeek) {
+                        assertEquals(effort, OpenRouterReasoningPolicy.requestEffort(model.id, effort))
+                    } else if (effort in setOf("low", "high", "max")) {
+                        val thinking = DeepSeekContextSnapshot.resolveThinking(effort)
+                        assertTrue(thinking.enabled)
+                        assertEquals(effort, thinking.effort)
+                    } else {
+                        assertThrows(java.io.IOException::class.java) { DeepSeekContextSnapshot.resolveThinking(effort) }
+                    }
                     for (mode in listOf("standard", "pro")) {
                         assertEquals(
                             if (isOpenAi) mode else null,

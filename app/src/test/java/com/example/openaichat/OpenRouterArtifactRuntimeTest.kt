@@ -220,6 +220,9 @@ class OpenRouterArtifactRuntimeTest {
                 } catch (error: Throwable) { failure.compareAndSet(null, error); finalRound() }
             }
             val client = OpenRouterChatClient(server.url("/api/v1").toString(), reconcileGenerations = false)
+            // This caller owns the transport across two requests, like MainActivity.
+            // Each runtime owns only its request lease and releases it on completion.
+            OpenRouterResponseRuntime.retainClient(client)
             try {
                 OpenRouterResponseRuntime.start(context, runtimeRequest(), client)
                 awaitRuntimeAndCleanup()
@@ -256,7 +259,7 @@ class OpenRouterArtifactRuntimeTest {
             } finally {
                 OpenRouterResponseRuntime.cancel(nextRequestId)
                 awaitRuntimeAndCleanup(nextRequestId)
-                client.close()
+                OpenRouterResponseRuntime.releaseClient(client)
                 ChatDatabase(context).use { db ->
                     db.listLocalFiles(chat).forEach { artifact ->
                         File(artifact.getString("path")).delete()

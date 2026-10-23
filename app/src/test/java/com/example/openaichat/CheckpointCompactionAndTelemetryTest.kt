@@ -357,6 +357,30 @@ class CheckpointCompactionAndTelemetryTest {
         }
     }
 
+    @Test fun openRouterPartialRoundKeepsKnownCostAndOnlyReconciliationCompletesEventTokens() {
+        ChatDatabase(context).use { db ->
+            prepared(db, provider = "openrouter")
+            assertTrue(db.observeOpenRouterRound(chat, request, 0, "gen-full", JSONObject()
+                .put("prompt_tokens", 100).put("completion_tokens", 10).put("cost", 0.1)))
+            assertTrue(db.observeOpenRouterRound(chat, request, 1, "gen-partial", JSONObject()
+                .put("prompt_tokens", 150).put("cost", 0.2)))
+            assertTrue(db.stopActiveRequestOnce(chat, request))
+            val partial = db.listRequestEvents(chat).single()
+            assertFalse(partial.getBoolean("usage_complete"))
+            assertTrue(partial.isNull("input_tokens"))
+            assertTrue(partial.isNull("output_tokens"))
+            assertEquals(0.3, partial.getString("cost_usd").toDouble(), 1e-9)
+            assertTrue(db.reconcileOpenRouterGeneration(chat, request, "gen-partial", JSONObject()
+                .put("id", "gen-partial").put("total_cost", 0.2)
+                .put("tokens_prompt", 150).put("tokens_completion", 20)))
+            val complete = db.listRequestEvents(chat).single()
+            assertTrue(complete.getBoolean("usage_complete"))
+            assertEquals(250L, complete.getLong("input_tokens"))
+            assertEquals(30L, complete.getLong("output_tokens"))
+            assertEquals(0.3, complete.getString("cost_usd").toDouble(), 1e-9)
+        }
+    }
+
     @Test fun terminalRollbackRestoresOpenRouterRoundSealAndWinningCommitSealsWithoutExternalCallback() {
         ChatDatabase(context).use { db ->
             prepared(db, provider = "openrouter")
