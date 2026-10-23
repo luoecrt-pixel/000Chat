@@ -183,6 +183,7 @@ dependencies {
     androidTestImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     testImplementation("org.json:json:20250517")
     testImplementation("org.robolectric:robolectric:4.14")
+    testImplementation("androidx.work:work-testing:2.11.2")
     androidTestImplementation("androidx.test:core:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")

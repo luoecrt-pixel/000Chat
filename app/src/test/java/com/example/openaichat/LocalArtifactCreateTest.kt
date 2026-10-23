@@ -64,11 +64,11 @@ class LocalArtifactCreateTest {
         } finally { file.delete() }
     }
 
-    @Test fun legacyDefaultDoesNotDependOnDeterministicHardLinkPublication() {
-        val unavailableHardLinks = LocalArtifactToolExecutor(context) { _, _ ->
-            throw UnsupportedOperationException("synthetic unsupported filesystem")
+    @Test fun legacyDefaultDoesNotDependOnDeterministicAtomicPublication() {
+        val unavailableAtomicMoves = LocalArtifactToolExecutor(context) { _, _ ->
+            throw UnsupportedOperationException("synthetic filesystem without atomic move")
         }
-        val result = unavailableHardLinks.createTextFile(args("OpenAI/OpenRouter legacy source 😀"))
+        val result = unavailableAtomicMoves.createTextFile(args("OpenAI/OpenRouter legacy source 😀"))
         val file = File(result.getString("path"))
         try {
             assertEquals("OpenAI/OpenRouter legacy source 😀", file.readText())
@@ -78,27 +78,27 @@ class LocalArtifactCreateTest {
     }
 
     @Test fun unsupportedDeepSeekPublicationIsExplicitAndKeepsTheStableIntent() {
-        val unavailableHardLinks = LocalArtifactToolExecutor(context) { _, _ ->
-            throw UnsupportedOperationException("synthetic unsupported filesystem")
+        val unavailableAtomicMoves = LocalArtifactToolExecutor(context) { _, _ ->
+            throw UnsupportedOperationException("synthetic filesystem without atomic move")
         }
         val arguments = args("DeepSeek planned output")
         val key = "unsupported-${UUID.randomUUID()}"
-        val intent = unavailableHardLinks.prepareCreateTextFile(arguments, key)
+        val intent = unavailableAtomicMoves.prepareCreateTextFile(arguments, key)
         val file = File(intent.getString("path"))
         try {
-            unavailableHardLinks.createTextFile(arguments, key)
+            unavailableAtomicMoves.createTextFile(arguments, key)
             fail("unsupported deterministic publication must fail closed")
         } catch (error: IOException) {
             assertTrue(error.message!!.contains("не поддерживает"))
             assertTrue(error.cause is UnsupportedOperationException)
         }
         assertFalse(file.exists())
-        assertEquals(intent.toString(), unavailableHardLinks.prepareCreateTextFile(arguments, key).toString())
+        assertEquals(intent.toString(), unavailableAtomicMoves.prepareCreateTextFile(arguments, key).toString())
     }
 
     @Test fun publicationFailureAfterLinkCannotDeleteTheCompletedArtifact() {
         val uncertainPublisher = LocalArtifactToolExecutor(context) { target, staged ->
-            java.nio.file.Files.createLink(target.toPath(), staged.toPath())
+            java.nio.file.Files.move(staged.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
             throw java.nio.file.FileSystemException("synthetic post-publication failure")
         }
         val arguments = args("confirmed bytes survive metadata failure")
@@ -114,6 +114,50 @@ class LocalArtifactCreateTest {
             assertEquals(plan.getString("sha256"), LocalUtf8FilePatch.sha256(file))
             assertEquals(plan.toString(), executor.createTextFile(arguments, key).toString())
         } finally { file.delete() }
+    }
+
+    @Test fun interruptedPublicationDoesNotPublishOrClearTheInterrupt() {
+        val arguments = args("interrupted operation")
+        val key = "interrupted-${UUID.randomUUID()}"
+        val plan = executor.prepareCreateTextFile(arguments, key)
+        Thread.currentThread().interrupt()
+        try {
+            try {
+                executor.createTextFile(arguments, key)
+                fail("interrupted publication must stop before file bytes are published")
+            } catch (_: java.io.InterruptedIOException) {}
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertFalse(File(plan.getString("path")).exists())
+        } finally { Thread.interrupted() }
+    }
+
+    @Test fun patchIntentIsObservedBeforeEitherFinalFileAndIncludesExactSidecarHash() {
+        val original = executor.createTextFile(args("original content"))
+        val source = File(original.getString("path"))
+        val attachment = OpenRouterLocalAttachment.fromJson(original.getJSONObject("attachment"))
+        val arguments = JSONObject().put("file_id", attachment.id).put("patches", org.json.JSONArray().put(
+            JSONObject().put("search", "original").put("replace", "modified")))
+        var planned: JSONObject? = null
+        try {
+            try {
+                executor.patchLocalFile(arguments, listOf(attachment), artifactKey = "patch-intent-${UUID.randomUUID()}",
+                    beforePublish = { metadata ->
+                        planned = metadata
+                        assertFalse(File(metadata.getString("path")).exists())
+                        assertFalse(File(metadata.getString("patch_diff_path")).exists())
+                        assertEquals(original.getString("sha256"), metadata.getString("source_sha256"))
+                        assertTrue(metadata.getString("operation_sha256").matches(Regex("[0-9a-f]{64}")))
+                        assertTrue(metadata.getString("patch_sidecar_sha256").matches(Regex("[0-9a-f]{64}")))
+                        assertTrue(metadata.getLong("patch_sidecar_size_bytes") > 0)
+                        throw java.util.concurrent.CancellationException("stop before durable intent acceptance")
+                    })
+                fail("rejected intent must prevent publication")
+            } catch (_: java.util.concurrent.CancellationException) {}
+            assertNotNull(planned)
+            assertFalse(File(planned!!.getString("path")).exists())
+            assertFalse(File(planned!!.getString("patch_diff_path")).exists())
+            assertEquals("original content", source.readText())
+        } finally { source.delete() }
     }
 
     @Test fun invalidCreateIsRejectedBeforeIntentCanBePrepared() {

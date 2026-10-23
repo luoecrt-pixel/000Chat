@@ -43,10 +43,27 @@ class LocalArtifactPublicationDeviceTest {
         } finally { target.delete() }
     }
 
+    @Test fun interruptedPublicationNeverPublishesAFileOnTheNativeFileSystem() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val executor = LocalArtifactToolExecutor(context)
+        val arguments = JSONObject().put("filename", "interrupted.txt").put("content", "must not publish")
+        val key = "interrupted-native-${UUID.randomUUID()}"
+        val target = File(executor.prepareCreateTextFile(arguments, key).getString("path"))
+        Thread.currentThread().interrupt()
+        try {
+            try {
+                executor.createTextFile(arguments, key)
+                fail("interrupted operation must not publish")
+            } catch (_: java.io.InterruptedIOException) {}
+            assertTrue(Thread.currentThread().isInterrupted)
+            assertFalse(target.exists())
+        } finally { Thread.interrupted(); target.delete() }
+    }
+
     @Test fun legacyCreateSucceedsWithoutCallingTheDeterministicPublisher() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val executor = LocalArtifactToolExecutor(context) { _, _ ->
-            throw UnsupportedOperationException("synthetic filesystem without hard links")
+            throw UnsupportedOperationException("synthetic filesystem without atomic move")
         }
         val result = executor.createTextFile(JSONObject().put("filename", "legacy.txt").put("content", "legacy bytes"))
         val target = File(result.getString("path"))

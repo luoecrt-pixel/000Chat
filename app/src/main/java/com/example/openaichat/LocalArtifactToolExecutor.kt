@@ -16,7 +16,7 @@ class LocalArtifactToolExecutor internal constructor(
     private val publishDeterministicFile: (destination: File, staged: File) -> Unit
 ) {
     constructor(context: Context) : this(context, { destination, staged ->
-        Files.createLink(destination.toPath(), staged.toPath())
+        Files.move(staged.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
         Unit
     })
     companion object {
@@ -42,7 +42,7 @@ class LocalArtifactToolExecutor internal constructor(
     /** A stable artifact key permits recovery of a completed publication, never another write. */
     fun createTextFile(arguments: JSONObject, artifactKey: String? = null): JSONObject = synchronized(patchLock) {
         // Existing OpenAI/OpenRouter callers retain their direct UUID-file contract.
-        // Hard-link support is required only by the opt-in durable DeepSeek path.
+        // The locked atomic-publication contract is used only by durable DeepSeek calls.
         if (artifactKey == null) return@synchronized createLegacyTextFile(arguments)
         val metadata = prepareCreateTextFile(arguments, artifactKey)
         val content = JsonProtocol.text(arguments, "content") ?: throw IOException("content must be a string")
@@ -54,44 +54,72 @@ class LocalArtifactToolExecutor internal constructor(
                 LocalUtf8FilePatch.sha256(file) != metadata.getString("sha256"))
                 throw IOException("Идентификатор вызова уже использован другим или неполным файлом; перезапись запрещена")
         }
-        if (file.exists()) {
-            verifyPublished()
-            return@synchronized metadata
-        }
-        // A partial stage is never a confirmed user artifact. Publication links the fsynced
-        // inode into its final name atomically and fails if that name already exists.
-        val staged = File.createTempFile(".create-", ".tmp", dir)
-        try {
-            java.io.FileOutputStream(staged).use { output ->
-                val nonClosing = object : java.io.FilterOutputStream(output) {
-                    override fun write(buffer: ByteArray, offset: Int, length: Int) { output.write(buffer, offset, length) }
-                    override fun close() { flush() }
-                }
-                // Closing the encoder emits even a trailing unmatched surrogate;
-                // the actual descriptor remains open until fsync completes.
-                nonClosing.writer(Charsets.UTF_8).buffered(64 * 1024).use { writeCreateContent(content, it) }
-                output.fd.sync()
-            }
-            if (staged.length() != metadata.getLong("size_bytes") ||
-                LocalUtf8FilePatch.sha256(staged) != metadata.getString("sha256"))
-                throw IOException("Файл записан не полностью; публикация отменена")
-            try {
-                // filesDir is app-private; same-directory hard-link publication cannot
-                // overwrite an existing complete version, unlike rename(ATOMIC_MOVE).
-                publishDeterministicFile(file, staged)
-            } catch (collision: java.nio.file.FileAlreadyExistsException) {
+        withPublicationLock(file) {
+            if (file.exists()) {
                 verifyPublished()
-            } catch (unsupported: UnsupportedOperationException) {
-                throw IOException("Файловая система не поддерживает безопасную публикацию файла DeepSeek. " +
-                    "Результат операции не подтверждён; автоматический повтор не выполнялся.", unsupported)
-            } catch (filesystem: FileSystemException) {
-                throw IOException("Не удалось подтвердить безопасную публикацию файла DeepSeek. " +
-                    "Сохранённое намерение остаётся для проверки; автоматический повтор не выполнялся.", filesystem)
+                return@withPublicationLock metadata
             }
-            metadata
-        } finally {
-            staged.delete()
+            val staged = File.createTempFile(".create-", ".tmp", dir)
+            try {
+                java.io.FileOutputStream(staged).use { output ->
+                    val nonClosing = object : java.io.FilterOutputStream(output) {
+                        override fun write(buffer: ByteArray, offset: Int, length: Int) { output.write(buffer, offset, length) }
+                        override fun close() { flush() }
+                    }
+                    nonClosing.writer(Charsets.UTF_8).buffered(64 * 1024).use { writeCreateContent(content, it) }
+                    output.fd.sync()
+                }
+                if (staged.length() != metadata.getLong("size_bytes") ||
+                    LocalUtf8FilePatch.sha256(staged) != metadata.getString("sha256"))
+                    throw IOException("Файл записан не полностью; публикация отменена")
+                checkPublicationInterrupted()
+                try {
+                    // The stable cross-process lock and target check above are mandatory:
+                    // ATOMIC_MOVE alone is allowed to replace an existing destination.
+                    publishDeterministicFile(file, staged)
+                } catch (collision: java.nio.file.FileAlreadyExistsException) {
+                    verifyPublished()
+                } catch (unsupported: UnsupportedOperationException) {
+                    throw IOException("Файловая система не поддерживает безопасную публикацию файла DeepSeek. " +
+                        "Результат операции не подтверждён; автоматический повтор не выполнялся.", unsupported)
+                } catch (filesystem: FileSystemException) {
+                    throw IOException("Не удалось подтвердить безопасную публикацию файла DeepSeek. " +
+                        "Сохранённое намерение остаётся для проверки; автоматический повтор не выполнялся.", filesystem)
+                }
+                verifyPublished()
+                metadata
+            } finally {
+                // A published target is immutable even if a later verification fails.
+                staged.delete()
+            }
         }
+    }
+
+    private fun checkPublicationInterrupted() {
+        if (Thread.currentThread().isInterrupted)
+            throw java.io.InterruptedIOException("Публикация файла прервана до подтверждения результата")
+    }
+
+    private inline fun <T> withPublicationLock(destination: File, block: () -> T): T {
+        val directory = File(destination.parentFile, ".publication-locks")
+        if (!directory.isDirectory && !directory.mkdirs() && !directory.isDirectory)
+            throw IOException("Каталог блокировок публикации недоступен")
+        val token = StreamingJsonRequestBody.sha256(JSONObject().put("destination", destination.name))
+        val lockFile = File(directory, "$token.lock")
+        checkPublicationInterrupted()
+        try {
+            java.io.RandomAccessFile(lockFile, "rw").use { handle ->
+                handle.channel.lock().use {
+                    checkPublicationInterrupted()
+                    return block()
+                }
+            }
+        } catch (interrupted: java.nio.channels.FileLockInterruptionException) {
+            Thread.currentThread().interrupt()
+            throw java.io.InterruptedIOException("Ожидание блокировки публикации прервано").apply { initCause(interrupted) }
+        }
+        // Lockfiles are deliberately retained: unlinking allows two processes to
+        // hold locks on different inodes for the same publication destination.
     }
 
     private fun createLegacyTextFile(arguments: JSONObject): JSONObject {
@@ -150,7 +178,8 @@ class LocalArtifactToolExecutor internal constructor(
     }
 
     fun patchLocalFile(arguments: JSONObject, files: List<OpenRouterLocalAttachment>,
-        active: () -> Boolean = { true }, artifactKey: String? = null): JSONObject = try { synchronized(patchLock) {
+        active: () -> Boolean = { true }, artifactKey: String? = null,
+        beforePublish: (JSONObject) -> Unit = {}): JSONObject = try { synchronized(patchLock) {
         LocalUtf8FilePatch.checkActive(active)
         if (StreamingJsonRequestBody.countBytes(arguments) > 256 * 1024) throw IOException("Аргументы патча превышают 256 КБ")
         val selector = JsonProtocol.nonBlank(arguments, "file_id") ?: JsonProtocol.nonBlank(arguments, "filename")
@@ -189,6 +218,8 @@ class LocalArtifactToolExecutor internal constructor(
             // A process may die between publishing the complete version and
             // its sidecar. Reconstruct only that metadata after proving that
             // the existing bytes are exactly this operation's expected result.
+            // Sidecar identity is shared by the operation even if source filenames differ.
+            withPublicationLock(diff) {
             val recoverSidecar = target.isFile && !diff.exists()
             if ((target.exists() || diff.exists()) && !recoverSidecar) {
                 if (!target.isFile || !diff.isFile || diff.length() > 2L * 1024 * 1024)
@@ -210,7 +241,6 @@ class LocalArtifactToolExecutor internal constructor(
             // finally. Only complete, published versions live in filesDir.
             val staged = File.createTempFile("patch_result_", ".tmp", context.cacheDir)
             var stagedDiff: File? = null
-            var published = false
             try {
                 // Keep the first allocation guarded if the second one fails.
                 val pendingDiff = File.createTempFile("patch_diff_", ".tmp", context.cacheDir).also { stagedDiff = it }
@@ -221,24 +251,34 @@ class LocalArtifactToolExecutor internal constructor(
                     .put("filename", source.name).put("path", target.absolutePath).put("mime_type", source.mime)
                     .put("size_bytes", staged.length()).put("patch_count", plan.hunks.size)
                     .put("source_file_id", source.id).put("source_sha256", plan.sourceSha256)
-                    .put("source_path", source.path).put("patch_diff_path", diff.absolutePath), resultSha)
+                    .put("source_path", source.path).put("patch_diff_path", diff.absolutePath)
+                    .put("operation_sha256", operation), resultSha)
                 val hunks = JSONArray().apply { plan.hunks.forEach { h -> put(JSONObject().put("line", h.line)
                     .put("search", h.replacement.search).put("replace", h.replacement.replace)) } }
                 val sidecar = JSONObject().put("version", 1).put("source_file_id", source.id).put("source_sha256", plan.sourceSha256)
                     .put("result_sha256", resultSha).put("operation_sha256", operation).put("hunks", hunks).put("artifact", metadata)
                 pendingDiff.bufferedWriter(Charsets.UTF_8).use { StreamingJsonRequestBody.writeJson(sidecar, it) }
+                java.io.RandomAccessFile(pendingDiff, "rw").use { it.fd.sync() }
+                java.io.RandomAccessFile(staged, "rw").use { it.fd.sync() }
+                // These observations are outside the serialized artifact to avoid
+                // a self-referential sidecar hash.
+                metadata.put("patch_sidecar_sha256", LocalUtf8FilePatch.sha256(pendingDiff))
+                    .put("patch_sidecar_size_bytes", pendingDiff.length())
+                // Durable intent is committed before either immutable result appears.
+                beforePublish(JsonProtocol.objectCopy(metadata))
                 LocalUtf8FilePatch.checkActive(active)
+                checkPublicationInterrupted()
                 if (!recoverSidecar) {
                     Files.move(staged.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
-                    published = true
                 }
                 Files.move(pendingDiff.toPath(), diff.toPath(), StandardCopyOption.ATOMIC_MOVE)
                 metadata
             } catch (error: Throwable) {
-                if (published) target.delete()
-                diff.delete()
+                // Never erase a complete version or an existing sidecar after a
+                // callback, Stop, or late I/O failure. Recovery proves their bytes.
                 throw error
             } finally { staged.delete(); stagedDiff?.delete() }
+            }
         }
     } } catch (error: FileNotFoundException) {
         // The model receives the message, not an app-private filesystem path.

@@ -2896,6 +2896,11 @@ data class ExistingMessageRow(
         if ("recovery_state" !in intentColumns) db.execSQL("ALTER TABLE local_artifact_intents ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending'")
         if ("recovery_error" !in intentColumns) db.execSQL("ALTER TABLE local_artifact_intents ADD COLUMN recovery_error TEXT")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifact_intents_recovery ON local_artifact_intents(recovery_state, created_at)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_local_artifact_intents_scan ON local_artifact_intents(recovery_state, created_at, chat_id, request_id, call_id)")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS local_artifact_recovery_cursor (
+            id INTEGER PRIMARY KEY CHECK(id=1), created_at INTEGER NOT NULL,
+            chat_id TEXT NOT NULL, request_id TEXT NOT NULL, call_id TEXT NOT NULL
+        )""")
     }
 
     fun getOpenAiToolCheckpoint(chatId: String, requestId: String): JSONObject? =
@@ -2983,7 +2988,7 @@ data class ExistingMessageRow(
     /** Persist the planned identity before a file-producing DeepSeek operation writes any bytes. */
     fun saveLocalArtifactIntentIfActive(chatId: String, requestId: String, callId: String, metadata: JSONObject): Boolean {
         if (chatId.isBlank() || requestId.isBlank() || callId.isBlank()) return false
-        require(metadata.optString("tool_name") == "create_local_text_file" && metadata.optString("tool_call_id") == callId)
+        require(JsonProtocol.string(metadata, "tool_name") in setOf("create_local_text_file", "patch_local_file") && JsonProtocol.string(metadata, "tool_call_id") == callId)
         require(JsonProtocol.nonBlank(metadata, "arguments_sha256") != null && verifiedIntentPath(metadata) != null)
         require(StreamingJsonRequestBody.countBytes(metadata) <= 256 * 1024) { "Artifact intent metadata is too large" }
         var saved = false
@@ -3020,6 +3025,18 @@ data class ExistingMessageRow(
         if (file.canonicalFile.parentFile != directory) return null
         val attachment = metadata.optJSONObject("attachment") ?: return null
         if (JsonProtocol.string(attachment, "path") != rawPath || JsonProtocol.string(attachment, "sha256") != sha) return null
+        if (JsonProtocol.string(metadata, "tool_name") == "patch_local_file") {
+            for (key in listOf("source_sha256", "operation_sha256", "patch_sidecar_sha256")) {
+                if (!Regex("[0-9a-f]{64}").matches(JsonProtocol.string(metadata, key))) return null
+            }
+            if (JsonProtocol.nonBlank(metadata, "source_file_id") == null ||
+                JsonProtocol.nonBlank(metadata, "source_path") == null ||
+                metadata.optLong("patch_sidecar_size_bytes", -1L) !in 0L..(2L * 1024L * 1024L)) return null
+            val source = java.io.File(metadata.getString("source_path"))
+            val sidecar = JsonProtocol.nonBlank(metadata, "patch_diff_path")?.let { java.io.File(it) } ?: return null
+            if (source.canonicalFile == file.canonicalFile ||
+                sidecar.canonicalFile.parentFile != java.io.File(directory, "patch-diffs").canonicalFile) return null
+        }
         return file
     }
 
@@ -3041,22 +3058,34 @@ data class ExistingMessageRow(
         try {
         val rowBudget = maxRows.coerceAtMost(32)
         val metadataBudget = maxMetadataBytes.coerceAtMost(1024L * 1024L)
-        val fileBudget = maxFileBytes.coerceAtMost(4L * 1024L * 1024L)
+        val fileBudget = maxFileBytes.coerceAtMost(32L * 1024L * 1024L)
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(maxWorkMillis.coerceAtMost(500L))
         var examined = 0; var recovered = 0; var quarantined = 0
         var metadataRead = 0L; var fileRead = 0L
         fun running() = shouldContinue() && !Thread.currentThread().isInterrupted && System.nanoTime() < deadline
         if (!running()) return ArtifactIntentRecoveryBatch(0, 0, 0, true, true)
         val db = writableDatabase
-        data class Candidate(val chatId: String, val requestId: String, val callId: String, val bytes: Long)
+        data class Candidate(val chatId: String, val requestId: String, val callId: String, val bytes: Long, val createdAt: Long)
         val candidates = mutableListOf<Candidate>()
-        db.query("local_artifact_intents", arrayOf("chat_id", "request_id", "call_id", "length(CAST(metadata AS BLOB))"),
-            "recovery_state='pending'", null, null, null, "created_at ASC", rowBudget.toString()).use { c ->
-            while (c.moveToNext()) candidates += Candidate(c.getString(0), c.getString(1), c.getString(2), c.getLong(3))
+        val previousCursor = db.query("local_artifact_recovery_cursor", arrayOf("created_at", "chat_id", "request_id", "call_id"),
+            "id=1", null, null, null, null, "1").use { c ->
+            if (c.moveToFirst()) arrayOf(c.getLong(0).toString(), c.getString(1), c.getString(2), c.getString(3)) else null
         }
+        fun selectCandidates(cursor: Array<String>?) {
+            db.query("local_artifact_intents", arrayOf("chat_id", "request_id", "call_id", "length(CAST(metadata AS BLOB))", "created_at"),
+                "recovery_state='pending'" + if (cursor == null) "" else " AND (created_at,chat_id,request_id,call_id)>(?,?,?,?)",
+                cursor, null, null, "created_at ASC,chat_id ASC,request_id ASC,call_id ASC", rowBudget.toString()).use { c ->
+                while (c.moveToNext()) candidates += Candidate(c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getLong(4))
+            }
+        }
+        selectCandidates(previousCursor)
+        if (candidates.isEmpty() && previousCursor != null && running()) selectCandidates(null)
+        var lastVisited: Candidate? = null
         for (candidate in candidates) {
             if (!running()) break
             val (chatId, requestId, callId, bytes) = candidate
+            lastVisited = candidate
+            examined++
             if (requestIsRunning(requestId)) continue
             val identity = arrayOf(chatId, requestId, callId)
             fun quarantine(reason: String) {
@@ -3064,16 +3093,15 @@ data class ExistingMessageRow(
                     put("recovery_state", "quarantined"); put("recovery_error", reason)
                 }, "chat_id=? AND request_id=? AND call_id=? AND recovery_state='pending'", identity)
             }
-            if (bytes > 256L * 1024L) { examined++; quarantine("metadata_size"); continue }
+            if (bytes > 256L * 1024L) { quarantine("metadata_size"); continue }
             if (metadataRead + bytes > metadataBudget) break
             metadataRead += bytes
-            examined++
             val raw = SqliteLargeTextQuery.query(db, "local_artifact_intents", arrayOf("metadata"),
                 "chat_id=? AND request_id=? AND call_id=? AND recovery_state='pending'", identity, null, null, null,
                 "1", arrayOf("chat_id", "request_id", "call_id")).use { if (it.moveToFirst()) it.getString(0) else null } ?: continue
             val metadata = try { JSONObject(raw) } catch (_: org.json.JSONException) { quarantine("invalid_metadata"); continue }
             if (JsonProtocol.string(metadata, "tool_call_id") != callId ||
-                JsonProtocol.string(metadata, "tool_name") != "create_local_text_file" ||
+                JsonProtocol.string(metadata, "tool_name") !in setOf("create_local_text_file", "patch_local_file") ||
                 JsonProtocol.nonBlank(metadata, "arguments_sha256") == null) {
                 quarantine("invalid_operation_identity"); continue
             }
@@ -3081,7 +3109,7 @@ data class ExistingMessageRow(
             if (file == null) { quarantine("invalid_path_or_identity"); continue }
             val size = metadata.getLong("size_bytes")
             if (!file.isFile || file.length() != size) { quarantine("unconfirmed_publication"); continue }
-            if (size > 4L * 1024L * 1024L) { quarantine("file_size"); continue }
+            if (size > BoundedAttachmentCopy.MAX_INPUT_BYTES) { quarantine("file_size"); continue }
             if (fileRead + size > fileBudget) break
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             var interrupted = false
@@ -3108,6 +3136,48 @@ data class ExistingMessageRow(
             if (fileBytes != size || file.length() != size) { quarantine("unconfirmed_publication"); continue }
             if (actualSha != metadata.getString("sha256")) { quarantine("digest_mismatch"); continue }
             if (!running() || requestIsRunning(requestId)) break
+            val recoveredMetadata = JsonProtocol.objectCopy(metadata)
+            if (JsonProtocol.string(metadata, "tool_name") == "patch_local_file") {
+                val sidecar = java.io.File(metadata.getString("patch_diff_path"))
+                if (!sidecar.exists()) {
+                    // The exact version is proven; never invent a missing diff or rerun its patch.
+                    recoveredMetadata.put("patch_diff_state", "missing")
+                } else {
+                    val expectedSidecarSize = metadata.getLong("patch_sidecar_size_bytes")
+                    if (!sidecar.isFile || sidecar.length() != expectedSidecarSize) { quarantine("patch_sidecar_size"); continue }
+                    if (fileRead + expectedSidecarSize > fileBudget) break
+                    val sidecarBytes = try { sidecar.inputStream().use { input ->
+                        val output = java.io.ByteArrayOutputStream(expectedSidecarSize.toInt())
+                        val buffer = ByteArray(32 * 1024)
+                        var remaining = expectedSidecarSize
+                        while (remaining > 0L && running()) {
+                            val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                            if (count < 0) break
+                            output.write(buffer, 0, count); remaining -= count; fileRead += count
+                        }
+                        output.toByteArray()
+                    } } catch (_: java.io.IOException) { quarantine("unreadable_patch_sidecar"); continue }
+                    if (!running()) break
+                    val sidecarSha = LocalUtf8FilePatch.hex(java.security.MessageDigest.getInstance("SHA-256").digest(sidecarBytes))
+                    if (sidecarBytes.size.toLong() != expectedSidecarSize || sidecar.length() != expectedSidecarSize ||
+                        sidecarSha != metadata.getString("patch_sidecar_sha256")) { quarantine("patch_sidecar_digest"); continue }
+                    val saved = try { JSONObject(sidecarBytes.toString(Charsets.UTF_8)) }
+                        catch (_: org.json.JSONException) { quarantine("invalid_patch_sidecar"); continue }
+                    val savedArtifact = saved.optJSONObject("artifact")
+                    if (saved.optInt("version") != 1 || savedArtifact == null ||
+                        JsonProtocol.string(saved, "operation_sha256") != JsonProtocol.string(metadata, "operation_sha256") ||
+                        JsonProtocol.string(saved, "result_sha256") != JsonProtocol.string(metadata, "sha256") ||
+                        JsonProtocol.string(saved, "source_file_id") != JsonProtocol.string(metadata, "source_file_id") ||
+                        JsonProtocol.string(saved, "source_sha256") != JsonProtocol.string(metadata, "source_sha256") ||
+                        JsonProtocol.string(savedArtifact, "path") != JsonProtocol.string(metadata, "path") ||
+                        JsonProtocol.string(savedArtifact, "patch_diff_path") != JsonProtocol.string(metadata, "patch_diff_path") ||
+                        JsonProtocol.string(savedArtifact, "sha256") != JsonProtocol.string(metadata, "sha256")) {
+                        quarantine("patch_sidecar_identity"); continue
+                    }
+                    recoveredMetadata.put("patch_diff_state", "confirmed")
+                }
+            }
+            if (!running() || requestIsRunning(requestId)) break
             db.transaction { sql ->
                 val stillPending = sql.query("local_artifact_intents", arrayOf("call_id"),
                     "chat_id=? AND request_id=? AND call_id=? AND metadata=? AND recovery_state='pending'",
@@ -3120,13 +3190,19 @@ data class ExistingMessageRow(
                 check(previous == null || previous == Pair(chatId, requestId)) { "Artifact recovery ownership changed" }
                 if (previous == null) sql.insertOrThrow("local_artifacts", null, ContentValues().apply {
                     put("path", file.path); put("chat_id", chatId); put("request_id", requestId)
-                    put("created_at", System.currentTimeMillis()); put("metadata", raw)
+                    put("created_at", System.currentTimeMillis()); put("metadata", recoveredMetadata.toString())
                 })
                 // Confirmations live durably in local_artifacts. Archive retrieval joins them;
                 // recovery must not copy an unbounded protocol archive on this optional batch.
                 sql.delete("local_artifact_intents", "chat_id=? AND request_id=? AND call_id=?", identity)
                 recovered++
             }
+        }
+        lastVisited?.let { visited ->
+            db.insertWithOnConflict("local_artifact_recovery_cursor", null, ContentValues().apply {
+                put("id", 1); put("created_at", visited.createdAt); put("chat_id", visited.chatId)
+                put("request_id", visited.requestId); put("call_id", visited.callId)
+            }, SQLiteDatabase.CONFLICT_REPLACE)
         }
         val hasMore = db.query("local_artifact_intents", arrayOf("call_id"), "recovery_state='pending'", null,
             null, null, null, "1").use { it.moveToFirst() }

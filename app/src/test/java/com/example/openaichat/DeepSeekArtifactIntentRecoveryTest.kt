@@ -141,6 +141,66 @@ class DeepSeekArtifactIntentRecoveryTest {
         }
     }
 
+    @Test fun persistentCursorPassesThirtyTwoRunningIntentsAndRecoversThirtyThirdAfterReopen() {
+        val planned = intent()
+        ChatDatabase(context).use { db ->
+            begin(db)
+            repeat(32) { index -> db.writableDatabase.execSQL(
+                "INSERT INTO local_artifact_intents(chat_id,request_id,call_id,metadata,created_at) VALUES(?,?,?,?,?)",
+                arrayOf("chat", "live-$index", "call", "{not-read-for-running", 0L)) }
+            assertTrue(db.saveLocalArtifactIntentIfActive("chat", "req", callId, planned))
+            LocalArtifactToolExecutor(context).createTextFile(args, key)
+            val first = db.reconcilePublishedArtifactIntents(requestIsRunning = { it.startsWith("live-") }, maxRows = 32)
+            assertEquals(32, first.examined); assertEquals(0, first.recovered); assertTrue(first.hasMore)
+        }
+        ChatDatabase(context).use { db ->
+            val next = db.reconcilePublishedArtifactIntents(requestIsRunning = { it.startsWith("live-") }, maxRows = 32)
+            assertEquals(1, next.recovered)
+            assertEquals(planned.getString("file_id"), db.getLocalArtifactToolResult("chat", "req", callId)!!.getString("file_id"))
+            db.readableDatabase.rawQuery("SELECT COUNT(*) FROM local_artifact_intents WHERE request_id LIKE 'live-%' AND recovery_state='pending'", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(32, it.getInt(0))
+            }
+        }
+    }
+
+    private fun recoverPublishedPatch(missingSidecar: Boolean) {
+        val executor = LocalArtifactToolExecutor(context)
+        val original = executor.createTextFile(JSONObject().put("filename", "source.txt").put("content", "before"))
+        val source = OpenRouterLocalAttachment.fromJson(original.getJSONObject("attachment"))
+        val patchArgs = JSONObject().put("file_id", source.id).put("patches", JSONArray().put(
+            JSONObject().put("search", "before").put("replace", "after")))
+        val tail = JSONArray().put(JSONObject().put("role", "assistant").put("tool_calls", JSONArray().put(
+            JSONObject().put("id", "original-patch-id").put("type", "function").put("function",
+                JSONObject().put("name", "patch_local_file").put("arguments", patchArgs.toString())))))
+        lateinit var published: JSONObject
+        ChatDatabase(context).use { db ->
+            begin(db)
+            assertTrue(db.saveDeepSeekCheckpoint("chat", "req", JSONObject().put("version", 1).put("replayable", false).put("tail", tail)))
+            published = executor.patchLocalFile(patchArgs, listOf(source), artifactKey = key, beforePublish = { planned ->
+                val metadata = JsonProtocol.objectCopy(planned).put("tool_name", "patch_local_file").put("tool_call_id", callId)
+                    .put("arguments_sha256", StreamingJsonRequestBody.sha256(patchArgs))
+                assertTrue(db.saveLocalArtifactIntentIfActive("chat", "req", callId, metadata))
+            })
+            if (missingSidecar) assertTrue(java.io.File(published.getString("patch_diff_path")).delete())
+            // Simulate death after publication and before the result-registration transaction.
+            assertTrue(db.stopActiveRequestOnce("chat", "req"))
+        }
+        ChatDatabase(context).use { db ->
+            assertEquals(1, db.reconcilePublishedArtifactIntents(maxFileBytes = 32L * 1024L * 1024L).recovered)
+            val recovered = db.getLocalArtifactToolResult("chat", "req", callId)!!
+            assertEquals(published.getString("file_id"), recovered.getString("file_id"))
+            assertEquals(if (missingSidecar) "missing" else "confirmed", recovered.getString("patch_diff_state"))
+            assertEquals("before", java.io.File(original.getString("path")).readText())
+            assertEquals("after", java.io.File(recovered.getString("path")).readText())
+            val archived = db.getRequestRecoveryArchive("chat", "req")!!
+            assertEquals(tail.toString(), archived.getJSONObject("deepseek_protocol").getJSONArray("tail").toString())
+            assertEquals(published.getString("file_id"), archived.getJSONArray("confirmed_artifacts").getJSONObject(0).getString("file_id"))
+        }
+    }
+
+    @Test fun publishedPatchWithSidecarRecoversExactVersionAndOriginalArgumentsAfterStop() = recoverPublishedPatch(false)
+    @Test fun publishedPatchWithoutSidecarPreservesExactVersionAndMarksMissingDiffWithoutReexecution() = recoverPublishedPatch(true)
+
     @Test fun intentAfterStopIsRejectedAndDeletedChatCannotResurrectAnArtifact() {
         val planned = intent()
         ChatDatabase(context).use { db ->
