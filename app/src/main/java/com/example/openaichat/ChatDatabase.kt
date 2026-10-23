@@ -1909,8 +1909,16 @@ data class ExistingMessageRow(
             c.getLong(0) > 0L && c.getLong(0) == c.getLong(1) && c.getLong(0) == c.getLong(2)
         }
         val cost = OpenRouterUsageSnapshot.from(usage).reportedCostUsd
-        val summary = FileBackedIoTelemetry.mergeCompactTelemetry(costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
+        val partialUsage = if (!usageComplete && usage != null) JSONObject()
+            .put("usage_incomplete", true).put("observed_partial_usage", JsonProtocol.objectCopy(usage)) else null
+        val summary = FileBackedIoTelemetry.mergeCompactTelemetry(toolTelemetry = partialUsage,
+            costDetails = OpenRouterUsageSnapshot.extractCostDetails(usage))
         val telemetry = FileBackedIoTelemetry.mergeTelemetryJson(readAccountingTelemetryInDb(db, chatId, localRequestId), summary)
+            ?.let { raw -> JSONObject(raw).apply {
+                // The raw observation remains diagnostic history after reconciliation,
+                // but the current completeness marker must reflect the latest ledger.
+                if (usageComplete) remove("usage_incomplete")
+            }.toString() }
         val usageValues = ContentValues().apply {
             putUsageValues(this, usage, router = true)
             put("usage_complete", if (usageComplete) 1 else 0)

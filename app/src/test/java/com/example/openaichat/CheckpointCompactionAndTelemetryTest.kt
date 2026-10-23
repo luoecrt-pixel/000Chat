@@ -308,16 +308,32 @@ class CheckpointCompactionAndTelemetryTest {
             db.recordRequestEvent(chat, "request_completed", request, "openrouter", "gpt-test", "gpt-test",
                 ModelCatalog.Match.EXACT, "completed", inputTokens = 100)
             val event = db.listRequestEvents(chat).single()
-            assertEquals(250L, event.getLong("input_tokens"))
+            // Only input tokens were reported: retain the observation without
+            // asserting that the complete request token usage is known.
+            assertFalse(event.getBoolean("usage_complete"))
+            assertTrue(event.isNull("input_tokens"))
             assertEquals(0.0125, event.getString("cost_usd").toDouble(), 1e-9)
             val telemetry = RequestEventFormatter.parseTelemetry(event)!!
+            assertEquals(250L, telemetry.getJSONObject("observed_partial_usage").getLong("prompt_tokens"))
             assertEquals(3, telemetry.getInt("calls_executed"))
             assertEquals(4096L, telemetry.getLong("source_read_bytes"))
             assertEquals(3, JSONObject(account(db).getString("telemetry_summary")).getInt("calls_executed"))
             db.recordEffortMetric(request, chat, "general", "high", "high", false,
                 8, 1, 25, 100, 0, 0, 0, 0, true, null)
-            assertEquals(250L, db.usageTotals().getLong("input_tokens"))
+            assertEquals(0L, db.usageTotals().getLong("input_tokens"))
+            assertEquals(1L, db.usageTotals().getLong("unknown_usage_requests"))
             assertEquals(1, db.usageTotals().getInt("known_cost_requests"))
+            assertEquals(0.0125, db.usageTotals().getDouble("provider_reported_cost_usd"), 1e-9)
+            assertTrue(db.reconcileOpenRouterGeneration(chat, request, "gen-late", JSONObject()
+                .put("id", "gen-late").put("total_cost", 0.0125)
+                .put("tokens_prompt", 250).put("tokens_completion", 25)))
+            val complete = db.listRequestEvents(chat).single()
+            assertTrue(complete.getBoolean("usage_complete"))
+            assertEquals(250L, complete.getLong("input_tokens"))
+            assertEquals(25L, complete.getLong("output_tokens"))
+            assertFalse(RequestEventFormatter.parseTelemetry(complete)!!.optBoolean("usage_incomplete", false))
+            assertEquals(250L, db.usageTotals().getLong("input_tokens"))
+            assertEquals(0L, db.usageTotals().getLong("unknown_usage_requests"))
             assertEquals(0.0125, db.usageTotals().getDouble("provider_reported_cost_usd"), 1e-9)
         }
     }
