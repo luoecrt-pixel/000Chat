@@ -2,34 +2,44 @@
 
 Единственный рабочий план. Правила — [NEXT_AGENT_HANDOFF.md](NEXT_AGENT_HANDOFF.md), причины прежних решений — [PROJECT_HISTORY.md](PROJECT_HISTORY.md). Номера сохранены для связи с поручениями; выполненные части исключены из активных задач.
 
+Область `000Chat` — прямые API OpenAI и DeepSeek, затем отдельно проверяемые прямые интеграции других провайдеров. OpenRouter/Claude развивается в [форке `000Chat-OR`](https://github.com/luoecrt-pixel/000Chat-OR). Из этого плана исключены его route/cache/server-tools/Claude-only задачи; они не объявлены выполненными. В нынешнем коде OpenRouter ещё исполняется: его удаление и общие исправления составляют следующий пункт. Старые OpenRouter сообщения, metadata, локальные файлы и fingerprint v1 должны читаться после удаления транспорта.
+
 ## Текущие задачи
+
+### 34. [P1] Общие исправления и удаление OpenRouter — **следующий**
+
+В текущем `ModelCatalog` selectable/live провайдеров три: OpenAI Responses, OpenRouter/Claude и прямой DeepSeek. Цель реализации — оставить OpenAI и DeepSeek, сохранить общие механизмы и старые данные; дальнейшие прямые провайдеры добавлять отдельными задачами после сверки их API. Этот пункт — задача с критериями, а не утверждение, что runtime уже очищен.
+
+**Сначала исправить общие подтверждённые проблемы.**
+
+- **Legacy-история и SQL-конфликты.** В `ChatDatabase.migrateLegacyPrefs()` malformed JSON сейчас заменяется пустым массивом, не-object элементы пропускаются, затем raw `chat_store` удаляется и маркер выставляется. `upsertChatObject()` заменяет существующего родителя через `CONFLICT_REPLACE` и удаляет его сообщения. Валидировать весь источник до SQL-записи, сохранять raw и незавершённый маркер при ошибке, обеспечивать атомарность и защиту настоящей более новой SQL-истории. Одновременно исправить bootstrap `MainActivity.ensureChatStore()`: повторный импорт может занимать только явно помеченный приложением и всё ещё неиспользованный placeholder. Не считать обычный пустой чат placeholder по заголовку/времени/числу сообщений; любое пользовательское использование навсегда снимает право замены. Обновлять допустимый placeholder на месте без родительского `REPLACE`; rollback сохраняет возможность retry. Учесть все таблицы оригинала, включая `local_artifact_intents` и незавершённые операции DeepSeek, а не применять whole-file замену из форка.
+- **GitHub credential binding.** `GitHubToolExecutor` читает текущий PAT при запросе после подтверждения записи. Зафиксировать исходный credential/identity от UI/request до executor, проверять rotation/revoke до HTTP, после подтверждения и перед повтором; другой аккаунт не получает прежнее разрешение. Секреты не писать в SQLite/model/log. Сохранить существующие one-shot write body, allow-list, unknown outcome и запрет небезопасного повторения.
+- **Постоянная debug-подпись.** Workflow сейчас продолжает без `DEBUG_KEYSTORE_BASE64` и может выдать APK с ключом нового runner. До выдачи установочного APK требовать постоянный ключ и проверять реальную криптографическую подпись по полному публичному SHA-256 сертификата; сохранять public signing evidence отдельно от ключа. PR-код не должен получать постоянный ключ или выдавать установочный APK. Локальный временный ключ для тестов не является постоянной подписью. Существующую identity оригинала сначала определить с владельцем; автоматически не менять ключ, applicationId или существующую установку. Создание/перенос ключа и production signing — отдельное поручение.
+
+**Затем удалить исполняемый OpenRouter с сохранением OpenAI/DeepSeek.**
+
+- Убрать выбор OpenRouter и Claude через него, его настройки/сетевые credentials UI, отправку/streaming/tool-loop, сетевое получение моделей/цен/маршрутов/usage и startup/background обращения к OpenRouter. Старый выбранный provider/model не должен молча стать OpenAI/DeepSeek или вызвать исключение: показать историческое состояние и потребовать явный выбор доступного прямого провайдера перед Send. Уже выполненный запрос не отправлять повторно через другой API.
+- Сначала разделить/сохранить общее: DeepSeek сейчас использует `OpenRouterResponseRuntime`, `OpenRouterResponseService`, `OpenRouterUiBridge`, `OpenRouterRuntimeRequest`, attachment DTO/store/system builder и `OpenRouterAppToolCatalog`. `ChatCompletionTransport` ещё зависит от OR-named route/result. Общие типы можно переименовать после проверки всех потребителей; не удалять их по префиксу. OpenAI Responses, Worker, files/Vector Store и его собственный recovery остаются действующими.
+- Сохранить `openrouter_protocol`, исторические SQLite-столбцы/metadata/allKeys и fingerprint v1, export, originals, drafts, сообщения и tool results, без изменения хешей других провайдеров. Старые active OpenRouter checkpoints разбирать и сохранять локально с truthful partial/unknown, без сетевого resume, повторного inference или tool execution. Завершённые/неопределённые операции и файлы не терять, удалённый чат не воскрешать.
+- Сохранить уже реализованные DeepSeek freeze/flush и состояния `not_started/in_flight/completed/outcome_unknown`, CAS/ownership и файловый intent ledger. Отдельно проверить Stop/ошибку SQLite/Delete/crash/reopen и отсутствие повторного инструмента/платного POST для каждого оставшегося провайдера; одного прежнего OR-теста недостаточно.
+
+**Приёмка реализации:** реальные regression fixtures до/после исправления, повторное открытие SQLite и точное сравнение сообщений/metadata/fingerprint, protected conflict и placeholder retry/rollback/использование/удаление; GitHub rotation на барьере подтверждения и проверка фактического Authorization; проверка pin на двух разных signer fixtures и fail-closed отсутствие настройки; OpenAI Responses и DeepSeek integration/Stop/intent/GitHub safety suites; MockWebServer wire-counts и offline startup старой OpenRouter истории; Android lifecycle/FGS/process-death на согласованных scenarios. Получить полные Debug/Release push CI на одном точном code SHA, static/mutation checks и native/host evidence. Не удалять существующие тесты ради зелёного CI: транспортные OR-тесты убрать только вместе с удалённым транспортом, общие гарантии перенести на оставшиеся реальные пути. Live/device/billing/подпись установки не выводятся из синтетических тестов.
+
+План Claude signed-thinking из PR184 и его развитие относятся к [форку OpenRouter/Claude](https://github.com/luoecrt-pixel/000Chat-OR); старые замечания использовать только после сверки актуального кода. После удаления транспорта никакая оставшаяся legacy-запись не является разрешением вернуть OpenRouter API в этот репозиторий.
 
 ### 33. [P1/P2] Замечания владельца и проверка присланных решений
 
 - В `ChatDatabase.clearActiveResponse()` не менять `updated_at` и порядок чатов, если активного запроса уже нет. Проверить no-op и повторную очистку через SQLite, включая reopen; сохранить существующее поведение реального append/title/terminal и позднего Worker tail.
 - Все темы и app-owned dialogs/buttons/cards используют согласованную контрастную палитру; scientific/rich поверхности отличаются осмысленными оттенками и мягкими рамками. Убрать обычные source toggles, сохранив точный source/copy и диагностический fallback/retry, reattach и sandbox.
-- Причину исходного immutable-thinking 400 установить доказательствами. Не считать первую signature/data дельту закрытием блока; сохранять фрагменты, индексы, порядок и raw replay. Не удалять автоматически «битые» unsigned/unknown blocks без подтверждённого upstream контракта и явного безопасного сценария.
 - Для web age не скрывать поле и не утверждать неподтверждённое происхождение. Исследовать provider dates/cache/URL eligibility/шум по реальным ответам; отличать tool evidence от заявлений модели. Инструкции используют captured enabled-tool flags, не обещают отключённый search, не обрезают originals.
 
-Присланные full-file replacements проверять относительно актуального кода; не откатывать bounded saved state, renderer lifecycle и ownership ради старых verifier snapshots. Это связка с #5/#12/#16/#31/#32, без автоматического расширения transport/миграций.
+Присланные full-file replacements проверять относительно актуального кода; не откатывать bounded saved state, renderer lifecycle и ownership ради старых verifier snapshots. Это связка с #5/#14/#15/#30/#31/#32/#34, без автоматического расширения transport/миграций.
 
-### 12. [C · P1/P2, остаток] Claude route/cache и сохранение сброса signed reasoning
+### 14. [E · P1/P2, остаток] Capabilities и reasoning-only progress прямых API
 
-- Wire matrix `AUTO/ANTHROPIC × 1h/5m/off × tools/system/history`; согласовать top-level automatic cache с реально поддерживаемым маршрутом Auto, не смешивать несовместимые nested 5m/top-level 1h. Сохранить explicit breakpoints, историю и route/fallback policy.
-- После `checkBinding()` сохранять в SQLite факт безопасного сброса несовместимых `reasoning_details`, чтобы warning не повторялся каждый turn; не менять оригинальную хронологию/подписи без причины. Тестировать model/key/tools/route/system mismatch и reopen.
-- При signed-thinking/provider HTTP 400 предлагать совместимый маршрут/новую ветку без молчаливого удаления истории и платного автоповтора. Mock не доказывает live cache hits/цену.
+Сверять возможности модели с документацией и фактической схемой выбранного прямого API: input modalities, reasoning/effort, допустимые sampling/forced tool параметры, output/context budgets и assistant prefill. Не брать ограничения или цены OpenRouter за контракт OpenAI/DeepSeek; не предполагать, что один endpoint всех провайдеров публикует одинаковые capabilities. Ручной effort молча не снижать; missing/stale metadata обрабатывать явно.
 
-### 13. [D · P1] PDF annotations и лимиты медиа OpenRouter
-
-Сохранять серверные PDF `annotations[].file.hash/content` и citations в protocol tail в актуальном поддерживаемом wire-формате, с привязкой к исходнику, без потери originals и исполнения недоверенных данных. Mock двух turn: правильный parsed payload переиспользуется; отсутствующий/подменённый hash не позволяет взять чужой результат. Live отсутствие повторной оплаты отдельно не доказано.
-
-В `OpenRouterAttachmentPreflight` считать изображения/PDF pages **по всей отправляемой истории**, с пределами модели/маршрута и явной ошибкой вместо усечения. Проверить границы и unreadable PDF, не вводить единый выдуманный лимит. Для native/auto/mistral-ocr/cloudflare-ai ясно сообщать о возможной цене OCR; не подменять engine незаметно.
-
-### 14. [E · P1/P2, остаток] Capabilities и reasoning-only progress
-
-Расширить `/api/v1/models` сверх `input_modalities`: `supported_parameters`, reasoning capabilities и `reasoning.mandatory`, если поле действительно есть в текущей схеме. Статический alias не доказывает возможности модели. Матрица: mandatory/optional reasoning, effort, допустимые sampling/forced tool параметры, отсутствие неподдерживаемого assistant prefill, missing/stale metadata. Ручной effort молча не снижать.
-
-При `reasoning_details` без visible content показывать прогресс/ожидание tools без раскрытия hidden thinking и без превращения reasoning в assistant text. Проверить Stop, пустой visible ответ и existing `length/content_filter/error → incomplete`; эту обработку не реализовывать заново.
+При reasoning без visible content показывать прогресс/ожидание tools, без выдачи hidden thinking и превращения его в assistant text. Проверить provider-specific поля, Stop и пустой visible ответ, сохранение `length/content_filter/error → incomplete`. Максимум выхода и окно контекста различать; `finish_reason=length` — результат, а не настройка или разрешение автоматического нового платного запроса.
 
 ### 15. [B · P1/P2, остаток] Retention, удаление server files и request-wide limits OpenAI
 
@@ -39,29 +49,22 @@
 
 **Приёмка:** shared references, credential mismatch, remote failure, expired IDs, reopen; actual wire purpose/полный request budget на history replay, без тихого усечения и повторного платного вызова. Неопределённые ссылки обрабатывать fail-closed.
 
-### 16. [D · P2, остаток] Web citations, engine и dev-only диагностика OpenRouter
+### 18. [D · P2, остаток #18.3] Тарифы прямых API и политика оценок
 
-Добавить хранение/отображение web_search/web_fetch annotations/citations (согласовать с #13), явный выбор поддерживаемого engine и совместимость route/tools/images.
-
-`debug.echo_upstream_body` — только отдельный явно разрешённый dev-only режим на synthetic/контролируемых данных, off по умолчанию; production/обычная диагностика не получает сырые keys/messages/paths. Флаг не нужен основной пользовательской функции citations.
-
-### 18. [D · P2, остаток #18.3] Актуальные тарифы и политика оценок
-
-- Получать HTTPS цены OpenRouter `/models` и подходящего `/models/{author}/{slug}/endpoints`, хранить TTL/дату/статус оценки. Неизвестные tool/cache-write тарифы не выдумывать.
-- Заменить захардкоженные оценки Activity/Worker на provider/model-aware policy; тариф OpenRouter не переносить на OpenAI. Оценка не заменяет подтверждённый расход, включая фактический ноль.
+- Получать тарифы из поддерживаемого API или официального источника соответствующего прямого провайдера; хранить источник, TTL/дату и статус оценки. Отдельно сверять OpenAI/DeepSeek input/output/cache и неизвестные tool/cache-write тарифы, не выдумывая отсутствующие цены.
+- Заменить захардкоженные оценки Activity/Worker на provider/model-aware policy; тарифы OpenRouter не переносить на прямые API. Оценка не заменяет подтверждённый расход, включая фактический ноль.
 
 **Приёмка остатка:** cache read/write, tiers/tools и отсутствующие тарифы; stale/corrupt metadata, offline, 401/402/429, reopen. Новый preflight или ошибка получения цен не стирают подтверждённые предыдущие раунды и не превращают unknown в ноль. Live сверка тарифа/счёта остаётся в #9.
 
-### 22. [D · P2, остаток] Bounded recovery resources
+### 22. [D · P2, остаток] Bounded recovery resources прямых API
 
-- Убрать отсечение reconciliation первыми четырьмя generation IDs, учитывать длинные tool loops через очередь/явные resource budgets; саму генерацию числом rounds не ограничивать.
-- Ограничить cached thread pool `OpenRouterResponseRuntime`, с явной очередью/отменой, без потери terminal/usage и отмены другого чата.
+Проверить и ограничить очередь/ресурсы общего runtime, используемого DeepSeek; сейчас он называется `OpenRouterResponseRuntime`. Само имя не является основанием удалить его вместе с транспортом OpenRouter. Сохранить отмену и terminal/usage другого чата, не вводить fixed tool rounds.
 
-Сохранить различие OpenAI resumable background Response и OpenRouter inference: после потери SSE — partial/checkpoint/known-or-unknown cost, без скрытого второго платного запроса. Статусы «генерация / связь потеряна / получение результата / неполный / готово» соответствуют реальности. Existing Stop/Delete/Edit/notification fixes не переделывать без причины.
+OpenAI Responses допускает серверное retrieval/resume; прямой DeepSeek после потери SSE сохраняет partial/checkpoint и known-or-unknown cost. Подмена одного механизма другим и скрытый повтор платного POST запрещены. Сохранять уже реализованные в PR185 freeze/flush, intent recovery и Stop/Delete/Edit/notification guards, проверять delta по провайдеру.
 
 ### 5. [G · P2, остаток] Длинные научные ответы и визуальные критерии
 
-На одинаковых GPT/Claude fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
+На сопоставимых OpenAI/DeepSeek fixtures довести/проверить компактные typography/copy actions, таблицы со всеми rows/columns и признаком горизонтального scroll, реальные structured tool cards и file card/Save. Auto-preview и адаптивные колонки не доказывают весь дизайн. Tests: narrow screen/font scale, 32K boundary, invalid/incomplete/large source, reopen, sandbox. Физическая visual acceptance — #9.
 
 На физическом телефоне принять плавность открытия/закрытия шторки и отсутствие сдвига viewport при первом touch selection (#9).
 
@@ -70,11 +73,11 @@
 1. **Темы, остаток #6.** Переименование/создание/удаление чата, Vector Store, diagnostics, local files/errors, GitHub confirmation, encoding, app-owned attachment/export dialogs и другие окна приложения. Системные Photo Picker/SAF оформляет Android, а не helper приложения. Оформлять custom content **и** window/title/list/action buttons/spinner/dropdown, selected/disabled states. Один `applyDialogControlTheme(box)` не покрывает весь dialog chrome. Проверять фактические foreground/background и контраст в dark/light/gray + font scale; отсутствие WHITE текста недостаточно. Theme switch сохраняет draft/attachments/anchor/request.
 2. **Бренд, остаток #25.** Убрать видимые `Astra diagnostics`, `Astra Files` и временную подпись `Astra` у активной карточки OpenAI до появления объекта сообщения. Проверить header во время генерации и после terminal. Не переименовывать `gpt-6-astra`, классы/package/БД/старые файлы/compatibility IDs.
 
-### 32. [N · P2, остаток] Файл результата инструмента в экспорте OpenRouter
+### 32. [N · P2, остаток] Файл результата инструмента в экспорте
 
-Сохранять безопасную связь конкретного вызова OpenRouter с именем созданного файла и экспортировать `tool → status → result file` в `.md` и `.txt`. Сейчас `ToolTraceSummary` не сохраняет результат, а отдельный список вложений не связывает файл с вызовом. Не выводить raw arguments/output, paths, hidden reasoning или секреты; не выдумывать неизвестный результат.
+Сохранять безопасную связь конкретного вызова локального инструмента с именем созданного файла и экспортировать `tool → status → result file` в `.md` и `.txt`. Проверить существующий общий путь DeepSeek и экспорт старых OpenRouter сообщений; отдельный список вложений не заменяет связь файла с вызовом. Не выводить raw arguments/output, paths, hidden reasoning или секреты; не выдумывать неизвестный результат.
 
-Проверить несколько вызовов/файлов, failed/cancelled/unknown results и реальное сохранение обоих форматов через UI для обоих провайдеров. Сохранить raw source, порядок сообщений и существующую OpenAI-связь по `call_id`.
+Проверить несколько вызовов/файлов, failed/cancelled/unknown results и реальное сохранение обоих форматов через UI поддерживаемых прямых API. Сохранить raw source, порядок сообщений и существующую OpenAI-связь по `call_id`; исторические OpenRouter результаты читаются без сетевого вызова.
 
 ### 30. [L · P2, отдельное расширение] GitHub read-only tools для OpenAI
 
@@ -88,21 +91,13 @@
 
 ### 9. [H-Release, по отдельному поручению] Приёмка APK и live provider
 
-Предоставить APK с точным Build SHA/успешным соответствующим CI. На физическом телефоне принять themes/dialogs, math/Mermaid/SVG/source, cards/tables, drawer/gestures/Back/IME, reading anchor/двухступенчатый scroll, multi-photo, tools GPT/Claude, attachments/Vector Store/cache, Stop/recovery/notifications. Для точного визуального сравнения нужны original references; их нет в репозитории.
+Предоставить APK с точным Build SHA/успешным соответствующим CI. На физическом телефоне принять themes/dialogs, math/Mermaid/SVG/source, cards/tables, drawer/gestures/Back/IME, reading anchor/двухступенчатый scroll, multi-photo, tools OpenAI/DeepSeek, attachments/Vector Store/provider-specific cache, Stop/recovery/notifications. Для точного визуального сравнения нужны original references; их нет в репозитории.
 
-Отдельно проверить live OpenAI multi-turn, provider route/cache и фактический usage/cost в согласованных сценариях. Фиксировать устройство/Android/Build SHA, действия/результат/negative case. Mock/эмулятор/CI не заменяют live/device evidence; невыполненное — not verified.
+Отдельно проверить live OpenAI/DeepSeek multi-turn, поддерживаемый provider-specific cache и фактический usage/cost в согласованных сценариях. Фиксировать устройство/Android/Build SHA, действия/результат/negative case. Mock/эмулятор/CI не заменяют live/device evidence; невыполненное — not verified.
 
 ### 10. [H-Release, по отдельному поручению] Production signing и публикация
 
 Определить канал и signing identity обновления существующей установки. Подготовить согласованный подписанный package, проверить version/signature и фактическую ссылку публикации. CI artifact/unsigned Release не равен production release; secrets не включать в repo/logs.
-
-### 26. [E · P2/P3, отложено] Claude Messages через OpenRouter
-
-Возвращаться при доказанной потребности в Messages-only возможностях. При возобновлении: существующий OpenRouter key/баланс, provider Anthropic default/Auto явный; transport на уровне чата, старую signed историю не конвертировать молча. Прямой Anthropic API/отдельная оплата не входят в требование. Не обещать OpenAI-подобный resume той же генерации.
-
-### 27. [E · P2/P3, отложено с #26] Матрица native tools Claude
-
-До подключения проверить модель × Messages × provider × capability flag, отличие native/server/local tools и цену. `openrouter:image_generation` исключён владельцем, не внедрять как fallback.
 
 ## Планы на потом
 
@@ -127,25 +122,13 @@ Pure policy состояний/действий: продолжить, повт�
 Local snapshot до сообщения с новым chatId, сохранностью originals/shared references.
 
 ### 8. [P2] Настройки генерации по capabilities
-ModelCapabilities/GenerationSettings для обоих builders; temperature отдельно от reasoning effort.
-
-### 11. [P2] Приватность и бюджет OpenRouter
-Opt-in data_collection=deny/ZDR, бюджет/отказ, resolved model. Capabilities/цены — #14/#18.
+ModelCapabilities/GenerationSettings для прямых провайдеров; temperature отдельно от reasoning effort.
 
 ### 12. [P2] Stateless/ZDR OpenAI и rate-limit UX
 Проверить store=false, encrypted reasoning/function calls, контекстные границы, 429/503/Retry-After и совместимость durable background.
 
 ### 13. [P3] Android 15/Xiaomi и долгие запросы
 По поручению на устройстве: notification visibility, FGS budget, process death/reboot, история/drafts.
-
-### 14. [P2, зависит от #26] Messages-only возможности Claude
-Citations/context management/per-turn effort/deferred tools после подтверждения поддержки; без скрытого изменения истории.
-
-### 15. [P3] Дополнительные server tools OpenRouter
-Datetime/advisor/subagent/tool_search после проверки доступности и явного выбора платных функций. Image generation исключён.
-
-### 16. [P3] Управление маршрутами OpenRouter
-Дополнительные routing/privacy options по выбору.
 
 ### 17. [P2, направление одобрено] Долговременная память
 Неизменяемая хронология + индекс выбранных фактов/заметок с первоисточником + durable stages агентной работы, без тихой обрезки истории.
