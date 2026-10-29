@@ -132,7 +132,7 @@ jobs:
             private Button btn(String s) {
               Button b = new Button(this);
               b.setText(s);
-              b.setTextAllCaps(false);
+              b.setAllCaps(false);
               return b;
             }
             @Override public void onCreate(Bundle b) {
